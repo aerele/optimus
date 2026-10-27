@@ -698,19 +698,30 @@
 		});
 	}
 
-	// Completion popup, shown once per session and outcome (localStorage dedupes across tabs).
-	function showSessionPopup(data, kind) {
-		const docname = data && data.docname;
-		if (!docname || !frappe.ui || !frappe.ui.Dialog) return;
-		const key = "optimus_popup_shown:" + docname + ":" + kind;
-		try {
-			if (localStorage.getItem(key)) return;
-			localStorage.setItem(key, "1");
-		} catch (e) {
-			if (popupShown.has(key)) return;
-		}
-		popupShown.add(key);
+	// Completion popups: one claim per run (localStorage) across tabs, queued, shown when not typing.
+	const popupQueue = [];
+	const popupClaimed = new Set();
+	let popupBusy = false;
+	let popupTimer = null;
 
+	function claimPopup(key, token) {
+		try {
+			if (localStorage.getItem(key) === token) return false;
+			localStorage.setItem(key, token);
+			return true;
+		} catch (e) {
+			if (popupClaimed.has(key + token)) return false;
+			popupClaimed.add(key + token);
+			return true;
+		}
+	}
+
+	function isTyping() {
+		const el = document.activeElement;
+		return !!el && (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || !!el.isContentEditable);
+	}
+
+	function openPopup(item) {
 		const messages = {
 			ready: __("Profiling is complete. Your Optimus Session is ready."),
 			empty: __("Profiling finished, but no requests were recorded in this session."),
@@ -721,35 +732,66 @@
 			empty: __("Optimus Session has no data"),
 			failed: __("Optimus analysis failed"),
 		};
-		const open = () => {
-			const d = new frappe.ui.Dialog({
-				title: titles[kind],
-				fields: [{
-					fieldtype: "HTML",
-					fieldname: "body",
-					options: "<p>" + frappe.utils.escape_html(messages[kind]) + "</p>"
-						+ "<p><b>" + frappe.utils.escape_html(__("Session ID")) + ":</b> "
-						+ frappe.utils.escape_html(docname) + "</p>",
-				}],
-				primary_action_label: __("Open Session"),
-				primary_action: () => {
-					d.hide();
-					frappe.set_route("Form", "Optimus Session", docname);
-				},
-			});
-			d.show();
+		const d = new frappe.ui.Dialog({
+			title: titles[item.kind],
+			fields: [{
+				fieldtype: "HTML",
+				fieldname: "body",
+				options: "<p>" + frappe.utils.escape_html(messages[item.kind]) + "</p>"
+					+ "<p><b>" + frappe.utils.escape_html(__("Session ID")) + ":</b> "
+					+ frappe.utils.escape_html(item.docname) + "</p>",
+			}],
+			primary_action_label: __("Open Session"),
+			primary_action: () => {
+				d.hide();
+				frappe.set_route("Form", "Optimus Session", item.docname);
+			},
+		});
+		d.onhide = () => {
+			popupBusy = false;
+			flushPopups();
 		};
+		d.show();
+	}
 
-		// Don't steal focus from a field being typed in.
-		const el = document.activeElement;
-		const typing = el && (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || el.isContentEditable);
-		if (typing) {
-			el.addEventListener("blur", () => setTimeout(open, 300), { once: true });
-		} else {
-			open();
+	function flushPopups() {
+		clearTimeout(popupTimer);
+		popupTimer = null;
+		if (popupBusy || !popupQueue.length) return;
+		// Don't steal focus from a field being typed in; re-check until it is free.
+		if (isTyping()) {
+			popupTimer = setTimeout(flushPopups, 1000);
+			return;
+		}
+		const item = popupQueue.shift();
+		if (!claimPopup(item.key, item.token)) {
+			flushPopups();
+			return;
+		}
+		popupBusy = true;
+		try {
+			openPopup(item);
+		} catch (e) {
+			popupBusy = false;
+			_diag("popup failed", e);
+			flushPopups();
 		}
 	}
-	const popupShown = new Set();
+
+	// Never throws: a popup problem must not break the widget's own state handling.
+	function showSessionPopup(data, kind) {
+		try {
+			const docname = data && data.docname;
+			if (!docname || !frappe.ui || !frappe.ui.Dialog) return;
+			if (data.recording_user && data.recording_user !== frappe.session.user) return;
+			const key = "optimus_popup_shown:" + docname + ":" + kind;
+			const token = String(data.event_id || data.session_uuid || "");
+			popupQueue.push({ docname, kind, key, token });
+			flushPopups();
+		} catch (e) {
+			_diag("popup failed", e);
+		}
+	}
 
 	function subscribeRealtime() {
 		// v0.5.1: realtime is now the PRIMARY state-transition channel
@@ -810,27 +852,29 @@
 		});
 
 		frappe.realtime.on("optimus_session_failed", (data) => {
+			if (matchesCurrentSession(data)) {
+				currentState.display = "ready";  // reuse ready slot so click opens the doc
+				currentState.docname = data.docname || currentState.docname;
+				setDisplay("ready", "Analyze failed", "click to view");
+				frappe.show_alert({
+					message: __("Profiler analyze failed check Error Log"),
+					indicator: "red",
+				});
+			}
 			showSessionPopup(data, "failed");
-			if (!matchesCurrentSession(data)) return;
-			currentState.display = "ready";  // reuse ready slot so click opens the doc
-			currentState.docname = data.docname || currentState.docname;
-			setDisplay("ready", "Analyze failed", "click to view");
-			frappe.show_alert({
-				message: __("Profiler analyze failed check Error Log"),
-				indicator: "red",
-			});
 		});
 
 		frappe.realtime.on("optimus_session_ready", (data) => {
+			if (matchesCurrentSession(data)) {
+				currentState.display = "ready";
+				currentState.docname = data.docname;
+				setDisplay("ready", "Report ready", "click to view");
+				frappe.show_alert({
+					message: __("Profiler report ready"),
+					indicator: "blue",
+				});
+			}
 			showSessionPopup(data, data && data.empty ? "empty" : "ready");
-			if (!matchesCurrentSession(data)) return;
-			currentState.display = "ready";
-			currentState.docname = data.docname;
-			setDisplay("ready", "Report ready", "click to view");
-			frappe.show_alert({
-				message: __("Profiler report ready"),
-				indicator: "blue",
-			});
 		});
 
 		// Round 2 fix #17: show live progress during analyze
