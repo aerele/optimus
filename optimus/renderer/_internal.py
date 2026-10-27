@@ -26,6 +26,7 @@ from optimus.analyzers.base import (
 	format_duration_markers,
 	format_durations,
 	installed_apps_allowlist,
+	strip_profiler_own_calls,
 )
 
 # Sensitive-data redaction lives in ``optimus/redaction.py`` (pure
@@ -173,6 +174,7 @@ from optimus.renderer.line_drilldown import (
 	_render_phase2_function_table,
 	_render_phase2_panel,
 )
+from optimus.renderer.queries_per_action import build_queries_per_action
 
 # render-time deterministic recipes (index advice, Hot Line gate notes).
 from optimus.renderer.recipe_enrichment import (
@@ -351,6 +353,7 @@ def render(
 					dict(c) if isinstance(c, dict) else c
 					for c in rec_copy["calls"]
 				]
+				strip_profiler_own_calls(rec_copy)
 				_redact_call_queries(rec_copy["calls"])
 			recordings_by_uuid[uid] = rec_copy
 
@@ -1072,6 +1075,9 @@ def render(
 		"frame_truncation": frame_truncation,
 		"table_breakdown": table_breakdown,
 		"recordings_by_uuid": recordings_by_uuid,
+		"queries_per_action": build_queries_per_action(
+			list(actions) + list(actions_framework), recordings_by_uuid, tracked_apps
+		),
 		"generated_at": generated_at or _now_iso(),
 		"server_tz": _get_server_timezone(),
 		# Format datetimes per the site's System Settings (drops microseconds).
@@ -1180,7 +1186,7 @@ def render(
 		"infra_summary", "infra_timeline",
 		"frontend_vitals_by_page", "frontend_xhr_matched",
 		"frontend_orphans", "frontend_summary",
-		"doc_event_breakdown",
+		"doc_event_breakdown", "queries_per_action",
 		"actions", "actions_framework",
 		"background_jobs",
 		"findings", "findings_by_app",

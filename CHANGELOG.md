@@ -8,11 +8,23 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.89] - 2026-10-27
+## [0.12.95] - 2026-10-27
 
 ### Changed
 
-- The "Preparing report" and "Capturing background jobs" banners on the Optimus Session form are now a slim one-line strip with a thin progress bar instead of a large block, so they no longer push the form content down. They stay aligned and wrap cleanly on narrow screens and follow the Desk dark theme.
+- The "Preparing report" and "Capturing background jobs" banners on the Optimus Session form are now a slim one-line strip with a thin progress bar instead of a large block, so they no longer push the form content down. They stay aligned and wrap cleanly on narrow screens and follow the Desk dark theme. The strip text is announced politely to screen readers and its text contrast is higher.
+
+---
+
+## [0.12.91] - 2026-10-27
+
+### Fixed
+
+- Optimus's own queries (such as the server-resource snapshots) no longer appear anywhere in the report. They are removed when a recording is loaded, so the query counts, DB time, table breakdown, slowest queries and findings never include them.
+- "Queries per action" now respects Optimus Settings. When Tracked Apps is set, it lists only queries issued from those apps and says how many queries from other apps were left out. When it is empty, every non-Optimus query is listed as before. The callsite shown is now the app code that issued the query, not the innermost Frappe frame.
+- Apps whose name merely ends in "optimus" are no longer mistaken for the profiler.
+
+---
 
 ## Unreleased — 0.12.83 / PR69 review fixes
 
