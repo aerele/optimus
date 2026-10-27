@@ -25,6 +25,7 @@ from frappe.tests.utils import FrappeTestCase
 from frappe.utils import now_datetime
 
 from optimus import api
+from optimus.managed import artifact_writer, save_session
 
 _SESSION_DOCTYPE = "Optimus Session"
 _FILE_DOCTYPE = "File"
@@ -85,7 +86,7 @@ class TestSafeReportSelfContainedOnRealBench(FrappeTestCase):
 				"stopped_at": now_datetime(),
 			}
 		)
-		doc.insert(ignore_permissions=True)
+		save_session(doc, insert=True)
 		frappe.db.commit()
 		return doc
 
@@ -101,6 +102,77 @@ class TestSafeReportSelfContainedOnRealBench(FrappeTestCase):
 		return content
 
 	# --- The 3 tests --------------------------------------------------
+
+	def test_rich_notes_survive_the_installed_frappe_sanitizer(self):
+		from bs4 import BeautifulSoup
+
+		from optimus.renderer._internal import _sanitize_report_html
+		value = '<ol><li>Open Customer list.</li></ol><meta name="private-canary"><link href="https://example.invalid"><script>alert(1)</script>'
+		clean = _sanitize_report_html(value)
+		soup = BeautifulSoup(clean, "html.parser")
+		assert soup.find("li").get_text() == "Open Customer list."
+		assert not soup.find_all(["meta", "link", "script"])
+
+	def test_recording_snapshot_commits_before_transient_input_is_deleted(self):
+		from frappe.recorder import RECORDER_REQUEST_HASH
+
+		from optimus import analyze
+		uuid = "snapshot-" + frappe.generate_hash(length=12)
+		rec = {"uuid": uuid, "calls": [{"query": "SELECT 1", "duration": 1, "stack": []}]}
+		frappe.cache.hset(RECORDER_REQUEST_HASH, uuid, rec)
+		try:
+			analyze._persist_recordings_file(self._session_doc.name, self._uuid, [uuid])
+			# A rollback after the method returns cannot erase the committed binding.
+			frappe.db.rollback()
+			self._session_doc.reload()
+			bundle = analyze._load_recordings_bundle(self._session_doc)
+			assert bundle["recordings"][uuid]["rec"] == rec
+			assert frappe.cache.hget(RECORDER_REQUEST_HASH, uuid) == rec
+			analyze._cleanup_redis(self._uuid, [uuid])
+			assert frappe.cache.hget(RECORDER_REQUEST_HASH, uuid) is None
+		finally:
+			frappe.cache.hdel(RECORDER_REQUEST_HASH, uuid)
+
+	def test_failed_snapshot_commit_keeps_recorder_input(self):
+		from unittest.mock import patch
+
+		from frappe.recorder import RECORDER_REQUEST_HASH
+
+		from optimus import analyze, recording_bundle
+		uuid = "snapshot-failure-" + frappe.generate_hash(length=12)
+		rec = {"uuid": uuid, "calls": [{"query": "SELECT 1", "duration": 1}]}
+		frappe.cache.hset(RECORDER_REQUEST_HASH, uuid, rec)
+		try:
+			with patch.object(analyze, "safe_commit", side_effect=RuntimeError("simulated commit failure")):
+				with self.assertRaises(recording_bundle.SnapshotUnavailable):
+					analyze._persist_recordings_file(self._session_doc.name, self._uuid, [uuid])
+			frappe.db.rollback()
+			assert frappe.cache.hget(RECORDER_REQUEST_HASH, uuid) == rec
+			assert not frappe.db.get_value("Optimus Session", self._session_doc.name, "recordings_file")
+		finally:
+			frappe.cache.hdel(RECORDER_REQUEST_HASH, uuid)
+
+	def test_real_whitelist_decorator_profiles_its_source_body(self):
+		from unittest.mock import patch
+
+		from optimus.line_profile import capture
+		@frappe.whitelist()
+		def target(value):
+			result = value + 1
+			return result * 2
+		import inspect
+		original = inspect.unwrap(target)
+		with patch.object(capture, "_get_or_resolve_picks", return_value=[target]):
+			profiler = capture.make_profiler("test-decorator")
+		assert profiler is not None
+		profiler.enable_by_count()
+		try:
+			assert [target(i) for i in range(3)] == [2, 4, 6]
+		finally:
+			profiler.disable_by_count()
+			capture.release_monitoring_tool()
+		rows = capture.serialize_stats(profiler)
+		assert any(r["lineno"] == original.__code__.co_firstlineno + 2 and r["hits"] == 3 for r in rows), rows
 
 	def test_on_disk_report_has_no_remote_resource_urls(self):
 		"""No external resource loads in the on-disk HTML: no ``https?:`` in

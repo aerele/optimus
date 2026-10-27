@@ -47,7 +47,45 @@ _EXPECTED = {
 	"table_breakdown_json": ("Long Text", {}),
 	"v5_aggregate_json": ("Long Text", {}),
 	"analyzer_warnings": ("Long Text", {}),
+	"auto_notes_sha256": ("Data", {"length": 64, "no_copy": 1}),
 }
+
+# Display flags per data field; a field not listed has none of them.
+_FLAGS = {
+	"session_uuid": {"in_list_view": 1, "read_only": 1},
+	"title": {"in_list_view": 1},
+	"user": {"in_list_view": 1, "read_only": 1},
+	"status": {"in_list_view": 1, "read_only": 1},
+	"top_severity": {"in_list_view": 1, "read_only": 1},
+	"ai_steps_tokens": {"read_only": 1, "hidden": 1},
+	"ai_tokens_spent": {"read_only": 1},
+	"ai_refresh_count": {"read_only": 1},
+	"started_at": {"in_list_view": 1, "read_only": 1},
+	"stopped_at": {"read_only": 1},
+	"total_duration_ms": {"read_only": 1},
+	"total_requests": {"in_list_view": 1, "read_only": 1},
+	"total_queries": {"in_list_view": 1, "read_only": 1},
+	"total_query_time_ms": {"read_only": 1},
+	"analyze_duration_ms": {"read_only": 1},
+	"summary_html": {"read_only": 1},
+	"actions": {"read_only": 1},
+	"findings": {"read_only": 1},
+	"background_jobs": {"read_only": 1},
+	"phase_2_runs": {"read_only": 1},
+	"raw_report_file": {"read_only": 1},
+	"raw_report_pdf_file": {"read_only": 1},
+	"recordings_file": {"read_only": 1, "hidden": 1},
+	"top_queries_json": {"read_only": 1, "hidden": 1},
+	"total_python_ms": {"read_only": 1},
+	"total_sql_ms": {"read_only": 1},
+	"hot_frames_json": {"read_only": 1, "hidden": 1},
+	"session_time_breakdown_json": {"read_only": 1, "hidden": 1},
+	"table_breakdown_json": {"read_only": 1, "hidden": 1},
+	"v5_aggregate_json": {"read_only": 1, "hidden": 1},
+	"analyzer_warnings": {"read_only": 1, "hidden": 1},
+	"auto_notes_sha256": {"read_only": 1, "hidden": 1},
+}
+_FLAG_KEYS = ("in_list_view", "read_only", "hidden", "depends_on")
 
 
 def _doc():
@@ -78,6 +116,12 @@ def test_schema_attributes_unchanged():
 	for name, (_fieldtype, attrs) in _EXPECTED.items():
 		for key in _SCHEMA_KEYS:
 			assert fields[name].get(key) == attrs.get(key), (name, key)
+
+
+def test_display_flags_unchanged():
+	for name, field in _data_fields().items():
+		actual = {k: field[k] for k in _FLAG_KEYS if k in field}
+		assert actual == _FLAGS.get(name, {}), name
 
 
 def test_most_used_information_comes_first():
