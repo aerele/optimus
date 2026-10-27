@@ -19,16 +19,18 @@ def build_queries_per_action(actions, recordings_by_uuid, tracked_apps=()) -> di
 	"""Return the slowest queries across actions plus the count hidden by Tracked Apps."""
 	rows: list[dict] = []
 	hidden = 0
+	total = 0
 	for action in actions or []:
 		recording = (recordings_by_uuid or {}).get(_get(action, "recording_uuid"))
 		if not recording:
 			continue
 		kept, untracked = _visible_calls(recording.get("calls"), tracked_apps)
 		hidden += untracked
+		total += len(kept)
 		for call, callsite in sorted(kept, key=_duration, reverse=True)[:PER_ACTION_TOP]:
 			rows.append(_row(_get(action, "action_label"), call, callsite))
 	rows.sort(key=lambda r: r["duration"], reverse=True)
-	return {"rows": rows[:SECTION_ROW_LIMIT], "total": len(rows), "hidden_untracked": hidden}
+	return {"rows": rows[:SECTION_ROW_LIMIT], "total": total, "hidden_untracked": hidden}
 
 
 def _visible_calls(calls, tracked_apps) -> tuple[list, int]:

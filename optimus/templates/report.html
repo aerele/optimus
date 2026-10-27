@@ -3547,7 +3547,8 @@
   </section>
 
   {# --------------- QUERY BREAKDOWN PER ACTION --------------- #}
-  {% if recordings_by_uuid %}
+  {% set qpa = report_data.get("queries_per_action") or {"rows": [], "total": 0, "hidden_untracked": 0} %}
+  {% if recordings_by_uuid and (qpa.rows or qpa.hidden_untracked) %}
   <section class="section">
     <h2>Queries per action</h2>
     <p class="small muted">
@@ -3555,7 +3556,9 @@
       the callsite so your developer knows where to look. Sorted by duration.
     </p>
 
-    {% set qpa = report_data.get("queries_per_action") or {"rows": [], "total": 0, "hidden_untracked": 0} %}
+    {% if not qpa.rows %}
+      <p class="small muted"><em>No queries from tracked apps.</em></p>
+    {% endif %}
     {% if qpa.rows %}
     <table class="data tbl-clip queries-flat-table">
       <colgroup>
