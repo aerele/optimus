@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Line profiling (line-profile) results processor.
+"""Line-profile results processor.
 
 Turns the aggregated ``results_json`` (one entry per picked function, with
 per-line timings) into findings plus a per-function aggregate.

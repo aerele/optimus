@@ -7,7 +7,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 REPO = ROOT.parent
-PHASE_RE = re.compile(r"phase[ -](1|2)\b", re.IGNORECASE)
+PHASE_RE = re.compile(r"phase(?:[ -]|&nbsp;)(1|2|one|two)\b", re.IGNORECASE)
+DOCTYPE_NAME = "Optimus Phase Two Run"
 JS_STRING_RE = re.compile(r"\"([^\"\n]*)\"|'([^'\n]*)'|`([^`]*)`")
 JS_FILES = (
 	"optimus/doctype/optimus_session/optimus_session.js",
@@ -43,7 +44,7 @@ def _py_strings(path: Path) -> list[str]:
 def test_js_has_no_phase_wording_in_strings():
 	for rel in JS_FILES:
 		for s in _js_strings(ROOT / rel):
-			assert not PHASE_RE.search(s), (rel, s)
+			assert not PHASE_RE.search(s.replace(DOCTYPE_NAME, "")), (rel, s)
 
 
 def test_python_user_facing_strings_have_no_phase_wording():
@@ -52,7 +53,7 @@ def test_python_user_facing_strings_have_no_phase_wording():
 		if any(part in skip for part in path.relative_to(ROOT).parts):
 			continue
 		for s in _py_strings(path):
-			assert not PHASE_RE.search(s), (str(path.relative_to(ROOT)), s)
+			assert not PHASE_RE.search(s.replace(DOCTYPE_NAME, "")), (str(path.relative_to(ROOT)), s)
 
 
 def test_doctype_labels_and_descriptions_have_no_phase_wording():
@@ -68,10 +69,35 @@ def test_doctype_labels_and_descriptions_have_no_phase_wording():
 def test_docs_have_no_phase_wording():
 	for rel in DOC_FILES:
 		for n, line in enumerate((REPO / rel).read_text().splitlines(), 1):
-			assert not PHASE_RE.search(line), (rel, n, line)
+			assert not PHASE_RE.search(line.replace(DOCTYPE_NAME, "")), (rel, n, line)
+
+
+def _template_visible_text() -> str:
+	html = (ROOT / "templates/report.html").read_text()
+	html = re.sub(r"\{#.*?#\}", "", html, flags=re.DOTALL)
+	html = re.sub(r"<!--.*?-->", "", html, flags=re.DOTALL)
+	html = re.sub(r"<(script|style)\b.*?</\1>", "", html, flags=re.DOTALL | re.IGNORECASE)
+	return re.sub(r"\{%.*?%\}", "", html, flags=re.DOTALL)
+
+
+def test_report_template_visible_text_has_no_phase_wording():
+	for n, line in enumerate(_template_visible_text().splitlines(), 1):
+		assert not PHASE_RE.search(line.replace(DOCTYPE_NAME, "")), (n, line.strip())
 
 
 def test_report_template_visible_hint_says_normal_profile():
-	html = (ROOT / "templates/report.html").read_text()
-	assert "in the normal profile)" in html
-	assert "in phase&nbsp;1" not in html
+	assert "in the normal profile)" in (ROOT / "templates/report.html").read_text()
+
+
+def test_wording_regex_catches_variants():
+	for text in ("phase 2", "Phase-1", "phase&nbsp;2", "phase two", "Phase-One"):
+		assert PHASE_RE.search(text), text
+	assert not PHASE_RE.search("phase20")
+
+
+def test_line_profiling_js_messages_use_placeholders_not_concatenation():
+	concat = re.compile(r"__\(\s*(?:\"[^\"]*\"|'[^']*')\s*\+")
+	for rel in JS_FILES:
+		text = (ROOT / rel).read_text()
+		for m in concat.finditer(text):
+			assert "ine profiling" not in text[m.start():m.end() + 80], (rel, m.group(0))

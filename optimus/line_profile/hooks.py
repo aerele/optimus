@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Line profiling (line-profile) hook callbacks, registered alongside the phase-1
+"""Line-profile hook callbacks, registered alongside the phase-1
 callbacks in ``hooks_callbacks.py``. Phase-1 and line profiling are mutually
 exclusive per user (separate Redis flags; the API rejects starting one
 while the other is active).

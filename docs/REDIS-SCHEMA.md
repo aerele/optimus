@@ -81,7 +81,7 @@ when you add a new key; the audit test asserts this table matches
 | `profiler:frontend:<session_uuid>:vitals` | list | Frappe pickle (entries) | `SESSION_TTL_SECONDS` | LTRIM'd to 200 entries. |
 | `profiler:frontend:<session_uuid>` | dict (legacy) | Frappe pickle | none | Pre-v0.5.1 combined shape. No code writes this any more; `delete_session_state` cleans it as a safety net for in-flight benches. |
 
-### 2.4 line profiling line-profile run state
+### 2.4 line-profile run state
 
 | Pattern | Value | Encoding | TTL | Notes |
 |---|---|---|---|---|

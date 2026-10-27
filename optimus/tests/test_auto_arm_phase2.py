@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Opt-in auto-arm of a line profiling line-profile pass after analyze.
+"""Opt-in auto-arm of a line-profile pass after analyze.
 
 When ``optimus_phase2_auto_arm`` is set in site_config, analyze arms a pass
 on the recommended hot-path functions so the user re-runs the flow once to

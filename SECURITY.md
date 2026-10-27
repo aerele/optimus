@@ -638,7 +638,7 @@ Code suggestions are saved for human review and are never automatically applied
 or executed. Automatic AI work may update suggestions and Steps to Reproduce;
 explicit user edits revoke automatic Steps replacement provenance.
 
-Before an AI request, source windows and line profiling line text are checked for the
+Before an AI request, source windows and line-profile line text are checked for the
 configured key, credential-shaped text and sensitive literal assignments.
 Detected credentials or a failed check withhold source grounding and require
 prose-only advice. This is a bounded minimization check, not a general proof that

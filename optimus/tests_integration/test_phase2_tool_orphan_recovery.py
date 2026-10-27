@@ -89,7 +89,7 @@ class TestPhase2ToolOrphanRecovery(FrappeTestCase):
 	# --- The tests ----------------------------------------------------
 
 	def test_probe_reclaims_leaked_line_profiler_tool_2_on_simulated_worker_respawn(self):
-		"""The canary. Simulate the post-line profiling-death state (tool 2
+		"""The canary. Simulate the post-crash state (tool 2
 		owned by 'line_profiler' with LINE events on), then call the
 		startup probe. The probe must reclaim the tool and reset its
 		events to 0."""

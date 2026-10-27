@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Line profiling line-profiler capture core.
+"""Line-profiler capture core.
 
 Two layers:
   * Pure: ``aggregate_samples(samples, picks)`` merges per-request

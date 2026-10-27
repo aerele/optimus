@@ -52,7 +52,7 @@
     },
     "line_drilldown_runs": {
       "type": ["array", "null"],
-      "description": "Line profiling line-profile runs (renamed Line-Level Drilldown in Phase J.16). [{number, status, total_ms_display, timestamp, picks, functions}, ...]."
+      "description": "Line-profile runs (renamed Line-Level Drilldown in Phase J.16). [{number, status, total_ms_display, timestamp, picks, functions}, ...]."
     },
     "line_drilldown_html": {
       "type": ["string", "null"],

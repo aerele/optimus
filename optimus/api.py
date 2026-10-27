@@ -284,7 +284,7 @@ def _phase2_run_gate(
 
 
 def _save_parent_bypassing_perms(parent) -> None:
-	"""Persist a line profiling line-profile parent Optimus Session. Ownership is
+	"""Persist a line-profile parent Optimus Session. Ownership is
 	enforced by the caller's _session_action_gate / _phase2_run_gate before this runs,
 	so the DocType write-perm is bypassed here."""
 	parent.flags.ignore_validate_update_after_submit = True
@@ -1552,7 +1552,7 @@ def get_config_profiles() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Line profiling line profiler API
+# Line profiler API
 # ---------------------------------------------------------------------------
 # Three whitelisted endpoints that the Optimus Session form's "Line profiling:
 # Line Profile" section calls into:
@@ -1704,7 +1704,7 @@ def get_phase2_candidates(session_uuid: str) -> dict:
 
 @frappe.whitelist(methods=["POST"])
 def start_line_profile_pass(session_uuid: str, picks: str | list, auto_expand: bool = True) -> dict:
-	"""Begin a line profiling line-profile run on a finished session.
+	"""Begin a line-profile run on a finished session.
 
 	``picks`` is a JSON-encoded (or parsed) list of ``{dotted_path, source}``
 	entries. When ``auto_expand`` is true (default), each curated pick is

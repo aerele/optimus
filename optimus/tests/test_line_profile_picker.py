@@ -2,7 +2,7 @@
 # For license information, please see license.txt
 
 """Tests for optimus.line_profile.picker candidate generation and
-free-form dotted-path resolution for the line profiling line-profile picker UI.
+free-form dotted-path resolution for the line-profile picker UI.
 
 pyinstrument captures the *bare* function name in ``function`` and the
 absolute path in ``filename``; we derive the importable dotted path from

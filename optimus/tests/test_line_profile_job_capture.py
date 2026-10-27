@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""End-to-end reproduction of line profiling line capture for a background-job
+"""End-to-end reproduction of line capture for a background-job
 function.
 
 Drives the real capture functions in-process (no bench/worker): arm a pass, run

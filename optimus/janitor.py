@@ -53,7 +53,7 @@ def sweep_stale_sessions():
 	except Exception:
 		frappe.log_error(title="optimus janitor sweep_stale_stopping")
 
-	# v0.6.0: line profiling line-profile runs follow the same staleness model
+	# v0.6.0: line-profile runs follow the same staleness model
 	# but live on the Optimus Phase Two Run child rows. Reuses the same
 	# thresholds (recording → 11min, analyzing → 30min).
 	try:

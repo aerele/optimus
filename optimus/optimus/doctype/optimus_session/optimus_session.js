@@ -549,14 +549,14 @@ function _refill_ai_call(frm, state, options) {
 	});
 }
 
-// v0.6.0: Line profiling line-profile picker.
+// v0.6.0: Line-profile picker.
 //
 // Adds a "Run Line-Profile Pass" custom button when the session is Ready.
 // Clicking opens a dialog that fetches curated candidates (top hot frames
 // from phase-1) plus a free-form textbox for dotted paths the user types.
 // Submission posts to api.start_line_profile_pass; realtime events drive
 // the form's line profiling history child table updates.
-// The line profiling "line profiling is armed" banner. Same in-place mechanism as the
+// The "armed" banner. Same in-place mechanism as the
 // analyze banner (see _single_banner); frm.set_intro appended a duplicate on every
 // refresh while a pass was Recording. Uses Frappe's native orange form-message
 // theme. Pass html=null to remove it.
@@ -689,13 +689,9 @@ function render_phase2_button(frm) {
 					callback: function (r) {
 						var msg = r && r.message ? r.message : {};
 						frappe.show_alert({
-							message: __(
-								"Line profiling cleared flag was " +
-								(msg.cleared_active_flag ? "set" : "already clear") +
-								"; " +
-								(msg.rows_marked_failed || 0) +
-								" rows marked Failed."
-							),
+							message: msg.cleared_active_flag
+								? __("Line profiling flag was set; {0} rows marked Failed.", [msg.rows_marked_failed || 0])
+								: __("Line profiling flag was already clear; {0} rows marked Failed.", [msg.rows_marked_failed || 0]),
 							indicator: "blue",
 						});
 						frm.reload_doc();
@@ -1027,12 +1023,9 @@ function start_phase2(frm, picks, auto_expand) {
 			var instrumented = resolved.filter(function (p) { return p.eligible; }).length;
 			var expansions = r.message.expansions || [];
 
-			var msg = __(
-				"Line profiling recording started instrumenting " +
-				instrumented +
-				" function" + (instrumented === 1 ? "" : "s") +
-				". Reproduce your flow now, then click Stop on the floating widget."
-			);
+			var msg = (instrumented === 1
+				? __("Line profiling recording started instrumenting 1 function. Reproduce your flow now, then click Stop on the floating widget.")
+				: __("Line profiling recording started instrumenting {0} functions. Reproduce your flow now, then click Stop on the floating widget.", [instrumented]));
 			if (expansions.length) {
 				// Show the first expansion inline so the dev sees what was
 				// added; remaining expansions appear in the form's run row.
@@ -1045,7 +1038,7 @@ function start_phase2(frm, picks, auto_expand) {
 			}
 			frappe.show_alert({ message: msg, indicator: "blue" });
 			frm.dashboard.add_indicator(
-				__("Line profiling recording run " + run_uuid.slice(0, 8) + "..."),
+				__("Line profiling recording run {0}...", [run_uuid.slice(0, 8)]),
 				"blue"
 			);
 		},
@@ -1078,7 +1071,7 @@ function subscribe_phase2_events(frm) {
 					});
 				} else if (event === "phase_2_run_failed") {
 					frappe.show_alert({
-						message: __("Line profiling analyze failed: " + (payload.error || "unknown")),
+						message: __("Line profiling analyze failed: {0}", [payload.error || "unknown"]),
 						indicator: "red",
 					});
 				}
@@ -1180,7 +1173,7 @@ function render_regenerate_report_button(frm) {
 	});
 }
 
-// Parent-level, NON-status hint that an additive line profiling line-profile drill-down
+// Parent-level, NON-status hint that an additive line-profile drill-down
 // is still computing. The session's own `status` intentionally stays "Ready" (the
 // phase-1 report is rendered and available and a session can have many line profiling
 // passes) this just resolves the "parent Ready but a line profiling run says Analyzing"

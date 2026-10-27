@@ -786,7 +786,7 @@
 			setDisplay("analyzing", `Analyzing ${pct}%`, data.description || "");
 		});
 
-		// v0.6.0: line profiling line-profile events. Widget reflects the same
+		// v0.6.0: line-profile events. Widget reflects the same
 		// state-machine slots as phase-1 (recording → analyzing → ready),
 		// but the labels are prefixed with "Line profiling" so the user knows
 		// which mode is running. Line profiling is started/stopped from the
@@ -834,7 +834,7 @@
 			currentState.phase2 = false;
 			setDisplay("ready", "Line profiling failed", "click to view");
 			frappe.show_alert({
-				message: __("Line profiling analyze failed: " + (data.error || "unknown")),
+				message: __("Line profiling analyze failed: {0}", [data.error || "unknown"]),
 				indicator: "red",
 			});
 		});
