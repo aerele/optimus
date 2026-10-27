@@ -321,3 +321,35 @@ class TestJobKeyTtl:
 		session.register_pending_job("s1", "j2")
 		assert set(expiries.values()) == {session.JOB_KEYS_TTL_SECONDS}
 		assert len(expiries) == 2
+
+
+class TestAiJobEnqueues:
+	"""The AI refresh job enqueues must not be marked or tracked by the profiler."""
+
+	def _ai_enqueue(self, enqueue):
+		enqueue(
+			"optimus.ai_jobs.run_slice",
+			queue="long",
+			is_async=True,
+			enqueue_after_commit=True,
+			deduplicate=True,
+			job_id="optimus-ai-r1-1",
+			run_id="r1",
+			slice_no=1,
+		)
+
+	def test_unwrapped_enqueue_is_untouched_and_untracked(self, env):
+		assert env.enqueue.__wrapped__ is not env.enqueue
+		self._ai_enqueue(env.enqueue.__wrapped__)
+		kw = env.calls[0]["kwargs"]
+		assert "_profiler_session_id" not in kw and "_lp_session_id" not in kw
+		assert kw["job_id"] == "optimus-ai-r1-1"
+		assert _pending(env) == set()
+
+	def test_without_session_ai_enqueue_is_not_marked_or_tracked(self, env):
+		env.fake.cache.delete_value(USER_KEY)
+		self._ai_enqueue(env.enqueue)
+		kw = env.calls[0]["kwargs"]
+		assert "_profiler_session_id" not in kw
+		assert kw["job_id"] == "optimus-ai-r1-1"
+		assert _pending(env) == set()
