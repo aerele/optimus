@@ -275,6 +275,20 @@ class SQLDatabase:
 			[*values.values(), name],
 		)
 
+	def multisql(self, queries, values, *, as_dict=False):
+		query = queries[self.backend]
+		quote = "`" if self.backend == "mariadb" else '"'
+		for table, name in self.tables.items():
+			query = query.replace(quote + "tab" + table + quote, self.quoted(name))
+		return self.sql(query, values)
+
+	def table_exists(self, table):
+		return table in self.tables
+
+	def delete(self, table, filters):
+		where = " AND ".join(self.quoted(key) + "=%s" for key in filters)
+		self.sql("DELETE FROM " + self.quoted(self.tables[table]) + " WHERE " + where, list(filters.values()))
+
 	def insert(self, values):
 		"""``Document.insert`` (``BaseDocument.db_insert``) for a journal row."""
 		values = dict(values)
@@ -2203,3 +2217,100 @@ def test_phase2_result_commit_readback_uses_durable_generation(sql, monkeypatch,
 	assert lost and writes == [True]
 	assert sql.primary.get_value(phase2.TABLE, "fake-child", "status") == ("Ready" if committed else "Analyzing")
 	assert (value(sql, "answer", "row-00", "body") == "durable phase2 answer") is committed
+
+
+def test_provider_settings_and_credential_share_a_sql_snapshot(sql, monkeypatch):
+	"""The production SELECT cannot pair an old endpoint with a new password."""
+	import frappe
+
+	primary, writer = sql.primary, sql.connect()
+	names = {"tabSingles": primary.tables["Optimus Session"] + "_singles",
+		"__Auth": primary.tables["Optimus Session"] + "_auth"}
+	created = []
+	queries = []
+	def read(queries_by_backend, values):
+		query = queries_by_backend[sql.primary.backend]
+		for original, replacement in names.items():
+			query = query.replace(primary.quoted(original), primary.quoted(replacement))
+		queries.append(query)
+		return [tuple(row.values()) for row in primary.sql(query, values)]
+	try:
+		for original, columns in (("tabSingles", "doctype VARCHAR(140), field VARCHAR(140), value TEXT"),
+			("__Auth", "doctype VARCHAR(140), name VARCHAR(140), fieldname VARCHAR(140), password TEXT, encrypted INTEGER")):
+			primary.sql("CREATE TABLE " + primary.quoted(names[original]) + " (" + columns + ")"
+				+ (" ENGINE=InnoDB" if sql.primary.backend == "mariadb" else ""))
+			created.append(names[original])
+		for field, value in {"ai_enabled": "1", "ai_provider": "OpenAI-compatible", "ai_base_url": "https://first.invalid/v1", "ai_model": "fake"}.items():
+			primary.sql("INSERT INTO " + primary.quoted(names["tabSingles"]) + " VALUES (%s, %s, %s)", ("Optimus Settings", field, value))
+		primary.sql("INSERT INTO " + primary.quoted(names["__Auth"]) + " VALUES (%s, %s, %s, %s, %s)",
+			("Optimus Settings", "Optimus Settings", "ai_api_key", "first encrypted value", 1))
+		primary.connection.commit()
+
+		monkeypatch.setattr(frappe, "db", SimpleNamespace(multisql=read), raising=False)
+		before, ciphertext = ai_fix._read_provider_snapshot()
+		assert (before.ai_base_url, ciphertext) == ("https://first.invalid/v1", "first encrypted value")
+		writer.sql("UPDATE " + writer.quoted(names["tabSingles"]) + " SET value=%s WHERE field=%s",
+			("https://second.invalid/v1", "ai_base_url"))
+		writer.sql("UPDATE " + writer.quoted(names["__Auth"]) + " SET password=%s", ("second encrypted value",))
+		writer.connection.commit()
+		old, ciphertext = ai_fix._read_provider_snapshot()
+		assert (old.ai_base_url, ciphertext) == (before.ai_base_url, "first encrypted value")
+		primary.connection.commit()
+		fresh, ciphertext = ai_fix._read_provider_snapshot()
+		assert (fresh.ai_base_url, ciphertext) == ("https://second.invalid/v1", "second encrypted value")
+		assert len(queries) == 3
+	finally:
+		primary.rollback()
+		writer.rollback()
+		for name in reversed(created):
+			primary.sql("DROP TABLE " + primary.quoted(name))
+		primary.connection.commit()
+
+
+def test_force_stop_cannot_erase_concurrently_claimed_capture_from_old_snapshot(sql):
+	phase2_admit(sql)
+	sql.primary.set_value(phase2.TABLE, "fake-child", {"status": "Recording", "recording_user": "capture-user"})
+	sql.primary.connection.commit()
+	older = sql.connect()
+	assert older.get_value(phase2.TABLE, "fake-child", "status") == "Recording"
+	out = ai_jobs._retry_sql(lambda: phase2._admit("parent-a", "fake-parent-a", "fake-phase2", "capture-user",
+		generation="generation-b", now=200, from_recording=True))
+	assert out["status"] == "queued"
+	with sql.using(older):
+		assert not ai_jobs._retry_sql(lambda: phase2._force_stop_capture("parent-a", "fake-phase2", "capture-user"))
+	assert sql.primary.get_value(phase2.TABLE, "fake-child", "status") == "Analyzing"
+	assert older.conflicts == []  # the shared wrapper ends the old snapshot before locking
+
+
+def test_capture_recovery_query_selects_only_actual_or_legacy_recording_actor(sql):
+	sql.primary.set_value("Optimus Session", "parent-a", {"user": "legacy-user"})
+	for name, actor, status in (("own", "capture-user", "Recording"), ("foreign", "other-user", "Recording"),
+		("done", "capture-user", "Ready"), ("legacy", None, "Recording")):
+		sql.primary.insert({"doctype": phase2.TABLE, "name": name, "parent": "parent-a", "run_uuid": name,
+			"recording_user": actor, "status": status, "creation": "2026-10-03"})
+	sql.primary.connection.commit()
+	assert [row["run_uuid"] for row in phase2._capture_candidates("capture-user")] == ["own"]
+	assert [row["run_uuid"] for row in phase2._capture_candidates("legacy-user")] == ["legacy"]
+	assert not phase2._capture_candidates("capture-user' OR 1=1 --")
+
+
+def test_parent_deletion_and_journal_removal_roll_back_together_and_fence_late_result(sql):
+	claimed()
+	attempt = ai_jobs._retry_sql(lambda: store.begin_attempt("run-a", docname="parent-a", worker_token="worker-a",
+		kind="fix", target="fake-finding", input_hash="fake-hash", now=12))
+	def delete(fail=False):
+		store.delete_session_journal("parent-a", "fake-parent-a")
+		sql.primary.delete("Optimus Session", {"name": "parent-a"})
+		if fail:
+			raise RuntimeError("fake delete failure")
+	with pytest.raises(RuntimeError, match="fake delete failure"):
+		ai_jobs._transaction(lambda: delete(True))
+	assert sql.primary.get_value("Optimus Session", "parent-a")
+	assert sql.primary.get_value(store.RUN, "run-a")
+	assert sql.primary.get_value(store.ATTEMPT, attempt["name"], "state") == "calling"
+	ai_jobs._transaction(delete)
+	assert sql.primary.get_value("Optimus Session", "parent-a") is None
+	assert sql.primary.get_value(store.ATTEMPT, attempt["name"]) is None
+	assert not ai_jobs._retry_sql(lambda: store.settle_attempt("run-a", attempt["name"], docname="parent-a",
+		worker_token="worker-a", now=13, outcome="succeeded", tokens=100, usage_complete=True,
+		persist=lambda: pytest.fail("late result persisted")))

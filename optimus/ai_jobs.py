@@ -855,8 +855,10 @@ def _build_payload(row, file_cache, grounding, *, principal):
 	PR-4, which scopes the source and recording reads to it; nothing reads it yet, the worker's
 	access having been checked for that user by ``_check_run``."""
 	from optimus import analyze
+	from optimus.renderer.source import server_script_readers
 
-	return analyze.ai_payload_for_finding(row, file_cache, **grounding)
+	with server_script_readers(principal):
+		return analyze.ai_payload_for_finding(row, file_cache, **grounding)
 
 
 def _grounding(doc, row, memo, run_id=None):
@@ -1505,9 +1507,61 @@ def record_admission_notice(docname, *, reason):
 def prepare_analyze_retry(docname, session_uuid, *, requested_by):
 	"""Called after the action gate; a stale refresh cannot write into a retry."""
 	_transaction(lambda: None)
-	return _retry_sql(lambda: store.prepare_analyze_retry(
-		docname, session_uuid, requested_by=requested_by, now=_now(),
-	))
+	def reserve():
+		captures = []
+		changed = store.prepare_analyze_retry(docname, session_uuid, requested_by=requested_by,
+			now=_now(), stopped_captures=captures)
+		return changed, captures
+	changed, captures = _retry_sql(reserve)
+	if captures:
+		from optimus.line_profile.jobs import stop_captures
+		stop_captures(captures)
+	return changed
+
+
+def validate_session_accounting(doc):
+	"""A Desk/REST save must not replace counters updated by an optional worker."""
+	before = doc.get_doc_before_save()
+	if before and any((doc.get(key) or 0) != (before.get(key) or 0) for key in (
+		"ai_tokens_spent", "ai_refresh_count", "ai_steps_tokens",
+	)):
+		raise frappe.ValidationError(_("AI usage is managed by the server. Reload the session before saving."))
+
+
+def delete_session_state(doc):
+	"""Participate in Session deletion; physical capture cleanup follows commit."""
+	store.delete_session_journal(doc.name, doc.session_uuid)
+	captures = tuple((row.run_uuid, getattr(row, "recording_user", None) or doc.user)
+		for row in doc.phase_2_runs or [] if row.run_uuid)
+	if captures:
+		frappe.db.after_commit.add(lambda: _cleanup_deleted_captures(captures))
+
+
+def _cleanup_deleted_captures(captures):
+	from optimus.line_profile import capture
+	failures = 0
+	for run_uuid, user in captures:
+		guard = safe_call.InterruptGuard(base=True)
+		try:
+			with guard:
+				capture.stop_line_profile_pass(run_uuid, user)
+				capture.cleanup_run(run_uuid)
+		except Exception:
+			failures += 1
+		if guard.pending():
+			raise guard.interrupt()
+	if failures:
+		# The parent and journal are already deleted. Never commit inside this
+		# callback or expose captured text/identities in a cleanup breadcrumb.
+		guard = safe_call.InterruptGuard(base=True)
+		try:
+			with guard:
+				frappe.logger("optimus").warning(
+					"optimus deleted capture cleanup: failed=%d; new capture input expires within 24 hours", failures)
+		except Exception:
+			pass  # Logging cannot undo a committed deletion.
+		if guard.pending():
+			raise guard.interrupt()
 
 
 def cancel_refresh(run_id, *, docname, requested_by):

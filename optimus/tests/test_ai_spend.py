@@ -266,7 +266,7 @@ def provider(monkeypatch):
 	monkeypatch.setattr(frappe.local, "_optimus_spend_session", "uuid-A", raising=False)
 	monkeypatch.setattr(ai_fix, "_provider_config", lambda: dict(_PROVIDER))
 	monkeypatch.setattr(ai_fix, "_resolve_display_threshold_ms", lambda: 1000)
-	monkeypatch.setattr(ai_fix, "_get_api_key", lambda *a: "")
+	monkeypatch.setattr(ai_fix, "_get_api_key", lambda *a, **kw: "")
 	monkeypatch.setattr(ai_fix, "_current_key_or_empty", lambda: "")
 	monkeypatch.setattr(ai_fix, "is_finding_type_excluded", lambda *a, **k: False)
 	monkeypatch.setattr(ai_fix, "_log_http_error", lambda *a, **k: None)
@@ -442,7 +442,7 @@ def test_public_call_explicit_session_reaches_protocol(monkeypatch, entry):
 	}
 	monkeypatch.setattr(ai_fix, "_provider_config", lambda: provider)
 	monkeypatch.setattr(ai_fix, "_resolve_display_threshold_ms", lambda: 1000)
-	monkeypatch.setattr(ai_fix, "_get_api_key", lambda *a: "")
+	monkeypatch.setattr(ai_fix, "_get_api_key", lambda *a, **kw: "")
 	monkeypatch.setattr(ai_fix, "is_finding_type_excluded", lambda *a: False)
 	seen = []
 
@@ -566,6 +566,7 @@ def test_an_increment_after_get_doc_survives_a_real_session_save(monkeypatch, ig
 		flags=frappe._dict(ignore_validate=ignore_validate),
 		ai_tokens_spent=10, ai_refresh_count=0, notes="analyzed notes", phase_2_runs=[],
 	)
+	stored.get = lambda key: getattr(stored, key, None)
 	stored.ai_tokens_spent, stored.ai_refresh_count = 52, 1  # humanize tokens; a refresh
 	doc.save(ignore_permissions=True)
 	assert loads == [(("Optimus Session", "SESS-1"), {"for_update": True})]

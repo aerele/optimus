@@ -17,6 +17,7 @@ import requests
 from optimus import ai_fix
 from optimus import settings as _settings
 
+pytestmark = pytest.mark.usefixtures("bound_provider_credentials")
 
 @pytest.fixture(autouse=True)
 def single_completion(monkeypatch):
@@ -440,11 +441,11 @@ class TestAKeylessProviderIgnoresAnUnsendableKey:
 			assert call.auth is None
 			assert "authorization" not in {k.lower() for k in call.wire_headers}
 
-	def test_a_sendable_key_is_still_sent(self, monkeypatch):
+	def test_a_sendable_key_is_still_sent_over_https(self, monkeypatch):
 		_store_key(monkeypatch, KEY)
 		fake = _capture(_Resp(200, _OPENAI_OK))
 		monkeypatch.setattr(requests, "post", fake)
-		with patch("optimus.settings.get_config", return_value=_cfg(**_LOCAL)):
+		with patch("optimus.settings.get_config", return_value=_cfg(**{**_LOCAL, "ai_base_url": "https://router.invalid/v1"})):
 			ai_fix.suggest_fix(dict(_FINDING))
 		assert fake.calls[0].wire_headers["authorization"] == f"Bearer {KEY}"
 

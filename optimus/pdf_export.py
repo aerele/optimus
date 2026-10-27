@@ -8,6 +8,7 @@ to a private File attachment on the Optimus Session; later requests serve from
 cache. The analyze pipeline is never touched.
 """
 
+import html
 import re
 
 import frappe
@@ -83,7 +84,7 @@ def _load_session(session_uuid: str):
 		"Optimus Session", {"session_uuid": session_uuid}, "name",
 	)
 	if not docname:
-		frappe.throw(_("No Optimus Session found for uuid {0}").format(session_uuid))
+		frappe.throw(_("No Optimus Session found for uuid {0}").format(html.escape(str(session_uuid))))
 	return frappe.get_doc("Optimus Session", docname)
 
 
