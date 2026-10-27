@@ -1,378 +1,251 @@
-# Copyright (c) 2026, Optimus contributors
-# For license information, please see license.txt
-
-"""Tests for ``optimus.api.refill_ai_suggestions``.
-
-The endpoint chains three helpers (``_run_ai_backfill``,
-``_humanize_steps_core``, ``_refill_indexes_for_doc``) and re-renders once at
-the end. Covers the happy path (each step runs once, status dict surfaced),
-toggle-off sections (skipped, no helper call) and gate failures (missing
-provider / non-Ready / non-owning user all raise before any work).
-"""
-
+"""The legacy refresh route now admits background work, preserving its session gates."""
+from importlib import import_module
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
 from optimus import api
-
-
-def _cfg(**overrides):
-	"""Build a minimal OptimusConfig-like namespace with all three
-	toggles on by default."""
-	defaults = {
-		"ai_suggest_findings": True,
-		"ai_humanize_steps": True,
-		"ai_suggest_indexes": True,
-	}
-	defaults.update(overrides)
-	return SimpleNamespace(**defaults)
-
-
-def _row(name="opt-xxx", user="user@example.com", status="Ready", title="t"):
-	return {"name": name, "user": user, "status": status, "title": title}
-
-
-def _fake_doc():
-	"""Minimal Optimus Session doc: only ``name`` is touched (helpers are
-	mocked)."""
-	return SimpleNamespace(name="opt-xxx", actions=[], findings=[], table_breakdown_json="[]")
+from optimus.tests.fixtures.ai_refresh_journal import journal as _journal_fixture  # noqa: F401
+from optimus.tests.fixtures.ai_refresh_queue import queue as _queue_fixture  # noqa: F401
+from optimus.tests.gate_fakes import (
+	DOCNAME,
+	OWNER,
+	SESSION_UUID,
+	FakePermissionError,
+	FakeValidationError,
+	fake_session_doc,
+	install,
+	make_fake_frappe,
+	owner_perms,
+	session_row,
+)
 
 
 @pytest.fixture
-def mock_session_environment(monkeypatch):
-	"""Patch the auth + lookup boundary so the orchestration tests can
-	focus on the helper chaining without standing up a real DB."""
-	monkeypatch.setattr(api, "_require_profiler_user", lambda: "user@example.com")
-
-	# frappe.db.get_value / frappe.get_doc / frappe.get_roles
-	fake_frappe = MagicMock()
-	fake_frappe.db.get_value.return_value = _row()
-	fake_frappe.get_doc.return_value = _fake_doc()
-	fake_frappe.get_roles.return_value = ["System Manager"]
-	# .throw must actually raise so the gate-failure tests detect the
-	# error path; mirror frappe's API of throw(msg, exc=Exception).
-	def _throw(msg, exc=Exception):
-		raise exc(msg)
-	fake_frappe.throw.side_effect = _throw
-	fake_frappe.PermissionError = PermissionError
-
-	monkeypatch.setattr(api, "frappe", fake_frappe)
-	return fake_frappe
-
-
-def test_refill_runs_all_three_steps(mock_session_environment, monkeypatch):
-	"""Happy path: every toggle is on, every helper runs once and the
-	per-step status dict surfaces the counts."""
-	from optimus import ai_fix
-	from optimus.settings import get_config  # noqa: F401 we patch this below
-
-	monkeypatch.setattr(ai_fix, "is_available", lambda: True)
-	monkeypatch.setattr("optimus.settings.get_config", lambda: _cfg())
-
-	# Mock the three core helpers + the final regen.
-	backfill = MagicMock(return_value={"added": 3, "failed": 0, "skipped_time": 1, "total_pending": 4})
-	humanize = MagicMock(return_value={"updated": True, "reason": None})
-	indexes = MagicMock(return_value={"added": 2, "failed": 0, "skipped": 0})
-	regen = MagicMock(return_value={"regenerated": True})
-
-	monkeypatch.setattr("optimus.analyze._run_ai_backfill", backfill)
-	monkeypatch.setattr(api, "_humanize_steps_core", humanize)
-	monkeypatch.setattr(api, "_refill_indexes_for_doc", indexes)
-	monkeypatch.setattr(api, "regenerate_reports", regen)
-
-	out = api.refill_ai_suggestions(session_uuid="sess-1")
-
-	assert out["ok"] is True
-	assert out["fixes"]["added"] == 3 and out["fixes"]["skipped_time"] == 1
-	assert out["steps"]["updated"] is True
-	assert out["indexes"]["added"] == 2
-	assert out["regenerated"] is True
-
-	# Each step was called exactly once.
-	assert backfill.call_count == 1
-	assert humanize.call_count == 1
-	assert indexes.call_count == 1
-	assert regen.call_count == 1
-
-
-def test_refill_skips_sections_whose_toggle_is_off(mock_session_environment, monkeypatch):
-	"""Per-section toggles gate each step: a toggle-off section reports
-	``skipped`` instead of erroring and the helper isn't called."""
-	from optimus import ai_fix
-
-	monkeypatch.setattr(ai_fix, "is_available", lambda: True)
-	# Only fixes toggle is on; humanize + indexes toggles are off.
-	monkeypatch.setattr(
-		"optimus.settings.get_config",
-		lambda: _cfg(ai_humanize_steps=False, ai_suggest_indexes=False),
-	)
-
-	backfill = MagicMock(return_value={"added": 1, "failed": 0, "skipped_time": 0, "total_pending": 1})
-	humanize = MagicMock()
-	indexes = MagicMock()
-	regen = MagicMock(return_value={"regenerated": True})
-
-	monkeypatch.setattr("optimus.analyze._run_ai_backfill", backfill)
-	monkeypatch.setattr(api, "_humanize_steps_core", humanize)
-	monkeypatch.setattr(api, "_refill_indexes_for_doc", indexes)
-	monkeypatch.setattr(api, "regenerate_reports", regen)
-
-	out = api.refill_ai_suggestions(session_uuid="sess-1")
-
-	assert backfill.call_count == 1
-	assert humanize.call_count == 0
-	assert indexes.call_count == 0
-	assert out["steps"]["reason"] == "toggle_off"
-	assert out["indexes"]["skipped_reason"] == "toggle_off"
-	# Final re-render still runs (the fixes step did write something).
-	assert regen.call_count == 1
-
-
-def test_refill_fails_fast_when_provider_missing(mock_session_environment, monkeypatch):
-	"""``ai_fix.is_available() == False`` → endpoint raises before any
-	helper runs."""
-	from optimus import ai_fix
-
-	monkeypatch.setattr(ai_fix, "is_available", lambda: False)
-	monkeypatch.setattr("optimus.settings.get_config", lambda: _cfg())
-
-	backfill = MagicMock()
-	humanize = MagicMock()
-	indexes = MagicMock()
-	regen = MagicMock()
-	monkeypatch.setattr("optimus.analyze._run_ai_backfill", backfill)
-	monkeypatch.setattr(api, "_humanize_steps_core", humanize)
-	monkeypatch.setattr(api, "_refill_indexes_for_doc", indexes)
-	monkeypatch.setattr(api, "regenerate_reports", regen)
-
-	with pytest.raises(Exception) as excinfo:
-		api.refill_ai_suggestions(session_uuid="sess-1")
-	assert "aren't configured" in str(excinfo.value)
-
-	assert backfill.call_count == 0
-	assert humanize.call_count == 0
-	assert indexes.call_count == 0
-	assert regen.call_count == 0
-
-
-def test_refill_requires_ready_status(mock_session_environment, monkeypatch):
-	"""Non-Ready session → raises before any work."""
-	from optimus import ai_fix
-
-	mock_session_environment.db.get_value.return_value = _row(status="Analyzing")
-	monkeypatch.setattr(ai_fix, "is_available", lambda: True)
-	monkeypatch.setattr("optimus.settings.get_config", lambda: _cfg())
-
-	with pytest.raises(Exception) as excinfo:
-		api.refill_ai_suggestions(session_uuid="sess-1")
-	assert "Ready sessions" in str(excinfo.value)
-
-
-def test_refill_permission_gate(mock_session_environment, monkeypatch):
-	"""Non-owning + non-System-Manager + non-Administrator user → raises."""
-	from optimus import ai_fix
-
-	# Doc is owned by a different user; current user has no elevated roles.
-	mock_session_environment.db.get_value.return_value = _row(user="someone-else@example.com")
-	mock_session_environment.get_roles.return_value = []
-	monkeypatch.setattr(api, "_require_profiler_user", lambda: "user@example.com")
-	monkeypatch.setattr(ai_fix, "is_available", lambda: True)
-	monkeypatch.setattr("optimus.settings.get_config", lambda: _cfg())
-
-	with pytest.raises(PermissionError):
-		api.refill_ai_suggestions(session_uuid="sess-1")
-
-
-# ------------------------------------------------ shared budget + circuit break
-
-
-def _wire_refill(monkeypatch, *, backfill=None, humanize=None, indexes=None, cfg=None):
-	"""Common wiring for the budget / abort tests: AI available, helpers mocked."""
-	from optimus import ai_fix
-
-	monkeypatch.setattr(ai_fix, "is_available", lambda: True)
-	monkeypatch.setattr("optimus.settings.get_config", lambda: cfg or _cfg())
-	backfill = backfill or MagicMock(
-		return_value={"added": 1, "failed": 0, "skipped_time": 0, "total_pending": 1}
-	)
-	humanize = humanize or MagicMock(return_value={"updated": True, "reason": None})
-	indexes = indexes or MagicMock(return_value={"added": 1, "failed": 0, "skipped": 0})
-	regen = MagicMock(return_value={"regenerated": True})
-	monkeypatch.setattr("optimus.analyze._run_ai_backfill", backfill)
-	monkeypatch.setattr(api, "_humanize_steps_core", humanize)
-	monkeypatch.setattr(api, "_refill_indexes_for_doc", indexes)
-	monkeypatch.setattr(api, "regenerate_reports", regen)
-	return backfill, humanize, indexes, regen
-
-
-def test_refill_aborted_fixes_skip_later_phases_and_surface_first_error(
-	mock_session_environment, monkeypatch
-):
-	backfill = MagicMock(return_value={
-		"added": 0, "failed": 1, "skipped_time": 0, "total_pending": 3,
-		"first_error": "Codex is not signed in.", "aborted": True,
-	})
-	_, humanize, indexes, regen = _wire_refill(monkeypatch, backfill=backfill)
-
-	out = api.refill_ai_suggestions(session_uuid="sess-1")
-
-	assert humanize.call_count == 0 and indexes.call_count == 0
-	assert out["steps"]["reason"] == "aborted"
-	assert out["indexes"]["skipped_reason"] == "aborted"
-	assert out["first_error"] == "Codex is not signed in."
-	assert out["fixes"]["first_error"] == "Codex is not signed in."
-	assert out["aborted"] is True
-	# The final re-render still runs and never triggers a second backfill.
-	regen.assert_called_once_with("sess-1", ai_backfill=False)
-
-
-def test_refill_passes_remaining_budget_to_findings_and_indexes(
-	mock_session_environment, monkeypatch
-):
-	backfill, _, indexes, _ = _wire_refill(monkeypatch)
-
-	api.refill_ai_suggestions(session_uuid="sess-1")
-
-	from optimus import analyze
-
-	assert backfill.call_args.kwargs["time_budget"] <= analyze.AI_BACKFILL_TIME_BUDGET_SECONDS
-	assert 0 < indexes.call_args.kwargs["time_budget"] <= api.REFILL_TOTAL_BUDGET_SECONDS
-
-
-def test_refill_skips_steps_and_indexes_when_deadline_passed(
-	mock_session_environment, monkeypatch
-):
-	monkeypatch.setattr(api, "REFILL_TOTAL_BUDGET_SECONDS", 0)
-	backfill, humanize, indexes, _ = _wire_refill(monkeypatch)
-
-	out = api.refill_ai_suggestions(session_uuid="sess-1")
-
-	assert backfill.call_args.kwargs["time_budget"] == 0
-	assert humanize.call_count == 0 and indexes.call_count == 0
-	assert out["steps"]["reason"] == "deadline"
-	assert out["indexes"]["skipped_reason"] == "deadline"
-
-
-def test_refill_collects_first_error_from_steps_and_indexes(
-	mock_session_environment, monkeypatch
-):
-	humanize = MagicMock(return_value={"updated": False, "reason": "flaky", "error": "flaky", "retryable": True})
-	indexes = MagicMock(return_value={"added": 0, "failed": 1, "skipped": 0, "first_error": "idx err"})
-	_wire_refill(monkeypatch, humanize=humanize, indexes=indexes)
-
-	out = api.refill_ai_suggestions(session_uuid="sess-1")
-
-	assert out["first_error"] == "flaky"
-	assert out["indexes"]["first_error"] == "idx err"
-	assert out["aborted"] is False
-
-
-def test_refill_non_retryable_steps_error_skips_indexes(mock_session_environment, monkeypatch):
-	humanize = MagicMock(return_value={
-		"updated": False, "reason": "signed out", "error": "signed out", "retryable": False,
-	})
-	_, _, indexes, _ = _wire_refill(monkeypatch, humanize=humanize)
-
-	out = api.refill_ai_suggestions(session_uuid="sess-1")
-
-	assert indexes.call_count == 0
-	assert out["indexes"]["skipped_reason"] == "aborted"
-	assert out["first_error"] == "signed out"
-
-
-# ----------------------------------------------------------- per-session lock
-
-
-def test_second_concurrent_refill_is_refused(mock_session_environment, monkeypatch):
-	backfill, humanize, indexes, regen = _wire_refill(monkeypatch)
-	# SETNX returns None when the key already exists (a run is in progress).
-	mock_session_environment.cache.set.return_value = None
-
-	with pytest.raises(Exception, match="already running"):
-		api.refill_ai_suggestions(session_uuid="sess-1")
-
-	assert backfill.call_count == 0 and regen.call_count == 0
-	# The refused call did not own the lock, so it must not delete it.
-	mock_session_environment.cache.delete_value.assert_not_called()
-
-
-def test_backfill_ai_fixes_also_refuses_concurrent_run(mock_session_environment, monkeypatch):
-	from optimus import ai_fix
-
-	monkeypatch.setattr(ai_fix, "is_available", lambda: True)
-	monkeypatch.setattr("optimus.settings.get_config", lambda: _cfg())
-	mock_session_environment.utils.cint = int
-	backfill = MagicMock()
-	monkeypatch.setattr("optimus.analyze._run_ai_backfill", backfill)
-	mock_session_environment.cache.set.return_value = None
-
-	with pytest.raises(Exception, match="already running"):
-		api.backfill_ai_fixes(session_uuid="sess-1")
-
-	assert backfill.call_count == 0
-
-
-def test_lock_is_taken_with_ttl_and_released_after_the_run(mock_session_environment, monkeypatch):
-	_wire_refill(monkeypatch)
-	cache = mock_session_environment.cache
-	cache.set.return_value = True
-
-	api.refill_ai_suggestions(session_uuid="sess-1")
-
-	kwargs = cache.set.call_args.kwargs
-	assert kwargs["nx"] is True and kwargs["ex"] == api.AI_REFRESH_LOCK_TTL_SECONDS
-	cache.delete_value.assert_called_once_with("optimus:ai_refill_lock:sess-1")
-
-
-def test_lock_is_released_when_the_run_raises(mock_session_environment, monkeypatch):
-	backfill = MagicMock(side_effect=RuntimeError("boom"))
-	_wire_refill(monkeypatch, backfill=backfill)
-	cache = mock_session_environment.cache
-	cache.set.return_value = True
-
-	with pytest.raises(RuntimeError):
-		api.refill_ai_suggestions(session_uuid="sess-1")
-
-	cache.delete_value.assert_called_once()
-
-
-def test_lock_fails_open_when_cache_is_unreachable(mock_session_environment, monkeypatch):
-	_, _, _, regen = _wire_refill(monkeypatch)
-	mock_session_environment.cache.set.side_effect = ConnectionError("redis down")
-
-	out = api.refill_ai_suggestions(session_uuid="sess-1")
-
-	assert out["ok"] is True and regen.call_count == 1
-	mock_session_environment.cache.delete_value.assert_not_called()
-
-
-# ------------------------------------------------- regenerate_reports ai_backfill
-
-
-@pytest.fixture
-def regen_env(mock_session_environment, monkeypatch):
-	mock_session_environment.utils.cint = int
-	mock_session_environment.db.get_value.return_value = {
-		"name": "opt-xxx", "user": "user@example.com", "status": "Ready",
+def env(monkeypatch):
+	def make(*, status="Ready", user=OWNER, perms=None, cfg=None):
+		fake = make_fake_frappe(user=user, sessions={SESSION_UUID: session_row(status=status)},
+			perms=owner_perms() if perms is None else perms, docs={DOCNAME: fake_session_doc()})
+		install(monkeypatch, fake)
+		jobs = import_module("optimus.ai_jobs")
+		monkeypatch.setattr(jobs, "frappe", fake)
+		h = SimpleNamespace(start=MagicMock(return_value={"status": "queued", "refresh": {"run_id": "fake-run", "state": "queued"}}),
+			active=MagicMock(return_value=None))
+		monkeypatch.setattr(jobs, "attach_refresh", h.active, raising=False)
+		monkeypatch.setattr(jobs, "active_refresh", h.active)
+		monkeypatch.setattr(jobs, "start_refresh", h.start)
+		monkeypatch.setattr("optimus.settings.get_config", lambda: cfg or SimpleNamespace(
+			ai_suggest_findings=True, ai_humanize_steps=True, ai_refresh_max_findings=20))
+		return fake, h
+	return make
+
+
+def test_refill_queues_for_plain_owner_without_inline_spend_or_counter_write(env):
+	fake, h = env()
+	out = api.refill_ai_suggestions(SESSION_UUID)
+	assert out["status"] == "queued" and out["ok"] is True
+	assert out["session_uuid"] == SESSION_UUID
+	assert h.start.call_args.kwargs == dict(docname=DOCNAME, session_uuid=SESSION_UUID,
+		requested_by=OWNER, regenerate_all=False, include_fixes=True, include_steps=True,
+		cap=20, resume_from=None, retry_uncertain=False)
+	assert not fake.spies.set_value and not fake.spies.get_doc
+
+
+def test_refill_honors_section_flags_and_explicit_unlimited_cap(env):
+	_, h = env(cfg=SimpleNamespace(ai_suggest_findings=False, ai_humanize_steps=True, ai_refresh_max_findings=0))
+	api.refill_ai_suggestions(SESSION_UUID, regenerate_all="1")
+	assert h.start.call_args.kwargs["include_fixes"] is False
+	assert h.start.call_args.kwargs["regenerate_all"] is True
+	assert h.start.call_args.kwargs["cap"] == 0
+
+
+def test_refill_requires_ready_status_before_admission(env):
+	_, h = env(status="Analyzing")
+	with pytest.raises(FakeValidationError):
+		api.refill_ai_suggestions(SESSION_UUID)
+	h.start.assert_not_called()
+
+
+def test_refill_denies_nonowner_without_write(env):
+	fake, h = env(user="other@example.com", perms={})
+	with pytest.raises(FakePermissionError):
+		api.refill_ai_suggestions(SESSION_UUID)
+	h.start.assert_not_called()
+	assert not fake.cache.calls
+
+
+def test_refill_allows_write_sharee_and_attributes_actual_requester(env):
+	user = "sharee@example.com"
+	_, h = env(user=user, perms={("read", DOCNAME, user): True, ("write", DOCNAME, user): True})
+	assert api.refill_ai_suggestions(SESSION_UUID)["ok"]
+	assert h.start.call_args.kwargs["requested_by"] == user
+
+
+@pytest.mark.parametrize("value", ["yes please", "2", [], {}, None, 2, 0.5])
+def test_malformed_flags_do_not_admit_or_consume_rate_limit(env, value):
+	fake, h = env()
+	with pytest.raises(FakeValidationError):
+		api.refill_ai_suggestions(SESSION_UUID, regenerate_all=value)
+	h.start.assert_not_called()
+	assert not fake.cache.calls
+
+
+@pytest.mark.parametrize("value,expected", [(False, False), (True, True), (0, False), (1, True),
+	("0", False), ("1", True), ("false", False), ("true", True), ("FALSE", False)])
+def test_refresh_flags_keep_false_strings_false(env, value, expected):
+	_, h = env()
+	api.refill_ai_suggestions(SESSION_UUID, regenerate_all=value, retry_uncertain=value)
+	assert h.start.call_args.kwargs["regenerate_all"] is expected
+	assert h.start.call_args.kwargs["retry_uncertain"] is expected
+
+
+def test_existing_run_attaches_without_redis_or_configuration(env, monkeypatch):
+	fake, h = env()
+	h.active.return_value = {"run_id": "fake-run", "state": "running"}
+	monkeypatch.setattr("optimus.settings.get_config", lambda: pytest.fail("must attach without Settings"))
+	out = api.refill_ai_suggestions(SESSION_UUID)
+	assert out["status"] == "already_running"
+	assert not fake.cache.calls
+	h.start.assert_not_called()
+
+
+@pytest.mark.parametrize("reason", ["no_worker", "queue_unavailable", "site_cap", "disabled"])
+def test_admission_refusal_is_explicit_without_inline_fallback(env, reason):
+	fake, h = env()
+	h.start.return_value = {"status": "refused", "reason": reason}
+	out = api.refill_ai_suggestions(SESSION_UUID)
+	assert out["ok"] is False and out["reason"] == reason and out["message"]
+	assert not fake.spies.set_value
+
+
+def test_cancel_cannot_target_another_sessions_run(env, monkeypatch):
+	fake, _ = env()
+	jobs = import_module("optimus.ai_jobs")
+	cancel = MagicMock()
+	monkeypatch.setattr(jobs, "cancel_refresh", cancel)
+	# The fake DB finds no run bound to this parent, even if a run id is supplied.
+	with pytest.raises(FakeValidationError):
+		api.cancel_ai_refresh(SESSION_UUID, "foreign-run")
+	cancel.assert_not_called()
+	assert not fake.cache.calls
+
+
+def test_status_checks_read_permission_before_touching_journal(env, monkeypatch):
+	fake, _ = env(user="stranger@example.com", perms={})
+	jobs = import_module("optimus.ai_jobs")
+	monkeypatch.setattr(jobs, "refresh_state", lambda *a: pytest.fail("unauthorized journal read"))
+	with pytest.raises(FakePermissionError):
+		api.ai_refresh_status(SESSION_UUID)
+
+
+def test_shared_viewer_without_profiler_role_can_poll_but_cannot_spend(env, monkeypatch):
+	user = "reader@example.com"
+	fake, h = env(user=user, perms={("read", DOCNAME, user): True})
+	monkeypatch.setattr(fake, "get_roles", lambda *a: [])
+	permission = fake.has_permission
+	monkeypatch.setattr(fake, "has_permission", lambda dt, ptype, doc, user=None:
+		permission(dt, ptype, doc, user=user or fake.session.user))
+	monkeypatch.setattr(fake, "get_doc", lambda *a: fake_session_doc(owner=OWNER, status="Ready"))
+	jobs = import_module("optimus.ai_jobs")
+	monkeypatch.setattr(jobs, "refresh_state", lambda *a: {"state": "complete", "seq": 1})
+	monkeypatch.setattr(jobs, "uncertain_attempts", lambda *a: [])
+	monkeypatch.setattr(jobs, "refresh_plan", lambda *a: pytest.fail("viewer must not prepare AI spend"))
+	out = api.ai_refresh_status(SESSION_UUID)
+	assert out["status"] == "ok" and out["refresh"]["state"] == "complete"
+	assert out["can_act"] is False and out["plan"] is None
+	with pytest.raises(FakePermissionError):
+		api.refill_ai_suggestions(SESSION_UUID)
+	h.start.assert_not_called()
+
+
+@pytest.mark.parametrize("owner", [True, False])
+def test_read_sharee_can_poll_but_only_actor_sees_refresh_plan(env, monkeypatch, owner):
+	user = OWNER if owner else "reader@example.com"
+	fake, _ = env(user=user, perms={("read", DOCNAME, user): True})
+	permission = fake.has_permission
+	monkeypatch.setattr(fake, "has_permission", lambda dt, ptype, doc, user=None: permission(dt, ptype, doc, user=user or fake.session.user))
+	monkeypatch.setattr(fake, "get_doc", lambda *a: fake_session_doc(owner=OWNER, status="Ready"))
+	jobs = import_module("optimus.ai_jobs")
+	monkeypatch.setattr(jobs, "refresh_state", lambda *a: {"state": "complete", "seq": 9})
+	monkeypatch.setattr(jobs, "uncertain_attempts", lambda *a: ["unknown-attempt"])
+	plan = MagicMock(return_value={"pending": 3})
+	monkeypatch.setattr(jobs, "refresh_plan", plan)
+	out = api.ai_refresh_status(SESSION_UUID)
+	assert out["status"] == "ok" and out["refresh"]["seq"] == 9
+	assert out["can_act"] is owner
+	assert out["session_uncertain_count"] == 1
+	assert bool(out["plan"]) is owner
+	assert plan.call_count == int(owner)
+	assert not fake.cache.calls
+
+
+def test_cancel_passes_exact_requested_run_even_when_a_newer_run_is_active(env, monkeypatch):
+	fake, _ = env(status="Failed")
+	jobs = import_module("optimus.ai_jobs")
+	read = fake.db.get_value
+	def get_value(table, filters, field="name", **kw):
+		if table == "Optimus AI Refresh Run":
+			assert filters == {"name": "old-run", "session_name": DOCNAME}
+			return "old-run"
+		return read(table, filters, field, **kw)
+	monkeypatch.setattr(fake, "db", SimpleNamespace(get_value=get_value))
+	cancel = MagicMock(return_value={"status": "cancelled", "refresh": {"state": "cancelled", "run_id": "old-run"}})
+	monkeypatch.setattr(jobs, "cancel_refresh", cancel)
+	assert api.cancel_ai_refresh(SESSION_UUID, "old-run")["refresh"]["state"] == "cancelled"
+	cancel.assert_called_once_with("old-run", docname=DOCNAME, requested_by=OWNER)
+	assert not fake.cache.calls
+
+
+def test_progress_failure_is_unknown_and_does_not_claim_completion(env, monkeypatch):
+	fake, _ = env()
+	monkeypatch.setattr(fake, "has_permission", lambda *a, **kw: True)
+	jobs = import_module("optimus.ai_jobs")
+	def fail(*a):
+		raise ConnectionError("fake SQL outage")
+	monkeypatch.setattr(jobs, "refresh_state", fail)
+	logs = []
+	monkeypatch.setattr("optimus.analyze._log_ai_step_failure", lambda *a, **kw: logs.append(type(a[1]).__name__))
+	assert api.ai_refresh_status(SESSION_UUID) == {
+		"status": "unknown", "refresh": None, "can_act": False, "plan": None,
 	}
-	monkeypatch.setattr(api, "_require_session_permission", lambda *a, **k: None)
-	monkeypatch.setattr("optimus.analyze._fetch_recordings", lambda *a, **k: [])
-	monkeypatch.setattr("optimus.analyze._load_recordings_bundle", lambda *a, **k: None)
-	monkeypatch.setattr("optimus.analyze._render_and_attach_reports", MagicMock())
-	backfill = MagicMock(return_value=False)
-	monkeypatch.setattr("optimus.analyze._backfill_ai_suggestions", backfill)
-	return backfill
+	assert logs == ["ConnectionError"]
 
 
-def test_regenerate_reports_default_still_backfills(regen_env):
-	out = api.regenerate_reports("sess-1")
-	assert out["regenerated"] is True
-	assert regen_env.call_count == 1
+def test_render_only_action_refuses_active_refresh_before_consuming_rate_limit(env):
+	fake, helpers = env()
+	helpers.active.return_value = {"run_id": "fake-run", "state": "running"}
+	with pytest.raises(FakeValidationError, match="AI refresh"):
+		api.regenerate_reports(SESSION_UUID)
+	assert not fake.cache.calls
 
 
-def test_regenerate_reports_ai_backfill_false_skips_backfill(regen_env):
-	out = api.regenerate_reports("sess-1", ai_backfill=False)
-	assert out["regenerated"] is True
-	assert regen_env.call_count == 0
+def test_public_refresh_redelivers_pending_intent_without_new_admission(queue, monkeypatch):
+	# Use the real endpoint, live SQL view and delivery path after a lost enqueue.
+	monkeypatch.setattr(api, "_session_action_gate", lambda *a, **kw: SimpleNamespace(
+		docname="fake-session-doc", session_uuid="fake-session"))
+	monkeypatch.setattr("optimus.settings.get_config", lambda: pytest.fail("attach read settings"))
+	monkeypatch.setattr(api.ratelimit, "enforce_user_rate_limit", lambda *a, **kw: pytest.fail("attach used rate limit"))
+	assert queue.jobs.active_refresh("fake-session-doc")["state"] == "queued"
+	assert queue.sent == [], "read-only progress must not dispatch"
+	out = api.refill_ai_suggestions("fake-session")
+	assert out["status"] == "already_running"
+	assert len(queue.sent) == 1
+	assert queue.sent[0][1]["run_id"] == "fake-run"
+	assert len(queue.journal.db.rows[queue.journal.mod.RUN]) == 1
+	# Dispatch interval prevents another click from immediately sending again.
+	api.refill_ai_suggestions("fake-session")
+	assert len(queue.sent) == 1
+
+
+def test_public_attach_keeps_sql_progress_when_redelivery_fails(queue, monkeypatch):
+	monkeypatch.setattr(api, "_session_action_gate", lambda *a, **kw: SimpleNamespace(
+		docname="fake-session-doc", session_uuid="fake-session"))
+	def fail(*a, **kw):
+		raise ConnectionError("fake Redis unavailable")
+	monkeypatch.setattr(queue.jobs.frappe, "enqueue", fail)
+	out = api.refill_ai_suggestions("fake-session")
+	assert out["ok"] and out["status"] == "already_running"
+	assert out["refresh"]["state"] == "queued"
+	assert queue.journal.db.rows[queue.journal.mod.RUN]["fake-run"]["dispatch_pending"] == 1
+	assert queue.sent == []

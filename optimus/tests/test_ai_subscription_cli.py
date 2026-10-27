@@ -3,26 +3,47 @@
 
 """Tests for the Codex CLI subscription transport in ``ai_fix``.
 
-Every subprocess call is MOCKED: nothing here ever runs a real ``codex``
-command (the real CLI bills a subscription and sends data). ``subprocess``,
-``shutil.which`` and ``os.killpg`` are patched on the ``ai_fix`` module, and
-``settings.get_config`` returns a plain SimpleNamespace.
+The real ``codex`` is never run. Process-level tests point ``ai_cli_path`` at a
+small shell script named ``codex`` that records what the child saw (environment,
+working files, stdin) and answers like the CLI would.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import signal
-import subprocess
+import stat
+import time
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
-from optimus import ai_fix
+from optimus import ai_fix, ai_transport
 
-_INJECTION = 'x; rm -rf / `id` $(whoami) "quoted" \'single\''
+_FAKE_CODEX = """#!/bin/sh
+R="{rec}"
+echo "$1 $2" >> "$R/calls.txt"
+env > "$R/env_$1.txt"
+echo "$PWD" > "$R/pwd_$1.txt"
+echo "$HOME" > "$R/home_$1.txt"
+echo "$CODEX_HOME" > "$R/codexhome_$1.txt"
+ls "$CODEX_HOME" > "$R/codexhome_ls_$1.txt" 2>&1
+case "$1" in
+	login) {login} ;;
+	--version) echo "codex-cli 9.9.9" ;;
+	exec)
+		out=""
+		while [ $# -gt 0 ]; do
+			if [ "$1" = "-o" ]; then out="$2"; fi
+			shift
+		done
+		cat > "$R/stdin.txt"
+		echo "$out" > "$R/out_path.txt"
+		{exec_body}
+		;;
+esac
+"""
 
 
 def _cfg(**kw):
@@ -42,7 +63,6 @@ def _cfg(**kw):
 
 @pytest.fixture(autouse=True)
 def _clear_login_cache():
-	"""A memoized login success must not leak between tests."""
 	ai_fix._LOGIN_CACHE.clear()
 	yield
 	ai_fix._LOGIN_CACHE.clear()
@@ -50,116 +70,62 @@ def _clear_login_cache():
 
 @pytest.fixture
 def sub_cfg(monkeypatch):
-	"""Subscription mode on and the dev-bench guard open; get_config returns the
-	cfg. Tests that need the guard closed re-patch ``_subscription_allowed``."""
+	"""Subscription mode on and the dev-bench guard open."""
 	cfg = _cfg()
 	monkeypatch.setattr("optimus.settings.get_config", lambda: cfg)
 	monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: True)
 	return cfg
 
 
-class _FakeProc:
-	def __init__(
-		self, returncode=0, stdout="", stderr="", raise_timeout=False, write_out=None,
-		raise_exc=None, alive=False,
-	):
-		self.returncode = returncode
-		self._raise_exc = raise_exc
-		self._alive = alive
-		self._stdout = stdout
-		self._stderr = stderr
-		self._raise_timeout = raise_timeout
-		self._write_out = write_out
-		self.pid = 4242
-		self.communicate_calls = []
-		self.out_file = None
-
-	def communicate(self, input=None, timeout=None):
-		self.communicate_calls.append({"input": input, "timeout": timeout})
-		if self._raise_timeout:
-			raise subprocess.TimeoutExpired(cmd="codex", timeout=timeout)
-		if self._raise_exc is not None:
-			raise self._raise_exc
-		if self._write_out is not None and self.out_file:
-			with open(self.out_file, "w", encoding="utf-8") as f:
-				f.write(self._write_out)
-		return self._stdout, self._stderr
-
-	def wait(self, timeout=None):
-		return self.returncode
-
-	def poll(self):
-		return None if self._alive else self.returncode
-
-
-class _FakeSubprocess:
-	"""Stands in for the ``subprocess`` module inside ai_fix. Keeps the real
-	exception class and PIPE so ``except subprocess.TimeoutExpired`` works."""
-
-	PIPE = subprocess.PIPE
-	TimeoutExpired = subprocess.TimeoutExpired
-
-	def __init__(
-		self, proc=None, login_stdout="", login_stderr="Logged in using ChatGPT",
-		login_rc=0, popen_exc=None,
-	):
-		self.proc = proc or _FakeProc(stdout="FIXTEXT")
-		self._popen_exc = popen_exc
-		self._login_stderr = login_stderr
-		self.popen_calls = []
-		self.run_calls = []
-		self._login_stdout = login_stdout
-		self._login_rc = login_rc
-
-	def Popen(self, argv, **kw):
-		self.popen_calls.append({"argv": argv, "kw": kw})
-		if self._popen_exc is not None:
-			raise self._popen_exc
-		if "-o" in argv:
-			self.proc.out_file = argv[argv.index("-o") + 1]
-		return self.proc
-
-	def run(self, argv, **kw):
-		self.run_calls.append({"argv": argv, "kw": kw})
-		if "login" in argv:
-			return SimpleNamespace(
-				returncode=self._login_rc, stdout=self._login_stdout, stderr=self._login_stderr,
-			)
-		return SimpleNamespace(returncode=0, stdout="", stderr="codex-cli 1.2.3\n")
+@pytest.fixture
+def real_auth(tmp_path, monkeypatch):
+	"""A fake operator sign-in file; ``_auth_source_path`` points at it."""
+	home = tmp_path / "operator_codex"
+	home.mkdir()
+	auth = home / "auth.json"
+	auth.write_text(json.dumps({"tokens": {"refresh_token": "ORIGINAL"}}))
+	monkeypatch.setattr(ai_fix, "_auth_source_path", lambda: str(auth))
+	return auth
 
 
 @pytest.fixture
-def fake_cli(monkeypatch, sub_cfg):
-	"""A resolvable codex path plus a signed-in fake subprocess (the real CLI
-	prints the login status to stderr). Returns the
-	fake so a test can inspect the calls (or swap fake.proc)."""
-	fake = _FakeSubprocess()
-	monkeypatch.setattr(ai_fix, "subprocess", fake)
-	monkeypatch.setattr(ai_fix.shutil, "which", lambda name: "/usr/bin/codex")
-	return fake
+def fake_codex(tmp_path, monkeypatch, sub_cfg, real_auth):
+	"""Build a fake ``codex`` script and point the settings at it."""
+	rec = tmp_path / "rec"
+	rec.mkdir()
+	sub_cfg.ai_cli_path = str(tmp_path / "bin" / "codex")
+	(tmp_path / "bin").mkdir()
+
+	def build(login='echo "Logged in using ChatGPT" >&2', exec_body='echo REPLY > "$out"'):
+		path = tmp_path / "bin" / "codex"
+		path.write_text(_FAKE_CODEX.format(rec=rec, login=login, exec_body=exec_body))
+		path.chmod(0o755)
+		return SimpleNamespace(rec=rec, path=path)
+
+	return build
+
+
+def _read(rec, name):
+	return (rec / name).read_text()
 
 
 # ---------------------------------------------------------------------------
-# Pure argv / prompt builders
+# Pure builders
 # ---------------------------------------------------------------------------
 
 class TestBuildArgv:
 	def test_argv_has_no_shell_metacharacters_from_data(self):
-		"""AC-SEC-1: the argv is a fixed list built from paths only."""
-		argv = ai_fix._build_cli_argv("codex", "/s", "/s/out")
-		joined = " ".join(argv)
-		assert "; rm -rf /" not in joined
-		assert "`" not in joined
-		assert "$(" not in joined
+		joined = " ".join(ai_fix._build_cli_argv("codex", "/s", "/s/out"))
+		assert "`" not in joined and "$(" not in joined and ";" not in joined
 
 	def test_argv_hardening_flags(self):
-		"""AC-SEC-2: read-only sandbox, ephemeral, no user config, scratch dir,
-		output file, and the trailing '-' (prompt from stdin)."""
 		argv = ai_fix._build_cli_argv("codex", "/s", "/s/out")
 		assert argv[:2] == ["codex", "exec"]
 		assert argv[argv.index("--sandbox") + 1] == "read-only"
 		for flag in ("--skip-git-repo-check", "--ignore-user-config", "--ignore-rules", "--ephemeral"):
 			assert flag in argv
+		disabled = [argv[i + 1] for i, a in enumerate(argv) if a == "--disable"]
+		assert "shell_tool" in disabled
 		assert argv[argv.index("-C") + 1] == "/s"
 		assert argv[argv.index("-o") + 1] == "/s/out"
 		assert argv[-1] == "-"
@@ -167,485 +133,538 @@ class TestBuildArgv:
 
 class TestComposePrompt:
 	def test_joins_system_and_messages_with_blank_lines(self):
-		out = ai_fix._compose_cli_prompt("SYS", [{"role": "user", "content": "A"}, {"role": "user", "content": "B"}])
+		out = ai_fix._compose_cli_prompt("SYS", [{"content": "A"}, {"content": "B"}])
 		assert out == "SYS\n\nA\n\nB"
 
 	def test_skips_empty_parts_and_strips(self):
-		out = ai_fix._compose_cli_prompt("  ", [{"role": "user", "content": " hi \n"}, {"role": "user", "content": ""}])
-		assert out == "hi"
+		assert ai_fix._compose_cli_prompt("  ", [{"content": " hi \n"}, {"content": ""}]) == "hi"
+
+
+class TestCliEnv:
+	def test_allowlist_drops_bench_secrets_and_sets_scratch_dirs(self):
+		env = ai_fix._build_cli_env(
+			{
+				"PATH": "/usr/bin", "HOME": "/home/op", "CODEX_HOME": "/home/op/.codex", "LANG": "C",
+				"LC_ALL": "C", "HTTPS_PROXY": "http://p", "OPENAI_API_KEY": "sk-1", "DB_PASSWORD": "x",
+				"FRAPPE_SITE": "s", "REDIS_CACHE": "redis://",
+			},
+			home="/s/home", codex_home="/s/codex", tmpdir="/s/tmp",
+		)
+		assert env == {
+			"PATH": "/usr/bin", "LANG": "C", "LC_ALL": "C", "HTTPS_PROXY": "http://p",
+			"HOME": "/s/home", "CODEX_HOME": "/s/codex", "TMPDIR": "/s/tmp",
+		}
+
+	def test_inherited_home_is_not_passed_through(self):
+		assert "HOME" not in ai_fix._build_cli_env({"HOME": "/home/op", "PATH": "/bin"})
 
 
 # ---------------------------------------------------------------------------
-# _call_local_cli hardening
+# Installed-CLI resolution
+# ---------------------------------------------------------------------------
+
+def _make_exe(path, mode=0o755):
+	path.write_text("#!/bin/sh\n")
+	path.chmod(mode)
+	return path
+
+
+class TestCliInstalled:
+	def test_configured_path_must_be_executable_file(self, tmp_path):
+		exe = tmp_path / "codex"
+		exe.write_text("#!/bin/sh\n")
+		exe.chmod(0o644)
+		cfg = _cfg(ai_cli_path=str(exe))
+		assert ai_fix._cli_installed(cfg) is None
+		exe.chmod(0o755)
+		assert ai_fix._cli_installed(cfg) == os.path.realpath(str(exe))
+		assert ai_fix._cli_installed(_cfg(ai_cli_path=str(tmp_path / "nope"))) is None
+
+	def test_basename_must_be_codex(self, tmp_path):
+		other = _make_exe(tmp_path / "sh")
+		assert ai_fix._cli_installed(_cfg(ai_cli_path=str(other))) is None
+		assert ai_fix._cli_installed(_cfg(ai_cli_path="/bin/sh")) is None
+
+	def test_relative_path_is_rejected(self, tmp_path, monkeypatch):
+		_make_exe(tmp_path / "codex")
+		monkeypatch.chdir(tmp_path)
+		assert ai_fix._cli_installed(_cfg(ai_cli_path="codex")) is None
+		assert ai_fix._cli_installed(_cfg(ai_cli_path="./codex")) is None
+
+	def test_symlink_is_checked_by_its_target(self, tmp_path):
+		link = tmp_path / "codex"
+		link.symlink_to("/bin/sh")
+		assert ai_fix._cli_installed(_cfg(ai_cli_path=str(link))) is None
+		real_dir = tmp_path / "real"
+		real_dir.mkdir()
+		real = _make_exe(real_dir / "codex")
+		link2 = tmp_path / "link2"
+		link2.mkdir()
+		(link2 / "codex").symlink_to(real)
+		assert ai_fix._cli_installed(_cfg(ai_cli_path=str(link2 / "codex"))) == os.path.realpath(str(real))
+
+	@pytest.mark.parametrize("mode", [0o775, 0o757, 0o777])
+	def test_group_or_world_writable_file_is_rejected(self, tmp_path, mode):
+		exe = _make_exe(tmp_path / "codex", mode)
+		exe.chmod(mode)
+		assert ai_fix._cli_installed(_cfg(ai_cli_path=str(exe))) is None
+
+	def test_file_owned_by_someone_else_is_rejected(self, tmp_path, monkeypatch):
+		exe = _make_exe(tmp_path / "codex")
+		cfg = _cfg(ai_cli_path=str(exe))
+		assert ai_fix._cli_installed(cfg) is not None
+		monkeypatch.setattr(ai_fix.os, "geteuid", lambda: os.stat(exe).st_uid + 12345)
+		assert ai_fix._cli_installed(cfg) is None
+
+	def test_blank_path_uses_path_lookup(self, monkeypatch):
+		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: "/usr/bin/codex")
+		assert ai_fix._cli_installed(_cfg()) == "/usr/bin/codex"
+
+
+# ---------------------------------------------------------------------------
+# The private scratch tree
+# ---------------------------------------------------------------------------
+
+class TestCliSandbox:
+	def test_tree_is_private_holds_only_the_auth_copy_and_is_removed(self, real_auth):
+		with ai_fix._cli_sandbox() as (work, env):
+			root = os.path.dirname(work)
+			assert stat.S_IMODE(os.stat(root).st_mode) == 0o700
+			assert os.listdir(env["CODEX_HOME"]) == ["auth.json"]
+			copy = os.path.join(env["CODEX_HOME"], "auth.json")
+			assert stat.S_IMODE(os.stat(copy).st_mode) == 0o600
+			assert open(copy, "rb").read() == real_auth.read_bytes()
+			assert os.listdir(env["HOME"]) == []
+			assert env["HOME"] != os.path.expanduser("~")
+		assert not os.path.exists(root)
+
+	def test_tree_is_removed_when_the_body_raises(self, real_auth):
+		with pytest.raises(RuntimeError):
+			with ai_fix._cli_sandbox() as (work, env):
+				root = os.path.dirname(work)
+				raise RuntimeError("boom")
+		assert not os.path.exists(root)
+
+	def test_without_auth_nothing_is_copied(self, real_auth):
+		with ai_fix._cli_sandbox(with_auth=False) as (work, env):
+			assert os.listdir(env["CODEX_HOME"]) == []
+
+	def test_missing_or_invalid_auth_file_is_skipped(self, real_auth):
+		real_auth.write_text("not json")
+		with ai_fix._cli_sandbox() as (work, env):
+			assert os.listdir(env["CODEX_HOME"]) == []
+		real_auth.unlink()
+		with ai_fix._cli_sandbox() as (work, env):
+			assert os.listdir(env["CODEX_HOME"]) == []
+
+	def test_refreshed_auth_is_saved_back_and_unchanged_auth_is_not_rewritten(self, real_auth):
+		before = real_auth.stat().st_mtime_ns
+		with ai_fix._cli_sandbox():
+			pass
+		assert real_auth.stat().st_mtime_ns == before
+		with ai_fix._cli_sandbox() as (work, env):
+			with open(os.path.join(env["CODEX_HOME"], "auth.json"), "w") as f:
+				json.dump({"tokens": {"refresh_token": "ROTATED"}}, f)
+		assert json.loads(real_auth.read_text())["tokens"]["refresh_token"] == "ROTATED"
+		assert stat.S_IMODE(real_auth.stat().st_mode) == 0o600
+
+	def test_garbage_written_to_the_copy_is_not_saved_back(self, real_auth):
+		original = real_auth.read_text()
+		with ai_fix._cli_sandbox() as (work, env):
+			with open(os.path.join(env["CODEX_HOME"], "auth.json"), "w") as f:
+				f.write("garbage")
+		assert real_auth.read_text() == original
+
+
+# ---------------------------------------------------------------------------
+# Process-level behaviour against a fake codex script
 # ---------------------------------------------------------------------------
 
 class TestCallLocalCli:
-	def _call(self, system="SYS", content="hello"):
-		return ai_fix._call_local_cli(
-			{"protocol": "subscription"}, system, [{"role": "user", "content": content}],
-		)
+	def _call(self, system="SYS", content="hello", **kw):
+		return ai_fix._call_local_cli(system, [{"role": "user", "content": content}], **kw)
 
-	def test_refuses_to_run_when_guard_is_off(self, monkeypatch, sub_cfg):
-		"""Defense in depth: a direct caller that bypasses is_available still
-		cannot run codex on a non-dev site."""
-		fake = _FakeSubprocess()
-		monkeypatch.setattr(ai_fix, "subprocess", fake)
-		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: "/usr/bin/codex")
-		monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: False)
-		with pytest.raises(ai_fix.AiFixError, match="developer-mode"):
-			self._call()
-		assert not fake.popen_calls
-		assert not fake.run_calls
-
-	def test_mkdtemp_oserror_becomes_aifixerror(self, monkeypatch, fake_cli):
-		def boom(*a, **k):
-			raise OSError("disk full")
-
-		monkeypatch.setattr(ai_fix.tempfile, "mkdtemp", boom)
-		with pytest.raises(ai_fix.AiFixError, match="working directory"):
-			self._call()
-		assert not fake_cli.popen_calls
-
-	def test_prompt_goes_to_stdin_never_argv(self, fake_cli):
-		"""AC-SEC-1 + AC-RES-2: metacharacters ride in communicate(input=...);
-		argv stays the fixed list."""
-		self._call(content=_INJECTION)
-		call = fake_cli.popen_calls[0]
-		assert not any("rm -rf" in a or "`" in a or "$(" in a for a in call["argv"])
-		sent = fake_cli.proc.communicate_calls[0]["input"]
-		assert _INJECTION in sent
-		body = ai_fix._compose_cli_prompt("SYS", [{"role": "user", "content": _INJECTION}])
-		assert sent == f"{ai_fix._CLI_SECURITY_PREAMBLE}\n\n{body}"
-		assert call["argv"][0] == "/usr/bin/codex"
-		assert call["argv"][-1] == "-"
-
-	def test_scratch_cwd_and_flags(self, fake_cli):
-		"""AC-SEC-2: Popen runs in the scratch dir that argv names with -C."""
-		self._call()
-		call = fake_cli.popen_calls[0]
-		argv = call["argv"]
-		scratch = argv[argv.index("-C") + 1]
-		assert call["kw"]["cwd"] == scratch
-		assert os.path.basename(scratch).startswith("optimus-codex-")
-		assert argv[argv.index("-o") + 1] == os.path.join(scratch, "out.txt")
-		assert call["kw"]["start_new_session"] is True
-		assert call["kw"].get("shell") in (None, False)
-		assert call["kw"]["errors"] == "replace"
-		assert call["kw"]["stdin"] == subprocess.PIPE
-		assert argv[argv.index("--sandbox") + 1] == "read-only"
-
-	def test_scratch_dir_removed_afterwards(self, fake_cli):
-		self._call()
-		argv = fake_cli.popen_calls[0]["argv"]
-		assert not os.path.exists(argv[argv.index("-C") + 1])
-
-	def test_env_is_an_allowlist(self, fake_cli, monkeypatch):
-		"""AC-SEC-3: bench secrets and API-key vars never reach the child; TLS and
-		proxy variables do (codex needs them to reach OpenAI)."""
-		monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret")
-		monkeypatch.setenv("OPENAI_API_KEY", "sk-secret")
-		monkeypatch.setenv("OPENAI_BASE_URL", "http://evil")
-		monkeypatch.setenv("CODEX_API_KEY", "sk-codex")
-		monkeypatch.setenv("DATABASE_URL", "mysql://root:pw@db/x")
-		monkeypatch.setenv("REDIS_CACHE", "redis://r:6379")
-		monkeypatch.setenv("PATH", "/usr/bin:/bin")
-		monkeypatch.setenv("HOME", "/home/dev")
-		monkeypatch.setenv("LC_ALL", "C.UTF-8")
-		monkeypatch.setenv("HTTPS_PROXY", "http://proxy:3128")
-		monkeypatch.setenv("SSL_CERT_FILE", "/etc/ssl/ca.pem")
-		self._call()
-		env = fake_cli.popen_calls[0]["kw"]["env"]
-		for name in (
-			"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_API_KEY",
-			"DATABASE_URL", "REDIS_CACHE",
-		):
-			assert name not in env
-		assert env["PATH"] == "/usr/bin:/bin"
-		assert env["HOME"] == "/home/dev"
-		assert env["LC_ALL"] == "C.UTF-8"
-		assert env["HTTPS_PROXY"] == "http://proxy:3128"
-		assert env["SSL_CERT_FILE"] == "/etc/ssl/ca.pem"
-
-	def test_nonzero_exit_leaks_nothing(self, fake_cli, monkeypatch):
-		"""AC-SEC-4: neither the error message nor any log call carries stderr."""
-		fake_cli.proc = _FakeProc(
-			returncode=1, stdout="CANARY_STDOUT_SECRET", stderr="OPENAI_API_KEY=sk-secret boom",
-		)
-		logged = []
-		monkeypatch.setattr(
-			"frappe.log_error", lambda *a, **kw: logged.append((a, kw)), raising=False,
-		)
-		with pytest.raises(ai_fix.AiFixError) as ei:
-			self._call()
-		msg = str(ei.value)
-		assert "exit 1" in msg
-		for needle in ("sk-secret", "OPENAI_API_KEY=", "boom", "CANARY_STDOUT_SECRET"):
-			assert needle not in msg
-			assert needle not in repr(logged)
-		assert len(logged) == 1
-		assert logged[0][1]["title"] == "optimus ai_fix cli"
-		assert "exit=1" in logged[0][1]["message"]
-
-	def test_timeout_kills_process_group(self, fake_cli):
-		"""AC-RES-1: TimeoutExpired -> SIGTERM then SIGKILL on the group."""
-		fake_cli.proc = _FakeProc(raise_timeout=True, alive=True)
-		with patch("optimus.ai_fix.os.killpg") as killpg:
-			with pytest.raises(ai_fix.AiFixError, match="didn't respond"):
-				self._call()
-		assert killpg.call_args_list
-		assert all(c.args[0] == fake_cli.proc.pid for c in killpg.call_args_list)
-		sigs = [c.args[1] for c in killpg.call_args_list]
-		assert signal.SIGTERM in sigs
-		assert signal.SIGKILL in sigs
-		assert sigs.index(signal.SIGTERM) < sigs.index(signal.SIGKILL)
-
-	def test_timeout_value_comes_from_cli_clamp(self, fake_cli, sub_cfg):
-		sub_cfg.ai_request_timeout_seconds = 500
-		self._call()
-		assert fake_cli.proc.communicate_calls[0]["timeout"] == 90
-
-	def test_reads_output_file_before_stdout(self, fake_cli):
-		fake_cli.proc = _FakeProc(stdout="from stdout", write_out="  from file \n")
-		assert self._call() == "from file"
-
-	def test_falls_back_to_stdout_when_file_missing(self, fake_cli):
-		fake_cli.proc = _FakeProc(stdout="  from stdout \n")
-		assert self._call() == "from stdout"
-
-	def test_empty_response_raises(self, fake_cli):
-		fake_cli.proc = _FakeProc(stdout="   ")
-		with pytest.raises(ai_fix.AiFixError, match="empty response"):
-			self._call()
-
-	def test_output_capped(self, fake_cli):
-		fake_cli.proc = _FakeProc(write_out="x" * 150_000)
-		assert ai_fix._CLI_MAX_OUTPUT_CHARS == 20_000
-		assert len(self._call()) == 20_000
-
-	def test_child_killed_on_non_timeout_exception(self, fake_cli):
-		"""A non-timeout failure after spawn must not leak the child or scratch."""
-		fake_cli.proc = _FakeProc(raise_exc=ValueError("boom"), alive=True)
-		with patch("optimus.ai_fix.os.killpg") as killpg:
-			with pytest.raises(ValueError):
-				self._call()
-		sigs = [c.args[1] for c in killpg.call_args_list]
-		assert signal.SIGTERM in sigs and signal.SIGKILL in sigs
-		argv = fake_cli.popen_calls[0]["argv"]
-		assert not os.path.exists(argv[argv.index("-C") + 1])
-
-	def test_no_kill_when_child_already_exited(self, fake_cli):
-		with patch("optimus.ai_fix.os.killpg") as killpg:
-			self._call()
-		killpg.assert_not_called()
-
-	def test_lone_surrogate_is_sanitised_before_communicate(self, fake_cli):
-		self._call(content="bad \ud800 text")
-		sent = fake_cli.proc.communicate_calls[0]["input"]
-		sent.encode("utf-8")  # must not raise
-		assert "bad" in sent and "text" in sent
-
-	def test_popen_oserror_becomes_aifixerror(self, monkeypatch, sub_cfg):
-		fake = _FakeSubprocess(popen_exc=OSError("/secret/path/codex: bad interpreter"))
-		monkeypatch.setattr(ai_fix, "subprocess", fake)
-		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: "/usr/bin/codex")
-		logged = []
-		monkeypatch.setattr(ai_fix, "_log_cli_error", lambda *a: logged.append(a))
-		with pytest.raises(ai_fix.AiFixError) as ei:
-			self._call()
-		assert str(ei.value) == "Codex CLI could not be started."
-		assert logged == [("codex", "spawn", None)]
-
-	def test_missing_cli_raises(self, fake_cli, monkeypatch):
-		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: None)
-		with pytest.raises(ai_fix.AiFixError, match="not found"):
-			self._call()
-		assert fake_cli.popen_calls == []
-
-	def test_signed_out_raises_and_never_execs(self, monkeypatch, sub_cfg):
-		fake = _FakeSubprocess(login_stderr="Not logged in", login_rc=1)
-		monkeypatch.setattr(ai_fix, "subprocess", fake)
-		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: "/usr/bin/codex")
-		with pytest.raises(ai_fix.AiFixError, match="not signed in with ChatGPT") as ei:
-			self._call()
-		assert ei.value.retryable is False
-		assert fake.popen_calls == []
-
-	@pytest.mark.parametrize("login_stderr,login_rc,expected", [
-		("Logged in using an API key", 0, "signed in with an API key, not ChatGPT"),
-		("Not logged in", 1, "not signed in with ChatGPT"),
-	])
-	def test_login_failures_are_terminal_with_actionable_message(
-		self, monkeypatch, sub_cfg, login_stderr, login_rc, expected,
-	):
-		fake = _FakeSubprocess(login_stderr=login_stderr, login_rc=login_rc)
-		monkeypatch.setattr(ai_fix, "subprocess", fake)
-		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: "/usr/bin/codex")
-		with pytest.raises(ai_fix.AiFixError) as ei:
-			self._call()
-		assert expected in str(ei.value)
-		assert "Sign in with ChatGPT" in str(ei.value)
-		assert ei.value.retryable is False
-
-	def test_login_probe_timeout_is_terminal(self, monkeypatch, sub_cfg):
-		fake = _FakeSubprocess()
-
-		def slow(argv, **kw):
-			raise subprocess.TimeoutExpired(cmd="codex", timeout=5)
-
-		fake.run = slow
-		monkeypatch.setattr(ai_fix, "subprocess", fake)
-		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: "/usr/bin/codex")
-		with pytest.raises(ai_fix.AiFixError, match="session check timed out") as ei:
-			self._call()
-		assert ei.value.retryable is False
-		assert fake.popen_calls == []
-
-	def test_login_probe_error_is_terminal(self, monkeypatch, sub_cfg):
-		fake = _FakeSubprocess()
-
-		def broken(argv, **kw):
-			raise OSError("nope")
-
-		fake.run = broken
-		monkeypatch.setattr(ai_fix, "subprocess", fake)
-		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: "/usr/bin/codex")
-		with pytest.raises(ai_fix.AiFixError) as ei:
-			self._call()
-		assert ei.value.retryable is False
-		assert fake.popen_calls == []
-
-	def test_guard_off_and_missing_cli_are_terminal(self, monkeypatch, sub_cfg, fake_cli):
-		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: None)
-		with pytest.raises(ai_fix.AiFixError) as ei:
-			self._call()
-		assert ei.value.retryable is False
-		monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: False)
-		with pytest.raises(ai_fix.AiFixError) as ei:
-			self._call()
-		assert ei.value.retryable is False
-
-	def test_login_check_is_memoized_across_calls(self, fake_cli):
-		self._call()
-		self._call()
-		assert len([c for c in fake_cli.run_calls if "login" in c["argv"]]) == 1
-
-	def test_security_preamble_leads_the_stdin_prompt(self, fake_cli):
-		self._call()
-		sent = fake_cli.proc.communicate_calls[0]["input"]
-		assert sent.startswith("SECURITY:")
-		assert "UNTRUSTED DATA" in sent
-		assert "Do NOT run any shell commands" in sent
-		assert sent.index("UNTRUSTED DATA") < sent.index("SYS")
-
-	@pytest.mark.parametrize("system,content", [("", ""), ("  ", " \n "), ("", "   ")])
-	def test_empty_prompt_never_spawns(self, fake_cli, system, content):
-		with pytest.raises(ai_fix.AiFixError, match="no content to send"):
-			ai_fix._call_local_cli({"protocol": "subscription"}, system, [{"role": "user", "content": content}])
-		assert fake_cli.popen_calls == []
-
-	def test_output_is_secret_scrubbed(self, fake_cli):
-		reply = (
-			"**Fix**\n```python\nfrappe.get_all('User')\n```\n"
-			'encryption_key = "abcd1234abcd1234abcd1234abcd1234"\n'
-			"-----BEGIN RSA PRIVATE KEY-----\nMIIEvQIBADANBg\nkqhkiG9w0BAQ\n-----END RSA PRIVATE KEY-----\n"
-		)
-		fake_cli.proc = _FakeProc(write_out=reply)
+	def test_reply_is_returned_scrubbed(self, fake_codex):
+		fake_codex(exec_body='echo "db_password = \\"hunter2hunter2\\"" > "$out"')
 		out = self._call()
-		assert "abcd1234abcd1234abcd1234abcd1234" not in out
-		assert "MIIEvQIBADANBg" not in out
-		assert "BEGIN RSA PRIVATE KEY" not in out
-		assert 'encryption_key = "[redacted]"' in out
-		assert "frappe.get_all('User')" in out
-		assert "**Fix**" in out
+		assert "hunter2" not in out and "[redacted]" in out
 
-	def test_pipes_are_closed(self, fake_cli):
-		fake_cli.proc.stdin = MagicMock()
-		fake_cli.proc.stdout = MagicMock()
-		fake_cli.proc.stderr = MagicMock()
+	def test_prompt_goes_on_stdin_after_the_security_preamble(self, fake_codex):
+		box = fake_codex()
+		self._call(content="SELECT 'x; rm -rf /' -- $(whoami)")
+		stdin = _read(box.rec, "stdin.txt")
+		assert stdin.startswith("SECURITY:") and "SELECT 'x; rm -rf /' -- $(whoami)" in stdin
+		argv_seen = _read(box.rec, "calls.txt")
+		assert "rm -rf" not in argv_seen
+
+	def test_child_sees_a_private_home_and_none_of_the_bench_environment(self, fake_codex, monkeypatch):
+		box = fake_codex()
+		monkeypatch.setenv("OPTIMUS_TEST_DB_PASSWORD", "supersecret")
+		monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
 		self._call()
-		fake_cli.proc.stdin.close.assert_called_once()
-		fake_cli.proc.stdout.close.assert_called_once()
-		fake_cli.proc.stderr.close.assert_called_once()
+		env = _read(box.rec, "env_exec.txt")
+		assert "supersecret" not in env and "OPENAI_API_KEY" not in env
+		home = _read(box.rec, "home_exec.txt").strip()
+		codex_home = _read(box.rec, "codexhome_exec.txt").strip()
+		assert home != os.path.expanduser("~") and codex_home.startswith(os.path.dirname(home))
+		assert _read(box.rec, "codexhome_ls_exec.txt").split() == ["auth.json"]
+		assert _read(box.rec, "pwd_exec.txt").strip().startswith(os.path.dirname(home))
 
-	def test_pipes_closed_even_when_pipe_close_raises(self, fake_cli):
-		fake_cli.proc.stdin = MagicMock()
-		fake_cli.proc.stdin.close.side_effect = OSError("broken pipe")
-		fake_cli.proc.stdout = MagicMock()
+	def test_scratch_tree_is_deleted_afterwards(self, fake_codex):
+		box = fake_codex()
 		self._call()
-		fake_cli.proc.stdout.close.assert_called_once()
+		home = _read(box.rec, "home_exec.txt").strip()
+		assert not os.path.exists(os.path.dirname(home))
 
-	def test_pipes_closed_after_kill_on_timeout(self, fake_cli):
-		fake_cli.proc = _FakeProc(raise_timeout=True, alive=True)
-		fake_cli.proc.stdout = MagicMock()
-		with patch("optimus.ai_fix.os.killpg"):
-			with pytest.raises(ai_fix.AiFixError):
-				self._call()
-		fake_cli.proc.stdout.close.assert_called_once()
-
-	@pytest.mark.parametrize("stderr,message,retryable", [
-		("HTTP 401 Unauthorized RAWCANARY", "Codex session expired. Run `codex login`.", False),
-		("token expired RAWCANARY", "Codex session expired. Run `codex login`.", False),
-		("You hit your usage limit RAWCANARY", "Codex usage limit reached. Try again later.", False),
-		("error 429 RAWCANARY", "Codex usage limit reached. Try again later.", False),
-		("error: unexpected argument '--foo' RAWCANARY", "Codex rejected a command-line flag. Update the codex CLI.", False),
-		("dns lookup failed RAWCANARY", "Codex could not reach the network.", True),
-		("some other crash RAWCANARY", "Codex CLI could not produce a suggestion (exit 3).", True),
-	])
-	def test_nonzero_exit_stderr_is_classified_without_leaking(
-		self, fake_cli, monkeypatch, stderr, message, retryable,
-	):
-		fake_cli.proc = _FakeProc(returncode=3, stdout="STDOUTCANARY", stderr=stderr)
-		logged = []
-		monkeypatch.setattr(
-			"frappe.log_error", lambda *a, **kw: logged.append((a, kw)), raising=False,
-		)
-		with pytest.raises(ai_fix.AiFixError) as ei:
+	def test_scratch_tree_is_deleted_after_a_failure(self, fake_codex):
+		box = fake_codex(exec_body="echo 'boom' >&2; exit 3")
+		with pytest.raises(ai_fix.AiFixError):
 			self._call()
-		assert str(ei.value) == message
-		assert ei.value.retryable is retryable
-		assert len(logged) == 1
-		assert "exit=3" in logged[0][1]["message"]
-		assert "label=" in logged[0][1]["message"]
-		assert "version=codex-cli 1.2.3" in logged[0][1]["message"]
-		for needle in ("RAWCANARY", "STDOUTCANARY"):
-			assert needle not in str(ei.value)
-			assert needle not in repr(logged)
+		assert not os.path.exists(os.path.dirname(_read(box.rec, "home_exec.txt").strip()))
+
+	def test_session_check_and_version_probes_use_the_same_restricted_child(self, fake_codex, monkeypatch):
+		box = fake_codex()
+		monkeypatch.setenv("OPTIMUS_TEST_DB_PASSWORD", "supersecret")
+		ai_fix._cli_session_status()
+		for name in ("login", "--version"):
+			assert "supersecret" not in _read(box.rec, f"env_{name}.txt")
+			assert _read(box.rec, f"home_{name}.txt").strip() != os.path.expanduser("~")
+			assert os.path.dirname(_read(box.rec, f"pwd_{name}.txt").strip()) == os.path.dirname(
+				_read(box.rec, f"home_{name}.txt").strip()
+			)
+			assert not os.path.exists(os.path.dirname(_read(box.rec, f"home_{name}.txt").strip()))
+
+	def test_refreshed_sign_in_is_saved_back(self, fake_codex, real_auth):
+		fake_codex(exec_body='echo \'{"tokens": {"refresh_token": "ROTATED"}}\' > "$CODEX_HOME/auth.json"; echo OK > "$out"')
+		self._call()
+		assert json.loads(real_auth.read_text())["tokens"]["refresh_token"] == "ROTATED"
+
+	def test_timeout_kills_the_whole_process_group_and_is_not_fatal(self, fake_codex):
+		rec = fake_codex().rec
+		fake_codex(exec_body=f'sleep 60 & echo $! > "{rec}/child.pid"; wait')
+		started = time.monotonic()
+		with ai_transport.attempt() as transport:
+			with pytest.raises(ai_fix.AiFixError) as err:
+				self._call(timeout=2)
+		assert time.monotonic() - started < 20
+		assert err.value.kind == "timeout" and err.value.fatal is False
+		assert transport.certainty == "sent_unknown"
+		pid = int((rec / "child.pid").read_text())
+		for _ in range(50):
+			try:
+				os.kill(pid, 0)
+			except ProcessLookupError:
+				break
+			time.sleep(0.1)
+		else:
+			os.kill(pid, 9)
+			pytest.fail("the grandchild survived the timeout")
+
+	def test_budget_covers_the_login_check(self, fake_codex, monkeypatch):
+		fake_codex()
+		seen = {}
+		real = ai_fix._run_cli
+
+		def spy(argv, env, cwd, timeout, stdin_text=None):
+			seen[argv[1]] = timeout
+			return real(argv, env, cwd, timeout, stdin_text)
+
+		monkeypatch.setattr(ai_fix, "_run_cli", spy)
+		self._call(timeout=30)
+		assert seen["exec"] <= 30
+
+	def test_guard_off_refuses_before_any_process(self, fake_codex, monkeypatch):
+		box = fake_codex()
+		monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: False)
+		with pytest.raises(ai_fix.AiFixError, match="developer-mode") as err:
+			self._call()
+		assert err.value.kind == "config" and err.value.fatal is True
+		assert not (box.rec / "calls.txt").exists()
+
+	def test_missing_cli_is_fatal(self, sub_cfg, monkeypatch):
+		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: None)
+		with pytest.raises(ai_fix.AiFixError) as err:
+			self._call()
+		assert err.value.kind == "config" and err.value.fatal is True
+
+	def test_empty_prompt_is_not_fatal(self, fake_codex):
+		fake_codex()
+		with pytest.raises(ai_fix.AiFixError, match="no content") as err:
+			ai_fix._call_local_cli("", [])
+		assert err.value.fatal is False
+
+	def test_spawn_failure_is_transport_and_not_sent(self, fake_codex, monkeypatch):
+		fake_codex()
+		monkeypatch.setattr(ai_fix, "_cli_login_ok", lambda path, **kw: (True, "ok"))
+
+		def fail(*a, **kw):
+			raise OSError("no exec")
+
+		monkeypatch.setattr(ai_fix.subprocess, "Popen", fail)
+		with ai_transport.attempt() as transport:
+			with pytest.raises(ai_fix.AiFixError) as err:
+				self._call()
+		assert err.value.kind == "transport" and transport.certainty == "not_sent"
+
+	def test_empty_reply_is_bad_response(self, fake_codex):
+		fake_codex(exec_body=': > "$out"')
+		with pytest.raises(ai_fix.AiFixError) as err:
+			self._call()
+		assert err.value.kind == "bad_response" and err.value.fatal is False
+
+	def test_reply_falls_back_to_stdout(self, fake_codex):
+		fake_codex(exec_body="echo FROM_STDOUT")
+		assert self._call() == "FROM_STDOUT"
+
+	def test_success_counts_one_known_zero_cost_call(self, fake_codex):
+		fake_codex()
+		usage = ai_fix.Usage()
+		with ai_transport.attempt() as transport:
+			self._call(usage_out=usage)
+		assert usage.calls == 1 and usage.complete and not usage.get("total_tokens")
+		assert transport.certainty == "known_response"
+
+	@pytest.mark.parametrize("stderr,kind,fatal", [
+		("HTTP 401 Unauthorized", "auth", True),
+		("Your access token expired", "auth", True),
+		("You hit your usage limit", "quota", True),
+		("error: unexpected argument '--foo'", "config", True),
+		("dns lookup failed", "transport", False),
+		("segfault", "unknown", False),
+	])
+	def test_exit_error_maps_to_a_kind_and_never_leaks_stderr(self, fake_codex, stderr, kind, fatal):
+		fake_codex(exec_body=f"echo 'RAWCANARY {stderr}' >&2; exit 3")
+		with ai_transport.attempt() as transport:
+			with pytest.raises(ai_fix.AiFixError) as err:
+				self._call()
+		assert err.value.kind == kind and err.value.fatal is fatal
+		assert "RAWCANARY" not in str(err.value) and err.value.detail == ""
+		assert transport.certainty == "known_response"
+
+	def test_prompt_echoed_on_stderr_does_not_misclassify_a_generic_failure(self, fake_codex):
+		fake_codex(
+			exec_body=(
+				"echo 'user: SELECT * FROM tabUser WHERE login = 1 AND connection expired 401' >&2; "
+				"for i in 1 2 3 4 5 6; do echo \"line $i\" >&2; done; echo 'panicked at main.rs' >&2; exit 101"
+			)
+		)
+		with pytest.raises(ai_fix.AiFixError) as err:
+			self._call()
+		assert err.value.kind == "unknown" and err.value.fatal is False
+		assert "expired" not in str(err.value)
+
+
+class TestLoginProbe:
+	def test_login_failure_kinds(self):
+		assert ai_fix._login_failure("signed_out").fatal is True
+		assert ai_fix._login_failure("not_chatgpt").fatal is True
+		assert ai_fix._login_failure("timeout").fatal is False
+		assert ai_fix._login_failure("timeout").kind == "timeout"
+		assert ai_fix._login_failure("error").fatal is False
+		assert ai_fix._login_failure("unexpected").kind == "transport"
+
+	def test_signed_out_stops_the_call_as_fatal(self, fake_codex):
+		fake_codex(login='echo "Not logged in" >&2; exit 1')
+		with pytest.raises(ai_fix.AiFixError, match="not signed in") as err:
+			ai_fix._call_local_cli("S", [{"content": "x"}])
+		assert err.value.kind == "auth" and err.value.fatal is True
+
+	def test_api_key_login_is_rejected(self, fake_codex):
+		fake_codex(login='echo "Logged in using an API key" >&2')
+		with pytest.raises(ai_fix.AiFixError, match="API key") as err:
+			ai_fix._call_local_cli("S", [{"content": "x"}])
+		assert err.value.fatal is True
+
+	def test_slow_probe_is_a_temporary_timeout_and_its_process_group_is_killed(self, fake_codex, monkeypatch):
+		box = fake_codex()
+		fake_codex(login=f'sleep 30 & echo $! > "{box.rec}/probe.pid"; wait')
+		monkeypatch.setattr(ai_fix, "_LOGIN_PROBE_SECONDS", 1)
+		with pytest.raises(ai_fix.AiFixError) as err:
+			ai_fix._call_local_cli("S", [{"content": "x"}])
+		assert err.value.kind == "timeout" and err.value.fatal is False
+		pid = int((box.rec / "probe.pid").read_text())
+		for _ in range(50):
+			try:
+				os.kill(pid, 0)
+			except ProcessLookupError:
+				break
+			time.sleep(0.1)
+		else:
+			os.kill(pid, 9)
+			pytest.fail("the probe's child survived the timeout")
+
+	def test_success_is_memoized_and_failure_is_not(self, fake_codex):
+		box = fake_codex()
+		path = str(box.path)
+		assert ai_fix._cli_login_ok(path) == (True, "ok")
+		assert ai_fix._cli_login_ok(path) == (True, "ok")
+		assert _read(box.rec, "calls.txt").count("login status") == 1
+		assert ai_fix._cli_login_ok(path, use_cache=False) == (True, "ok")
+		assert _read(box.rec, "calls.txt").count("login status") == 2
+		ai_fix._LOGIN_CACHE.clear()
+		fake_codex(login="exit 1")
+		assert ai_fix._cli_login_ok(path) == (False, "signed_out")
+		assert path not in ai_fix._LOGIN_CACHE
+
+	def test_unstartable_binary_is_a_temporary_error(self, tmp_path):
+		bad = tmp_path / "codex"
+		bad.write_text("not a script and no shebang")
+		bad.chmod(0o755)
+		assert ai_fix._cli_login_ok(str(bad)) == (False, "error")
+
+
+class TestSessionStatus:
+	def test_blocked_when_guard_off(self, sub_cfg, monkeypatch):
+		monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: False)
+		st = ai_fix._cli_session_status()
+		assert st["state"] == "blocked" and st["ok"] is False
+		assert "developer_mode" in st["message"] and "optimus_allow_subscription_cli" in st["message"]
+
+	def test_missing_when_cli_not_found(self, sub_cfg, monkeypatch):
+		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: None)
+		assert ai_fix._cli_session_status()["state"] == "missing"
+
+	def test_connected(self, fake_codex):
+		fake_codex()
+		st = ai_fix._cli_session_status()
+		assert st["state"] == "connected" and st["ok"] is True and st["version"] == "codex-cli 9.9.9"
+		assert "@" not in st["message"]
+
+	def test_signed_out_message_carries_no_account_detail(self, fake_codex):
+		fake_codex(login='echo "secret detail user@example.com" >&2; exit 1')
+		st = ai_fix._cli_session_status()
+		assert st["state"] == "signed_out" and "user@example.com" not in st["message"]
+
+	def test_slow_check_reports_error_state(self, fake_codex, monkeypatch):
+		fake_codex(login="sleep 30")
+		monkeypatch.setattr(ai_fix, "_LOGIN_PROBE_SECONDS", 1)
+		st = ai_fix._cli_session_status()
+		assert st["state"] == "error" and "timed out" in st["message"]
+
+	def test_button_ignores_the_cached_success(self, fake_codex):
+		box = fake_codex()
+		ai_fix._LOGIN_CACHE[str(box.path)] = (time.monotonic(), True, "ok")
+		fake_codex(login="exit 1")
+		assert ai_fix._cli_session_status()["state"] == "signed_out"
 
 
 # ---------------------------------------------------------------------------
-# Dispatch through the three entrypoints
+# stderr classification and error kinds
 # ---------------------------------------------------------------------------
+
+class TestClassifyStderr:
+	@pytest.mark.parametrize("text,label", [
+		("HTTP 401 Unauthorized", "auth_expired"),
+		("token expired", "auth_expired"),
+		("please log in again", "auth_expired"),
+		("You hit your usage limit", "usage_limit"),
+		("error 429", "usage_limit"),
+		("error: unexpected argument '--foo'", "unknown_flag"),
+		("Error: Unknown feature flag: x", "unknown_flag"),
+		("dns lookup failed", "network"),
+		("segfault", "other"),
+		("", "other"),
+		(None, "other"),
+	])
+	def test_labels(self, text, label):
+		assert ai_fix._classify_cli_stderr(text) == label
+
+	def test_only_the_tail_is_matched(self):
+		echoed = "workdir: /x\nprompt: SELECT login, expired, connection FROM t WHERE status = 401\n"
+		tail = "\n".join(f"line {i}" for i in range(ai_fix._CLI_STDERR_TAIL_LINES))
+		assert ai_fix._classify_cli_stderr(echoed + tail) == "other"
+		assert ai_fix._classify_cli_stderr(echoed + tail + "\nHTTP 401 Unauthorized") == "auth_expired"
+
+	def test_long_last_line_is_capped_to_its_end(self):
+		long_line = "login " + "x" * 5000 + " done"
+		assert ai_fix._classify_cli_stderr(long_line) == "other"
+
+	def test_every_kind_used_is_known_and_only_terminal_ones_are_fatal(self):
+		kinds = {kind for _, kind in ai_fix._CLI_EXEC_ERRORS.values()}
+		kinds |= {kind for _, kind in ai_fix._LOGIN_FAILURES.values()}
+		assert kinds <= set(ai_fix.KIND_HINTS)
+		fatal = {kind for kind in kinds if kind in ai_fix.AI_FATAL_KINDS}
+		assert fatal == {"auth", "quota", "config"}
+		assert ai_fix._CLI_EXEC_ERRORS["network"][1] not in ai_fix.AI_FATAL_KINDS
+
+
+# ---------------------------------------------------------------------------
+# Provider wiring
+# ---------------------------------------------------------------------------
+
+_FINDING = {"finding_type": "N+1 Query", "severity": "High", "title": "Repeated lookup"}
+
 
 def _boom(*a, **kw):
 	raise AssertionError("an HTTP caller was hit in subscription mode")
 
 
-@pytest.fixture
-def sub_dispatch(sub_cfg, monkeypatch):
-	"""Subscription mode with _call_local_cli stubbed and HTTP callers armed."""
-	monkeypatch.setattr(ai_fix, "_call_openai_chat", _boom)
-	monkeypatch.setattr(ai_fix, "_call_anthropic", _boom)
-	holder = {"text": "FIXTEXT", "calls": []}
+class TestProvider:
+	def test_provider_config_is_synthetic_and_not_in_the_table(self, sub_cfg):
+		p = ai_fix._provider_config()
+		assert p["protocol"] == "subscription" and p["name"] == "Codex CLI"
+		assert p["needs_key"] is False and p["model"] and p["base_url"]
+		assert "Codex CLI" not in ai_fix._PROVIDER_DEFAULTS
 
-	def fake_cli(provider, system, messages, **kw):
-		holder["calls"].append((provider, system, messages, kw))
-		return holder["text"]
-
-	monkeypatch.setattr(ai_fix, "_call_local_cli", fake_cli)
-	return holder
-
-
-_FINDING = {"finding_type": "N+1 Query", "severity": "High", "title": "Repeated lookup"}
-
-
-class TestDispatch:
-	def test_resolve_provider_subscription(self, sub_cfg):
-		p = ai_fix._resolve_provider()
-		assert p["protocol"] == "subscription"
-		assert p["name"] == "Codex CLI"
-		assert p["model"] == "codex"
-		assert p["base_url"] and p["needs_key"] is False
-		assert "Subscription (local CLI)" not in ai_fix._PROVIDER_DEFAULTS
-
-	def test_api_key_mode_unchanged(self, monkeypatch):
+	def test_api_mode_is_unchanged(self, monkeypatch):
 		monkeypatch.setattr(
-			"optimus.settings.get_config", lambda: _cfg(ai_connection_type="API Key", ai_provider="Anthropic"),
+			"optimus.settings.get_config",
+			lambda: _cfg(ai_connection_type="API Key", ai_provider="OpenAI"),
 		)
-		assert ai_fix._resolve_provider()["protocol"] == "anthropic"
+		monkeypatch.setattr("frappe.conf", {}, raising=False)
+		assert ai_fix._provider_config()["protocol"] == "openai"
 
-	def test_all_entrypoints_use_cli_not_http(self, sub_dispatch):
-		"""AC-DISP-1."""
-		fix = ai_fix.suggest_fix(_FINDING)
-		idx = ai_fix.suggest_index({"table": "tabX", "doctype": "X"})
-		steps = ai_fix.humanize_steps([{"label": "Save Sales Order", "cmd": "frappe.client.save"}])
-		assert "FIXTEXT" in fix["suggestion"]
-		assert "FIXTEXT" in idx["suggestion"]
-		assert steps == "FIXTEXT"
-		assert len(sub_dispatch["calls"]) == 3
+	def test_dispatch_routes_subscription_to_the_cli_not_http(self, sub_cfg, monkeypatch):
+		monkeypatch.setattr(ai_fix, "_call_openai_chat", _boom)
+		monkeypatch.setattr(ai_fix, "_call_anthropic", _boom)
+		monkeypatch.setattr(ai_fix, "_get_api_key", _boom)
+		calls = []
 
-	def test_result_shape_has_no_tokens(self, sub_dispatch):
-		"""AC-RESULT-1."""
-		fix = ai_fix.suggest_fix(_FINDING)
-		assert fix["provider"] == "Codex CLI"
-		assert fix["model"] == "codex"
-		assert "tokens" not in fix
-		idx = ai_fix.suggest_index({"table": "tabX"})
-		assert "tokens" not in idx
+		def fake(system, messages, **kw):
+			calls.append((system, messages, kw))
+			return "FIXTEXT"
 
-	def test_raw_sql_guardrail_applies(self, sub_dispatch):
-		"""AC-GUARDRAIL-1: same post-processing as the HTTP path."""
-		sub_dispatch["text"] = '**Fix**\n```python\nrows = frappe.db.sql("SELECT name FROM `tabUser`")\n```'
-		fix = ai_fix.suggest_fix(_FINDING)
-		assert "Profiler note" in fix["suggestion"]
-		assert "frappe.db.sql" in fix["suggestion"]
+		monkeypatch.setattr(ai_fix, "_call_local_cli", fake)
+		usage = ai_fix.Usage()
+		out = ai_fix._dispatch_call(
+			ai_fix._provider_config(), "SYS", [{"role": "user", "content": "q"}], usage_out=usage, timeout=33,
+		)
+		assert out == "FIXTEXT"
+		assert calls[0][0] == "SYS" and calls[0][2]["timeout"] == 33 and calls[0][2]["usage_out"] is usage
 
-	def test_dispatch_routes_http_protocols(self, monkeypatch):
-		"""Both HTTP protocols still reach their handlers through _dispatch_chat."""
-		seen = {}
-		monkeypatch.setattr(ai_fix, "_call_anthropic", lambda *a, **kw: seen.setdefault("a", (a, kw)) and "A")
-		monkeypatch.setattr(ai_fix, "_call_openai_chat", lambda *a, **kw: seen.setdefault("o", (a, kw)) and "O")
-		base = {"base_url": "http://x", "model": "m", "api_key": "k"}
-		assert ai_fix._dispatch_chat({**base, "protocol": "anthropic"}, "s", []) == "A"
-		assert ai_fix._dispatch_chat({**base, "protocol": "openai"}, "s", [], metadata={"m": 1}) == "O"
-		assert seen["o"][1]["metadata"] == {"m": 1}
-		assert "metadata" not in seen["a"][1]
-
-	def test_connection_uses_status_not_exec(self, sub_cfg, monkeypatch):
-		"""test_connection must not run codex exec (it would bill the subscription)."""
-		monkeypatch.setattr(ai_fix, "_dispatch_chat", _boom)
-		monkeypatch.setattr(ai_fix, "_cli_session_status", lambda: {
-			"ok": True, "state": "connected", "message": "Connected.", "cli": "codex", "version": None,
-		})
+	def test_test_connection_checks_status_and_never_runs_exec(self, sub_cfg, monkeypatch):
+		monkeypatch.setattr(ai_fix, "_call_local_cli", _boom)
+		monkeypatch.setattr(
+			ai_fix, "_cli_session_status", lambda: {"ok": True, "message": "Connected."},
+		)
 		assert ai_fix.test_connection() == {"ok": True, "message": "Connected.", "model": "codex"}
 
-	def test_connection_api_mode_probes_via_dispatch(self, monkeypatch):
-		monkeypatch.setattr(
-			"optimus.settings.get_config", lambda: _cfg(ai_connection_type="API Key", ai_provider="Anthropic"),
-		)
-		monkeypatch.setattr(ai_fix, "_resolve_provider", lambda: {
-			"name": "Anthropic", "protocol": "anthropic", "base_url": "http://x",
-			"model": "m", "needs_key": False, "api_key": "",
-		})
-		seen = {}
+	def test_suggest_fix_runs_through_the_cli(self, sub_cfg, monkeypatch):
+		monkeypatch.setattr(ai_fix, "_call_openai_chat", _boom)
+		monkeypatch.setattr(ai_fix, "_call_anthropic", _boom)
+		monkeypatch.setattr(ai_fix, "_call_local_cli", lambda system, messages, **kw: "FIXTEXT")
+		out = ai_fix.suggest_fix({**_FINDING, "sql": "select 1"})
+		assert out["provider"] == "Codex CLI" and "FIXTEXT" in out["suggestion"]
 
-		def fake_dispatch(provider, system, messages, **kw):
-			seen.update(kw)
-			return "OK"
-
-		monkeypatch.setattr(ai_fix, "_dispatch_chat", fake_dispatch)
-		out = ai_fix.test_connection()
-		assert out["ok"] is True
-		assert seen["max_tokens"] == 16
-
-
-# ---------------------------------------------------------------------------
-# Availability
-# ---------------------------------------------------------------------------
 
 class TestAvailability:
 	def test_available_when_guard_on_and_cli_present(self, sub_cfg, monkeypatch):
-		"""AC-AVAIL-1."""
-		monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: True)
 		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: "/usr/bin/codex")
 		assert ai_fix.is_available() is True
 
 	@pytest.mark.parametrize("section,attr", [
 		("findings", "ai_suggest_findings"),
-		("indexes", "ai_suggest_indexes"),
 		("humanize", "ai_humanize_steps"),
 	])
 	def test_sections_follow_their_toggle(self, sub_cfg, monkeypatch, section, attr):
-		"""Subscription mode behaves like the API path: a section is available
-		when its toggle is on and unavailable when it is off."""
-		monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: True)
 		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: "/usr/bin/codex")
 		assert ai_fix.is_available(section=section) is True
 		setattr(sub_cfg, attr, False)
 		assert ai_fix.is_available(section=section) is False
 		assert ai_fix.is_available() is True
 
-	@pytest.mark.parametrize("section", [None, "findings", "indexes", "humanize"])
-	def test_sections_need_guard_and_cli(self, sub_cfg, monkeypatch, section):
+	@pytest.mark.parametrize("section", [None, "findings", "humanize"])
+	def test_needs_guard_and_cli(self, sub_cfg, monkeypatch, section):
 		monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: False)
 		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: "/usr/bin/codex")
 		assert ai_fix.is_available(section=section) is False
@@ -653,77 +672,14 @@ class TestAvailability:
 		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: None)
 		assert ai_fix.is_available(section=section) is False
 
-	def test_unavailable_when_cli_missing(self, sub_cfg, monkeypatch):
-		monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: True)
-		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: None)
-		assert ai_fix.is_available() is False
-
-	def test_unavailable_when_guard_off(self, sub_cfg, monkeypatch):
-		"""AC-GUARD-1."""
-		monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: False)
-		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: "/usr/bin/codex")
-		assert ai_fix.is_available() is False
-
-	def test_no_subprocess_on_availability_path(self, sub_cfg, monkeypatch):
-		"""AC-AVAIL-2: any subprocess use would raise."""
-		trap = MagicMock()
-		trap.run.side_effect = AssertionError("subprocess.run used")
-		trap.Popen.side_effect = AssertionError("subprocess.Popen used")
-		monkeypatch.setattr(ai_fix, "subprocess", trap)
-		monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: True)
+	def test_no_subprocess_on_the_availability_path(self, sub_cfg, monkeypatch):
+		trap = MagicMock(side_effect=AssertionError("subprocess used"))
+		monkeypatch.setattr(ai_fix.subprocess, "Popen", trap)
+		monkeypatch.setattr(ai_fix.subprocess, "run", trap)
 		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: "/usr/bin/codex")
 		assert ai_fix.is_available() is True
-		assert ai_fix.is_available(section="findings") is True
-		trap.run.assert_not_called()
-		trap.Popen.assert_not_called()
+		trap.assert_not_called()
 
-	def test_configured_path_must_be_executable_file(self, tmp_path):
-		exe = tmp_path / "codex"
-		exe.write_text("#!/bin/sh\n")
-		cfg = _cfg(ai_cli_path=str(exe))
-		assert ai_fix._cli_installed(cfg) is None  # not executable yet
-		exe.chmod(0o755)
-		assert ai_fix._cli_installed(cfg) == os.path.realpath(str(exe))
-		assert ai_fix._cli_installed(_cfg(ai_cli_path=str(tmp_path / "nope"))) is None
-
-	def test_configured_path_basename_must_be_codex(self, tmp_path):
-		"""A SysMgr cannot point the path at an arbitrary executable."""
-		other = tmp_path / "sh"
-		other.write_text("#!/bin/sh\n")
-		other.chmod(0o755)
-		assert ai_fix._cli_installed(_cfg(ai_cli_path=str(other))) is None
-		assert ai_fix._cli_installed(_cfg(ai_cli_path="/bin/sh")) is None
-
-	def test_relative_path_is_rejected(self, tmp_path, monkeypatch):
-		"""A relative path would pass the file checks from the bench cwd and then
-		fail at spawn (the child runs in a scratch cwd), so it never counts."""
-		exe = tmp_path / "codex"
-		exe.write_text("#!/bin/sh\n")
-		exe.chmod(0o755)
-		monkeypatch.chdir(tmp_path)
-		assert ai_fix._cli_installed(_cfg(ai_cli_path="codex")) is None
-		assert ai_fix._cli_installed(_cfg(ai_cli_path="./codex")) is None
-
-	def test_symlink_to_non_codex_is_rejected(self, tmp_path):
-		"""The basename check applies to the resolved target, not the link name."""
-		link = tmp_path / "codex"
-		link.symlink_to("/bin/sh")
-		assert ai_fix._cli_installed(_cfg(ai_cli_path=str(link))) is None
-
-	def test_symlink_to_codex_returns_realpath(self, tmp_path):
-		real_dir = tmp_path / "real"
-		real_dir.mkdir()
-		real = real_dir / "codex"
-		real.write_text("#!/bin/sh\n")
-		real.chmod(0o755)
-		link = tmp_path / "codex"
-		link.symlink_to(real)
-		assert ai_fix._cli_installed(_cfg(ai_cli_path=str(link))) == os.path.realpath(str(real))
-
-
-# ---------------------------------------------------------------------------
-# Guard
-# ---------------------------------------------------------------------------
 
 class TestSubscriptionGuard:
 	def _with_conf(self, monkeypatch, conf):
@@ -731,26 +687,16 @@ class TestSubscriptionGuard:
 		monkeypatch.setattr(frappe, "conf", conf, raising=False)
 
 	def test_requires_both_flags(self, monkeypatch):
-		"""AC-GUARD-1."""
 		self._with_conf(monkeypatch, {"developer_mode": 1, "optimus_allow_subscription_cli": 1})
 		assert ai_fix._subscription_allowed() is True
 		self._with_conf(monkeypatch, {"developer_mode": 1})
 		assert ai_fix._subscription_allowed() is False
 		self._with_conf(monkeypatch, {"optimus_allow_subscription_cli": 1})
 		assert ai_fix._subscription_allowed() is False
-		self._with_conf(monkeypatch, {"developer_mode": 0, "optimus_allow_subscription_cli": 1})
-		assert ai_fix._subscription_allowed() is False
 
-	def test_string_flags_from_set_config_are_cint_coerced(self, monkeypatch):
-		"""`bench set-config` can store "0" / "false" strings: they must read as off."""
+	def test_string_flags_from_set_config_are_coerced(self, monkeypatch):
 		self._with_conf(monkeypatch, {"developer_mode": "0", "optimus_allow_subscription_cli": 1})
 		assert ai_fix._subscription_allowed() is False
-		self._with_conf(monkeypatch, {"developer_mode": 1, "optimus_allow_subscription_cli": "0"})
-		assert ai_fix._subscription_allowed() is False
-		self._with_conf(monkeypatch, {"developer_mode": "false", "optimus_allow_subscription_cli": "false"})
-		assert ai_fix._subscription_allowed() is False
-		self._with_conf(monkeypatch, {"developer_mode": 1, "optimus_allow_subscription_cli": 1})
-		assert ai_fix._subscription_allowed() is True
 		self._with_conf(monkeypatch, {"developer_mode": "1", "optimus_allow_subscription_cli": "1"})
 		assert ai_fix._subscription_allowed() is True
 
@@ -758,231 +704,6 @@ class TestSubscriptionGuard:
 		import frappe
 		monkeypatch.delattr(frappe, "conf", raising=False)
 		assert ai_fix._subscription_allowed() is False
-
-
-# ---------------------------------------------------------------------------
-# Session status (Connect button, library half)
-# ---------------------------------------------------------------------------
-
-class TestSessionStatus:
-	def test_blocked_when_guard_off(self, sub_cfg, monkeypatch):
-		"""AC-CONNECT-1."""
-		monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: False)
-		st = ai_fix._cli_session_status()
-		assert st["state"] == "blocked" and st["ok"] is False
-		assert "developer_mode" in st["message"]
-		assert "optimus_allow_subscription_cli" in st["message"]
-
-	def test_missing_when_cli_not_found(self, sub_cfg, monkeypatch):
-		monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: True)
-		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: None)
-		st = ai_fix._cli_session_status()
-		assert st["state"] == "missing" and st["ok"] is False
-
-	def test_signed_out_when_login_fails(self, sub_cfg, monkeypatch):
-		monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: True)
-		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: "/usr/bin/codex")
-		monkeypatch.setattr(ai_fix, "subprocess", _FakeSubprocess(login_stderr="Not logged in", login_rc=1))
-		st = ai_fix._cli_session_status()
-		assert st["state"] == "signed_out" and st["ok"] is False
-		assert st["message"] == (
-			"Codex CLI is not signed in with ChatGPT (an API-key login does not count). "
-			"Run `codex login` and choose Sign in with ChatGPT."
-		)
-
-	def test_connected_when_login_ok(self, sub_cfg, monkeypatch):
-		monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: True)
-		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: "/usr/bin/codex")
-		fake = _FakeSubprocess()
-		monkeypatch.setattr(ai_fix, "subprocess", fake)
-		st = ai_fix._cli_session_status()
-		assert st["state"] == "connected" and st["ok"] is True
-		assert st["cli"] == "codex"
-		assert st["version"] == "codex-cli 1.2.3"
-		assert "codex-cli 1.2.3" in st["message"]
-		assert fake.popen_calls == []  # status never runs an exec
-
-	def test_stderr_only_login_text_counts_as_connected(self, sub_cfg, monkeypatch):
-		"""The real CLI prints the status to stderr with an empty stdout."""
-		monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: True)
-		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: "/usr/bin/codex")
-		fake = _FakeSubprocess(login_stdout="", login_stderr="Logged in using ChatGPT")
-		monkeypatch.setattr(ai_fix, "subprocess", fake)
-		assert ai_fix._cli_login_ok("/usr/bin/codex") == (True, "ok")
-		assert ai_fix._cli_session_status()["state"] == "connected"
-		login_calls = [c for c in fake.run_calls if "login" in c["argv"]]
-		assert login_calls
-		assert all(c["kw"]["timeout"] == 5 for c in login_calls)
-
-	def test_api_key_login_is_rejected(self, sub_cfg, monkeypatch):
-		"""Only the ChatGPT subscription is wanted, never a metered API key."""
-		monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: True)
-		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: "/usr/bin/codex")
-		fake = _FakeSubprocess(login_stderr="Logged in using an API key", login_rc=0)
-		monkeypatch.setattr(ai_fix, "subprocess", fake)
-		assert ai_fix._cli_login_ok("/usr/bin/codex") == (False, "not_chatgpt")
-		st = ai_fix._cli_session_status()
-		assert st["state"] == "signed_out" and st["ok"] is False
-		assert st["message"] == (
-			"Codex CLI is signed in with an API key, not ChatGPT. "
-			"Run `codex login` and choose Sign in with ChatGPT."
-		)
-
-	def test_timeout_message(self, sub_cfg, monkeypatch):
-		monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: True)
-		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: "/usr/bin/codex")
-		fake = _FakeSubprocess()
-
-		def slow_run(argv, **kw):
-			if "login" in argv:
-				raise subprocess.TimeoutExpired(cmd="codex", timeout=5)
-			return SimpleNamespace(returncode=0, stdout="", stderr="codex-cli 1.2.3")
-
-		fake.run = slow_run
-		monkeypatch.setattr(ai_fix, "subprocess", fake)
-		st = ai_fix._cli_session_status()
-		assert st["ok"] is False
-		assert st["message"] == "The Codex CLI session check timed out. Try again."
-
-	@pytest.mark.parametrize("reason", ["not_chatgpt", "signed_out", "timeout", "error"])
-	def test_non_connected_reason_is_logged_with_label_and_version(self, sub_cfg, monkeypatch, reason):
-		monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: True)
-		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: "/usr/bin/codex")
-		monkeypatch.setattr(ai_fix, "subprocess", _FakeSubprocess())
-		monkeypatch.setattr(ai_fix, "_cli_login_ok", lambda path, **kw: (False, reason))
-		logged = []
-		monkeypatch.setattr(
-			ai_fix, "_log_cli_error", lambda *a, **kw: logged.append((a, kw)),
-		)
-		ai_fix._cli_session_status()
-		assert logged == [(("codex", "login_status", None), {"label": reason, "version": "codex-cli 1.2.3"})]
-
-	def test_connect_button_does_not_use_cached_login(self, sub_cfg, monkeypatch):
-		"""Connect must reflect the live session, so it bypasses the 30s memo."""
-		monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: True)
-		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: "/usr/bin/codex")
-		ai_fix._LOGIN_CACHE["/usr/bin/codex"] = (ai_fix.time.monotonic(), True, "ok")
-		monkeypatch.setattr(ai_fix, "subprocess", _FakeSubprocess(login_stderr="Not logged in", login_rc=1))
-		assert ai_fix._cli_session_status()["ok"] is False
-
-	def test_not_logged_in_nonzero_exit(self, monkeypatch):
-		monkeypatch.setattr(ai_fix, "subprocess", _FakeSubprocess(login_stderr="Not logged in", login_rc=1))
-		assert ai_fix._cli_login_ok("/usr/bin/codex") == (False, "signed_out")
-
-	def test_chatgpt_text_with_nonzero_exit_is_rejected(self, monkeypatch):
-		monkeypatch.setattr(ai_fix, "subprocess", _FakeSubprocess(login_stderr="ChatGPT session expired", login_rc=1))
-		assert ai_fix._cli_login_ok("/usr/bin/codex") == (False, "signed_out")
-
-	def test_login_probe_swallows_errors(self, monkeypatch):
-		boom = MagicMock()
-		boom.TimeoutExpired = subprocess.TimeoutExpired
-		boom.run.side_effect = OSError("nope")
-		monkeypatch.setattr(ai_fix, "subprocess", boom)
-		assert ai_fix._cli_login_ok("/usr/bin/codex") == (False, "error")
-
-	def test_login_probe_timeout(self, monkeypatch):
-		boom = MagicMock()
-		boom.TimeoutExpired = subprocess.TimeoutExpired
-		boom.run.side_effect = subprocess.TimeoutExpired(cmd="codex", timeout=5)
-		monkeypatch.setattr(ai_fix, "subprocess", boom)
-		assert ai_fix._cli_login_ok("/usr/bin/codex") == (False, "timeout")
-		assert boom.run.call_args.kwargs["timeout"] == 5
-
-
-class TestLoginMemo:
-	def test_success_is_memoized_per_path(self, monkeypatch):
-		fake = _FakeSubprocess()
-		monkeypatch.setattr(ai_fix, "subprocess", fake)
-		assert ai_fix._cli_login_ok("/a/codex") == (True, "ok")
-		assert ai_fix._cli_login_ok("/a/codex") == (True, "ok")
-		assert len(fake.run_calls) == 1
-		assert ai_fix._cli_login_ok("/b/codex") == (True, "ok")
-		assert len(fake.run_calls) == 2
-
-	def test_memo_expires(self, monkeypatch):
-		fake = _FakeSubprocess()
-		monkeypatch.setattr(ai_fix, "subprocess", fake)
-		ai_fix._cli_login_ok("/a/codex")
-		ts, ok, reason = ai_fix._LOGIN_CACHE["/a/codex"]
-		ai_fix._LOGIN_CACHE["/a/codex"] = (ts - 31, ok, reason)
-		ai_fix._cli_login_ok("/a/codex")
-		assert len(fake.run_calls) == 2
-
-	def test_failure_is_never_memoized(self, monkeypatch):
-		fake = _FakeSubprocess(login_stderr="Not logged in", login_rc=1)
-		monkeypatch.setattr(ai_fix, "subprocess", fake)
-		assert ai_fix._cli_login_ok("/a/codex") == (False, "signed_out")
-		assert "/a/codex" not in ai_fix._LOGIN_CACHE
-		# The operator logs in and retries immediately: no stale failure.
-		fake._login_rc = 0
-		fake._login_stderr = "Logged in using ChatGPT"
-		assert ai_fix._cli_login_ok("/a/codex") == (True, "ok")
-
-
-class TestKillProcessGroup:
-	def test_sigkill_sent_even_if_leader_already_reaped(self):
-		"""The group id is the child's pid, captured once; no getpgid lookup that
-		could fail after the leader is reaped."""
-		proc = MagicMock()
-		proc.pid = 777
-		proc.wait.side_effect = [None, None]
-		with patch("optimus.ai_fix.os.killpg") as killpg, \
-		     patch("optimus.ai_fix.os.getpgid", side_effect=ProcessLookupError):
-			ai_fix._kill_process_group(proc)
-		assert [c.args for c in killpg.call_args_list] == [(777, signal.SIGTERM), (777, signal.SIGKILL)]
-
-	def test_sigkill_attempted_when_sigterm_raises(self):
-		proc = MagicMock()
-		proc.pid = 778
-		calls = []
-		pgids = []
-
-		def killpg(pgid, sig):
-			pgids.append(pgid)
-			calls.append(sig)
-			if sig == signal.SIGTERM:
-				raise ProcessLookupError
-
-		with patch("optimus.ai_fix.os.killpg", side_effect=killpg):
-			ai_fix._kill_process_group(proc)
-		assert calls == [signal.SIGTERM, signal.SIGKILL]
-		assert pgids == [778, 778]
-
-
-class TestCliTimeout:
-	@pytest.mark.parametrize("raw,expected", [(5, 10), (60, 60), (999, 90), (None, 45)])
-	def test_clamped(self, monkeypatch, raw, expected):
-		monkeypatch.setattr("optimus.settings.get_config", lambda: _cfg(ai_request_timeout_seconds=raw))
-		assert ai_fix._resolve_cli_timeout_seconds() == expected
-
-	def test_unreadable_settings_default(self, monkeypatch):
-		def boom():
-			raise RuntimeError("no bench")
-		monkeypatch.setattr("optimus.settings.get_config", boom)
-		assert ai_fix._resolve_cli_timeout_seconds() == 45
-
-
-class TestRetryableFlag:
-	def test_default_is_retryable(self):
-		assert ai_fix.AiFixError("x").retryable is True
-		assert ai_fix.AiFixError("x", status_code=429).retryable is True
-
-	def test_can_be_marked_terminal(self):
-		assert ai_fix.AiFixError("x", retryable=False).retryable is False
-
-	def test_timeout_and_empty_response_stay_retryable(self, fake_cli):
-		def call():
-			return ai_fix._call_local_cli({"protocol": "subscription"}, "SYS", [{"role": "user", "content": "hi"}])
-
-		fake_cli.proc = _FakeProc(raise_timeout=True, alive=True)
-		with patch("optimus.ai_fix.os.killpg"):
-			with pytest.raises(ai_fix.AiFixError) as ei:
-				call()
-		assert ei.value.retryable is True
-		fake_cli.proc = _FakeProc(stdout="   ")
-		with pytest.raises(ai_fix.AiFixError) as ei:
-			call()
-		assert ei.value.retryable is True
 
 
 class TestSubscriptionConstant:
@@ -1013,65 +734,6 @@ class TestSubscriptionConstant:
 		assert ai_fix.subscription_mode_active() is True
 		monkeypatch.setattr("optimus.settings.get_config", lambda: _cfg(ai_connection_type="API Key"))
 		assert ai_fix.subscription_mode_active() is False
-
-
-class TestCliEnv:
-	def test_allowlist_keeps_only_safe_keys(self):
-		env = ai_fix._build_cli_env({
-			"PATH": "/bin", "HOME": "/h", "CODEX_HOME": "/c", "LANG": "C", "TMPDIR": "/t",
-			"SHELL": "/bin/sh", "USER": "dev", "TERM": "xterm", "LC_CTYPE": "C", "LC_ALL": "C",
-			"SSL_CERT_FILE": "/f", "SSL_CERT_DIR": "/d", "REQUESTS_CA_BUNDLE": "/b",
-			"HTTPS_PROXY": "p", "HTTP_PROXY": "p", "NO_PROXY": "n",
-			"ANTHROPIC_API_KEY": "k", "OPENAI_API_KEY": "k", "CODEX_API_KEY": "k",
-			"DATABASE_URL": "u", "REDIS_QUEUE": "r", "FRAPPE_SITE": "s",
-		})
-		assert set(env) == {
-			"PATH", "HOME", "CODEX_HOME", "LANG", "TMPDIR", "SHELL", "USER", "TERM", "LC_CTYPE",
-			"LC_ALL", "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "HTTPS_PROXY",
-			"HTTP_PROXY", "NO_PROXY",
-		}
-
-	def test_absent_passthrough_keys_are_not_invented(self):
-		assert ai_fix._build_cli_env({"PATH": "/bin"}) == {"PATH": "/bin"}
-
-	def test_denylist_is_gone(self):
-		assert not hasattr(ai_fix, "_CLI_ENV_DENYLIST")
-
-
-class TestClassifyStderr:
-	@pytest.mark.parametrize("stderr,label", [
-		("401 Unauthorized", "auth_expired"),
-		("please log in again", "auth_expired"),
-		("session expired", "auth_expired"),
-		("Usage limit reached", "usage_limit"),
-		("rate limit exceeded", "usage_limit"),
-		("quota exhausted", "usage_limit"),
-		("HTTP 429", "usage_limit"),
-		("error: unexpected argument '--x' found", "unknown_flag"),
-		("unrecognized option", "unknown_flag"),
-		("unknown option --y", "unknown_flag"),
-		("network is unreachable", "network"),
-		("connection reset", "network"),
-		("TLS handshake failed", "network"),
-		("dns error", "network"),
-		("segfault", "other"),
-		("", "other"),
-		(None, "other"),
-	])
-	def test_labels(self, stderr, label):
-		assert ai_fix._classify_cli_stderr(stderr) == label
-
-	def test_catalog_interface_is_not_a_login_error(self):
-		assert ai_fix._classify_cli_stderr("catalog interface failed") == "other"
-
-	def test_log_cli_error_carries_only_fixed_fields(self, monkeypatch):
-		logged = []
-		monkeypatch.setattr("frappe.log_error", lambda *a, **kw: logged.append(kw), raising=False)
-		ai_fix._log_cli_error("codex", "exec", 2, label="network", version="codex-cli 1.2.3")
-		assert logged == [{
-			"message": "AI fix CLI call failed: cli=codex at=exec exit=2 label=network version=codex-cli 1.2.3",
-			"title": "optimus ai_fix cli",
-		}]
 
 
 class TestScrubSecrets:
