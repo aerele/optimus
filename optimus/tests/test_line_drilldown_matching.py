@@ -2,8 +2,8 @@
 # For license information, please see license.txt
 
 """The finding-card "Line-Level Drilldown" callout links a finding to its
-phase-2 hot line via (file-basename, function-name). The index is keyed on the
-phase-2 result's ``qualname`` while the lookup uses the callsite ``function``,
+line profiling hot line via (file-basename, function-name). The index is keyed on the
+line profiling result's ``qualname`` while the lookup uses the callsite ``function``,
 and the two can disagree on the module/class prefix (``common.bg_recheck_users``
 vs bare ``bg_recheck_users``). These tests pin that matching stays robust to the
 prefix on both sides.

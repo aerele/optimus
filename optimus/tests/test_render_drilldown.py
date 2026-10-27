@@ -192,7 +192,7 @@ class TestDrilldownRender:
 		assert "--ctd: 1" in dd and "--ctd: 2" in dd
 
 	def test_call_chain_renders_as_indented_tree(self):
-		"""The Phase-2 Call chain block goes through the same nested-tree macro:
+		"""The line profiling Call chain block goes through the same nested-tree macro:
 		every step keeps its `qualname:lineno`, the first is the root and the
 		deepest is the terminal node."""
 		from optimus import renderer

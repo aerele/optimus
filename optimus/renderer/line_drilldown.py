@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Line-Level Drilldown panel: the phase-2 per-line profiling section.
+"""Line-Level Drilldown panel: the per-line profiling section.
 
 Sourced from the session's ``phase_2_runs`` child table (one row per
 line-profile pass); each row carries a ``results_json`` blob
@@ -14,7 +14,7 @@ Two public surfaces (called from the render orchestrator in ``_internal.py``):
   "Line-Level Drilldown hot line: ..." callout. Returns a
   ``(basename, function_name) → hottest-line`` dict.
 * ``_render_line_drilldown_panel(session_doc)``: the section HTML, or "" when
-  the session has no phase-2 runs.
+  the session has no line profiling runs.
 
 Internal helpers: ``_make_line_drilldown_lookup`` (Jinja tuple-key adapter),
 ``_phase2_invoked`` (did-it-run check), ``_render_phase2_function_table`` and
@@ -47,14 +47,14 @@ def _e(text: object) -> str:
 
 def _build_line_drilldown_callsite_index(session_doc: Any) -> dict:
 	"""Build a (basename, function_name) → hottest-line lookup from the
-	session's phase-2 runs, for ``finding_card``'s "Line-Level Drilldown hot
+	session's line profiling runs, for ``finding_card``'s "Line-Level Drilldown hot
 	line: ..." callout.
 
 	Keyed by file basename (not absolute path) so it survives dev-vs-deploy
 	path differences. When a function appears in multiple runs, the entry with
 	the largest single-line ``total_ms`` wins. Per-function only: reports the
 	function's own hottest line, never a cross-function redirect. Returns an
-	empty dict when there are no phase-2 runs or the blobs are empty/malformed.
+	empty dict when there are no line profiling runs or the blobs are empty/malformed.
 	"""
 	runs = list(getattr(session_doc, "phase_2_runs", None) or [])
 	index: dict[tuple, dict] = {}
@@ -135,7 +135,7 @@ _make_phase2_lookup = _make_line_drilldown_lookup
 
 
 def _phase2_invoked(fn: dict) -> bool:
-	"""Whether a picked phase-2 function actually ran (≥1 line with hits or
+	"""Whether a picked line profiling function actually ran (≥1 line with hits or
 	time). Reuses the analyzer's canonical check so render + analyze agree."""
 	from optimus.line_profile.analyzer import _function_invoked
 
@@ -143,7 +143,7 @@ def _phase2_invoked(fn: dict) -> bool:
 
 
 def _render_phase2_function_table(fn: dict, threshold_ms: float = DEFAULT_DISPLAY_THRESHOLD_MS) -> str:
-	"""Per-function line table inside one phase-2 run.
+	"""Per-function line table inside one line profiling run.
 
 	Columns: line number, hit count, total ms, per-hit µs, source. When ``fn``
 	carries a ``source == "auto_expand"`` marker, the function header is
@@ -313,7 +313,7 @@ def _render_phase2_diff_table(diff_rows: list[dict], threshold_ms: float = DEFAU
 
 def _render_line_drilldown_panel(session_doc: Any, threshold_ms: float = DEFAULT_DISPLAY_THRESHOLD_MS) -> str:
 	"""Build the Line-Level Drilldown section HTML, or "" when the session has
-	no phase-2 runs (the template's ``{% if line_drilldown_html %}`` guard then
+	no line profiling runs (the template's ``{% if line_drilldown_html %}`` guard then
 	skips the section)."""
 	from optimus.line_profile import diff as _lp_diff
 

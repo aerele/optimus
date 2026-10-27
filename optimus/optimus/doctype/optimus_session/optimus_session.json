@@ -45,7 +45,8 @@
   "session_time_breakdown_json",
   "table_breakdown_json",
   "v5_aggregate_json",
-  "analyzer_warnings"
+  "analyzer_warnings",
+  "auto_notes_sha256"
  ],
  "fields": [
   {
@@ -327,11 +328,20 @@
    "hidden": 1,
    "label": "Analyzer Warnings",
    "read_only": 1
+  },
+  {
+   "fieldname": "auto_notes_sha256",
+   "fieldtype": "Data",
+   "label": "Automatic Steps Source Hash",
+   "read_only": 1,
+   "hidden": 1,
+   "no_copy": 1,
+   "length": 64
   }
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-26 12:00:00.000000",
+ "modified": "2026-10-27 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Optimus",
  "name": "Optimus Session",
@@ -350,7 +360,6 @@
    "write": 1
   },
   {
-   "create": 1,
    "if_owner": 1,
    "print": 1,
    "read": 1,

@@ -61,7 +61,7 @@ bench --site <your-site> install-app optimus
 bench restart
 ```
 
-Tested on **Frappe v16** with MariaDB and Redis. The app declares `required_apps = ["frappe"]`. Runtime dependencies (installed automatically by `bench get-app`) are listed in [`pyproject.toml`](./pyproject.toml) currently `pyinstrument`, `line_profiler`, `requests`, `sqlparse` and `Jinja2`, all pure-Python with no compiled extensions (`line_profiler` ships a small C extension; pre-built wheels exist for cpython 3.10–3.14).
+Tested on **Frappe v16** with MariaDB and Redis. The app declares `required_apps = ["frappe"]`. Runtime dependencies are listed in [`pyproject.toml`](./pyproject.toml) and installed by `bench get-app` or `bench setup requirements`: `pyinstrument`, `line_profiler`, `requests`, `sqlparse`, `Jinja2`, `nh3` and `markdown2`. Some include compiled extensions with pre-built wheels; `nh3` is the Rust HTML sanitizer used for AI suggestions. Frappe v16 already installs `nh3` and `markdown2`. On Frappe v15, run `bench setup requirements` after pulling Optimus to install `nh3`; without it, AI suggestions safely fall back to escaped plain text in a `<pre>` block.
 
 After install, an **Optimus User** role is created automatically. All existing System Managers are granted this role and new System Managers get it automatically via a `User.validate` hook.
 
@@ -126,8 +126,11 @@ read-only sections:
    - **Download Safe Report** / **Open Safe Report**: the customer-
      safe HTML. Email-shareable.
    - **Download Raw Report** / **Open Raw Report**: the un-redacted
-     version. Hidden from non-admins; the link itself is permission-
-     gated server-side, so guessing the file name does not bypass it.
+     version. A `File.has_permission` hook runs in Frappe's permission
+     checks (the File form, REST, `frappe.has_permission`) and lets
+     only a System Manager or the recording user through; a direct
+     download URL bypasses the hook and grants access to anyone who
+     can read the parent Optimus Session, including a read-sharee.
    - **Re-analyze**: re-runs the analyze pipeline from the captured
      recordings (which live in Redis for 10 minutes after Stop).
      Useful when a session ends `Failed` because of a transient
@@ -136,7 +139,11 @@ read-only sections:
      but cannot recompute findings.
    - **Regenerate Reports**: re-renders both HTML files from the
      persisted Action/Finding rows. Cheaper than a full re-analyze;
-     useful after an Optimus upgrade that improves the renderer.
+     useful after an Optimus upgrade that improves the renderer. It
+     does not re-run the analyzer and does not call the AI provider;
+     saved AI suggestions are kept as they are. For new or updated
+     suggestions use **AI > Refresh AI suggestions** (Ready sessions,
+     with AI enabled).
    - **Line Profiling → Run Line-Profile Pass**: opens the picker dialog (see
      below).
    - **Pin as Baseline** / **Unpin Baseline**: see _Baseline
@@ -187,6 +194,11 @@ expires mid-request, line profiling disengages so the request finishes
 at natural speed and the run is flagged "partial data". This stops a
 hot-loop pick from freezing the UI.
 
+Line profiling does not ask the AI for fixes for its new Hot Line findings; run
+**AI > Refresh AI suggestions** on the Ready session to fill them in. If
+the report re-render after a line profiling run fails, the run stays Ready with
+a warning; use **Regenerate Reports**.
+
 ### AI fix suggestions (optional)
 
 Optimus can call an LLM (Anthropic, OpenAI, Kimi, DeepSeek, or any OpenAI-
@@ -194,22 +206,30 @@ compatible endpoint including local ones like Ollama or LM Studio) to
 suggest concrete fixes for each finding. Off by default no traffic
 leaves your bench until you enable it.
 
-Three feature toggles, all under **Optimus Settings → AI Fix
+Feature controls, all under **Optimus Settings → AI Fix
 Suggestions → Use the LLM for**:
 
-- **Fix suggestions on findings**: adds a "Suggest a fix (AI)" button
-  per finding and an auto-suggest pass during analyze (when the
-  auto-suggest checkbox below is on).
-- **Index recommendations**: adds a "Suggest an index (AI)" button to
-  the per-table breakdown.
+- **Fix suggestions on findings**: enables eligible finding fixes through
+  **Refresh AI suggestions** and the automatic pass during analysis.
+- **Index recommendations**: retired. The report builds index advice from the
+  DocType metadata, the real column types and the table's existing indexes,
+  without calling the AI: tick Search Index for one column of a field you
+  control on MariaDB, otherwise one generated `ensure_indexes()` for your app,
+  registered on `after_install`, `after_sync` and `after_migrate` (see
+  [`docs/AI-FIXING.md`](./docs/AI-FIXING.md) section 2.3).
 - **Humanized "Steps to Reproduce"**: rewrites the auto-captured
   action list into a friendly flow ("Open Sales Invoice list, click
   New, …").
 
-Turning any one of these off is a hard disable the button is hidden,
-the API refuses and re-rendered reports omit the AI block. See
+Turning an active AI section off disables generation for that section;
+re-rendered reports omit its stored AI block. Deterministic index advice
+is independent of the AI controls. See
 [`docs/AI-FIXING.md`](./docs/AI-FIXING.md) for the per-pathway data
 inventory and local-LLM recipes.
+
+**Refresh AI suggestions** regenerates missing and outdated suggestions first and says
+how many findings got deterministic advice or a note instead (gated), and how many
+were skipped because their type is excluded.
 
 ### Baseline comparison
 
@@ -451,9 +471,7 @@ When a session moves to `Ready`, the source recordings in Redis (`RECORDER_REQUE
 ### Two report modes
 
 - **`safe_report_file`**: Normalized SQL, redacted URLs/headers/form data, sanitized notes, redacted custom-app function names. Safe to email to a third-party.
-- **`raw_report_file`**: Full data: raw SQL with literals, request headers, form data, complete stack traces. **Gated at two layers:**
-  1. The "Download Raw Report" button is hidden in the form UI unless the user has `System Manager` role or recorded the session themselves.
-  2. A `File.has_permission` hook (`optimus.permissions.file_has_permission`) blocks direct URL access even if the user guesses the file name.
+- **`raw_report_file`**: Full data: raw SQL with literals, request headers, form data, complete stack traces. A `File.has_permission` hook (`optimus.permissions.file_has_permission`) runs in Frappe's permission checks (the File form, REST, `frappe.has_permission`) and lets only a System Manager or the recording user through. Direct `/private/files` downloads bypass this hook and allow a parent Session read-sharee access to raw HTML, PDF and recordings. The hidden `recordings_file` field remains at permlevel 0, so its URL can be returned when the parent is read through REST. A Session read share does not restrict the recipient to sanitized output; share a separately reviewed safe export when raw access is inappropriate.
 
 ---
 
@@ -605,33 +623,41 @@ Off by default no traffic leaves your bench until you turn it on.
 | **Enable AI Fix Suggestions** | ✗ off | Master switch for the entire AI feature. When off, every AI button on the Session form is hidden and the API refuses. |
 | **Provider** | `Anthropic` | Wire format. `Anthropic`, `OpenAI`, `Kimi`, `DeepSeek` and `OpenAI-compatible` (which requires Base URL + Model covers Ollama, LM Studio, vLLM, OpenRouter, Together, Groq). |
 | **Base URL** | _empty_ | Leave blank to use the hosted default. Required for `OpenAI-compatible`: e.g. `http://localhost:11434/v1` (Ollama), `http://localhost:1234/v1` (LM Studio). |
-| **Model** | _empty_ | Leave blank for the provider default. Examples: `claude-sonnet-4-6` (Anthropic), `gpt-4.1-mini` (OpenAI), `kimi-k2-0905-preview` (Kimi), `deepseek-chat` (DeepSeek), or your local model name. |
+| **Model** | _empty_ | Leave blank for the provider default. Examples: `claude-sonnet-4-6` (Anthropic), `gpt-4.1-mini` (OpenAI), `kimi-k2-0905-preview` (Kimi), `deepseek-flash` (DeepSeek), or your local model name. |
 | **API Key** | _empty_ | Per-site, stored encrypted (Frappe `Password` field). Most local OpenAI-compatible endpoints don't need one; hosted ones do. |
 
 #### Use the LLM for (section toggles)
 
-Three independent on/off switches. Turning any one off is a **hard
-disable**: the section is never auto-generated, the matching button is
-hidden, the API refuses and re-rendered reports omit the block.
+The findings and humanized-steps switches control their respective AI
+sections. The index setting is read-only and has no effect.
 
 | Field | Default | Purpose |
 |---|---|---|
-| **Fix suggestions on findings** | ✓ on | "Suggest a fix (AI)" / "Generate AI fixes" / "Re-evaluate AI fixes" buttons on findings. |
-| **Index recommendations (DB-tables breakdown)** | ✓ on | "Suggest an index (AI)" button in the per-table breakdown. |
-| **Humanized "Steps to Reproduce"** | ✓ on | LLM rewrites the auto-captured action list into a friendly flow at analyze time (and on demand). Falls back to the raw action list on any failure. |
+| **Fix suggestions on findings** | ✓ on | Eligible finding fixes through Refresh AI suggestions and the automatic pass. |
+| **Index recommendations (DB-tables breakdown, retired)** | read-only | No effect: index advice is deterministic and never uses the AI. |
+| **Humanized "Steps to Reproduce"** | ✓ on | Manual background Refresh AI suggestions may rewrite the action list. Failure preserves saved results; captured actions remain available. |
 
 #### Automatic Suggestions section
 
 | Field | Default | Purpose |
 |---|---|---|
-| **Suggest AI fixes in the report by default** | ✗ off | When on, the analyze pipeline auto-generates a fix for each eligible finding so suggestions are already in the report no need to click per finding. Costs LLM tokens (and a little analyze time) on every session. Keep off unless you want suggestions baked in. |
-| **Max auto-suggested findings per session** | `5` | Cap on how many findings get an automatic suggestion highest-severity, highest-impact first. `0` = every eligible finding (can be slow + costly on big sessions). _Strict 10 · Recommended 5 · Relaxed 3._ |
+| **Suggest AI fixes in the report by default** | ✓ on | When AI is enabled, queue optional fixes after profiling is Ready. Requires an AI worker and uses provider tokens; saved profiling results survive AI failure. |
+| **Max auto-suggested findings per session** | `5` | Cap on how many findings get an automatic suggestion highest-severity, highest-impact first. `0` = every eligible finding (can be slow + costly on big sessions). _Strict 0 · Recommended 5 · Relaxed 3._ |
 
 #### Privacy & Operations section
 
+**Send raw values to the AI provider** is off by default. SQL literals/comments
+and Steps document names/session title are omitted unless explicitly enabled.
+Code, finding titles and schema names can still contain private information.
+Use type exclusions or disable AI when sharing that context is unacceptable.
+Settings changes are recorded in Version history. Provider URLs are validated,
+and changing the destination clears an unchanged stored key. See the
+[security boundaries and deployment limits](SECURITY.md) and
+[background refresh operations](docs/AI-REFRESH.md).
+
 | Field | Default | Purpose |
 |---|---|---|
-| **Excluded finding types** | _empty_ | One finding type per line. Those types are skipped in both auto-suggest and on-demand the payload is never built (no data ever sent for them). Exact-match, case-sensitive. `#` comments. Canonical names: `Filesort`, `Framework N+1`, `Full Table Scan`, `Hot Line`, `Low Filter Ratio`, `Missing Index`, `N+1 Query`, `Redundant Call`, `Slow Query`, `Temporary Table`. |
+| **Excluded finding types** | _empty_ | One finding type per line. Those types are skipped in both auto-suggest and on-demand the payload is never built (no data ever sent for them). Exact-match, case-sensitive. `#` comments. Canonical names: `Hot Line`, `N+1 Query`, `Redundant Call`, `Slow Query`. Index findings and Framework N+1 never call the AI. Refresh AI suggestions reports how many findings it skipped this way. |
 | **Request timeout (seconds)** | `60` | HTTP timeout for outbound LLM calls. `60s` fits hosted providers (Anthropic / OpenAI reply in 2–10s typically). For local LLMs (Ollama / LM Studio / vLLM) first-token cold-start can exceed 60s start at `180` and tune once warm-call P99 is known. Clamped to `10–600`. |
 
 ---
@@ -652,6 +678,7 @@ as pre-DocType fallbacks. The DocType row wins if both are set.
 
 | Key | Default | Purpose |
 |---|---|---|
+| `optimus_ai_reask` | `True` | When an AI fix suggestion breaks a block rule the guardrail checks (code not copied from the shown source, new raw SQL or DDL, a removed permission check, ...), send the model ONE follow-up turn listing the broken rules; the rewrite is kept only if it has the four headings and breaks fewer block rules. Advise rules (conventions no pinned semgrep rule checks) never cost a follow-up turn. Skipped when the first answer was cut off, when half the timeout budget is used or when the follow-up would not fit the context window. Set `False` to avoid the extra round-trip on a slow local model. |
 | `optimus_max_recordings_per_session` | `200` | Soft cap on HTTP requests + bg jobs per session. When hit, further recordings are silently dropped and the report shows a truncation banner. |
 | `optimus_inline_analyze_limit` | `50` | Max recordings allowed for inline analyze on scheduler-disabled sites. Sessions larger than this are refused with an actionable error pointing at `bench enable-scheduler` + the Retry Analyze button. |
 
@@ -677,7 +704,8 @@ as pre-DocType fallbacks. The DocType row wins if both are set.
 
 | Key | Default | Purpose |
 |---|---|---|
-| `optimus_allow_unsigned_pickles` | `True` | Whether to accept legacy un-signed pyinstrument blobs in Redis during analyze. Defaults to `True` to keep pre-v0.7 sessions analyzable. Set `False` on hardened sites to refuse unsigned blobs entirely (requires `encryption_key` in site_config). |
+| `optimus_allow_unsigned_pickles` | `False` with an encryption key | Legacy live-Redis compatibility only. Explicit true weakens HMAC protection; sites without an encryption key retain the legacy default. Persisted JSON bundles never unpickle. |
+| `optimus_ai_allow_key_over_http` | `False` | Explicitly allow credentials over non-loopback plain HTTP on a trusted network. Prefer HTTPS; this does not encrypt prompts or credentials. |
 
 ### Infra-pressure analyzer
 

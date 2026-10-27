@@ -1,4 +1,4 @@
-__version__ = "0.12.80"
+__version__ = "0.12.92"
 
 
 def safe_commit() -> None:
@@ -248,7 +248,7 @@ _patch_recorder()
 # sys.monitoring tool-2 startup probe (v0.7.x+) Critical Risk #3
 # ---------------------------------------------------------------------------
 # On Python 3.12+ line_profiler claims sys.monitoring.PROFILER_ID (tool 2).
-# If a worker died mid-Phase-2 without running its after_request finally
+# If a worker died mid line profiling without running its after_request finally
 # (or hit the pre-6f66a43 teardown bug), tool 2 stays owned by
 # "line_profiler" process-globally and the next request to that worker
 # inherits the orphan AND gets line-traced. The pre-arm self-heal in
@@ -352,6 +352,12 @@ _startup_probe_tool2()
 # time frappe is fully initialized.
 
 
+
+def _try_install_file_input_guard() -> bool:
+	from optimus.managed import install_file_input_guard
+	return install_file_input_guard()
+
+
 def _try_install_capture_wraps() -> bool:
 	"""Install the sidecar wraps. Returns True if installed, False if deferred
 	(frappe still bootstrapping) or errored. Idempotent (the capture module
@@ -369,6 +375,8 @@ def _try_install_capture_wraps() -> bool:
 	# init ImportError. Defer until hooks fire.
 	if not hasattr(frappe, "_"):
 		return False
+
+	_try_install_file_input_guard()
 
 	try:
 		from optimus import capture

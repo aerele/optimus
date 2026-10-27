@@ -2,7 +2,7 @@
 # For license information, please see license.txt
 
 """Tests for optimus.line_profile.picker candidate generation and
-free-form dotted-path resolution for the phase-2 line-profile picker UI.
+free-form dotted-path resolution for the line profiling line-profile picker UI.
 
 pyinstrument captures the *bare* function name in ``function`` and the
 absolute path in ``filename``; we derive the importable dotted path from
@@ -810,7 +810,7 @@ class TestMultiTreePicker:
 
 
 class TestPickerDialogIndent:
-	"""Regression guard for the phase-2 picker dialog's tree rendering
+	"""Regression guard for the line profiling picker dialog's tree rendering
 	(``build_tree_html`` in optimus_session.js).
 
 	A hard-coded ``padding:2px 0 2px 22px`` left pad made a depth-0 leaf look
