@@ -320,14 +320,14 @@ def test_phase2_persistence_never_commits_outside_ownership_transaction(monkeypa
 	from optimus.line_profile import analyzer
 	child = SimpleNamespace(run_uuid="fake-run")
 	findings = []
-	parent = SimpleNamespace(phase_2_runs=[child], flags=SimpleNamespace(),
+	parent = SimpleNamespace(phase_2_runs=[child], findings=[], flags=SimpleNamespace(),
 		append=lambda table, row: findings.append(row), save=lambda **kw: None)
 	monkeypatch.setattr(analyzer, "frappe", SimpleNamespace(get_doc=lambda *a: parent,
 		utils=SimpleNamespace(now_datetime=lambda: "fake-time")))
 	def forbidden():
 		raise AssertionError("phase2 save must participate in the ownership transaction")
 	monkeypatch.setattr(analyzer, "safe_commit", forbidden, raising=False)
-	result = SimpleNamespace(findings=[{"title": "fake finding"}], warnings=[])
+	result = SimpleNamespace(findings=[{"title": "fake finding"}], warnings=[], aggregate={})
 	analyzer._persist_run("fake-doc", "fake-run", [], result, 5)
 	assert child.status == "Ready" and len(findings) == 1
 
