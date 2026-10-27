@@ -72,6 +72,8 @@ app_include_css = f"/assets/optimus/css/floating_widget.css?v={_widget_css_v}"
 
 after_install = "optimus.install.after_install"
 before_uninstall = "optimus.install.before_uninstall"
+# Seeds the AI refresh admission mutex again if a rollback removed it (idempotent).
+after_migrate = ["optimus.install.after_migrate"]
 
 # Boot session
 # ------------
@@ -128,6 +130,7 @@ after_job = [
 
 scheduler_events = {
 	"cron": {
+		"* * * * *": ["optimus.ai_jobs.recover_pending", "optimus.line_profile.jobs.recover_pending"],
 		"*/5 * * * *": [
 			"optimus.janitor.sweep_stale_sessions",
 		],
@@ -139,10 +142,10 @@ scheduler_events = {
 
 # File permission gate (Phase 6)
 # ------------------------------
-# Server-side double-check that the raw profiler report can only be
-# downloaded by System Manager + the recording user. The UI hides the
-# download button from non-admins, but this gate also blocks direct URL
-# access in case someone guesses the file name.
+# Restrict File permission checks for raw reports and recordings to System
+# Manager + the recording user (form load, REST, frappe.has_permission).
+# Direct /private/files downloads bypass this hook: a parent Session
+# read-sharee can still download the raw artifacts through Frappe's rule.
 
 has_permission = {
 	"File": "optimus.permissions.file_has_permission",
@@ -151,8 +154,25 @@ has_permission = {
 # v0.4.0: doc_events hooks.
 # - User.validate auto-grants Optimus User to any user that has
 #   System Manager. See install.on_user_role_change for the logic.
+# - Error Log.before_insert masks the stored AI API key (and other key
+#   shapes) in the Error Log rows from Optimus's AI code or holding the
+#   key as Frappe inserts them, the rows Frappe's save_to_db takes from the
+#   deferred-insert queue included; every other row is left as it was. See
+#   optimus/error_log_mask.py.
 doc_events = {
+	"File": {
+		"before_validate": "optimus.managed.protect_file",
+		"before_insert": "optimus.managed.protect_file",
+	},
+	**{doctype: {
+		"before_validate": "optimus.managed.protect_child",
+		"before_insert": "optimus.managed.protect_child",
+		"on_trash": "optimus.managed.protect_child",
+	} for doctype in ("Optimus Action", "Optimus Finding", "Optimus Background Job", "Optimus Phase Two Run")},
 	"User": {
 		"validate": "optimus.install.on_user_role_change",
+	},
+	"Error Log": {
+		"before_insert": "optimus.error_log_mask.mask_error_log",
 	},
 }

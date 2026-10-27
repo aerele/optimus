@@ -372,8 +372,7 @@
 			callback: () => {
 				frappe.show_alert({
 					message: __(
-						"Phase 2 stopped analyzing now. Open the session " +
-						"to see the line-level report when it's ready."
+						"Phase 2 stopped analyzing now. Open the session to see the line-level report when it's ready."
 					),
 					indicator: "blue",
 				});
@@ -737,15 +736,26 @@
 			return;
 		}
 
-		// Helper: skip events for sessions the widget isn't tracking.
-		function matchesCurrentSession(data) {
+		// A socket can receive the same event through its user and document
+		// rooms. Shared-form events must never take over this user's widget.
+		const seenEvents = new Set();
+		function matchesCurrentSession(data, phase2 = false) {
 			if (!data || !data.session_uuid) return false;
+			const principal = phase2 ? data.user : data.recording_user;
+			if (principal && principal !== frappe.session.user) return false;
+			if (!principal && (phase2 || data.session_uuid !== currentState.session_uuid)) return false;
 			if (
 				currentState.session_uuid
 				&& data.session_uuid !== currentState.session_uuid
 			) {
 				return false;
 			}
+			if (data.event_id) {
+				if (seenEvents.has(data.event_id)) return false;
+				seenEvents.add(data.event_id);
+				if (seenEvents.size > 128) seenEvents.delete(seenEvents.values().next().value);
+			}
+			currentState.session_uuid = data.session_uuid;
 			return true;
 		}
 
@@ -769,7 +779,7 @@
 		// existing Stop API path (api.stop_line_profile_pass), which the
 		// form's history list reflects after refresh.
 		frappe.realtime.on("phase_2_run_recording", (data) => {
-			if (!matchesCurrentSession(data)) return;
+			if (!matchesCurrentSession(data, true)) return;
 			currentState.display = "recording";
 			currentState.phase2 = true;
 			currentState.run_uuid = data.run_uuid;
@@ -784,6 +794,7 @@
 		// analyzing / progress / ready / failed for both phases.
 		Pill.EVENT_NAMES.forEach((name) => {
 			frappe.realtime.on(name, (data) => {
+				if (!matchesCurrentSession(data, name.indexOf("phase_2_") === 0)) return;
 				applyResult(Pill.reduceEvent(currentState, name, data, Date.now()));
 			});
 		});

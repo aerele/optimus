@@ -7,21 +7,44 @@ Endpoints the floating widget and custom integrations call. Decorated with
 `@frappe.whitelist()`, reachable as `/api/method/optimus.api.<name>`.
 """
 
-import json
+import html
 import time
+import uuid
+from dataclasses import dataclass
 
 import frappe
 from frappe import _
-from frappe.rate_limiter import rate_limit
 from frappe.utils import add_to_date, now_datetime
 
-from optimus import safe_commit, session
+from optimus import ratelimit, safe_call, safe_commit, session
+from optimus.permissions import may_act_on_session
 
 # Roles allowed to call the profiler API. System Manager is always allowed
 # (Frappe's superuser role); Optimus User is our dedicated role created
 # on install via install.after_install. Adding Administrator explicitly
 # because frappe.get_roles("Administrator") doesn't include "System Manager".
 ALLOWED_ROLES = {"System Manager", "Optimus User", "Administrator"}
+
+
+# Per-user rate limits (optimus.ratelimit), keyed by endpoint name and counted by the endpoint
+# right after its gate passes (the gates themselves never count). A site can override any entry
+# in site_config, for example "optimus_rate_limits": {"refill_ai_suggestions": [12, 3600]}.
+# Read-only status polling and cancelling a background job are deliberately not limited.
+_AI_LIMITS: dict[str, dict[str, int]] = {
+	"refill_ai_suggestions": {"limit": 6, "seconds": 3600},
+	"test_ai_connection": {"limit": 10, "seconds": 60},
+}
+_ACTION_LIMITS: dict[str, dict[str, int]] = {
+	"start": {"limit": 10, "seconds": 60},
+	"stop": {"limit": 20, "seconds": 60},
+	"start_line_profile_pass": {"limit": 10, "seconds": 60},
+	"stop_line_profile_pass": {"limit": 20, "seconds": 60},
+	"retry_phase2_analyze": {"limit": 5, "seconds": 60},
+	"regenerate_reports": {"limit": 30, "seconds": 60},
+	"retry_analyze": {"limit": 5, "seconds": 60},
+	"download_pdf": {"limit": 20, "seconds": 60},
+	"export_session": {"limit": 20, "seconds": 60},
+}
 
 
 def _require_user() -> str:
@@ -56,8 +79,8 @@ def _require_profiler_user() -> str:
 
 
 def _require_session_permission(session_uuid: str, permission_type: str = "read") -> str:
-	"""Per-doc permission gate for endpoints that read or mutate a specific
-	``Optimus Session`` (the role check alone lets any Optimus User in).
+	"""Per-doc read gate for drain_progress, download_pdf, export_session and
+	get_phase2_candidates. Session actions use _session_action_gate instead.
 	Returns the resolved docname; throws when the ``session_uuid`` is missing
 	or unknown, or when the caller lacks ``permission_type`` access.
 
@@ -71,8 +94,9 @@ def _require_session_permission(session_uuid: str, permission_type: str = "read"
 	)
 	if not docname:
 		frappe.throw(
-			_("No Optimus Session found for uuid {0}").format(session_uuid),
+			_("No Optimus Session found for uuid {0}").format(html.escape(str(session_uuid))),
 			frappe.DoesNotExistError,
+			title=_("Optimus"),
 		)
 	try:
 		allowed = frappe.has_permission("Optimus Session", permission_type, docname)
@@ -96,16 +120,197 @@ def _require_session_permission(session_uuid: str, permission_type: str = "read"
 	return docname
 
 
+@dataclass(frozen=True)
+class SessionRef:
+	"""What a passed session gate hands the endpoint, so it never re-queries the row.
+
+	``owner`` is the document owner (what the permission rule keys on). ``user`` is the session's
+	recording-user field (equal to ``owner`` for sessions created by ``start()``). The acting user
+	is ``frappe.session.user``, not a field here.
+	"""
+
+	docname: str
+	session_uuid: str
+	owner: str
+	user: str
+	status: str
+	title: str | None
+
+
+def _session_action_gate(
+	session_uuid: str,
+	*,
+	action: str,
+	statuses: tuple[str, ...] = ("Ready",),
+	status_hint: str | None = None,
+) -> SessionRef:
+	"""The one permission gate for actions that change an Optimus Session or spend AI tokens on it.
+
+	Allowed when the caller has the profiler role, can read the session AND is its owner, a System
+	Manager (write through the DocPerm) or a user it is shared with for editing
+	(``permissions.may_act_on_session``, design decision D1). The Optimus Session DocPerm is
+	unchanged: a plain Optimus User keeps read with if_owner and no write.
+
+	Fails closed: if ``frappe.has_permission`` raises, the caller is denied. ``statuses`` lists the
+	session statuses the action accepts; an empty tuple accepts any status. Status is checked only
+	after permission, so a stranger learns nothing about the session. ``status_hint`` (translated,
+	``{0}`` = the session's current status) replaces the default status-mismatch message.
+
+	Writes nothing and counts no rate limit: the endpoint calls
+	``ratelimit.enforce_user_rate_limit`` itself right after this returns. ``action`` is the
+	endpoint name and labels the log line.
+	"""
+	user = _require_profiler_user()
+	if not session_uuid:
+		frappe.throw(_("session_uuid is required"), frappe.ValidationError, title=_("Optimus"))
+	row = frappe.db.get_value(
+		"Optimus Session",
+		{"session_uuid": session_uuid},
+		["name", "owner", "user", "status", "title"],
+		as_dict=True,
+	)
+	if not row:
+		frappe.throw(
+			_("No Optimus Session found for uuid {0}").format(html.escape(str(session_uuid))),
+			frappe.DoesNotExistError,
+			title=_("Optimus"),
+		)
+	engine_failed = False
+	try:
+		can_read = frappe.has_permission("Optimus Session", "read", row["name"], user=user)
+		can_write = frappe.has_permission("Optimus Session", "write", row["name"], user=user)
+	except Exception:
+		engine_failed = True
+		can_read = can_write = False
+	if engine_failed:
+		try:
+			frappe.logger("optimus").error(
+				f"optimus._session_action_gate: has_permission raised for {row['name']} ({action}); denying"
+			)
+		except Exception:
+			pass
+	if not may_act_on_session(
+		user=user, owner=row["owner"] or "", can_read=bool(can_read), can_write=bool(can_write)
+	):
+		frappe.throw(
+			_(
+				"You can't do this on this Optimus Session. Only its owner, a System Manager or "
+				"a user it is shared with for editing can."
+			),
+			frappe.PermissionError,
+			title=_("Optimus"),
+		)
+	if statuses and row["status"] not in statuses:
+		if status_hint:
+			message = status_hint.format(row["status"])
+		else:
+			message = _("This action needs a session in status {0}. This one is {1}.").format(
+				", ".join(statuses), row["status"]
+			)
+		frappe.throw(message, frappe.ValidationError, title=_("Optimus"))
+	return SessionRef(
+		docname=row["name"],
+		session_uuid=session_uuid,
+		owner=row["owner"] or "",
+		user=row["user"] or "",
+		status=row["status"],
+		title=row.get("title") or None,
+	)
+
+
+def _ai_unavailable_message(section: str | None) -> str:
+	"""Translated reason an AI action can't run: the provider isn't configured (``section`` None),
+	or the per-section toggle is off."""
+	if section == "findings":
+		return _(
+			'AI fix suggestions on findings are turned off. Turn on "Fix suggestions on findings" '
+			"under Optimus Settings ▸ AI."
+		)
+	if section == "humanize":
+		return _('AI-written "Steps to Reproduce" is turned off. Turn it on under Optimus Settings ▸ AI.')
+	return _(
+		"AI suggestions aren't configured. Turn them on under Optimus Settings ▸ AI and set a "
+		"provider, a model and, if the provider needs one, an API key."
+	)
+
+
+def _ai_session_gate(session_uuid: str, *, section: str | None, action: str) -> SessionRef:
+	"""``_session_action_gate`` for AI actions (Ready sessions only), then the AI availability
+	check for ``section`` ("findings", "humanize", or None for the combined refresh), then the
+	per-user rate limit for ``action`` (a key of ``_AI_LIMITS``). The limit is counted only for a
+	caller who passed every earlier check, so denied or misconfigured calls never use up a user's
+	budget."""
+	ref = _session_action_gate(session_uuid, action=action)
+	from optimus import ai_fix
+
+	if not ai_fix.is_available():
+		frappe.throw(_ai_unavailable_message(None), frappe.ValidationError, title=_("Optimus"))
+	if section and not ai_fix.is_available(section=section):
+		frappe.throw(_ai_unavailable_message(section), frappe.ValidationError, title=_("Optimus"))
+	ratelimit.enforce_user_rate_limit(action, **_AI_LIMITS[action])
+	return ref
+
+
+def _phase2_run_gate(
+	run_uuid: str, *, action: str, run_statuses: tuple[str, ...] = ()
+) -> tuple[SessionRef, dict]:
+	"""Resolve a Phase 2 Run to its parent session and run ``_session_action_gate`` on it (a
+	run_uuid is not self-authorizing). The parent's status is not constrained (develop never
+	constrained it); ``run_statuses`` constrains the run row and is checked after permission.
+	Returns the session ref and the run row ``{name, parent, status}``."""
+	_require_profiler_user()
+	if not isinstance(run_uuid, str) or not run_uuid or len(run_uuid) > 140:
+		frappe.throw(_("run_uuid is required"), frappe.ValidationError, title=_("Optimus"))
+	run = frappe.db.get_value(
+		"Optimus Phase Two Run", {"run_uuid": run_uuid}, ["name", "parent", "status", "recording_user"], as_dict=True
+	)
+	session_uuid = frappe.db.get_value("Optimus Session", run["parent"], "session_uuid") if run else None
+	if not run or not session_uuid:
+		frappe.throw(
+			_("Phase 2 run {0} was not found.").format(html.escape(str(run_uuid))),
+			frappe.DoesNotExistError,
+			title=_("Optimus"),
+		)
+	ref = _session_action_gate(session_uuid, action=action, statuses=())
+	if run_statuses and run["status"] not in run_statuses:
+		frappe.throw(
+			_("This Phase 2 run is {0}. This action needs it to be {1}.").format(
+				run["status"], ", ".join(run_statuses)
+			),
+			frappe.ValidationError,
+			title=_("Optimus"),
+		)
+	return ref, run
+
+
 def _save_parent_bypassing_perms(parent) -> None:
 	"""Persist a phase-2 line-profile parent Optimus Session. Ownership is
-	enforced by the caller's _require_session_permission check before this runs,
+	enforced by the caller's _session_action_gate / _phase2_run_gate before this runs,
 	so the DocType write-perm is bypassed here."""
 	parent.flags.ignore_validate_update_after_submit = True
-	parent.save(ignore_permissions=True)
+	from optimus.managed import save_session
+
+	save_session(parent)
 	safe_commit()
 
 
-@frappe.whitelist()
+def _lock_phase2_for_write(docname: str, *, allow_failed: bool = False) -> None:
+	"""Serialize Phase 2 admission with AI until the caller saves its run row."""
+	from optimus import ai_refresh_store
+
+	# End the permission/configuration snapshot before taking current locks.
+	safe_commit()
+	reason = ai_refresh_store.lock_phase2_parent(docname, allow_failed=allow_failed, now=time.time())
+	if reason:
+		frappe.db.rollback()
+		frappe.throw(
+			_("Wait for the AI refresh to finish or cancel it before starting Phase 2.")
+			if reason == "ai_refresh" else _("The session is no longer ready for Phase 2."),
+			frappe.ValidationError,
+		)
+
+
+@frappe.whitelist(methods=["POST"])
 def start(
 	label: str = "",
 	capture_python_tree: bool = True,
@@ -127,6 +332,7 @@ def start(
 	        top of the report; also editable on the Optimus Session form.
 	"""
 	user = _require_profiler_user()
+	ratelimit.enforce_user_rate_limit("start", **_ACTION_LIMITS["start"])
 
 	# v0.3.0: clear any in-flight capture state from a previous request
 	# on this worker BEFORE we look at session state, so leaked state
@@ -167,7 +373,9 @@ def start(
 		doc_fields["notes"] = notes_clean
 	# Caller passed _require_profiler_user; the profiler creates their own
 	# session, which regular users have no create-perm for.
-	doc = frappe.get_doc(doc_fields).insert(ignore_permissions=True)
+	from optimus.managed import save_session
+
+	doc = save_session(frappe.get_doc(doc_fields), insert=True)
 
 	# Store metadata in Redis (used by the analyze pipeline later).
 	session.set_session_meta(
@@ -184,7 +392,14 @@ def start(
 
 	# Flip the user's active flag last once this is set, the next
 	# request from this user will start being recorded.
-	session.set_active_session(user, session_uuid)
+	try:
+		session.set_active_session(user, session_uuid)
+	except BaseException:
+		# The Redis admission precedes the SQL commit. A refused Phase 1
+		# must leave neither a Session row nor its metadata behind.
+		frappe.db.rollback()
+		session.delete_session_state(session_uuid)
+		raise
 
 	return {
 		"session_uuid": session_uuid,
@@ -194,7 +409,7 @@ def start(
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def stop() -> dict:
 	"""End the calling user's active profiling session.
 
@@ -211,6 +426,8 @@ def stop() -> dict:
 	active = session.get_active_session_for(user)
 	if not active:
 		return {"stopped": False, "reason": "no active session"}
+
+	ratelimit.enforce_user_rate_limit("stop", **_ACTION_LIMITS["stop"])
 
 	docname, ran_inline = _stop_session(user, active)
 
@@ -319,9 +536,10 @@ def _publish_session_event(
 	user: str,
 	**extra,
 ) -> None:
-	"""Publish a session-state realtime event to all the user's Desk tabs via
-	Frappe's Socket.IO bridge, driving the floating widget without HTTP
-	polling. Event names: optimus_session_{stopping,analyzing,ready,failed}.
+	"""Publish to the recording user's Desk tabs and authorized open forms.
+	The persisted session determines the recipient; ``user`` is retained for
+	call compatibility and may identify a different action actor.
+	Event names: optimus_session_{stopping,analyzing,ready,failed}.
 
 	All events carry ``session_uuid`` and ``docname`` so a widget with
 	multiple open tabs can match the session it tracks. Best-effort: publish
@@ -329,7 +547,8 @@ def _publish_session_event(
 	payload = {"session_uuid": session_uuid, "docname": docname}
 	payload.update(extra)
 	try:
-		frappe.publish_realtime(event_name, payload, user=user)
+		from optimus.realtime import publish_session_event
+		publish_session_event(event_name, payload)
 	except Exception:
 		# Don't log realtime is best-effort, the widget falls back
 		# to its on-visibility-change status fetch.
@@ -663,6 +882,43 @@ def _frontend_vitals_key(session_uuid: str) -> str:
 	return redis_keys.frontend_vitals(session_uuid)
 
 
+MAX_FRONTEND_PAYLOAD_BYTES = 512 * 1024
+MAX_FRONTEND_PAYLOAD_NODES = 32_000
+
+
+def _frontend_payload_bounded(value):
+	"""Bound parsed RPC dictionaries without expanding unbounded containers."""
+	import json
+	from itertools import chain
+	stack, nodes, used = [iter((value,))], 0, 0
+	try:
+		while stack:
+			try:
+				item = next(stack[-1])
+			except StopIteration:
+				stack.pop()
+				continue
+			nodes += 1
+			used += 4  # Conservative container/separator/quoting overhead.
+			if nodes > MAX_FRONTEND_PAYLOAD_NODES or len(stack) > 12:
+				return False
+			if isinstance(item, dict):
+				stack.append(iter(chain(item.keys(), item.values())))
+			elif isinstance(item, list):
+				stack.append(iter(item))
+			elif item is None or isinstance(item, (str, bool, int, float)):
+				if isinstance(item, str) and len(item) > MAX_FRONTEND_PAYLOAD_BYTES:
+					return False
+				used += len(json.dumps(item, ensure_ascii=False, allow_nan=False).encode("utf-8"))
+			else:
+				return False
+			if used > MAX_FRONTEND_PAYLOAD_BYTES:
+				return False
+	except (ValueError, TypeError, RecursionError, UnicodeError):
+		return False
+	return True
+
+
 @frappe.whitelist(methods=["POST"])
 def submit_frontend_metrics(payload: str) -> dict:
 	"""Receive a batch of frontend metrics (XHR timings + Web Vitals) as a
@@ -676,6 +932,11 @@ def submit_frontend_metrics(payload: str) -> dict:
 	"""
 	user = _require_profiler_user()
 
+	ratelimit.enforce_user_rate_limit("submit_frontend_metrics", limit=120, seconds=60)
+	if isinstance(payload, str) and (len(payload) > MAX_FRONTEND_PAYLOAD_BYTES or
+		len(payload.encode("utf-8", errors="replace")) > MAX_FRONTEND_PAYLOAD_BYTES):
+		return {"accepted": False, "reason": "payload too large"}
+
 	try:
 		if isinstance(payload, str):
 			data = frappe.parse_json(payload)
@@ -684,11 +945,13 @@ def submit_frontend_metrics(payload: str) -> dict:
 	except Exception:
 		return {"accepted": False, "reason": "invalid json"}
 
-	if not isinstance(data, dict):
+	if not isinstance(data, dict) or not _frontend_payload_bounded(data):
+		return {"accepted": False, "reason": "invalid payload"}
+	if any(not isinstance(data.get(key) or [], list) or any(not isinstance(row, dict) for row in (data.get(key) or [])) for key in ("xhr", "vitals")):
 		return {"accepted": False, "reason": "invalid payload"}
 
 	session_uuid = data.get("session_uuid")
-	if not session_uuid:
+	if not isinstance(session_uuid, str) or not session_uuid or len(session_uuid) > 140:
 		return {"accepted": False, "reason": "missing session_uuid"}
 
 	# Ownership check: only the user who owns the session can write to
@@ -835,7 +1098,7 @@ def _session_perf_24h() -> dict:
 			Avg(s.analyze_duration_ms).as_("avg_ms"),
 			Max(s.analyze_duration_ms).as_("max_ms"),
 		)
-		.where((s.status == "Ready") & (s.modified > cutoff))
+		.where((s.status == "Ready") & (s.stopped_at > cutoff))
 	).run(as_dict=True)
 	agg = rows[0] if rows else {}
 	return {
@@ -899,7 +1162,7 @@ def check_onboarding_seen() -> dict:
 	return {"seen": bool(payload)}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def mark_onboarding_seen() -> dict:
 	"""Mark the onboarding toast as dismissed for the current user."""
 	user = _require_user()
@@ -913,8 +1176,7 @@ def mark_onboarding_seen() -> dict:
 	return {"seen": True}
 
 
-@frappe.whitelist()
-@rate_limit(key="optimus_download_pdf", limit=20, seconds=60)
+@frappe.whitelist(methods=["POST"])
 def download_pdf(session_uuid: str) -> dict:
 	"""Return the URL of the report PDF, generating it on first call.
 
@@ -933,7 +1195,7 @@ def download_pdf(session_uuid: str) -> dict:
 		as_dict=True,
 	)
 	if not row:
-		frappe.throw(_("No Optimus Session found for uuid {0}").format(session_uuid))
+		frappe.throw(_("No Optimus Session found for uuid {0}").format(html.escape(str(session_uuid))))
 	if row["status"] != "Ready":
 		frappe.throw(_("Cannot generate PDF for session in '{0}' state").format(row['status']))
 
@@ -948,18 +1210,80 @@ def download_pdf(session_uuid: str) -> dict:
 			frappe.PermissionError,
 		)
 
+	ratelimit.enforce_user_rate_limit("download_pdf", **_ACTION_LIMITS["download_pdf"])
+
 	from optimus import pdf_export
 
 	url = pdf_export.get_or_generate_pdf(session_uuid)
 	return {"file_url": url}
 
 
+def _export_index_advice(findings: list[dict], tables) -> None:
+	"""An export carries the deterministic index advice the report
+	shows, never the analyzer's stored raw DDL (``suggested_ddl``) or the retired index AI
+	output (a table's ``ai_index``; finding ``llm_fix_json`` is never exported). Mutates in
+	place. Each index-family finding gains ``index_advice`` from
+	``recipe_enrichment.export_advice``, the advice step the report runs too:
+	``route``, ``doctype``, ``table``, ``columns``, ``index_name``, ``text`` and ``code``,
+	the report's fix-hint prose and code, ``unknown`` (no verdict: Optimus could not
+	tell, or the advisor failed) and ``sort_stays`` ("stays" or "may stay" when a Filesort or
+	Temporary Table code leaves the sort or the temporary table in place, or may, else ""),
+	or None when the advisor has nothing to say. With
+	advice, its ``technical_detail.fix_hint`` is that same text, and its ``title`` and
+	``customer_description`` are the report's (``finding_display``: no "Add index" title
+	next to a no-code advice). When the advisor raises, the finding carries the report's
+	failure note (``RECIPE_FAILED_HINT``, route no_code, no code) and the failures are
+	logged once, as a render logs them. Each table's ``recommended_index`` goes through the
+	same advisor. One per-export evidence lookup (memoised per table) and one per-export
+	query parser (memoised per query) serve both, as in the report."""
+	from optimus.analyzers.base import INDEX_FINDING_TYPES
+	from optimus.renderer import recipe_enrichment
+	from optimus.safe_call import best_effort
+	from optimus.settings import read_tracked_apps
+
+	tracked = read_tracked_apps()
+	lookup = recipe_enrichment.make_evidence_lookup()
+	parser = recipe_enrichment.make_query_parser()
+	failed = 0
+	errors: list = []
+	for f in findings:
+		detail = f.get("technical_detail")
+		if f.get("finding_type") in INDEX_FINDING_TYPES:
+			advice, advice_failed = recipe_enrichment.export_advice(
+				f, evidence_lookup=lookup, tracked_apps=tracked, parser=parser, errors=errors,
+			)
+			failed += advice_failed
+			f["index_advice"] = advice
+			if advice is not None and isinstance(detail, dict):
+				# The report's prose in the report's slot: the analyzer's stored hint ("Add an
+				# index on ...") must never sit next to a no_code advice.
+				detail["fix_hint"] = advice["text"]
+			f.update(recipe_enrichment.finding_display(f, advice))
+		if isinstance(detail, dict):
+			detail.pop("suggested_ddl", None)
+	tables = [t for t in (tables if isinstance(tables, list) else []) if isinstance(t, dict)]
+	for t in tables:
+		t.pop("ai_index", None)
+	table_stats = best_effort(
+		lambda: recipe_enrichment.apply_table_recipes(
+			tables, evidence_lookup=lookup, tracked_apps=tracked, errors=errors,
+		),
+		None,
+	)
+	failed += (table_stats or {}).get("failed", 0)
+	recipe_enrichment.log_recipe_failures(failed, where="export", errors=errors)
+	lookup.log_unlisted_failures()
+
+
 @frappe.whitelist()
-@rate_limit(key="optimus_export_session", limit=20, seconds=60)
 def export_session(session_uuid: str) -> dict:
 	"""Export an Optimus Session as a structured JSON blob for programmatic
 	consumption (no HTML parsing): the full session with all child rows, top
 	queries, table breakdown and finding technical details.
+
+	Index advice is the report's deterministic advice (``index_advice`` on each
+	index-family finding, the table's ``recommended_index``); the analyzer's raw DDL and
+	the retired index AI output are not exported.
 
 	Permission: recording user or System Manager only (mirrors the report
 	download gate); other users get a permission error.
@@ -978,7 +1302,7 @@ def export_session(session_uuid: str) -> dict:
 		as_dict=True,
 	)
 	if not row:
-		frappe.throw(_("No Optimus Session found for uuid {0}").format(session_uuid))
+		frappe.throw(_("No Optimus Session found for uuid {0}").format(html.escape(str(session_uuid))))
 
 	doc = frappe.get_doc("Optimus Session", row["name"])
 
@@ -987,6 +1311,8 @@ def export_session(session_uuid: str) -> dict:
 	if doc.user != user and "System Manager" not in roles and user != "Administrator":
 		frappe.throw(_("You can only export your own sessions."), frappe.PermissionError)
 
+	ratelimit.enforce_user_rate_limit("export_session", **_ACTION_LIMITS["export_session"])
+
 	def _parse_json_field(value):
 		if not value:
 			return []
@@ -994,6 +1320,23 @@ def export_session(session_uuid: str) -> dict:
 			return json.loads(value)
 		except Exception:
 			return []
+
+	findings = [
+		{
+			"idx": f.idx,
+			"finding_type": f.finding_type,
+			"severity": f.severity,
+			"title": f.title,
+			"customer_description": f.customer_description,
+			"technical_detail": _parse_json_field(f.technical_detail_json),
+			"estimated_impact_ms": f.estimated_impact_ms,
+			"affected_count": f.affected_count,
+			"action_ref": f.action_ref,
+		}
+		for f in (doc.findings or [])
+	]
+	table_breakdown = _parse_json_field(doc.table_breakdown_json)
+	_export_index_advice(findings, table_breakdown)
 
 	return {
 		"schema_version": 1,
@@ -1037,22 +1380,9 @@ def export_session(session_uuid: str) -> dict:
 			}
 			for a in (doc.actions or [])
 		],
-		"findings": [
-			{
-				"idx": f.idx,
-				"finding_type": f.finding_type,
-				"severity": f.severity,
-				"title": f.title,
-				"customer_description": f.customer_description,
-				"technical_detail": _parse_json_field(f.technical_detail_json),
-				"estimated_impact_ms": f.estimated_impact_ms,
-				"affected_count": f.affected_count,
-				"action_ref": f.action_ref,
-			}
-			for f in (doc.findings or [])
-		],
+		"findings": findings,
 		"top_queries": _parse_json_field(doc.top_queries_json),
-		"table_breakdown": _parse_json_field(doc.table_breakdown_json),
+		"table_breakdown": table_breakdown,
 		# v0.3.0 top-level aggregates
 		"hot_frames": _parse_json_field(getattr(doc, "hot_frames_json", None)),
 		"session_time_breakdown": _parse_json_field(
@@ -1061,364 +1391,120 @@ def export_session(session_uuid: str) -> dict:
 	}
 
 
-@frappe.whitelist()
-@rate_limit(key="optimus_retry_analyze", limit=5, seconds=60)
+@frappe.whitelist(methods=["POST"])
 def retry_analyze(session_uuid: str) -> dict:
 	"""Retry the analyze job for a Failed session.
 
-	Allows the recording user or a System Manager to recover from
-	transient analyzer errors (worker crash, DB timeout, etc.) without
-	dropping into a Frappe console. The session must be in `Failed`
-	state retrying a Ready or Recording session is a no-op.
+	Lets the session owner, a System Manager or a write-sharee (``_session_action_gate``) recover
+	from transient analyzer errors (worker crash, DB timeout, ...) without a Frappe console. The
+	session must be Failed; any other status is refused with a clear message.
 	"""
-	user = _require_profiler_user()
-	if not session_uuid:
-		frappe.throw(_("session_uuid is required"))
-	_require_session_permission(session_uuid, "write")
+	ref = _session_action_gate(session_uuid, action="retry_analyze", statuses=("Failed",))
+	ratelimit.enforce_user_rate_limit("retry_analyze", **_ACTION_LIMITS["retry_analyze"])
 
-	doc = frappe.db.get_value(
-		"Optimus Session",
-		{"session_uuid": session_uuid},
-		["name", "user", "status"],
-		as_dict=True,
-	)
-	if not doc:
-		frappe.throw(_("No Optimus Session found for uuid {0}").format(session_uuid))
+	from optimus import ai_jobs
+	if not ai_jobs.prepare_analyze_retry(ref.docname, ref.session_uuid, requested_by=frappe.session.user):
+		frappe.throw(_("The session changed before Retry Analyze. Reload it and try again."),
+			frappe.ValidationError, title=_("Optimus"))
 
-	# Permission check: recording user OR System Manager only
-	roles = set(frappe.get_roles(user))
-	if doc["user"] != user and "System Manager" not in roles and user != "Administrator":
-		frappe.throw(_("You can only retry your own sessions."), frappe.PermissionError)
-
-	if doc["status"] != "Failed":
-		return {
-			"retried": False,
-			"reason": f"Session is in '{doc['status']}' state, not Failed.",
-		}
-
-	# Reset to Stopping so the analyze pipeline runs through its usual
-	# state transitions.
-	frappe.db.set_value(
-		"Optimus Session",
-		doc["name"],
-		{"status": "Stopping", "analyzer_warnings": None},
-	)
-	safe_commit()
-
-	# v0.4.0: clear the cached PDF so the next download regenerates from
-	# the fresh HTML produced by the re-run analyze.
+	# Clear the cached PDF so the next download regenerates from the fresh HTML.
 	try:
 		from optimus import pdf_export
 
-		pdf_export.clear_cached_pdf(session_uuid)
+		pdf_export.clear_cached_pdf(ref.session_uuid)
 	except Exception:
 		pass
 
-	# v0.5.0: use the scheduler-aware enqueue helper so retry also works
-	# on sites where bench disable-scheduler is in effect. Earlier
-	# versions called frappe.enqueue directly here, which on scheduler-
-	# disabled sites would re-hit the exact hung-forever bug that the
-	# v0.5.0 scheduler fallback was designed to fix Retry would push
-	# to a queue no worker consumes and the session would stay stuck
-	# in Stopping forever. Passing docname also lets the inline cap
-	# check mark this session Failed (with a clear message) if the
-	# recording count exceeds the inline limit.
-	ran_inline = _enqueue_analyze(session_uuid, docname=doc["name"])
+	# The scheduler-aware enqueue helper, so retry also works where the scheduler is
+	# disabled (a bare frappe.enqueue would push to a queue no worker consumes). Passing docname
+	# lets the inline cap mark the session Failed with a clear message when it is too large.
+	ran_inline = _enqueue_analyze(ref.session_uuid, docname=ref.docname)
 
-	# Read back the final status if inline analyze ran, so the client
-	# can show the right terminal state (same contract as stop()).
+	# Read back the final status if inline analyze ran (same contract as stop()).
 	final_status = None
 	if ran_inline:
 		try:
-			final_status = frappe.db.get_value(
-				"Optimus Session", doc["name"], "status"
-			)
+			final_status = frappe.db.get_value("Optimus Session", ref.docname, "status")
 		except Exception:
 			final_status = None
 
 	return {
 		"retried": True,
-		"session_uuid": session_uuid,
-		"docname": doc["name"],
+		"session_uuid": ref.session_uuid,
+		"docname": ref.docname,
 		"ran_inline": ran_inline,
 		"status": final_status,
 	}
 
 
-@frappe.whitelist()
-@rate_limit(key="optimus_regenerate_reports", limit=30, seconds=60)
-def regenerate_reports(session_uuid: str) -> dict:
-	"""Re-render the HTML report from stored session data without re-running
-	any analyzer (fast, idempotent). Use it when the template or renderer
-	changed and you want the new UI on an already-analyzed session.
+def _render_session_report(docname: str) -> dict:
+	"""Render saved answers and atomically replace the report; caller authorizes access.
 
-	Each call replaces the report File attachment and clears the cached PDF.
-	Recordings are best-effort: if they've expired from Redis the per-query
-	drill-down / Full recordings sections render empty, but every persisted
-	section stays intact. Allowed on Ready or Failed sessions.
-	Permission: recording user or System Manager.
+	No provider call is made. A failed or stale replacement keeps the previous
+	report and PDF reference. RQ timeouts still terminate the worker.
 	"""
-	user = _require_profiler_user()
-	if not session_uuid:
-		frappe.throw(_("session_uuid is required"))
-	_require_session_permission(session_uuid, "write")
-
-	row = frappe.db.get_value(
-		"Optimus Session",
-		{"session_uuid": session_uuid},
-		["name", "user", "status"],
-		as_dict=True,
-	)
-	if not row:
-		frappe.throw(_("No Optimus Session found for uuid {0}").format(session_uuid))
-
-	# v0.12.9: enforce the docstring's "Allowed on Ready OR Failed
-	# sessions" contract. The pre-v0.12.9 code accepted any status,
-	# which would attach an incomplete report to a still-running
-	# analyze (Recording / Stopping / Analyzing) that the pipeline
-	# would then overwrite confusing for operators and surfaced
-	# in v0.12.4 by the integration test that exercised this gap.
-	if row["status"] not in ("Ready", "Failed"):
-		frappe.throw(
-			_("regenerate_reports requires the session to be in a terminal state (Ready or Failed); this one is '{0}'. Wait for analyze to finish, or use retry_analyze to restart a stuck pipeline.").format(row['status'])
-		)
-
-	roles = set(frappe.get_roles(user))
-	if (
-		row["user"] != user
-		and "System Manager" not in roles
-		and user != "Administrator"
-	):
-		frappe.throw(
-			_("You can only regenerate reports for your own sessions."),
-			frappe.PermissionError,
-		)
-
-	# Best-effort recording fetch. The renderer uses DocType fields for
-	# everything important; recordings only power the per-query drill-
-	# down + Full recordings sections. If Redis dropped them, render
-	# with an empty list and the rest of the report is still fine.
 	from optimus import analyze as _analyze_mod
+	from optimus.report_refresh import render_report
 
-	doc = frappe.get_doc("Optimus Session", row["name"])
-	recording_uuids = [
-		a.recording_uuid
-		for a in (doc.actions or [])
-		if getattr(a, "recording_uuid", None)
-	]
-	try:
-		recordings = list(_analyze_mod._fetch_recordings(
-			recording_uuids, recordings_bundle=_analyze_mod._load_recordings_bundle(doc)
-		))
-	except Exception:
-		frappe.log_error(title="optimus regenerate_reports fetch")
-		recordings = []
+	out, failed = _analyze_mod._run_ai_step(
+		lambda: render_report(docname), title="optimus ai regenerate report", docname=docname,
+	)
+	if failed:
+		frappe.throw(
+			_("Report update could not be confirmed. Saved results are retained. Reload the session and use Regenerate Reports if needed."),
+			frappe.ValidationError, title=_("Optimus"),
+		)
+	return out
 
-	# v0.6.0: if "Suggest AI fixes in the report by default" is on, backfill
-	# AI suggestions onto the top eligible findings that don't have one yet,
-	# so a session analyzed before the switch was flipped picks them up on a
-	# Regenerate. Best-effort + tightly time-budgeted (it runs synchronously
-	# in this web request). The persisted llm_fix_json is what the renderer
-	# below reads to draw the "Suggested fix (AI)" block under each finding.
-	try:
-		_analyze_mod._backfill_ai_suggestions(doc)
-	except Exception:
-		frappe.log_error(title="optimus regenerate ai backfill")
 
-	# Invalidate the cached PDF next /api/method/download_pdf call
-	# will regenerate it from the freshly-rendered HTML.
-	try:
-		from optimus import pdf_export
 
-		pdf_export.clear_cached_pdf(session_uuid)
-	except Exception:
-		pass
 
-	_analyze_mod._render_and_attach_reports(row["name"], recordings)
+@frappe.whitelist(methods=["POST"])
+def regenerate_reports(session_uuid: str) -> dict:
+	"""Re-render the HTML report from stored session data without re-running any analyzer (fast,
+	idempotent). Use it when the template or renderer changed and you want the new UI on an
+	already-analyzed session.
 
+	Each call replaces the report File attachment and clears the cached PDF. Allowed on Ready or
+	Failed sessions; any other status is refused with the long-standing message that names
+	retry_analyze (pinned by the real-bench integration test). Permission:
+	``_session_action_gate`` (the owner, a System Manager or a user the session is shared with for
+	editing); then the per-user limit. Uses saved AI answers without making new
+	provider calls. Use Refresh AI suggestions to request new answers.
+	"""
+	ref = _session_action_gate(
+		session_uuid,
+		action="regenerate_reports",
+		statuses=("Ready", "Failed"),
+		status_hint=_("regenerate_reports requires the session to be in a terminal state (Ready or Failed); this one is '{0}'. Wait for analyze to finish, or use retry_analyze to restart a stuck pipeline."),
+	)
+	from optimus import ai_jobs
+	if ai_jobs.active_refresh(ref.docname):
+		frappe.throw(_("Wait for the AI refresh to finish or cancel it before regenerating reports."), frappe.ValidationError)
+	ratelimit.enforce_user_rate_limit("regenerate_reports", **_ACTION_LIMITS["regenerate_reports"])
+	out = _render_session_report(ref.docname)
 	return {
-		"regenerated": True,
-		"session_uuid": session_uuid,
-		"docname": row["name"],
-		"recordings_available": len(recordings),
-		"actions_total": len(doc.actions or []),
+		"regenerated": bool(out.get("regenerated")),
+		"session_uuid": ref.session_uuid,
+		"docname": ref.docname,
+		"recordings_available": out["recordings_available"],
+		"actions_total": out["actions_total"],
 	}
 
 
-@frappe.whitelist()
-@rate_limit(key="optimus_suggest_fix", limit=10, seconds=60)
-def suggest_fix(session_uuid: str, finding_ref: str, regenerate=0) -> dict:
-	"""Generate (or return the cached) AI-suggested fix for one finding.
-	On-demand only. The finding's context (type, callsite, source window,
-	normalized SQL + EXPLAIN, static hint) is sent to the configured LLM and
-	the result is cached on the Optimus Finding row (``llm_fix_json``).
-
-	Args:
-	    session_uuid: the Optimus Session.
-	    finding_ref: the finding child-row ``name``; a bare integer is
-	        accepted as a 0-based index fallback.
-	    regenerate: truthy ignores the cache and re-calls the LLM.
-
-	Permission: recording user / System Manager / Administrator. AI must be
-	enabled and configured.
-	"""
-	user = _require_profiler_user()
-	if not session_uuid:
-		frappe.throw(_("session_uuid is required"))
-	if not finding_ref:
-		frappe.throw(_("finding_ref is required"))
-	_require_session_permission(session_uuid, "write")
-	regenerate = bool(frappe.utils.cint(regenerate))
-
-	row = frappe.db.get_value(
-		"Optimus Session",
-		{"session_uuid": session_uuid},
-		["name", "user", "status"],
-		as_dict=True,
-	)
-	if not row:
-		frappe.throw(_("No Optimus Session found for uuid {0}").format(session_uuid))
-	if row["status"] != "Ready":
-		frappe.throw(
-			_("AI fix suggestions are only available for Ready sessions (this one is '{0}').").format(row['status'])
-		)
-
-	roles = set(frappe.get_roles(user))
-	if (
-		row["user"] != user
-		and "System Manager" not in roles
-		and user != "Administrator"
-	):
-		frappe.throw(
-			_("You can only request AI fixes for your own sessions."),
-			frappe.PermissionError,
-		)
-
-	from optimus import ai_fix
-
-	if not ai_fix.is_available():
-		frappe.throw(
-			_(
-				"AI fix suggestions aren't configured enable them in Profiler "
-				"Settings ▸ AI Fix Suggestions and set a provider, model and API key."
-			)
-		)
-	from optimus.settings import get_config
-	if not get_config().ai_suggest_findings:
-		frappe.throw(
-			_(
-				'AI fix suggestions on findings are turned off enable '
-				'"Fix suggestions on findings" under Optimus Settings ▸ AI.'
-			)
-		)
-
-	doc = frappe.get_doc("Optimus Session", row["name"])
-	findings = doc.findings or []
-	child = next((f for f in findings if f.name == finding_ref), None)
-	if child is None and str(finding_ref).strip().lstrip("-").isdigit():
-		idx = int(finding_ref)
-		if 0 <= idx < len(findings):
-			child = findings[idx]
-	if child is None:
-		frappe.throw(_("Finding {0!r} not found on this session.").format(finding_ref))
-
-	if (child.finding_type or "") not in ai_fix.AI_ELIGIBLE_FINDING_TYPES:
-		frappe.throw(
-			_("AI fix suggestions aren't offered for '{0}' findings they don't carry enough code/SQL context.").format(child.finding_type)
-		)
-	# v0.9.0: per-type opt-out (Critical Risk #2). Refuse on-demand calls
-	# for types listed in ``ai_excluded_finding_types`` with a clear message
-	# pointing the operator at the setting they configured.
-	if ai_fix.is_finding_type_excluded(child.finding_type or ""):
-		frappe.throw(
-			_("'{0}' is on the exclusion list in Optimus Settings ▸ AI ▸ Privacy & Operations ▸ Excluded finding types. Remove the line if you want AI suggestions for this type.").format(child.finding_type)
-		)
-
-	# Return the cached suggestion unless the caller asked to regenerate.
-	if not regenerate and (child.llm_fix_json or "").strip():
-		try:
-			cached = json.loads(child.llm_fix_json)
-		except Exception:
-			cached = None
-		if isinstance(cached, dict) and (cached.get("suggestion") or "").strip():
-			return {"ok": True, "finding": child.name, "cached": True, **cached}
-
-	# Build the LLM context: the finding dict + a wide source window + (when a
-	# Phase-2 line-profile pass instrumented this finding's function) its
-	# hottest line + (best-effort) the top-N slowest SQL queries from this
-	# action's recording shared with the analyze-time auto-suggest path.
-	from optimus import analyze as _analyze_mod
-
-	# v0.6.x: fetch the single action's recording from Redis so the AI gets
-	# verbatim SQL evidence to ground against (the leading cause of bogus AI
-	# refactorings was the model inferring SQL shape from Python source
-	# instead of reading the actual query). Best-effort if the recording
-	# expired from Redis, fall through with just the source-window context.
-	recordings_by_uuid: dict = {}
-	actions_by_idx: dict = {}
-	try:
-		actions_by_idx = {
-			int(a.idx) if hasattr(a, "idx") else i: {
-				"idx": int(getattr(a, "idx", i)),
-				"recording_uuid": a.recording_uuid or "",
-			}
-			for i, a in enumerate(doc.actions or [])
-		}
-		ref = (getattr(child, "action_ref", None) or "").strip()
-		if ref and ref.lstrip("-").isdigit():
-			act = actions_by_idx.get(int(ref))
-			rec_uuid = (act or {}).get("recording_uuid")
-			if rec_uuid:
-				recs = list(_analyze_mod._fetch_recordings([rec_uuid], recordings_bundle=_analyze_mod._load_recordings_bundle(doc)))
-				recordings_by_uuid = {r.get("uuid"): r for r in recs if r.get("uuid")}
-	except Exception:
-		# Never let a recording-fetch error block the AI suggestion fall
-		# through with whatever context we already have.
-		recordings_by_uuid = {}
-
-	finding_dict = _analyze_mod._ai_payload_for_finding(
-		child, {}, phase2_index=_analyze_mod._phase2_index_for(doc),
-		recordings_by_uuid=recordings_by_uuid,
-		actions_by_idx=actions_by_idx,
-	)
-
-	try:
-		_analyze_mod._mark_ai_spend_session(session_uuid)
-		result = ai_fix.suggest_fix(finding_dict)
-	except ai_fix.AiFixError as e:
-		frappe.throw(str(e))
-
-	try:
-		frappe.db.set_value(
-			"Optimus Finding", child.name, "llm_fix_json", json.dumps(result),
-		)
-		safe_commit()
-	except Exception:
-		# Failing to persist isn't fatal the operator still gets the
-		# suggestion in the dialog, just not cached / in the report.
-		frappe.log_error(title="optimus suggest_fix persist")
-
-	return {"ok": True, "finding": child.name, "cached": False, **result}
-
-
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def test_ai_connection() -> dict:
-	"""Probe the configured AI provider. System-Manager-only (config-
-	adjacent Optimus Settings itself is SysMgr-only). Returns
-	``{"ok": bool, "message": str, "model": str}``; never raises on a
-	provider failure (the detail is in ``message``)."""
-	# The settings probe isn't billable to any session clear the spend marker
-	# so its tokens don't land on whatever session this worker last served.
-	from optimus import analyze as _analyze_mod
-
-	_analyze_mod._mark_ai_spend_session(None)
+	"""Probe the configured AI provider. System-Manager-only (Optimus Settings itself is
+	System-Manager-only) and limited per user. Returns ``{"ok": bool, "message": str,
+	"model": str}``; never raises on a provider failure (the detail is in ``message``)."""
 	user = _require_profiler_user()
-	roles = set(frappe.get_roles(user))
-	if "System Manager" not in roles and user != "Administrator":
+	if "System Manager" not in set(frappe.get_roles(user)) and user != "Administrator":
 		frappe.throw(
 			_("Only a System Manager can test the AI connection."),
 			frappe.PermissionError,
+			title=_("Optimus"),
 		)
+	ratelimit.enforce_user_rate_limit("test_ai_connection", **_AI_LIMITS["test_ai_connection"])
 	from optimus import ai_fix
 
 	return ai_fix.test_connection()
@@ -1429,438 +1515,111 @@ def ai_capabilities() -> dict:
 	"""The per-section LLM toggles, for the Optimus Session form to decide
 	which AI buttons to show. Any logged-in profiler user no Profiler
 	Settings read permission needed (the server still enforces the toggles).
-	Returns ``{enabled, findings, indexes, humanize}`` (all bools)."""
+	Returns ``{enabled, findings, indexes, humanize}`` (all bools);
+	``indexes`` is always False since index advice stopped using the AI."""
 	_require_profiler_user()
 	from optimus.settings import get_config
 	cfg = get_config()
 	return {
 		"enabled": bool(getattr(cfg, "ai_enabled", False)),
 		"findings": bool(getattr(cfg, "ai_suggest_findings", True)),
-		"indexes": bool(getattr(cfg, "ai_suggest_indexes", True)),
+		"indexes": False,
 		"humanize": bool(getattr(cfg, "ai_humanize_steps", True)),
 	}
 
 
-@frappe.whitelist()
-def backfill_ai_fixes(session_uuid: str, regenerate_all=0) -> dict:
-	"""Generate AI fix suggestions for eligible findings, then re-render the
-	report.
+def _refresh_flag(value) -> bool:
+	if type(value) is bool:
+		return value
+	if type(value) is int and value in (0, 1):
+		return bool(value)
+	if isinstance(value, str) and value.lower() in {"0", "1", "true", "false"}:
+		return value.lower() in {"1", "true"}
+	frappe.throw(_("Refresh options must be true or false."), frappe.ValidationError)
 
-	``regenerate_all`` falsy (default) fills only findings without a
-	suggestion yet; truthy (re)generates every eligible finding, overwriting
-	existing ones (a mid-run failure leaves the old suggestion in place).
-	Bypasses the auto-suggest toggle but still needs the provider configured
-	and is bounded by a per-call time budget (re-run if findings are skipped
-	for time). Permission: recording user / System Manager / Administrator.
+
+@frappe.whitelist(methods=["POST"])
+def refill_ai_suggestions(
+	session_uuid: str, regenerate_all: bool | str | int = False,
+	resume_from: str | None = None, retry_uncertain: bool | str | int = False,
+) -> dict:
+	"""Admit optional AI work. The response describes a queued run, not completed answers.
+
+	The existing route and session argument remain supported. By default only
+	missing/outdated fixes are selected; replacing current answers is explicit.
+	An existing reservation attaches without depending on Redis availability.
 	"""
-	user = _require_profiler_user()
-	if not session_uuid:
-		frappe.throw(_("session_uuid is required"))
-	regenerate_all = bool(frappe.utils.cint(regenerate_all))
-
-	row = frappe.db.get_value(
-		"Optimus Session",
-		{"session_uuid": session_uuid},
-		["name", "user", "status"],
-		as_dict=True,
-	)
-	if not row:
-		frappe.throw(_("No Optimus Session found for uuid {0}").format(session_uuid))
-	if row["status"] != "Ready":
-		frappe.throw(
-			_("AI fixes can only be generated for Ready sessions (this one is '{0}').").format(row['status'])
-		)
-
-	roles = set(frappe.get_roles(user))
-	if (
-		row["user"] != user
-		and "System Manager" not in roles
-		and user != "Administrator"
-	):
-		frappe.throw(
-			_("You can only generate AI fixes for your own sessions."),
-			frappe.PermissionError,
-		)
-
-	from optimus import ai_fix
-
-	if not ai_fix.is_available():
-		frappe.throw(
-			_(
-				"AI fix suggestions aren't configured enable them in Profiler "
-				"Settings ▸ AI Fix Suggestions and set a provider, model and API key."
-			)
-		)
-	from optimus.settings import get_config
-	if not get_config().ai_suggest_findings:
-		frappe.throw(
-			_(
-				'AI fix suggestions on findings are turned off enable '
-				'"Fix suggestions on findings" under Optimus Settings ▸ AI.'
-			)
-		)
-
-	from optimus import analyze as _analyze_mod
-
-	doc = frappe.get_doc("Optimus Session", row["name"])
-	# cap=0 → do as many target findings as fit in the time budget, ignoring
-	# the auto-suggest cap (the operator asked for them explicitly).
-	counts = _analyze_mod._run_ai_backfill(doc, cap=0, regenerate_all=regenerate_all)
-
-	# Re-render so the new/updated suggestions land in the HTML report.
-	# regenerate_reports re-fetches the doc (seeing the just-committed
-	# llm_fix_json), clears the cached PDF and re-renders; its own
-	# auto-suggest-gated backfill is then a no-op.
-	regen = regenerate_reports(session_uuid)
-
-	return {
-		"ok": True,
-		"session_uuid": session_uuid,
-		"regenerate_all": regenerate_all,
-		"added": counts["added"],
-		"failed": counts["failed"],
-		"skipped_time": counts["skipped_time"],
-		"total_pending": counts["total_pending"],
-		"regenerated": bool(regen.get("regenerated")),
-	}
-
-
-@frappe.whitelist()
-def humanize_steps(session_uuid: str) -> dict:
-	"""(Re)generate the "Steps to Reproduce" note on a Ready session via the
-	configured LLM (overwriting what's there), then re-render the report. Use
-	it when the steps read as a raw list of HTTP calls, or to redo it after
-	editing the note. Permission: recording user / System Manager /
-	Administrator.
-	"""
-	user = _require_profiler_user()
-	if not session_uuid:
-		frappe.throw(_("session_uuid is required"))
-
-	row = frappe.db.get_value(
-		"Optimus Session",
-		{"session_uuid": session_uuid},
-		["name", "user", "status", "title"],
-		as_dict=True,
-	)
-	if not row:
-		frappe.throw(_("No Optimus Session found for uuid {0}").format(session_uuid))
-	if row["status"] != "Ready":
-		frappe.throw(
-			_("Steps can only be (re)generated for Ready sessions (this one is '{0}').").format(row['status'])
-		)
-
-	roles = set(frappe.get_roles(user))
-	if (
-		row["user"] != user
-		and "System Manager" not in roles
-		and user != "Administrator"
-	):
-		frappe.throw(
-			_("You can only do this for your own sessions."),
-			frappe.PermissionError,
-		)
-
-	from optimus import ai_fix
-
-	if not ai_fix.is_available():
-		frappe.throw(
-			_("AI isn't configured enable it under Optimus Settings ▸ "
-			"AI Fix Suggestions and set a provider, model and API key.")
-		)
-	from optimus.settings import get_config
-	if not get_config().ai_humanize_steps:
-		frappe.throw(
-			_(
-				'AI-humanized "Steps to Reproduce" is turned off enable it '
-				'under Optimus Settings ▸ AI.'
-			)
-		)
-
-	doc = frappe.get_doc("Optimus Session", row["name"])
-	status = _humanize_steps_core(doc, title=row.get("title") or None)
-	if not status.get("updated"):
-		# Mirror the legacy endpoint's contract: surface "no actions" as a
-		# user-facing error rather than a silent skip.
-		reason = status.get("reason") or _("Couldn't humanize the steps.")
-		frappe.throw(reason)
-
-	regen = regenerate_reports(session_uuid)
-	return {
-		"ok": True,
-		"session_uuid": session_uuid,
-		"regenerated": bool(regen.get("regenerated")),
-	}
-
-
-def _humanize_steps_core(doc, *, title: str | None = None) -> dict:
-	"""Validation-free rewrite of the session's "Steps to Reproduce" via the
-	configured LLM. Caller is responsible for the permission / status / AI-
-	available / toggle gates and for the final re-render. Returns
-	``{"updated": bool, "reason": str|None}`` so the composite endpoint can
-	report per-step outcomes without raising.
-	"""
-	from optimus import ai_fix
-	from optimus import analyze as _analyze_mod
-
-	_analyze_mod._mark_ai_spend_session(getattr(doc, "session_uuid", None))
-
-	recording_uuids = [
-		a.recording_uuid for a in (doc.actions or [])
-		if getattr(a, "recording_uuid", None)
-	]
-	try:
-		recordings = list(_analyze_mod._fetch_recordings(
-			recording_uuids, recordings_bundle=_analyze_mod._load_recordings_bundle(doc)
-		))
-	except Exception:
-		frappe.log_error(title="optimus humanize_steps fetch")
-		recordings = []
-
-	actions = _analyze_mod._actions_for_humanizer(recordings)
-	if not actions:
-		return {
-			"updated": False,
-			"reason": (
-				"This session has no user actions to summarise it was all "
-				"background / polling traffic (or the recordings have expired)."
-			),
-		}
-	_steps_usage: dict = {}
-	try:
-		steps_md = ai_fix.humanize_steps(actions, session_title=title, usage_out=_steps_usage)
-	except ai_fix.AiFixError as e:
-		return {"updated": False, "reason": str(e)}
-
-	frappe.db.set_value(
-		"Optimus Session", doc.name, {
-			"notes": _analyze_mod._assemble_humanized_notes(steps_md),
-			# Tokens for this Steps-to-Reproduce humanization. The report's
-			# session total rolls it in alongside fix + index suggestions
-			# (notes is markdown, so the count needs its own field).
-			"ai_steps_tokens": int(_steps_usage.get("total_tokens") or 0),
-		},
-	)
-	safe_commit()
-	return {"updated": True, "reason": None}
-
-
-@frappe.whitelist()
-def suggest_index(session_uuid: str, table_name: str) -> dict:
-	"""Generate (or regenerate) the LLM-vetted index recommendation for one
-	table in the session's DB-table breakdown, then re-render the report.
-
-	The deterministic index candidate is always in the report; this adds the
-	AI's take on top (which composite, whether existing indexes cover it, the
-	write-cost call). Requires AI configured. Permission: recording user /
-	System Manager / Administrator.
-	"""
-	user = _require_profiler_user()
-	if not session_uuid or not table_name:
-		frappe.throw(_("session_uuid and table_name are required"))
-
-	row = frappe.db.get_value(
-		"Optimus Session",
-		{"session_uuid": session_uuid},
-		["name", "user", "status"],
-		as_dict=True,
-	)
-	if not row:
-		frappe.throw(_("No Optimus Session found for uuid {0}").format(session_uuid))
-	if row["status"] != "Ready":
-		frappe.throw(
-			_("Index suggestions are only available for Ready sessions (this one is '{0}').").format(row['status'])
-		)
-
-	roles = set(frappe.get_roles(user))
-	if (
-		row["user"] != user
-		and "System Manager" not in roles
-		and user != "Administrator"
-	):
-		frappe.throw(
-			_("You can only request index suggestions for your own sessions."),
-			frappe.PermissionError,
-		)
-
-	from optimus import ai_fix
-
-	if not ai_fix.is_available():
-		frappe.throw(
-			_("AI isn't configured enable it under Optimus Settings ▸ "
-			"AI Fix Suggestions and set a provider, model and API key.")
-		)
-	from optimus.settings import get_config
-	if not get_config().ai_suggest_indexes:
-		frappe.throw(
-			_(
-				'AI index recommendations are turned off enable '
-				'"Index recommendations (DB-tables breakdown)" under Optimus Settings ▸ AI.'
-			)
-		)
-
-	from optimus import analyze as _analyze_mod
-
-	doc = frappe.get_doc("Optimus Session", row["name"])
-	try:
-		out = _analyze_mod._run_table_index_ai_backfill(doc, table_name=table_name)
-	except ai_fix.AiFixError as e:
-		frappe.throw(str(e))
-	if not out.get("ok"):
-		frappe.throw(out.get("reason") or _("Couldn't generate an index suggestion for that table."))
-
-	regen = regenerate_reports(session_uuid)
-	return {
-		"ok": True,
-		"session_uuid": session_uuid,
-		"table": out.get("table"),
-		"regenerated": bool(regen.get("regenerated")),
-	}
-
-
-def _refill_indexes_for_doc(doc) -> dict:
-	"""Walk the session's table breakdown and run the per-table index AI
-	helper for every table that has a heuristic ``recommended_index`` but
-	no ``ai_index`` yet. Returns ``{"added": N, "failed": N, "skipped": N}``.
-	Caller is responsible for permission / status / AI-available gates and
-	for the final re-render.
-	"""
-	import json as _json
-
-	from optimus import analyze as _analyze_mod
-
-	try:
-		breakdown = _json.loads(doc.table_breakdown_json or "[]")
-	except Exception:
-		breakdown = []
-
-	eligible = [
-		t for t in (breakdown or [])
-		if isinstance(t, dict)
-		and (t.get("recommended_index") or {}).get("columns")
-		and not t.get("ai_index")
-	]
-	added = failed = skipped = 0
-	for t in eligible:
-		table_name = t.get("table")
-		if not table_name:
-			skipped += 1
-			continue
-		try:
-			out = _analyze_mod._run_table_index_ai_backfill(doc, table_name=table_name)
-		except Exception:
-			frappe.log_error(title=f"optimus refill_indexes {table_name}")
-			failed += 1
-			continue
-		if out.get("ok"):
-			added += 1
-		else:
-			# Helper returned a reason (e.g. provider missing for one call)
-			# treat as skipped, not failed, since the doc state is unchanged.
-			skipped += 1
-	return {"added": added, "failed": failed, "skipped": skipped}
-
-
-@frappe.whitelist()
-def refill_ai_suggestions(session_uuid: str) -> dict:
-	"""Single-button entry point: re-fills every AI-generated report section
-	in one round-trip: (1) overwrite every eligible finding's fix suggestion,
-	(2) rewrite Steps to Reproduce, (3) run the per-table index helper for
-	tables with a candidate but no AI advice, (4) one final re-render.
-
-	Each step is gated by its per-section toggle; a toggle-off step is
-	skipped, not errored. Permission and provider gates run once at the top.
-	"""
-	user = _require_profiler_user()
-	if not session_uuid:
-		frappe.throw(_("session_uuid is required"))
-
-	row = frappe.db.get_value(
-		"Optimus Session",
-		{"session_uuid": session_uuid},
-		["name", "user", "status", "title"],
-		as_dict=True,
-	)
-	if not row:
-		frappe.throw(_("No Optimus Session found for uuid {0}").format(session_uuid))
-	if row["status"] != "Ready":
-		frappe.throw(
-			_("AI suggestions can only be refreshed for Ready sessions (this one is '{0}').").format(row['status'])
-		)
-
-	roles = set(frappe.get_roles(user))
-	if (
-		row["user"] != user
-		and "System Manager" not in roles
-		and user != "Administrator"
-	):
-		frappe.throw(
-			_("You can only refresh AI suggestions for your own sessions."),
-			frappe.PermissionError,
-		)
-
-	from optimus import ai_fix
-
-	if not ai_fix.is_available():
-		frappe.throw(
-			_("AI isn't configured enable it under Optimus Settings ▸ "
-			"AI Fix Suggestions and set a provider, model and API key.")
-		)
-
-	from optimus import analyze as _analyze_mod
+	ref = _session_action_gate(session_uuid, action="refill_ai_suggestions")
+	from optimus import ai_jobs, analyze
 	from optimus.settings import get_config
 
+	regenerate_all, retry_uncertain = _refresh_flag(regenerate_all), _refresh_flag(retry_uncertain)
+	if resume_from is not None and (not isinstance(resume_from, str) or not resume_from or len(resume_from) > 140):
+		frappe.throw(_("Invalid refresh run."), frappe.ValidationError)
+	current = ai_jobs.attach_refresh(ref.docname)
+	if current:
+		return {"ok": True, "status": "already_running", "session_uuid": ref.session_uuid, "refresh": current}
+	ratelimit.enforce_user_rate_limit("refill_ai_requests", limit=60, seconds=60)
 	cfg = get_config()
-	doc = frappe.get_doc("Optimus Session", row["name"])
 
-	# v0.13: count this refresh (cumulative; only ever increases). Portable
-	# read-modify-write off the already-loaded doc; update_modified=False so
-	# this counter bump doesn't touch `modified` (the health 24h query filters
-	# on it). Refresh is user-initiated + rate-limited, so the non-atomic
-	# increment is acceptable.
-	frappe.db.set_value(
-		"Optimus Session", doc.name, "ai_refresh_count",
-		(getattr(doc, "ai_refresh_count", 0) or 0) + 1,
-		update_modified=False,
-	)
+	def start_refresh():
+		try:
+			return ai_jobs.start_refresh(
+				docname=ref.docname, session_uuid=ref.session_uuid, requested_by=frappe.session.user,
+				regenerate_all=regenerate_all, cap=cfg.ai_refresh_max_findings,
+				include_fixes=bool(cfg.ai_suggest_findings), include_steps=bool(cfg.ai_humanize_steps),
+				resume_from=resume_from, retry_uncertain=retry_uncertain,
+			)
+		except ai_jobs.StopRefresh as exc:
+			return {"status": "refused", "reason": exc.reason}
 
-	fixes = {"added": 0, "failed": 0, "skipped_time": 0, "skipped": None}
-	if cfg.ai_suggest_findings:
-		counts = _analyze_mod._run_ai_backfill(doc, cap=0, regenerate_all=True)
-		fixes = {
-			"added": counts.get("added", 0),
-			"failed": counts.get("failed", 0),
-			"skipped_time": counts.get("skipped_time", 0),
-			"skipped": None,
-		}
-	else:
-		fixes["skipped"] = "toggle_off"
+	out, failed = analyze._run_ai_step(start_refresh, title="optimus ai refresh admission", session_uuid=ref.session_uuid)
+	if failed:
+		out = {"status": "unknown"}
+	out.update(ok=out["status"] in {"queued", "already_running"}, session_uuid=ref.session_uuid)
+	if out["status"] == "refused":
+		out["message"] = ai_jobs.admission_message(out.get("reason"))
+	return out
 
-	steps = {"updated": False, "reason": None}
-	if cfg.ai_humanize_steps:
-		# Re-fetch the doc the backfill above may have mutated rows.
-		doc = frappe.get_doc("Optimus Session", row["name"])
-		steps = _humanize_steps_core(doc, title=row.get("title") or None)
-	else:
-		steps["reason"] = "toggle_off"
 
-	indexes = {"added": 0, "failed": 0, "skipped": 0, "skipped_reason": None}
-	if cfg.ai_suggest_indexes:
-		doc = frappe.get_doc("Optimus Session", row["name"])
-		indexes = _refill_indexes_for_doc(doc)
-		indexes["skipped_reason"] = None
-	else:
-		indexes["skipped_reason"] = "toggle_off"
+@frappe.whitelist()
+def ai_refresh_status(session_uuid: str) -> dict:
+	"""Read SQL progress even during a queue outage. No per-user polling limit."""
+	user = _require_user()
+	docname = _require_session_permission(session_uuid)
+	from optimus import ai_jobs, analyze
 
-	regen = regenerate_reports(session_uuid)
-	return {
-		"ok": True,
-		"session_uuid": session_uuid,
-		"fixes": fixes,
-		"steps": steps,
-		"indexes": indexes,
-		"regenerated": bool(regen.get("regenerated")),
-	}
+	def status_view():
+		refresh = ai_jobs.refresh_state(docname)
+		doc = frappe.get_doc("Optimus Session", docname)
+		can_write = frappe.has_permission("Optimus Session", "write", docname, user=user)
+		can_act = is_profiler_user(user) and may_act_on_session(
+			user=user, owner=doc.owner or "", can_read=True,
+			can_write=bool(can_write),
+		)
+		busy = bool(refresh and refresh["state"] in {"queued", "running", "unknown"})
+		plan = ai_jobs.refresh_plan(doc) if can_act and not busy and doc.status == "Ready" else None
+		return {"status": "ok", "refresh": refresh, "can_act": can_act, "plan": plan,
+			"session_uncertain_count": len(ai_jobs.uncertain_attempts(docname))}
+
+	out, failed = analyze._run_ai_step(status_view, title="optimus ai refresh status", session_uuid=session_uuid)
+	return {"status": "unknown", "refresh": None, "can_act": False, "plan": None} if failed else out
+
+
+@frappe.whitelist(methods=["POST"])
+def cancel_ai_refresh(session_uuid: str, run_id: str) -> dict:
+	"""Cancel only the specified run of an authorized parent, without Redis."""
+	ref = _session_action_gate(session_uuid, action="cancel_ai_refresh", statuses=())
+	from optimus import ai_jobs
+	from optimus import ai_refresh_store as store
+
+	if (not isinstance(run_id, str) or not run_id or len(run_id) > 140
+		or frappe.db.get_value(store.RUN, {"name": run_id, "session_name": ref.docname}, "name") != run_id):
+		frappe.throw(_("No matching AI refresh was found for this session."), frappe.ValidationError)
+	out = ai_jobs.cancel_refresh(run_id, docname=ref.docname, requested_by=frappe.session.user)
+	if out["status"] == "cancelled":
+		return {"status": "ok", "refresh": out["refresh"]}
+	return {**out, "message": ai_jobs.admission_message(out.get("reason"))}
 
 
 @frappe.whitelist()
@@ -2043,14 +1802,17 @@ def get_phase2_candidates(session_uuid: str) -> dict:
 	}
 
 
-@frappe.whitelist()
-def start_line_profile_pass(session_uuid: str, picks, auto_expand=True) -> dict:
+@frappe.whitelist(methods=["POST"])
+def start_line_profile_pass(session_uuid: str, picks: str | list, auto_expand: bool = True) -> dict:
 	"""Begin a phase-2 line-profile run on a finished session.
 
 	``picks`` is a JSON-encoded (or parsed) list of ``{dotted_path, source}``
 	entries. When ``auto_expand`` is true (default), each curated pick is
 	walked down phase-1's call tree (``picker.expand_hot_chain``) so the run
 	instruments the full hot chain; free-form picks pass through unchanged.
+
+	Gated by ``_session_action_gate`` (Ready session; owner, System Manager or write-sharee). The
+	run instruments the caller's own requests, so ``user`` is the caller.
 	"""
 	import json as _json
 	import uuid as _uuid
@@ -2058,22 +1820,27 @@ def start_line_profile_pass(session_uuid: str, picks, auto_expand=True) -> dict:
 	from optimus.line_profile import capture as _lp_capture
 	from optimus.line_profile import picker as _lp_picker
 
-	user = _require_profiler_user()
-	# SECURITY: ownership gate this instruments code and writes Phase Two Run
-	# rows onto the session (save(ignore_permissions=True)). Only the owner /
-	# System Manager may start a pass on it.
-	_require_session_permission(session_uuid, "write")
+	ref = _session_action_gate(session_uuid, action="start_line_profile_pass")
+	ratelimit.enforce_user_rate_limit("start_line_profile_pass", **_ACTION_LIMITS["start_line_profile_pass"])
+	user = frappe.session.user
+	parent_docname = ref.docname
 
 	# The picks arg often arrives as a string from JS accept both shapes.
 	if isinstance(picks, str):
+		if len(picks) > 64000:
+			frappe.throw(_("The selected function list is too large."), frappe.ValidationError, title=_("Optimus"))
 		try:
 			picks_list = _json.loads(picks)
-		except _json.JSONDecodeError:
-			frappe.throw(_("picks must be a JSON list of {dotted_path, source} entries."))
+		except (_json.JSONDecodeError, RecursionError):
+			frappe.throw(_("picks must be a JSON list of {dotted_path, source} entries."), frappe.ValidationError, title=_("Optimus"))
 	else:
 		picks_list = picks
 	if not isinstance(picks_list, list) or not picks_list:
-		frappe.throw(_("Provide at least one function to line-profile."))
+		frappe.throw(_("Provide at least one function to line-profile."), frappe.ValidationError, title=_("Optimus"))
+	try:
+		_lp_capture.validate_picks(picks_list)
+	except _lp_capture.CaptureError as exc:
+		frappe.throw(str(exc), frappe.ValidationError, title=_("Optimus"))
 
 	# Coerce auto_expand from the JS payload (frappe.call sends "true"/"false"
 	# strings; whitelisted view fns accept Python types when available).
@@ -2085,30 +1852,15 @@ def start_line_profile_pass(session_uuid: str, picks, auto_expand=True) -> dict:
 	# read separate Redis flags but only one can be active at a time.
 	if session.get_active_session_for(user):
 		frappe.throw(
-			_("You currently have a phase-1 session recording. Stop it before "
-			"starting a phase-2 line-profile run."),
+			_("You currently have a phase-1 session recording. Stop it before starting a phase-2 line-profile run."),
+			frappe.ValidationError,
+			title=_("Optimus"),
 		)
 
-	# Look up the parent Optimus Session and verify it's Ready.
-	parent_docname = frappe.db.get_value(
-		"Optimus Session",
-		{"session_uuid": session_uuid},
-		"name",
-	)
-	if not parent_docname:
-		frappe.throw(_("Optimus Session {0!r} not found.").format(session_uuid))
-	parent_status = frappe.db.get_value("Optimus Session", parent_docname, "status")
-	if parent_status != "Ready":
-		frappe.throw(
-			_(
-				"Phase-2 requires a finished session (status=Ready); current "
-				"status is {0!r}."
-			).format(parent_status)
-		)
 
 	# Reject if the user already has a phase-2 run in flight elsewhere.
-	if _lp_capture.is_active(user):
-		frappe.throw(_("You already have a phase-2 line-profile run active."))
+	if _lp_capture.is_active(user, fresh=True):
+		frappe.throw(_("You already have a phase-2 line-profile run active."), frappe.ValidationError, title=_("Optimus"))
 
 	# Auto-expand curated picks via phase-1's call tree. Curated picks come
 	# in as {dotted_path, source: "curated"}; the expansion adds their hot
@@ -2116,6 +1868,7 @@ def start_line_profile_pass(session_uuid: str, picks, auto_expand=True) -> dict:
 	# (source != "curated") aren't expanded we don't know if they appeared
 	# in phase 1 at all.
 	expansions: list[dict] = []
+	server_expanded: set[str] = set()
 	if auto_expand:
 		# Load the phase-1 call trees once so expand_hot_chain can search
 		# across all action recordings for the hottest match.
@@ -2182,6 +1935,8 @@ def start_line_profile_pass(session_uuid: str, picks, auto_expand=True) -> dict:
 			})
 			for chain_entry in chain:
 				cdp = chain_entry["dotted_path"]
+				if chain_entry["depth"] > 0:
+					server_expanded.add(cdp)
 				if cdp and cdp not in seen:
 					seen.add(cdp)
 					expanded_picks.append({
@@ -2190,39 +1945,32 @@ def start_line_profile_pass(session_uuid: str, picks, auto_expand=True) -> dict:
 					})
 		picks_list = expanded_picks
 		if not picks_list:
-			frappe.throw(_("Provide at least one function to line-profile."))
+			frappe.throw(_("Provide at least one function to line-profile."), frappe.ValidationError, title=_("Optimus"))
 
 	run_uuid = _uuid.uuid4().hex
-
-	# Resolve picks + persist Redis state. Raises CaptureError if no pick
-	# is eligible.
 	try:
-		resolved = _lp_capture.start_line_profile_pass(
-			session_uuid=session_uuid,
-			run_uuid=run_uuid,
-			user=user,
-			picks=picks_list,
-		)
+		prepared = (_lp_capture.prepare_line_profile_picks(picks_list, server_expanded=frozenset(server_expanded))
+			if server_expanded else _lp_capture.prepare_line_profile_picks(picks_list))
 	except _lp_capture.CaptureError as exc:
-		frappe.throw(str(exc))
+		frappe.throw(str(exc), frappe.ValidationError, title=_("Optimus"))
 
-	# Append the Phase 2 Run row in Recording status.
+	_lock_phase2_for_write(parent_docname)
+	_session_action_gate(session_uuid, action="start_line_profile_pass")
+	from optimus.settings import get_config
 	parent = frappe.get_doc("Optimus Session", parent_docname)
-	parent.append("phase_2_runs", {
-		"run_uuid": run_uuid,
-		"status": "Recording",
-		"started_at": now_datetime(),
-		"picks_json": frappe.as_json([
-			{"dotted_path": r["dotted_path"], "source": r.get("source", "freeform")}
-			for r in resolved if r.get("eligible")
-		]),
-	})
-	_save_parent_bypassing_perms(parent)
+	cap = get_config().phase2_max_runs_per_session
+	if cap > 0 and len(parent.phase_2_runs or []) >= cap:
+		frappe.throw(_("The Phase 2 run limit for this session has been reached."),
+			frappe.ValidationError, title=_("Optimus"))
+	resolved = _persist_phase2_capture(parent, parent_docname, session_uuid, run_uuid, user, prepared)
 
-	frappe.publish_realtime("phase_2_run_recording", {
+	from optimus.realtime import publish_session_event
+	publish_session_event("phase_2_run_recording", {
 		"session_uuid": session_uuid,
+		"docname": parent_docname,
 		"run_uuid": run_uuid,
-	}, user=user)
+		"user": user,
+	})
 
 	return {
 		"run_uuid": run_uuid,
@@ -2234,257 +1982,133 @@ def start_line_profile_pass(session_uuid: str, picks, auto_expand=True) -> dict:
 	}
 
 
-@frappe.whitelist()
-def force_stop_phase2() -> dict:
-	"""Recovery endpoint: clears the calling user's phase-2 active flag and
-	marks any of their in-flight Phase 2 Run rows as Failed.
-
-	Idempotent safe to call when nothing is stuck. Use this when the
-	form rejects ``start_line_profile_pass`` with "phase-2 already
-	active" and the previous run never reached Stop (worker crash, tab
-	close, or interrupted reproduction).
-	"""
+def _persist_phase2_capture(parent, parent_docname, session_uuid, run_uuid, user, prepared):
+	"""Publish prepared input and save its actor under the caller's admission lock."""
+	from optimus import ai_fix as _ai_fix
 	from optimus.line_profile import capture as _lp_capture
-
-	user = _require_profiler_user()
-
-	cleared_run = _lp_capture.is_active(user)
-	# Always clear the flag, even if is_active returned None (defensive
-	# against stale frappe.local caches mid-test or after worker recycle).
-	_lp_capture.stop_line_profile_pass(cleared_run or "_unknown_", user)
-
-	# Mark any Recording rows the user owns as Failed so the form's child
-	# table reflects the recovery. We scope to rows where parent.user ==
-	# the calling user so a System Manager hitting this doesn't sweep
-	# other users' active runs.
-	# Portable, no join: the user's session names first, then their Recording
-	# Phase-2 Run child rows (parent == session name). Works on MariaDB + PG.
-	session_names = frappe.get_all(
-		"Optimus Session", filters={"user": user}, pluck="name"
-	)
-	stuck_rows = (
-		frappe.get_all(
-			"Optimus Phase Two Run",
-			filters={"status": "Recording", "parent": ["in", session_names]},
-			fields=["name", "parent", "run_uuid"],
-		)
-		if session_names
-		else []
-	)
-
-	# v0.6.x: group stuck rows by their parent Optimus Session so each
-	# parent doc is loaded + saved EXACTLY ONCE per batch (was N loads + N
-	# saves when one session held multiple stuck runs the common case
-	# for a user spamming the picker).
-	rows_by_parent: dict[str, list[dict]] = {}
-	for row in stuck_rows:
-		rows_by_parent.setdefault(row["parent"], []).append(row)
-
-	failed = 0
-	for parent_name, rows in rows_by_parent.items():
-		try:
-			parent = frappe.get_doc("Optimus Session", parent_name)
-			matched_in_parent = 0
-			wanted_uuids = {r["run_uuid"] for r in rows}
-			for child in (parent.phase_2_runs or []):
-				if child.run_uuid in wanted_uuids:
-					child.status = "Failed"
-					child.warnings_json = frappe.as_json([
-						"Force-stopped by user via api.force_stop_phase2.",
-					])
-					child.ended_at = now_datetime()
-					try:
-						_lp_capture.cleanup_run(child.run_uuid)
-					except Exception:
-						frappe.log_error(
-							title="force_stop_phase2 redis cleanup",
-							message=f"{parent_name}/{child.run_uuid}",
-						)
-					matched_in_parent += 1
-			if matched_in_parent:
-				parent.flags.ignore_validate_update_after_submit = True
-				parent.save(ignore_permissions=True)
-				failed += matched_in_parent
-		except Exception as exc:
-			frappe.log_error(
-				title="force_stop_phase2 parent save",
-				message=f"{parent_name}: {exc}",
+	from optimus.line_profile.jobs import capture_creation
+	guard = _ai_fix._InterruptGuard(base=True)
+	failure = None
+	try:
+		with guard:
+			resolved = _lp_capture.start_line_profile_pass(
+				session_uuid=session_uuid, run_uuid=run_uuid, user=user, prepared=prepared,
 			)
-	safe_commit()
+			parent.append("phase_2_runs", {
+				"run_uuid": run_uuid, "recording_user": user,
+				"status": "Recording", "started_at": now_datetime(),
+				"picks_json": frappe.as_json([
+					{"dotted_path": r["dotted_path"], "source": r.get("source", "freeform")}
+					for r in resolved if r.get("eligible")
+				]),
+			})
+			with capture_creation(parent_docname, run_uuid, user):
+				_save_parent_bypassing_perms(parent)
+	except Exception as exc:
+		failure = exc
+	if guard.pending() or failure is not None:
+		_cleanup_failed_capture(run_uuid, user, guard)
+		if guard.pending():
+			failure = prepared = None
+			raise guard.interrupt()
+		if isinstance(failure, _lp_capture.CaptureError):
+			frappe.throw(str(failure), frappe.ValidationError, title=_("Optimus"))
+		raise failure
 
-	return {
-		"cleared_active_flag": bool(cleared_run),
-		"prior_run_uuid": cleared_run,
-		"rows_marked_failed": failed,
-	}
+	return resolved
 
 
-@frappe.whitelist()
-def stop_line_profile_pass(run_uuid: str) -> dict:
-	"""End a phase-2 run, mark it Analyzing, enqueue the analyzer."""
-	from optimus.line_profile import capture as _lp_capture
+def _cleanup_failed_capture(run_uuid, user, guard):
+	"""Compensate only this admission, even if Redis lost its acknowledgement.
+	SQL/Redis cannot commit together. A hard process death leaves a bounded
+	active TTL; explicit force-stop recovers the orphan. An ambiguous SQL commit
+	may leave a Recording row whose missing input is reported as Failed later.
+	"""
+	from optimus import ai_fix as _ai_fix
+	from optimus.line_profile import capture
+	for action in (frappe.db.rollback, lambda: capture.stop_line_profile_pass(run_uuid, user),
+		lambda: capture.cleanup_run(run_uuid)):
+		failure_type = None
+		try:
+			with guard:
+				action()
+		except Exception as exc:
+			# Cleanup cannot hide the original failure. No captured data in logs.
+			failure_type = type(exc).__name__
+		if failure_type:
+			try:
+				with guard:
+					_ai_fix.log_ai_failure("optimus ai Phase 2 admission cleanup", RuntimeError(failure_type))
+			except Exception:
+				pass  # The caller still reports the admission failure.
+
+
+@frappe.whitelist(methods=["POST"])
+def force_stop_phase2() -> dict:
+	"""Recover only the caller's captures, with locked status and identity checks."""
+	from optimus.line_profile.jobs import force_stop_captures
 
 	user = _require_profiler_user()
-
-	# Find the run row + parent session. ``frappe.db.get_value`` with a
-	# filter dict + ``as_dict=True`` is the right primitive for a single
-	# child-table lookup on v16 Frappe's ``get_list`` against child
-	# DocTypes (``istable: 1``) occasionally returns rows where the
-	# requested ``Select`` columns are stripped, which surfaced as a
-	# ``KeyError: 'status'`` in production. ``_require_profiler_user()``
-	# already gates the endpoint; we don't need ``get_list``'s
-	# permission filter on top.
-	row = frappe.db.get_value(
-		"Optimus Phase Two Run",
-		{"run_uuid": run_uuid},
-		["name", "parent", "status"],
-		as_dict=True,
-	)
-	if not row:
-		frappe.throw(_("Phase 2 run {0!r} not found.").format(run_uuid))
-	if row.status != "Recording":
-		frappe.throw(_("Phase 2 run is in status {0!r}, not Recording.").format(row.status))
-
-	parent_docname = row.parent
-	session_uuid = frappe.db.get_value("Optimus Session", parent_docname, "session_uuid")
-	# SECURITY: ownership gate on the resolved parent session a run_uuid is not
-	# self-authorizing; only the session owner / System Manager may stop its run.
-	_require_session_permission(session_uuid, "write")
-
-	# Clear the active flag (capture won't instrument further requests).
-	_lp_capture.stop_line_profile_pass(run_uuid, user)
-
-	# Mark run Analyzing.
-	parent = frappe.get_doc("Optimus Session", parent_docname)
-	for child in (parent.phase_2_runs or []):
-		if child.run_uuid == run_uuid:
-			child.status = "Analyzing"
-			child.ended_at = now_datetime()
-			break
-	_save_parent_bypassing_perms(parent)
-
-	frappe.publish_realtime("phase_2_run_analyzing", {
-		"session_uuid": session_uuid,
-		"run_uuid": run_uuid,
-	}, user=user)
-
-	# When the scheduler is disabled (e.g. dev sites without
-	# `bench start`), no RQ worker will pick up the long-queue job and
-	# the run gets stuck in Analyzing. Mirror api.stop's inline fallback:
-	# run the analyzer in-process so the request completes with results.
-	from frappe.utils.scheduler import is_scheduler_disabled
-
-	run_inline = False
-	try:
-		run_inline = bool(is_scheduler_disabled())
-	except Exception:
-		frappe.log_error(title="optimus phase-2 scheduler check")
-
-	if run_inline:
-		frappe.logger().warning(
-			f"optimus: scheduler disabled; running phase-2 "
-			f"analyze inline for run {run_uuid}. Caller will block."
-		)
-		from optimus.line_profile import analyzer as _lp_analyzer
-
-		try:
-			_lp_analyzer.run_analyze(session_uuid, run_uuid)
-		except Exception as exc:
-			# run_analyze marks the run Failed itself; surface the error
-			# in the API response so the caller isn't silently puzzled.
-			return {
-				"run_uuid": run_uuid,
-				"session_uuid": session_uuid,
-				"status": "Failed",
-				"error": str(exc),
-				"ran_inline": True,
-			}
-		return {
-			"run_uuid": run_uuid,
-			"session_uuid": session_uuid,
-			"status": "Ready",
-			"ran_inline": True,
-		}
-
-	# Otherwise enqueue normally.
-	frappe.enqueue(
-		"optimus.line_profile.analyzer.run_analyze",
-		queue="long",
-		timeout=25 * 60,
-		session_uuid=session_uuid,
-		run_uuid=run_uuid,
-	)
-
-	return {
-		"run_uuid": run_uuid,
-		"session_uuid": session_uuid,
-		"status": "Analyzing",
-	}
+	ratelimit.enforce_user_rate_limit("force_stop_phase2", **_ACTION_LIMITS["stop_line_profile_pass"])
+	return force_stop_captures(user)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
+def stop_line_profile_pass(run_uuid: str) -> dict:
+	"""Stop capture and queue durable Phase 2 analysis; never compute inline."""
+	ref, _run = _phase2_run_gate(run_uuid, action="stop_line_profile_pass", run_statuses=("Recording",))
+	ratelimit.enforce_user_rate_limit("stop_line_profile_pass", **_ACTION_LIMITS["stop_line_profile_pass"])
+	from optimus.line_profile import capture as _lp_capture
+	from optimus.line_profile import jobs as _lp_jobs
+
+	_lp_capture.stop_line_profile_pass(run_uuid, _run.get("recording_user") or ref.user)
+	return _phase2_admission_result(_lp_jobs.request(
+		ref.docname, ref.session_uuid, run_uuid, frappe.session.user, from_recording=True,
+	))
+
+
+@frappe.whitelist(methods=["POST"])
 def retry_phase2_analyze(run_uuid: str) -> dict:
-	"""Re-trigger run_analyze for a Phase 2 Run row stuck in Analyzing or
-	Failed. Useful when the original RQ enqueue never landed (no worker)
-	or when the analyzer crashed and the user wants another shot.
+	"""Queue a bounded retry, or attach to its current live analysis generation.
 
-	Resets the row to Analyzing, then runs inline so the response carries
-	the final status (Ready or Failed) no waiting for a worker to come
-	online.
+	Permissions and the per-user limit precede admission. Analyzing means
+	queued or running; completion arrives through the saved row/realtime event.
 	"""
-	from optimus.line_profile import analyzer as _lp_analyzer
+	ref, _run = _phase2_run_gate(run_uuid, action="retry_phase2_analyze", run_statuses=("Analyzing", "Failed"))
+	ratelimit.enforce_user_rate_limit("retry_phase2_analyze", **_ACTION_LIMITS["retry_phase2_analyze"])
+	from optimus.line_profile import jobs as _lp_jobs
 
-	_require_profiler_user()
+	return _phase2_admission_result(_lp_jobs.request(ref.docname, ref.session_uuid, run_uuid, frappe.session.user))
 
-	# See ``stop_line_profile_pass`` for why this uses ``db.get_value``
-	# instead of ``get_list`` (child-table ``get_list`` strips ``Select``
-	# columns in v16, producing ``KeyError: 'status'`` at runtime).
-	row = frappe.db.get_value(
-		"Optimus Phase Two Run",
-		{"run_uuid": run_uuid},
-		["name", "parent", "status"],
-		as_dict=True,
-	)
-	if not row:
-		frappe.throw(_("Phase 2 run {0!r} not found.").format(run_uuid))
-	parent_docname = row.parent
-	session_uuid = frappe.db.get_value("Optimus Session", parent_docname, "session_uuid")
-	# SECURITY: ownership gate on the resolved parent session (run_uuid alone is
-	# not self-authorizing).
-	_require_session_permission(session_uuid, "write")
 
-	# Reset to Analyzing so the realtime event flow still makes sense.
-	parent = frappe.get_doc("Optimus Session", parent_docname)
-	for child in (parent.phase_2_runs or []):
-		if child.run_uuid == run_uuid:
-			child.status = "Analyzing"
-			break
-	_save_parent_bypassing_perms(parent)
-
-	try:
-		_lp_analyzer.run_analyze(session_uuid, run_uuid)
-	except Exception as exc:
-		return {
-			"run_uuid": run_uuid,
-			"session_uuid": session_uuid,
-			"status": "Failed",
-			"error": str(exc),
+def _phase2_admission_result(out: dict) -> dict:
+	if out["status"] == "Refused":
+		messages = {
+			"no_worker": _("Phase 2 needs a worker listening on the long queue. Start a worker and retry analysis."),
+			"queue_unavailable": _("Phase 2 worker availability could not be checked. Check Redis and the long queue worker, then retry analysis."),
+			"ai_refresh": _("Wait for the AI refresh to finish or cancel it before retrying Phase 2."),
+			"not_ready": _("Phase 2 requires a Ready session. Wait for profiling analysis to finish."),
+			"not_retryable": _("This Phase 2 run is no longer retryable. Reload the session."),
+			"retry_limit": _("Phase 2 retry limit reached. Record a new line-profile pass."),
+			"permission": _("Session permissions changed. Reload the session before retrying."),
 		}
-	return {
-		"run_uuid": run_uuid,
-		"session_uuid": session_uuid,
-		"status": "Ready",
-	}
+		frappe.throw(messages.get(out.get("reason"), _("The Phase 2 run is unavailable. Reload the session.")),
+			frappe.ValidationError, title=_("Optimus"))
+	return out
 
 
-@frappe.whitelist()
-def retry_phase2_analyzes_batch(run_uuids) -> dict:
+@frappe.whitelist(methods=["POST"])
+def retry_phase2_analyzes_batch(run_uuids: str | list) -> dict:
 	"""Batch variant of ``retry_phase2_analyze``: retries a list of
 	``run_uuid``s in a single server round-trip instead of N client calls.
 
-	Per-run failures are isolated (one bad retry doesn't abort the rest).
-	The response carries a per-run status list plus an aggregate tally."""
+	At most five entries are accepted; duplicate runs are retried once.
+	Each retry uses the single-run per-user limit. A limit refusal stops the
+	batch; other per-run failures are isolated. The response carries a per-run
+	status list plus an aggregate tally."""
 	import json as _json
+
+	from optimus.ai_fix import _InterruptGuard
 
 	_require_profiler_user()
 
@@ -2495,25 +2119,42 @@ def retry_phase2_analyzes_batch(run_uuids) -> dict:
 		try:
 			run_uuids = _json.loads(run_uuids)
 		except (TypeError, ValueError):
-			frappe.throw(_("run_uuids must be a JSON array of run-uuid strings."))
+			frappe.throw(_("run_uuids must be a JSON array of run-uuid strings."), frappe.ValidationError, title=_("Optimus"))
 	if not isinstance(run_uuids, (list, tuple)) or not run_uuids:
-		frappe.throw(_("run_uuids must be a non-empty list of run-uuid strings."))
+		frappe.throw(_("run_uuids must be a non-empty list of run-uuid strings."), frappe.ValidationError, title=_("Optimus"))
 
+	if len(run_uuids) > 5:
+		frappe.throw(_("Retry at most 5 Phase 2 runs per request."), frappe.ValidationError, title=_("Optimus"))
+
+	seen: set[str] = set()
 	results: list[dict] = []
 	for run_uuid in run_uuids:
 		if not isinstance(run_uuid, str) or not run_uuid.strip():
 			results.append({"run_uuid": run_uuid, "status": "Skipped",
 			                "error": "empty / non-string run_uuid"})
 			continue
+		if run_uuid in seen:
+			continue
+		seen.add(run_uuid)
+		failure_kind = None
+		guard = _InterruptGuard(base=True)
 		try:
-			results.append(retry_phase2_analyze(run_uuid))
+			with guard:
+				results.append(retry_phase2_analyze(run_uuid))
+		except frappe.RateLimitExceededError:
+			raise
 		except Exception as exc:
-			# Don't let one bad row abort the rest of the batch.
+			failure_kind = type(exc).__name__
+			# Keep exception text out of the RPC response.
 			results.append({
 				"run_uuid": run_uuid,
 				"status": "Failed",
-				"error": str(exc),
+				"error": _("Phase 2 retry could not be confirmed. Reload the run before retrying; ask your administrator if it keeps failing."),
 			})
+		if guard.pending():
+			raise guard.interrupt()
+		if failure_kind and failure_kind not in {"ValidationError", "PermissionError", "DoesNotExistError"}:
+			safe_call.log_error_line(f"Optimus Phase 2 retry failed ({failure_kind}).")
 
 	# Quick aggregate for the UI to render a single message.
 	tallies = {"Ready": 0, "Failed": 0, "Analyzing": 0, "Skipped": 0}

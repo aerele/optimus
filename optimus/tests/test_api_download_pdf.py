@@ -6,6 +6,7 @@
 import pytest
 
 from optimus import api
+from optimus.tests.gate_fakes import install_handler_context
 
 
 class FakeDB:
@@ -28,6 +29,7 @@ class FakeDB:
 def fake_env(monkeypatch):
 	import frappe
 
+	install_handler_context(monkeypatch)
 	rows = {
 		"uuid-001": {"name": "PS-001", "user": "Administrator", "status": "Ready"},
 		"uuid-failed": {"name": "PS-failed", "user": "Administrator", "status": "Failed"},
@@ -52,6 +54,9 @@ def fake_env(monkeypatch):
 		fake_get_or_generate_pdf,
 		raising=False,
 	)
+
+	# PR-1: download_pdf counts a per-user limit (Redis); these tests cover the PDF path only.
+	monkeypatch.setattr(api.ratelimit, "enforce_user_rate_limit", lambda *a, **k: None)
 
 
 def test_download_pdf_returns_file_url(fake_env):

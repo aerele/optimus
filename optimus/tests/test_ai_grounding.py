@@ -1,0 +1,494 @@
+# Copyright (c) 2026, Optimus contributors
+# For license information, please see license.txt
+
+"""ai_grounding: the one source-window helper, and the loop chain around a callsite
+from the whole file's AST, formatted only for the lines the prompt
+still shows."""
+
+import ast
+
+import pytest
+
+from optimus import ai_grounding as g
+
+
+def _facts(lines, target):
+	return g.loop_facts_from_tree(ast.parse("\n".join(lines)), target)
+
+
+def _text(lines, target, *, first=1, last=None, caller_hint=False):
+	return g.format_loop_facts(
+		_facts(lines, target), first_line=first, last_line=last or len(lines), caller_hint=caller_hint,
+	)
+
+
+CHECK_USER = [
+	"def _check_user_exists(doc):",
+	"    for i in range(150):",
+	"        user = frappe.get_doc(\"User\", frappe.session.user)",
+	"        roles = frappe.db.sql(",
+	"            \"SELECT role FROM `tabHas Role` WHERE parent=%s\",",
+	"            (frappe.session.user,),",
+	"            as_dict=True,",
+	"        )",
+	"        if user.enabled:",
+	"            for _r in roles:",
+	"                pass",
+]
+DEMO_ORDER = [
+	"class DemoOrder(Document):",
+	"\tdef validate(self):",
+	"\t\tfor d in self.items:",
+	"\t\t\tuom = frappe.db.get_value(\"Item\", d.item_code, \"stock_uom\")",
+	"\t\t\td.uom = uom",
+	"\t\tfor d in self.items:",
+	"\t\t\titem = frappe.get_doc(\"Item\", d.item_code)",
+	"\t\t\titem.last_ordered = frappe.utils.today()",
+	"\t\t\titem.save()",
+]
+NESTED = [
+	"def post(invoices):",
+	"\tfor inv in invoices:",
+	"\t\tfor row in inv.items:",
+	"\t\t\trate = frappe.db.get_value('Item Price', {'item_code': row.item_code, 'price_list': inv.price_list}, 'rate')",
+	"\t\t\trow.rate = rate",
+	"\t\tinv.db_update()",
+]
+
+
+class TestGroundingWindow:
+	def test_a_small_function_is_shown_whole(self):
+		lines = ["import os", "", "def f(doc):", "\treturn doc.owner", "", "def g():", "\tpass"]
+		window = g.grounding_window(lines, 4, 24, 24)
+		assert [r["lineno"] for r in window.rows] == [3, 4] and (window.start, window.end) == (3, 4)
+		assert [r["lineno"] for r in window.rows if r["is_target"]] == [4]
+		assert isinstance(window.tree, ast.Module)
+
+	def test_decorators_and_the_outer_function_are_included(self):
+		lines = ["@decorator", "def outer(items):", "\tfor item in items:", "\t\tdef inner():",
+			"\t\t\treturn item.name", "\t\tinner()"]
+		assert [r["lineno"] for r in g.grounding_window(lines, 5, 24, 24).rows] == list(range(1, 7))
+
+	def test_an_80_line_function_is_whole_and_81_falls_back(self):
+		"""The max_lines boundary."""
+		fits = ["def f():"] + ["\tx = 1"] * 79
+		window = g.grounding_window(fits + ["", "y = 2"], 40, 24, 24)
+		assert (window.start, window.end) == (1, 80)
+		too_big = ["def f():"] + ["\tx = 1"] * 80
+		window = g.grounding_window(too_big, 40, 24, 24)
+		assert (window.start, window.end) == (16, 64)
+
+	def test_the_fallback_uses_before_and_after_as_given(self):
+		"""An asymmetric fallback."""
+		window = g.grounding_window(["value = 0"] * 121, 61, 10, 30)
+		assert (window.start, window.end, len(window.rows)) == (51, 91, 41)
+
+	def test_max_lines_is_honoured(self):
+		lines = ["def f():"] + ["\tx = 1"] * 9
+		window = g.grounding_window(lines, 5, 2, 2, max_lines=10)
+		assert (window.start, window.end) == (1, 10)
+		window = g.grounding_window(lines, 5, 2, 2, max_lines=9)
+		assert (window.start, window.end) == (3, 7)
+
+	def test_an_unparseable_file_falls_back_and_has_no_tree(self):
+		# A real syntax error: ast.parse accepts a module-level "return" (only compile rejects it).
+		lines = [f"x{i} = {i}" for i in range(60)] + ["def broken(:"] + [f"y{i} = {i}" for i in range(60)]
+		window = g.grounding_window(lines, 61, 24, 24)
+		assert (window.start, window.end, window.tree) == (37, 85, None)
+
+	def test_a_long_line_is_capped(self):
+		window = g.grounding_window(["def f():", "\tvalue = '" + "a" * 400 + "'"], 2, 24, 24, max_line_chars=200)
+		assert len(window.rows[1]["content"]) == 203 and window.rows[1]["content"].endswith("...")
+
+	@pytest.mark.parametrize("target", [0, -1, 3, True, "1", None])
+	def test_an_invalid_target_has_no_rows(self, target):
+		assert g.grounding_window(["def f():", "\tpass"], target, 24, 24).rows == []
+
+
+class TestLoopChain:
+	def test_invariant_sql_in_a_loop(self):
+		facts = _facts(CHECK_USER, 4)
+		assert (facts["call"], facts["call_line"], [loop["line"] for loop in facts["loops"]]) == ("frappe.db.sql", 4, [2])
+		assert _text(CHECK_USER, 4) == (
+			"The marked line runs inside the for loop on line 2. The call frappe.db.sql uses no variable "
+			"that changes in that loop. The result of frappe.db.sql is used. The profiler sees no database "
+			"write inside this loop in the code shown."
+		)
+
+	def test_the_call_depends_on_the_loop_variable(self):
+		assert _text(DEMO_ORDER, 4) == (
+			"The marked line runs inside the for loop on line 3. The call frappe.db.get_value uses "
+			"variables that change in that loop: d. The result of frappe.db.get_value is used. The profiler "
+			"sees no database write inside this loop in the code shown."
+		)
+
+	def test_writes_in_the_loop_are_reported(self):
+		assert "Inside this loop the code also writes through: item.save." in _text(DEMO_ORDER, 7)
+
+	def test_nested_loops_report_the_whole_chain(self):
+		"""The outer loop's variable is reported, not only the innermost loop's."""
+		assert _text(NESTED, 4) == (
+			"The marked line runs inside the for loop on line 3, which runs inside the for loop on line 2. "
+			"The call frappe.db.get_value uses variables that change in the loop on line 3: row. "
+			"The call frappe.db.get_value uses variables that change in the loop on line 2: inv, row. "
+			"The result of frappe.db.get_value is used. "
+			"Inside these loops the code also writes through: inv.db_update."
+		)
+
+	def test_a_walrus_while_header_is_in_the_loop(self):
+		"""A while header that assigns with := runs on every pass, so it is part of the loop."""
+		lines = [
+			"def drain():",
+			"\twhile (row := frappe.db.get_value('Queue', {'status': 'Open'}, 'name')):",
+			"\t\tfrappe.db.set_value('Queue', row, 'status', 'Done')",
+		]
+		facts = _facts(lines, 2)
+		assert facts["in_loop"] and facts["loops"][0]["kind"] == "while"
+		assert ["frappe.db.set_value", 3] in facts["loops"][0]["writes"]
+
+	def test_the_element_line_of_a_multi_line_comprehension(self):
+		"""The element line of a comprehension spread over several lines is inside its loop."""
+		lines = ["def names(codes):", "\treturn [", "\t\tfrappe.db.get_value('Item', d, 'item_name')",
+			"\t\tfor d in codes", "\t]"]
+		assert "uses variables that change in that loop: d." in _text(lines, 3)
+		assert _facts(lines, 3)["loops"][0]["kind"] == "comprehension"
+
+	def test_a_comprehension_inside_a_for_loop_keeps_the_outer_loop(self):
+		"""The statement holding a comprehension no longer hides the for loop."""
+		lines = ["def f(orders):", "\tfor o in orders:",
+			"\t\tnames = [frappe.db.get_value('Item', d.item_code, 'item_name') for d in o.items]"]
+		assert [(loop["kind"], loop["line"]) for loop in _facts(lines, 3)["loops"]] == [("comprehension", 3), ("for", 2)]
+
+	def test_an_attribute_target_binds_no_name(self):
+		"""self.total += d.amount does not make self loop-variant."""
+		lines = ["def total(self):", "\tfor d in self.items:", "\t\tself.total += d.amount",
+			"\t\tfrappe.db.get_value('Company', self.company, 'default_currency')"]
+		text = _text(lines, 4)
+		assert "uses no variable that changes in that loop" in text
+		assert "The result of frappe.db.get_value is not used." in text
+
+	def test_a_stored_key_or_attribute_the_call_reads_changes_in_the_loop(self):
+		"""status_updater's args['detail_id'] = ... then .format(**args), and
+		batch.py's self.batch_id = ... then frappe.db.exists('Batch', self.batch_id)."""
+		lines = [
+			"def update_children(self, args):",
+			"\tfor d in self.get_all_children():",
+			"\t\targs['detail_id'] = d.get(args['join_field'])",
+			"\t\tfrappe.db.sql(\"update `tab{target_dt}` set qty = 1 where name = '{detail_id}'\".format(**args))",
+		]
+		assert "uses variables that change in that loop: args." in _text(lines, 4)
+		batch = [
+			"def autoname(self):",
+			"\twhile not self.batch_id:",
+			"\t\tself.batch_id = get_name_from_hash()",
+			"\t\tif frappe.db.exists('Batch', self.batch_id):",
+			"\t\t\tself.batch_id = None",
+		]
+		assert "uses variables that change in that loop: self." in _text(batch, 4)
+
+	def test_a_stored_path_counts_only_when_the_call_reads_an_overlapping_one(self):
+		"""F2: paths overlap when one is a prefix of the other; a computed key matches any key."""
+		def text(store, read, op="="):
+			lines = ["def f(rows, cache):", "\tfor r in rows:", f"\t\t{store} {op} r", f"\t\tfrappe.get_doc('Item', {read})"]
+			return _text(lines, 4)
+
+		assert "change in that loop: cache." in text("cache[r.name]", "cache['x']")
+		assert "change in that loop: cache." in text("cache['x']", "cache")
+		assert "change in that loop: cache." in text("cache['n']", "cache['n']", "+=")
+		assert "uses no variable that changes" in text("cache['a']", "cache['b']")
+		assert "uses no variable that changes" in text("cache.total", "cache.company")
+		# Only the stored path counts, not the paths the target reads on the way.
+		assert "uses no variable that changes" in text("cache[r.idx].qty", "cache[0].rate")
+
+	def test_a_subscript_receiver_write_is_seen(self):
+		"""A write through a subscripted receiver (self.items[i].db_update()) counts as a write in the loop."""
+		lines = ["def save_rows(self):", "\tfor i in range(len(self.items)):",
+			"\t\tfrappe.get_doc('Item', self.items[i].item_code)", "\t\tself.items[i].db_update()"]
+		text = _text(lines, 3)
+		assert "self.items[].db_update" in text and "in that loop: i." in text
+
+	def test_formatted_sql_writes_are_seen(self):
+		"""f-string, .format and % SQL writes."""
+		lines = [
+			"def mark(names):",
+			"\tfor n in names:",
+			"\t\tfrappe.get_doc('Item', n)",
+			"\t\tfrappe.db.sql(f\"UPDATE `tabItem` SET disabled = 1 WHERE name = '{n}'\")",
+			"\t\tfrappe.db.sql(\"DELETE FROM `tabBin` WHERE item_code = '{}'\".format(n))",
+			"\t\tfrappe.db.sql(\"INSERT INTO `tabLog` VALUES ('%s')\" % n)",
+		]
+		assert "frappe.db.sql(DELETE), frappe.db.sql(INSERT), frappe.db.sql(UPDATE)" in _text(lines, 3)
+
+	def test_a_query_builder_write_chain_is_seen(self):
+		"""frappe.qb update, insert and delete chains that end in .run()."""
+		lines = [
+			"def close(names):",
+			"\tfor n in names:",
+			"\t\tfrappe.get_doc('Item', n)",
+			"\t\tfrappe.qb.update(item).set(item.disabled, 1).where(item.name == n).run()",
+			"\t\tqb.into(log).insert((n, 'closed')).run()",
+			"\t\tfrappe.qb.from_(bin_).delete().where(bin_.item_code == n).run()",
+			"\t\tfrappe.qb.from_(bin_).select(bin_.name).where(bin_.item_code == n).run()",
+			"\t\tfrappe.qb.update(item).set(item.disabled, 0)",
+		]
+		assert _facts(lines, 3)["loops"][0]["writes"] == [
+			["frappe.qb.update", 4], ["frappe.qb.into", 5], ["frappe.qb.from_().delete", 6],
+		]
+		assert "writes through: frappe.qb.from_().delete, frappe.qb.into, frappe.qb.update." in _text(lines, 3)
+
+	def test_async_for_with_match(self):
+		"""async and match shapes."""
+		lines = ["async def f(rows):", "\tasync for r in rows:", "\t\tmatch r.kind:", "\t\t\tcase 'item':",
+			"\t\t\t\tawait frappe.get_doc('Item', r.name)"]
+		facts = _facts(lines, 5)
+		assert facts["loops"][0]["kind"] == "for" and facts["result_used"] is False
+		assert "in that loop: r." in _text(lines, 5)
+
+	def test_a_generator_yield_uses_the_result(self):
+		"""Generator shape."""
+		lines = ["def rows(names):", "\tfor n in names:", "\t\tyield frappe.get_doc('Item', n)"]
+		assert _facts(lines, 3)["result_used"] is True
+
+	def test_a_call_in_the_for_iterable_runs_once(self):
+		assert _facts(["def f():", "\tfor d in frappe.get_all('Item'):", "\t\tpass"], 2) == {"in_loop": False}
+
+	def test_a_lambda_inside_a_loop_stops_the_walk(self):
+		lines = ["def f(rows):", "\tfor r in rows:", "\t\tkey = lambda x: frappe.get_doc('Item', x)"]
+		assert _facts(lines, 3) == {"in_loop": False}
+
+	def test_a_call_in_a_comprehension_filter_runs_every_pass(self):
+		"""Kept from the deleted test_fix_recipes_boundaries.py."""
+		facts = _facts(["def f(names):", "\treturn [name for name in names if frappe.db.exists('Item', name)]"], 2)
+		assert (facts["call"], facts["loops"][0]["kind"], facts["loops"][0]["bound"]) == (
+			"frappe.db.exists", "comprehension", [["name", 2]],
+		)
+
+	def test_the_loop_receiver_is_a_variable_the_call_uses(self):
+		"""Kept from the deleted test_fix_recipes_boundaries.py."""
+		assert "in that loop: doc." in _text(["def f(docs):", "\tfor doc in docs:", "\t\tdoc.reload()"], 3)
+
+	def test_a_multi_line_for_header(self):
+		"""Kept from the deleted test_fix_recipes_loop_facts.py."""
+		lines = ["def f():", "\tfor d in frappe.get_all(", "\t\t'Item',", "\t\tfilters={'disabled': 0},", "\t):",
+			"\t\tfoo(d.name)", "\treturn 1"]
+		facts = _facts(lines, 6)
+		assert (facts["call"], facts["loops"][0]["line"], facts["result_used"]) == ("foo", 2, False)
+
+	def test_code_after_the_loop_is_not_in_it(self):
+		"""Kept from the deleted test_fix_recipes_loop_facts.py."""
+		assert _facts(["def f(items):", "\tfor d in items:", "\t\tbar(d)", "\tfoo()"], 4) == {"in_loop": False}
+		lines = ["def f(y):", "\tfor d in y:", "\t\tpass", "\tx = (", "\t\tfoo()", "\t)"]
+		assert _facts(lines, 5) == {"in_loop": False}
+
+	def test_list_insert_and_a_nested_function_are_not_loop_writes(self):
+		lines = ["def f(rows):", "\tout = []", "\tfor r in rows:", "\t\tfrappe.get_doc('Item', r)",
+			"\t\tout.insert(0, r)", "\t\tif r:", "\t\t\tdef later():", "\t\t\t\tr.save()",
+			"\t\tcallbacks.append(lambda: r.db_update())"]
+		assert _facts(lines, 4)["loops"][0]["writes"] == []
+
+	@pytest.mark.parametrize("header,names", [
+		("for a, b in pairs:", ["a", "b"]),
+		("for first, *rest in groups:", ["first", "rest"]),
+		("for (a, [b, c]), d in nested:", ["a", "b", "c", "d"]),
+		("with open_it() as (a, b):", ["a", "b"]),
+		("with open_it() as [a, *rest]:", ["a", "rest"]),
+	])
+	def test_tuple_and_starred_targets_bind_every_name(self, header, names):
+		"""Each name of a tuple, list or starred target is a loop binding."""
+		lines = ["def f(pairs):"]
+		if header.startswith("with"):
+			lines += ["\tfor _x in pairs:", "\t\t" + header, "\t\t\tfrappe.get_doc('Item', " + ", ".join(names) + ")"]
+			target = 4
+		else:
+			lines += ["\t" + header, "\t\tfrappe.get_doc('Item', " + ", ".join(names) + ")"]
+			target = 3
+		facts = _facts(lines, target)
+		bound = {name for name, _line in facts["loops"][0]["bound"]}
+		assert set(names) <= bound
+		assert f"change in that loop: {', '.join(sorted(names))}." in _text(lines, target)
+
+	def test_a_call_in_the_first_comprehension_iterable_runs_once(self):
+		"""The first iterable runs once; the second generator's iterable runs per pass."""
+		first = ["def f(a):", "\treturn [x for x in frappe.get_all('Item')]"]
+		assert _facts(first, 2) == {"in_loop": False}
+		second = ["def f(a):", "\treturn [y for x in a for y in frappe.get_all('Item', x)]"]
+		facts = _facts(second, 2)
+		assert facts["in_loop"] is True and facts["call"] == "frappe.get_all"
+
+	@pytest.mark.parametrize("mutation", [
+		"filters.update({'item_code': d.item_code})", "filters.setdefault('item_code', d.item_code)",
+		"filters.pop('x', None)", "filters.clear()", "filters.add(d)", "filters.discard(d)",
+		"filters.remove(d)", "filters.extend([d])", "filters.insert(0, d)", "filters.append(d)",
+	])
+	def test_in_place_mutation_binds_the_name_the_call_reads(self, mutation):
+		"""The name is not rebound, yet its value differs on every pass."""
+		lines = ["def f(items):", "\tfilters = {}", "\tfor d in items:", "\t\t" + mutation,
+			"\t\tfrappe.db.get_value('Bin', filters, 'qty')"]
+		facts = _facts(lines, 5)
+		assert ["filters", 4] in facts["loops"][0]["bound"]
+		text = _text(lines, 5)
+		assert "variables that change in that loop: filters." in text
+		assert "uses no variable" not in text
+
+	def test_a_document_append_of_a_child_row_binds_only_that_table(self):
+		"""F3a (payment_entry.py:3464): pe.append("references", ...) does not change pe.company."""
+		lines = ["def f(pe, rows):", "\tfor row in rows:", "\t\tpe.append('references', {'a': row})",
+			"\t\tc = frappe.get_cached_value('Company', pe.company, 'cost_center')"]
+		text = _text(lines, 4)
+		assert ["pe", 3] not in _facts(lines, 4)["loops"][0]["bound"]
+		assert "loop: pe" not in text and ", pe" not in text
+
+	@pytest.mark.parametrize("call", ["self.append('taxes', {'a': d})", "self.extend('taxes', [d])"])
+	def test_self_append_of_a_child_row_and_a_company_lookup(self, call):
+		lines = ["def f(self):", "\tfor d in self.get('items'):", "\t\t" + call,
+			"\t\tabbr = frappe.get_cached_value('Company', self.company, 'abbr')"]
+		assert ["self", 3] not in _facts(lines, 4)["loops"][0]["bound"]
+
+	def test_a_document_append_with_a_computed_fieldname_binds_no_attribute(self):
+		"""meta.py:474: self.append(fieldname, d) leaves self.name alone."""
+		lines = ["def f(self, tables):", "\tfor fieldname in tables:", "\t\tself.append(fieldname, {'a': 1})",
+			"\t\tfrappe.get_all('X', filters={'parent': self.name})"]
+		assert ["self", 3] not in _facts(lines, 4)["loops"][0]["bound"]
+
+	def test_a_document_append_binds_the_table_when_the_call_reads_it(self):
+		lines = ["def f(self):", "\tfor d in self.get('items'):", "\t\tself.append('taxes', {'a': d})",
+			"\t\tfrappe.db.sql('x', self.taxes)"]
+		assert ["self", 3] in _facts(lines, 4)["loops"][0]["bound"]
+
+	def test_a_query_builder_receiver_is_not_a_mutation(self):
+		"""F3b: frappe.qb.update(T) builds a query."""
+		for update in ("frappe.qb.update(T).set(T.qty, 0).where(T.name == 'x').run()",):
+			lines = ["def f(rows):", "\tT = frappe.qb.DocType('Bin')", "\tfor d in rows:", "\t\t" + update]
+			assert all(name != "frappe" for name, _ in _facts(lines, 4)["loops"][0]["bound"])
+		lines = ["def f(rows):", "\tfor d in rows:", "\t\tq = qb.update(T)", "\t\tfrappe.db.sql(qb.update(T).get_sql())"]
+		assert all(name != "qb" for name, _ in _facts(lines, 4)["loops"][0]["bound"])
+
+	def test_task_list_append_beside_a_subscript_read_stays_a_true_positive(self):
+		"""task.py:255: a plain list append changes the list the call reads."""
+		lines = ["def f(tasks):", "\ttask_list = []", "\tfor t in tasks:", "\t\ttask_list.append(t)",
+			"\t\tfrappe.get_doc('Task', task_list[count])"]
+		assert ["task_list", 4] in _facts(lines, 5)["loops"][0]["bound"]
+
+	def test_a_two_argument_insert_or_pop_is_still_a_container_change(self):
+		lines = ["def f(items):", "\tseen = []", "\tfor d in items:", "\t\tseen.insert(0, d)",
+			"\t\tfrappe.db.get_value('Bin', seen, 'qty')"]
+		assert ["seen", 4] in _facts(lines, 5)["loops"][0]["bound"]
+
+	def test_a_positional_insert_keeps_the_whole_receiver(self):
+		"""insert(index, x) is a list insert, not a child-table row: only a string fieldname narrows it."""
+		lines = ["def f(self, items):", "\tfor i, d in enumerate(items):", "\t\tself.insert(i, d)",
+			"\t\tfrappe.get_cached_value('Company', self.company, 'abbr')"]
+		assert ["self", 3] in _facts(lines, 4)["loops"][0]["bound"]
+
+	def test_a_mutation_inside_a_lambda_is_not_a_pass_of_the_loop(self):
+		"""F7: _own_walk stops at lambdas and nested functions."""
+		lines = ["def f(items):", "\tfilters = {}", "\tfor d in items:",
+			"\t\tcb.append(lambda: filters.update({'x': d}))", "\t\tfrappe.db.get_value('Bin', filters, 'qty')"]
+		assert ["filters", 4] not in _facts(lines, 5)["loops"][0]["bound"]
+
+	def test_setdefault_then_a_read_through_get_binds(self):
+		lines = ["def f(items):", "\tfilters = {}", "\tfor d in items:", "\t\tfilters.setdefault('x', d)",
+			"\t\tfrappe.db.get_value('Bin', 'n', filters.get('x'))"]
+		assert ["filters", 4] in _facts(lines, 5)["loops"][0]["bound"]
+
+	def test_mutating_a_name_the_call_does_not_read_binds_nothing(self):
+		lines = ["def f(items):", "\tseen = []", "\tfor d in items:", "\t\tseen.append(d)",
+			"\t\tfrappe.db.get_value('Bin', d, 'qty')"]
+		assert ["seen", 4] not in _facts(lines, 5)["loops"][0]["bound"]
+
+	def test_a_mutated_attribute_path_binds_its_base_when_read(self):
+		lines = ["def f(self, items):", "\tfor d in items:", "\t\tself.conditions.append(d)",
+			"\t\tfrappe.db.sql(' and '.join(self.conditions))"]
+		assert ["self", 3] in _facts(lines, 4)["loops"][0]["bound"]
+
+	def test_a_mutating_method_name_outside_the_list_binds_nothing(self):
+		lines = ["def f(items):", "\tq = Query()", "\tfor d in items:", "\t\tq.where(d)",
+			"\t\tfrappe.db.sql(q.get_sql())"]
+		assert ["q", 4] not in _facts(lines, 5)["loops"][0]["bound"]
+
+	def test_unknown_targets(self):
+		assert g.loop_facts_from_tree(ast.parse("x = 1"), 5) == {}
+		assert g.loop_facts_from_tree(None, 1) == {}
+		assert g.loop_facts_from_tree(ast.parse("x = 1"), True) == {}
+
+
+class TestFormatting:
+	def test_not_in_a_loop_gets_the_caller_hint_only_when_asked(self):
+		"""The loop may be in a caller that is not shown."""
+		lines = ["def get_user(name):", "\treturn frappe.get_doc('User', name)"]
+		assert "The repetition may come from a caller that is not shown" in _text(lines, 2, caller_hint=True)
+		assert "caller" not in _text(lines, 2)
+
+	def test_a_loop_header_above_the_shown_lines_is_left_out(self):
+		"""Only facts about lines still shown."""
+		text = _text(NESTED, 4, first=3)
+		assert text.startswith("The marked line runs inside the for loop on line 3.")
+		assert "line 2" not in text and "inv" not in text
+
+	def test_no_shown_loop_gives_no_facts(self):
+		assert _text(NESTED, 4, first=4) == ""
+
+	def test_a_variable_bound_on_a_line_not_shown_gets_no_invariant_claim(self):
+		"""No "uses no variable that changes" when the binding is not shown."""
+		lines = ["def f(rows):", "\tkey = None", "\tfor r in rows:", "\t\tfrappe.get_doc('Item', key)",
+			"\t\tkey = r.next_key"]
+		assert "uses variables that change in that loop: key." in _text(lines, 4)
+		text = _text(lines, 4, last=4)
+		assert text.startswith("The marked line runs inside the for loop on line 3.")
+		assert "uses no variable" not in text and "key" not in text
+		# A hidden binding the call does not use leaves the invariant claim in place.
+		lines = ["def f(rows):", "\tfor r in rows:", "\t\tfrappe.get_doc('Item', 'fixed')", "\t\tother = r.x"]
+		assert "uses no variable that changes in that loop" in _text(lines, 3, last=3)
+
+	def test_writes_on_lines_not_shown_are_left_out(self):
+		assert "no database write" in _text(DEMO_ORDER, 7, last=8)
+
+	def test_the_window_fallback_uses_file_line_numbers(self):
+		rows = [{"lineno": 40 + i, "content": text, "is_target": i == 3} for i, text in enumerate(DEMO_ORDER[:5])]
+		facts = g.loop_facts_from_window(rows, 43)
+		assert facts["loops"][0]["line"] == 42 and facts["call_line"] == 43
+
+	def test_a_window_inside_a_loop_body_with_no_def_is_unknown(self):
+		"""A window that starts inside a body cannot see a loop header above it."""
+		lines = ["\t\tx = 1", "\t\tfrappe.db.get_value('Item', x)", "\t\ty = 2"]
+		rows = [{"lineno": 10 + i, "content": text, "is_target": i == 1} for i, text in enumerate(lines)]
+		assert g.loop_facts_from_window(rows, 11) == {}
+		# A def in the window that does not hold the line does not count.
+		lines = ["\t\tdef helper():", "\t\t\treturn 1", "\t\tfrappe.db.get_value('Item', x)"]
+		rows = [{"lineno": 10 + i, "content": text, "is_target": i == 2} for i, text in enumerate(lines)]
+		assert g.loop_facts_from_window(rows, 12) == {}
+
+	def test_a_window_holding_the_function_or_lambda_can_say_not_in_a_loop(self):
+		lines = ["def get_user(name):", "\treturn frappe.get_doc('User', name)"]
+		rows = [{"lineno": 10 + i, "content": text, "is_target": i == 1} for i, text in enumerate(lines)]
+		assert g.loop_facts_from_window(rows, 11) == {"in_loop": False}
+		rows = [{"lineno": 20, "content": "\t\tkey = lambda r: frappe.get_doc('Item', r)", "is_target": True}]
+		assert g.loop_facts_from_window(rows, 20) == {"in_loop": False}
+
+
+class TestParseOnce:
+	LINES = ["def f(items):", "\tfor d in items:", "\t\tfrappe.db.get_value('Item', d, 'x')"]
+
+	def test_parsed_is_used_instead_of_parsing_again(self, monkeypatch):
+		parsed = g.parse_source(self.LINES)
+		monkeypatch.setattr(g.ast, "parse", lambda *a, **k: pytest.fail("parsed again"))
+		window = g.grounding_window(self.LINES, 3, 2, 2, parsed=parsed)
+		assert window.tree is parsed[0] and window.parent is parsed[1]
+		assert g.loop_facts_from_tree(window.tree, 3, parent=window.parent)["in_loop"] is True
+
+	def test_the_parent_map_is_built_once_for_two_findings_of_one_file(self, monkeypatch):
+		"""F7: parent= is passed on, so the second finding does not rebuild it."""
+		built = []
+		real = g._parent_map
+		monkeypatch.setattr(g, "_parent_map", lambda tree: built.append(1) or real(tree))
+		parsed = g.parse_source(self.LINES)
+		for line in (3, 3):
+			window = g.grounding_window(self.LINES, line, 2, 2, parsed=parsed)
+			g.loop_facts_from_tree(window.tree, line, parent=window.parent)
+		assert len(built) == 1
+
+	def test_parse_source_gives_the_tree_and_parent_map_or_nothing(self):
+		tree, parent = g.parse_source(self.LINES)
+		assert isinstance(tree, ast.Module) and parent[tree.body[0]] is tree
+		assert g.parse_source(["return 1 +"]) == (None, None)
+		assert g.grounding_window(self.LINES, 3, 1, 1).parent is not None
