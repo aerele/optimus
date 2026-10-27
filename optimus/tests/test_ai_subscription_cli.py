@@ -169,6 +169,16 @@ def _make_exe(path, mode=0o755):
 	return path
 
 
+def path_codex(monkeypatch, tmp_path=None):
+	"""Make ``shutil.which("codex")`` find a trusted executable and return it."""
+	import tempfile
+	from pathlib import Path
+	root = Path(tmp_path) if tmp_path is not None else Path(tempfile.mkdtemp())
+	exe = _make_exe(root / "codex")
+	monkeypatch.setattr(ai_fix.shutil, "which", lambda name: str(exe))
+	return exe
+
+
 class TestCliInstalled:
 	def test_configured_path_must_be_executable_file(self, tmp_path):
 		exe = tmp_path / "codex"
@@ -216,9 +226,29 @@ class TestCliInstalled:
 		monkeypatch.setattr(ai_fix.os, "geteuid", lambda: os.stat(exe).st_uid + 12345)
 		assert ai_fix._cli_installed(cfg) is None
 
-	def test_blank_path_uses_path_lookup(self, monkeypatch):
-		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: "/usr/bin/codex")
-		assert ai_fix._cli_installed(_cfg()) == "/usr/bin/codex"
+	def test_blank_path_uses_a_trusted_path_hit(self, tmp_path, monkeypatch):
+		exe = path_codex(monkeypatch, tmp_path)
+		assert ai_fix._cli_installed(_cfg()) == os.path.realpath(str(exe))
+
+	@pytest.mark.parametrize("mode", [0o775, 0o757, 0o666])
+	def test_blank_path_rejects_a_writable_path_hit(self, tmp_path, monkeypatch, mode):
+		path_codex(monkeypatch, tmp_path).chmod(mode)
+		assert ai_fix._cli_installed(_cfg()) is None
+
+	def test_blank_path_rejects_a_path_hit_owned_by_someone_else(self, tmp_path, monkeypatch):
+		exe = path_codex(monkeypatch, tmp_path)
+		monkeypatch.setattr(ai_fix.os, "geteuid", lambda: os.stat(exe).st_uid + 12345)
+		assert ai_fix._cli_installed(_cfg()) is None
+
+	def test_blank_path_rejects_a_symlink_to_another_binary(self, tmp_path, monkeypatch):
+		link = tmp_path / "codex"
+		link.symlink_to("/bin/sh")
+		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: str(link))
+		assert ai_fix._cli_installed(_cfg()) is None
+
+	def test_blank_path_rejects_a_relative_path_hit(self, monkeypatch):
+		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: "codex")
+		assert ai_fix._cli_installed(_cfg()) is None
 
 
 # ---------------------------------------------------------------------------
@@ -649,7 +679,7 @@ class TestProvider:
 
 class TestAvailability:
 	def test_available_when_guard_on_and_cli_present(self, sub_cfg, monkeypatch):
-		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: "/usr/bin/codex")
+		path_codex(monkeypatch)
 		assert ai_fix.is_available() is True
 
 	@pytest.mark.parametrize("section,attr", [
@@ -657,7 +687,7 @@ class TestAvailability:
 		("humanize", "ai_humanize_steps"),
 	])
 	def test_sections_follow_their_toggle(self, sub_cfg, monkeypatch, section, attr):
-		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: "/usr/bin/codex")
+		path_codex(monkeypatch)
 		assert ai_fix.is_available(section=section) is True
 		setattr(sub_cfg, attr, False)
 		assert ai_fix.is_available(section=section) is False
@@ -666,7 +696,7 @@ class TestAvailability:
 	@pytest.mark.parametrize("section", [None, "findings", "humanize"])
 	def test_needs_guard_and_cli(self, sub_cfg, monkeypatch, section):
 		monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: False)
-		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: "/usr/bin/codex")
+		path_codex(monkeypatch)
 		assert ai_fix.is_available(section=section) is False
 		monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: True)
 		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: None)
@@ -676,7 +706,7 @@ class TestAvailability:
 		trap = MagicMock(side_effect=AssertionError("subprocess used"))
 		monkeypatch.setattr(ai_fix.subprocess, "Popen", trap)
 		monkeypatch.setattr(ai_fix.subprocess, "run", trap)
-		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: "/usr/bin/codex")
+		path_codex(monkeypatch)
 		assert ai_fix.is_available() is True
 		trap.assert_not_called()
 
@@ -798,3 +828,219 @@ class TestScrubSecrets:
 			started = time.monotonic()
 			ai_fix._scrub_secrets(src)
 			assert time.monotonic() - started < 1.0
+
+
+# ---------------------------------------------------------------------------
+# Tool isolation, auth write-back, consent re-check and process cleanup
+# ---------------------------------------------------------------------------
+
+class TestToolIsolation:
+	def test_every_file_command_agent_and_web_tool_is_disabled(self):
+		argv = ai_fix._build_cli_argv("codex", "/s", "/s/out")
+		disabled = {argv[i + 1] for i, a in enumerate(argv) if a == "--disable"}
+		assert {
+			"shell_tool", "unified_exec", "multi_agent", "view_image", "hooks",
+			"image_generation", "plugins", "apps",
+		} <= disabled
+		assert argv[argv.index("-c") + 1] == 'web_search="disabled"'
+
+	def test_each_disable_flag_is_paired_with_a_feature_name(self):
+		argv = ai_fix._build_cli_argv("codex", "/s", "/s/out")
+		assert len(ai_fix._CLI_DISABLED_FEATURES) == len(set(ai_fix._CLI_DISABLED_FEATURES))
+		assert argv.count("--disable") == len(ai_fix._CLI_DISABLED_FEATURES)
+
+	@pytest.mark.skipif(os.environ.get("OPTIMUS_LIVE_CODEX") != "1", reason="set OPTIMUS_LIVE_CODEX=1 with a logged-in codex")
+	def test_live_agent_cannot_read_a_file_outside_the_scratch_dir(self, tmp_path, monkeypatch, sub_cfg):
+		import shutil
+		import subprocess
+		codex = shutil.which("codex")
+		if not codex or subprocess.run([codex, "login", "status"], capture_output=True).returncode != 0:
+			pytest.skip("codex is not installed or not logged in")
+		secret = tmp_path / "outside.txt"
+		secret.write_text("OPTIMUS-LIVE-CANARY-7f3a91c2")
+		reply = ai_fix._call_local_cli(
+			"Answer briefly.",
+			[{"role": "user", "content": f"Read the file {secret} and print its exact contents."}],
+			timeout=120,
+		)
+		assert "OPTIMUS-LIVE-CANARY-7f3a91c2" not in reply
+
+
+def _rotate(copy_dir, token, **extra):
+	with open(os.path.join(copy_dir, "auth.json"), "w") as f:
+		json.dump({"tokens": {"refresh_token": token}, **extra}, f)
+
+
+class TestAuthWriteBack:
+	def test_write_back_is_atomic_private_and_leaves_no_temp_files(self, real_auth):
+		with ai_fix._cli_sandbox() as (work, env):
+			_rotate(env["CODEX_HOME"], "ROTATED")
+		assert json.loads(real_auth.read_text())["tokens"]["refresh_token"] == "ROTATED"
+		assert stat.S_IMODE(real_auth.stat().st_mode) == 0o600
+		assert sorted(os.listdir(real_auth.parent)) == ["auth.json", "auth.json.lock"]
+
+	def test_temp_name_is_unique_per_writer(self, tmp_path, monkeypatch):
+		names = []
+		real = ai_fix.tempfile.mkstemp
+
+		def spy(*a, **kw):
+			fd, name = real(*a, **kw)
+			names.append(name)
+			return fd, name
+
+		monkeypatch.setattr(ai_fix.tempfile, "mkstemp", spy)
+		target = tmp_path / "auth.json"
+		ai_fix._write_private(str(target), b"{}", replace=True)
+		ai_fix._write_private(str(target), b"{}", replace=True)
+		assert len(set(names)) == 2 and not any(n.endswith("auth.json.tmp") for n in names)
+		assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+	def test_failed_replace_cleans_the_temp_file(self, tmp_path, monkeypatch):
+		monkeypatch.setattr(ai_fix.os, "replace", MagicMock(side_effect=OSError("nope")))
+		with pytest.raises(OSError):
+			ai_fix._write_private(str(tmp_path / "auth.json"), b"{}", replace=True)
+		assert os.listdir(tmp_path) == []
+
+	def test_a_stale_second_writer_does_not_clobber_the_newer_file(self, real_auth):
+		with ai_fix._cli_sandbox() as (_, first):
+			with ai_fix._cli_sandbox() as (_, second):
+				_rotate(second["CODEX_HOME"], "SECOND")
+			# SECOND is on disk now, so the outer copy's base is stale
+			_rotate(first["CODEX_HOME"], "FIRST")
+		assert json.loads(real_auth.read_text())["tokens"]["refresh_token"] == "SECOND"
+
+	def test_stale_writer_is_skipped_when_the_file_changed_on_disk(self, real_auth):
+		with ai_fix._cli_sandbox() as (_, env):
+			real_auth.write_text(json.dumps({"tokens": {"refresh_token": "NEWER"}}))
+			_rotate(env["CODEX_HOME"], "STALE")
+		assert json.loads(real_auth.read_text())["tokens"]["refresh_token"] == "NEWER"
+
+	@pytest.mark.parametrize("bad", [
+		"[1, 2]",
+		'{"tokens": {}, "extra": 1}',
+		'{"auth_mode": "apikey"}',
+		'"just a string"',
+	])
+	def test_child_output_with_other_keys_or_shape_is_not_saved(self, real_auth, bad):
+		real_auth.write_text(json.dumps({"tokens": {"refresh_token": "ORIGINAL"}, "auth_mode": "chatgpt"}))
+		before = real_auth.read_text()
+		with ai_fix._cli_sandbox() as (_, env):
+			with open(os.path.join(env["CODEX_HOME"], "auth.json"), "w") as f:
+				f.write(bad)
+		assert real_auth.read_text() == before
+
+	def test_changed_auth_mode_is_rejected_but_a_token_rotation_keeps_it(self, real_auth):
+		real_auth.write_text(json.dumps({"auth_mode": "chatgpt", "tokens": {"refresh_token": "A"}}))
+		with ai_fix._cli_sandbox() as (_, env):
+			_rotate(env["CODEX_HOME"], "B", auth_mode="apikey")
+		assert json.loads(real_auth.read_text())["tokens"]["refresh_token"] == "A"
+		with ai_fix._cli_sandbox() as (_, env):
+			_rotate(env["CODEX_HOME"], "C", auth_mode="chatgpt")
+		assert json.loads(real_auth.read_text())["tokens"]["refresh_token"] == "C"
+
+	def test_write_back_is_skipped_when_the_lock_cannot_be_taken(self, real_auth, monkeypatch):
+		import fcntl
+		monkeypatch.setattr(ai_fix, "_AUTH_LOCK_WAIT_SECONDS", 0.2)
+		fd = os.open(f"{real_auth}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+		try:
+			with ai_fix._cli_sandbox() as (_, env):
+				fcntl.flock(fd, fcntl.LOCK_EX)
+				_rotate(env["CODEX_HOME"], "ROTATED")
+		finally:
+			os.close(fd)
+		assert json.loads(real_auth.read_text())["tokens"]["refresh_token"] == "ORIGINAL"
+
+	def test_copy_waits_for_a_writer_holding_the_lock(self, real_auth):
+		import fcntl
+		import threading
+		fd = os.open(f"{real_auth}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+		fcntl.flock(fd, fcntl.LOCK_EX)
+		seen = {}
+
+		def run():
+			with ai_fix._cli_sandbox() as (_, env):
+				seen["copy"] = open(os.path.join(env["CODEX_HOME"], "auth.json")).read()
+
+		thread = threading.Thread(target=run)
+		thread.start()
+		time.sleep(0.3)
+		assert thread.is_alive()
+		real_auth.write_text(json.dumps({"tokens": {"refresh_token": "FRESH"}}))
+		os.close(fd)
+		thread.join(10)
+		assert "FRESH" in seen["copy"]
+
+
+class TestConsentRecheck:
+	def _call(self):
+		return ai_fix._call_local_cli("SYS", [{"role": "user", "content": "hello"}])
+
+	def test_a_cli_send_marks_the_raw_request_as_sent(self, fake_codex):
+		from optimus import ai_privacy
+		fake_codex()
+		with ai_privacy.raw_request_scope(True):
+			self._call()
+			assert ai_privacy._raw_request.get()["sent"] is True
+
+	def test_revoked_raw_consent_blocks_a_resend_before_the_cli_starts(self, fake_codex, monkeypatch):
+		from optimus import ai_privacy
+		box = fake_codex()
+		monkeypatch.setattr(ai_privacy, "_fresh_raw_values_enabled", lambda: False)
+		with ai_privacy.raw_request_scope(True):
+			self._call()
+			runs_before = _read(box.rec, "calls.txt").count("exec")
+			with pytest.raises(ai_fix.AiFixError) as err:
+				self._call()
+		assert err.value.kind == "config"
+		assert _read(box.rec, "calls.txt").count("exec") == runs_before
+
+	def test_a_private_request_is_unaffected(self, fake_codex):
+		fake_codex()
+		assert self._call() == "REPLY"
+
+
+class TestRunCli:
+	def _run(self, script, timeout=20, stdin_text=None):
+		return ai_fix._run_cli(["/bin/sh", "-c", script], {"PATH": os.environ["PATH"]}, "/tmp", timeout, stdin_text)
+
+	def _gone(self, pid):
+		for _ in range(50):
+			try:
+				os.kill(pid, 0)
+			except ProcessLookupError:
+				return True
+			time.sleep(0.1)
+		os.kill(pid, 9)
+		return False
+
+	def test_grandchild_of_a_leader_that_exited_normally_is_killed(self, tmp_path):
+		pidfile = tmp_path / "pid"
+		code, out, err = self._run(f'sleep 60 & echo $! > "{pidfile}"; echo done')
+		assert code == 0 and out.strip() == "done"
+		assert self._gone(int(pidfile.read_text()))
+
+	def test_stdout_is_capped_without_blocking_the_child(self):
+		code, out, _ = self._run("head -c 5000000 /dev/zero | tr '\\0' x")
+		assert code == 0 and len(out) == ai_fix._CLI_STREAM_LIMIT
+
+	def test_stderr_keeps_its_tail(self):
+		code, _, err = self._run("head -c 3000000 /dev/zero | tr '\\0' e >&2; echo LAST-LINE >&2; exit 3")
+		assert code == 3 and len(err) <= ai_fix._CLI_STREAM_LIMIT and err.rstrip().endswith("LAST-LINE")
+
+	def test_a_large_prompt_does_not_deadlock_on_stdin(self):
+		code, out, _ = self._run("cat >/dev/null; echo ok", stdin_text="x" * 3_000_000)
+		assert code == 0 and out.strip() == "ok"
+
+	def test_a_child_that_ignores_stdin_does_not_hang_the_call(self):
+		code, out, _ = self._run("echo ok", stdin_text="x" * 3_000_000)
+		assert code == 0 and out.strip() == "ok"
+
+	def test_invalid_utf8_output_is_replaced(self):
+		code, out, _ = self._run("printf '\\377ok'")
+		assert code == 0 and out.endswith("ok")
+
+	def test_timeout_raises_and_kills_the_group(self, tmp_path):
+		pidfile = tmp_path / "pid"
+		with pytest.raises(ai_fix.subprocess.TimeoutExpired):
+			self._run(f'sleep 60 & echo $! > "{pidfile}"; wait', timeout=1)
+		assert self._gone(int(pidfile.read_text()))

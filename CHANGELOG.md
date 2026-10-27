@@ -22,9 +22,14 @@ versions may contain breaking changes see migration notes below).
 - The Codex CLI runs as an agent with a read-only sandbox. It now starts with `HOME` and `CODEX_HOME` pointing at a private scratch directory that holds only a copy of the ChatGPT sign-in file, removed afterwards, so the agent no longer sees the operator's home directory or the bench. It can still read other files the bench user can read, and a prompt injection hidden in profiled data is mitigated (a security preamble and a secret scrub on the output) but not eliminated. Keep subscription mode to data you trust.
 - The CLI path must now be a `codex` file owned by the bench user (or root) and not writable by group or others.
 - The session check and version probes use the same restricted environment and scratch directory as the run itself.
+- The Codex agent now also starts with `unified_exec`, `multi_agent`, `view_image`, `hooks`, `image_generation`, browser and computer tools and web search turned off, so no file or command tool is left reachable. An opt-in live test (`OPTIMUS_LIVE_CODEX=1`) checks that a prompt asking for a file outside the scratch directory returns nothing.
+- Saving a refreshed ChatGPT sign-in back is done under a file lock with a unique temp file and an atomic replace. It only happens if the real file is unchanged since it was copied and the copy keeps the same keys and auth mode, so concurrent calls cannot overwrite a newer token and a bad child file is ignored.
+- The CLI path found on `PATH` (blank "CLI path") now goes through the same ownership and permission check as an explicit path.
+- A CLI send now marks the raw-value request as sent, so a re-ask after raw-value consent is revoked is refused.
 
 ### Fixed
 
+- The CLI process group is always stopped when a call ends, and its output is read with a size limit instead of being buffered without bound.
 - A CLI failure is classified from the last lines of its error output only, so SQL or text echoed from the prompt can no longer be mistaken for a signed-out session.
 
 ## [0.12.91] - 2026-10-27

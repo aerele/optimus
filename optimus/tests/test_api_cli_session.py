@@ -77,21 +77,22 @@ def test_system_manager_gets_the_status_and_it_is_stored(connect):
 	fake, calls, commits, result = connect(("System Manager",))
 	assert api.check_cli_session() is result
 	assert calls == [True] and commits == [True]
-	args, _ = fake.spies.set_value[0]
-	assert args == ("Optimus Settings", "Optimus Settings", "ai_subscription_status", "Connected.")
+	args, _ = fake.spies.set_single_value[0]
+	assert args == ("Optimus Settings", "ai_subscription_status", "Connected.")
+	assert fake.spies.set_value == []
 
 
 def test_stored_message_is_truncated(connect):
 	fake, *_ = connect(("System Manager",), status={"ok": False, "state": "error", "message": "x" * 300})
 	api.check_cli_session()
-	assert fake.spies.set_value[0][0][3] == "x" * 140
+	assert fake.spies.set_single_value[0][0][2] == "x" * 140
 
 
 def test_non_manager_is_refused_without_probing_or_counting(connect):
 	fake, calls, commits, _ = connect(("Optimus User",))
 	with pytest.raises(FakePermissionError):
 		api.check_cli_session()
-	assert calls == [] and commits == [] and fake.spies.set_value == [] and fake.cache.calls == []
+	assert calls == [] and commits == [] and fake.spies.set_single_value == [] and fake.cache.calls == []
 
 
 def test_administrator_passes_without_the_role(connect):
@@ -106,7 +107,7 @@ def test_a_failed_store_still_returns_the_status(connect, monkeypatch):
 	def fail(*a, **kw):
 		raise RuntimeError("db down")
 
-	monkeypatch.setattr(fake.db, "set_value", fail)
+	monkeypatch.setattr(fake.db, "set_single_value", fail)
 	assert api.check_cli_session() is result
 
 

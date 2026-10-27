@@ -26,6 +26,7 @@ helpers are unit-testable without a bench.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import ipaddress
 import json
 import os
@@ -34,6 +35,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 import traceback
 from copy import deepcopy
@@ -3328,13 +3330,12 @@ def _trusted_cli_file(real: str) -> bool:
 def _cli_installed(cfg) -> str | None:
 	"""Resolved path of the Codex CLI, or None. An explicit ``ai_cli_path`` must be
 	absolute and, after symlinks are resolved, a trusted executable named ``codex``
-	(``_trusted_cli_file``). Blank falls back to PATH. No subprocess."""
+	(``_trusted_cli_file``). Blank falls back to the PATH hit, held to the same checks. No subprocess."""
 	configured = (getattr(cfg, "ai_cli_path", "") or "").strip()
-	if not configured:
-		return shutil.which("codex")
-	if not os.path.isabs(configured):
+	candidate = configured or shutil.which("codex")
+	if not candidate or not os.path.isabs(candidate):
 		return None
-	real = os.path.realpath(configured)
+	real = os.path.realpath(candidate)
 	if os.path.basename(real) != "codex" or not _trusted_cli_file(real):
 		return None
 	return real
@@ -3358,12 +3359,23 @@ def _compose_cli_prompt(system: str, messages: list[dict]) -> str:
 	return "\n\n".join(p.strip() for p in parts if p and p.strip()).strip()
 
 
+# Agent tools that could read a file or run a command, turned off so the
+# sign-in copy and bench files are out of the agent's reach.
+_CLI_DISABLED_FEATURES = (
+	"shell_tool", "unified_exec", "unified_exec_tty", "multi_agent", "multi_agent_v2",
+	"view_image", "hooks", "image_generation", "browser_use", "computer_use",
+	"plugins", "apps",
+)
+
+
 def _build_cli_argv(cli_path: str, scratch_dir: str, out_file: str) -> list[str]:
-	"""Fixed argv for a read-only, ephemeral ``codex exec`` with the shell, plugin and
-	app tools turned off. Pure. The trailing ``-`` reads the prompt from stdin."""
-	return [
-		cli_path, "exec", "--disable", "shell_tool", "--disable", "plugins", "--disable", "apps",
-		"--sandbox", "read-only", "--skip-git-repo-check",
+	"""Fixed argv for a read-only, ephemeral ``codex exec`` with every file, command,
+	agent and web tool turned off. Pure. The trailing ``-`` reads the prompt from stdin."""
+	argv = [cli_path, "exec"]
+	for feature in _CLI_DISABLED_FEATURES:
+		argv += ["--disable", feature]
+	return argv + [
+		"-c", 'web_search="disabled"', "--sandbox", "read-only", "--skip-git-repo-check",
 		"--ignore-user-config", "--ignore-rules", "--ephemeral", "--color", "never",
 		"-C", scratch_dir, "-o", out_file, "-",
 	]
@@ -3409,7 +3421,7 @@ def _auth_source_path() -> str:
 def _read_auth(path: str) -> bytes | None:
 	"""The sign-in file's bytes when it is a JSON object, else None."""
 	try:
-		with open(path, "rb") as f:
+		with open(path, "rb") as f:  # nosemgrep: frappe-security-file-traversal -- path is built by the program, not user input
 			data = f.read(1_000_000)
 		return data if isinstance(json.loads(data), dict) else None
 	except (OSError, ValueError):
@@ -3418,13 +3430,73 @@ def _read_auth(path: str) -> bytes | None:
 
 def _write_private(path: str, data: bytes, *, replace: bool = False) -> None:
 	"""Write ``data`` to ``path`` with mode 0600. ``replace`` swaps an existing file
-	atomically through a sibling temp file."""
-	target = f"{path}.tmp" if replace else path
-	fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-	with os.fdopen(fd, "wb") as f:
-		f.write(data)
-	if replace:
-		os.replace(target, path)
+	atomically through a unique sibling temp file."""
+	if not replace:
+		fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+		with os.fdopen(fd, "wb") as f:
+			f.write(data)
+		return
+	fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".auth-", suffix=".tmp")
+	try:
+		with os.fdopen(fd, "wb") as f:
+			os.fchmod(f.fileno(), 0o600)
+			f.write(data)
+			f.flush()
+			os.fsync(f.fileno())
+		os.replace(tmp, path)
+	except BaseException:
+		with contextlib.suppress(OSError):
+			os.unlink(tmp)
+		raise
+
+
+_AUTH_LOCK_WAIT_SECONDS = 10
+
+
+@contextlib.contextmanager
+def _auth_lock(source: str):
+	"""Hold an exclusive flock on a lock file next to the sign-in file; yields True
+	when held, False when it could not be taken in time (callers then skip the write)."""
+	fd = None
+	held = False
+	try:
+		fd = os.open(f"{source}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+		limit = time.monotonic() + _AUTH_LOCK_WAIT_SECONDS
+		while not held:
+			try:
+				fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+				held = True
+			except BlockingIOError:
+				if time.monotonic() >= limit:
+					break
+				time.sleep(0.05)
+	except OSError:
+		held = False
+	try:
+		yield held
+	finally:
+		if fd is not None:
+			os.close(fd)
+
+
+def _auth_shape(data: bytes) -> tuple[frozenset, object] | None:
+	"""Key set and auth mode of a sign-in file, or None when it is not a JSON object."""
+	try:
+		obj = json.loads(data)
+	except ValueError:
+		return None
+	return (frozenset(obj), obj.get("auth_mode")) if isinstance(obj, dict) else None
+
+
+def _save_refreshed_auth(source: str, original: bytes, refreshed: bytes) -> None:
+	"""Replace the real sign-in file with the CLI's refreshed copy, under the lock, only
+	when the real file still equals what was copied and the copy keeps its keys and auth mode."""
+	shape = _auth_shape(refreshed)
+	if shape is None or shape != _auth_shape(original):
+		return
+	with _auth_lock(source) as held:
+		if held and _read_auth(source) == original:
+			_write_private(source, refreshed, replace=True)
 
 
 @contextlib.contextmanager
@@ -3441,9 +3513,10 @@ def _cli_sandbox(*, with_auth: bool = True):
 			os.mkdir(path, 0o700)
 		source, copy, original = _auth_source_path(), os.path.join(dirs["codex"], "auth.json"), None
 		if with_auth:
-			original = _read_auth(source)
-			if original is not None:
-				_write_private(copy, original)
+			with _auth_lock(source):
+				original = _read_auth(source)
+				if original is not None:
+					_write_private(copy, original)
 		env = _build_cli_env(home=dirs["home"], codex_home=dirs["codex"], tmpdir=dirs["tmp"])
 		try:
 			yield dirs["work"], env
@@ -3451,7 +3524,7 @@ def _cli_sandbox(*, with_auth: bool = True):
 			refreshed = _read_auth(copy) if original is not None else None
 			if refreshed is not None and refreshed != original:
 				with contextlib.suppress(OSError):
-					_write_private(source, refreshed, replace=True)
+					_save_refreshed_auth(source, original, refreshed)
 	finally:
 		shutil.rmtree(root, ignore_errors=True)
 
@@ -3467,26 +3540,64 @@ def _kill_process_group(proc) -> None:
 			proc.wait(timeout=wait)
 
 
+_CLI_STREAM_LIMIT = 1_000_000
+
+
+def _drain(stream, box: dict, *, keep_tail: bool) -> None:
+	"""Read ``stream`` to its end, keeping at most ``_CLI_STREAM_LIMIT`` bytes (the first
+	ones, or the last ones with ``keep_tail``) so the child never blocks on a full pipe."""
+	buf = bytearray()
+	with contextlib.suppress(Exception):
+		while chunk := stream.read1(1 << 16):
+			if keep_tail:
+				buf += chunk
+				del buf[:-_CLI_STREAM_LIMIT]
+			elif len(buf) < _CLI_STREAM_LIMIT:
+				buf += chunk[: _CLI_STREAM_LIMIT - len(buf)]
+	box["data"] = bytes(buf)
+
+
+def _feed(stream, data: bytes) -> None:
+	"""Write the prompt to the child's stdin, then close it."""
+	with contextlib.suppress(Exception):
+		stream.write(data)
+	with contextlib.suppress(Exception):
+		stream.close()
+
+
 def _run_cli(argv: list[str], env: dict, cwd: str, timeout: float, stdin_text: str | None = None):
 	"""Run one CLI command in its own session and return ``(returncode, stdout, stderr)``.
-	Stdin is the given text or /dev/null. Raises ``subprocess.TimeoutExpired`` (after the
-	whole process group is killed) or ``OSError`` when it cannot start."""
+	Stdin is the given text or /dev/null; stdout and stderr are each capped at
+	``_CLI_STREAM_LIMIT`` bytes. Raises ``subprocess.TimeoutExpired`` (after the whole
+	process group is killed) or ``OSError`` when it cannot start."""
 	proc = subprocess.Popen(
 		argv, stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
 		stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd, env=env,
-		start_new_session=True, text=True, errors="replace",
+		start_new_session=True,
 	)
+	boxes = ({}, {})
+	threads = [
+		threading.Thread(target=_drain, args=(proc.stdout, boxes[0]), kwargs={"keep_tail": False}, daemon=True),
+		threading.Thread(target=_drain, args=(proc.stderr, boxes[1]), kwargs={"keep_tail": True}, daemon=True),
+	]
+	if stdin_text is not None:
+		data = stdin_text.encode("utf-8", "replace")
+		threads.append(threading.Thread(target=_feed, args=(proc.stdin, data), daemon=True))
+	for thread in threads:
+		thread.start()
 	try:
-		out, err = proc.communicate(input=stdin_text, timeout=timeout)
-		return proc.returncode, out or "", err or ""
+		proc.wait(timeout=timeout)
 	finally:
-		# Whatever went wrong, never leave the child (or its group) running.
-		if proc.poll() is None:
-			_kill_process_group(proc)
+		# Always stop the group: a descendant can outlive a leader that exited.
+		_kill_process_group(proc)
+		for thread in threads:
+			thread.join(timeout=5)
 		for pipe in (proc.stdin, proc.stdout, proc.stderr):
 			with contextlib.suppress(Exception):
 				if pipe is not None:
 					pipe.close()
+	out, err = (box.get("data", b"").decode("utf-8", "replace") for box in boxes)
+	return proc.returncode, out, err
 
 
 _LOGIN_CACHE_SECONDS = 30
@@ -3684,7 +3795,7 @@ def _read_cli_reply(out_file: str, stdout: str) -> str:
 	text = ""
 	try:
 		if os.path.isfile(out_file):
-			with open(out_file, encoding="utf-8", errors="replace") as f:
+			with open(out_file, encoding="utf-8", errors="replace") as f:  # nosemgrep: frappe-security-file-traversal -- out_file is built inside the private scratch dir
 				text = f.read(_CLI_MAX_OUTPUT_CHARS)
 	except OSError:
 		text = ""
@@ -3731,6 +3842,7 @@ def _call_local_cli(
 	if isinstance(usage_out, Usage):
 		usage_out.begin()
 		usage_out.observe(True)  # nothing is billed per token, so the cost is a known zero
+	ai_privacy.before_http_send()  # a CLI send discloses the prompt like an HTTP one
 	try:
 		with _cli_sandbox() as (work, env):
 			out_file = os.path.join(work, "out.txt")

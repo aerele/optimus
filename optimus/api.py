@@ -1436,8 +1436,8 @@ def check_cli_session() -> dict:
 
 	status = ai_fix._cli_session_status()
 	def store():
-		frappe.db.set_value(
-			"Optimus Settings", "Optimus Settings", "ai_subscription_status", (status.get("message") or "")[:140],
+		frappe.db.set_single_value(
+			"Optimus Settings", "ai_subscription_status", (status.get("message") or "")[:140],
 		)
 		safe_commit()
 
