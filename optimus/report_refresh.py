@@ -21,21 +21,27 @@ class StaleReport(RuntimeError):
 	"""The rendering input changed or another operation owns the session."""
 
 
-def render_report(docname, recordings=None, *, run_id=None, worker_token=None):
+def render_report(docname, recordings=None, *, run_id=None, worker_token=None, required_status=None):
 	guard = safe_call.InterruptGuard(base=True)
 	with guard:
-		return _render_and_save(docname, recordings, run_id=run_id, worker_token=worker_token)
+		return _render_and_save(docname, recordings, run_id=run_id, worker_token=worker_token, required_status=required_status)
 	if guard.pending():
 		recordings = None
 		raise guard.interrupt()
 
 
-def _render_and_save(docname, recordings, *, run_id, worker_token):
+def _render_and_save(docname, recordings, *, run_id, worker_token, required_status):
 	# A permission/config read may have opened an old REPEATABLE READ view.
 	_transaction(lambda: None)
 	doc = frappe.get_doc("Optimus Session", docname)
 	if recordings is None:
 		recordings = analyze.load_recordings_light(doc)
+		requested = {analyze.row_get(action, "recording_uuid") for action in (doc.actions or [])}
+		requested.discard(None)
+		requested.discard("")
+		available = {rec.get("uuid") for rec in recordings}
+		if requested - available or (not recordings and getattr(doc, "total_queries", 0)):
+			raise ValueError("Retained recordings are unavailable. The existing report was preserved; record a new session.")
 	_transaction(lambda: None)
 	content = renderer.render_raw(doc, recordings)
 	if not isinstance(content, str) or not content.strip():
@@ -45,7 +51,7 @@ def _render_and_save(docname, recordings, *, run_id, worker_token):
 	def save():
 		parent = frappe.db.get_value("Optimus Session", docname, "*", as_dict=True, for_update=True)
 		if (
-			not parent or parent.get("status") not in {"Ready", "Failed", "Analyzing"}
+			not parent or parent.get("status") not in ({required_status} if required_status else {"Ready", "Failed", "Analyzing"})
 			or parent.get("modified") != doc.get("modified")
 			or parent.get("session_uuid") != doc.get("session_uuid")
 		):
@@ -58,7 +64,7 @@ def _render_and_save(docname, recordings, *, run_id, worker_token):
 				or run["deadline"] <= ai_jobs._now()):
 				raise StaleReport("Refresh no longer owns report replacement")
 			ai_jobs._check_run(run, locked=True)
-		elif run:
+		elif run and store.release_expired_reservation(docname, now=ai_jobs._now()):
 			raise StaleReport("An active refresh owns report replacement")
 		file_doc = frappe.get_doc({
 			"doctype": "File", "file_name": f"optimus_report_{uuid.uuid4().hex}.html",
@@ -69,7 +75,10 @@ def _render_and_save(docname, recordings, *, run_id, worker_token):
 		try:
 			# Keep the existing code-generated HTML extension exception narrow.
 			frappe.local.request = None
-			file_doc.insert(ignore_permissions=True)
+			from optimus.managed import artifact_writer
+
+			with artifact_writer(docname, "raw_report_file"):
+				file_doc.insert(ignore_permissions=True)
 		finally:
 			frappe.local.request = request
 		url = file_doc.file_url

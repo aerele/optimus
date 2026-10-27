@@ -292,6 +292,11 @@ def _frappe_in_test_flag():
 	# Manual restoration preserves the module-fence/monkeypatch teardown order.
 	import frappe
 
+	missing = object()
+	local = frappe.local
+	saved_local = getattr(local, "flags", missing)
+	if saved_local is missing:
+		local.flags = _InTestFlags()
 	try:
 		frappe.flags.in_test
 	except Exception:
@@ -301,8 +306,14 @@ def _frappe_in_test_flag():
 			yield
 		finally:
 			frappe.flags = saved
+			if saved_local is missing:
+				del local.flags
 		return
-	yield
+	try:
+		yield
+	finally:
+		if saved_local is missing:
+			del local.flags
 
 
 @pytest.fixture(autouse=True)

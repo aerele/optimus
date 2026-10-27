@@ -10,7 +10,9 @@ imported lazily to avoid renderer import cycles.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import os
 import re
 
@@ -19,6 +21,72 @@ import re
 # ``SEVERITY_ORDER`` in ``analyzers.base`` but lives here so the
 # renderer doesn't drag an analyzer import into hot paths.
 _GROUPING_SEVERITY_RANK = {"High": 0, "Medium": 1, "Low": 2}
+
+
+def _action_ref_key(value) -> str:
+	"""Match persisted action indices, including zero; never guess malformed refs."""
+	if isinstance(value, bool) or not isinstance(value, (str, int)):
+		return ""
+	return str(value).strip()
+
+
+def _assign_finding_ids(findings: list[dict], rows) -> None:
+	"""Opaque per-report identities, assigned before filtering or group promotion.
+
+	Stored row names stay private. Legacy rows use their original input position;
+	duplicate names/hash collisions get deterministic suffixes within this report.
+	"""
+	counts: dict[str, int] = {}
+	for idx, (finding, row) in enumerate(zip(findings, rows, strict=True)):
+		name = getattr(row, "name", None)
+		key = (
+			"finding-row-" + hashlib.sha256(name.encode()).hexdigest()[:24]
+			if isinstance(name, str) and name else f"finding-pos-{idx}"
+		)
+		counts[key] = counts.get(key, 0) + 1
+		finding["finding_id"] = key if counts[key] == 1 else f"{key}-{counts[key]}"
+
+
+def _ai_links_by_action(buckets: list[dict]) -> dict[str, list[dict]]:
+	"""Register only final visible answers; the template uses this same render gate.
+
+	The canonical primary and child keep their own identity and action reference.
+	Embedded cards suppress both the answer and its ID. No saved JSON is read here.
+	"""
+	links: dict[str, list[dict]] = {}
+	for bucket in buckets:
+		for primary in bucket.get("findings") or []:
+			for finding in [primary, *(primary.get("sub_findings") or [])]:
+				finding.pop("ai_target_id", None)
+				finding.pop("ai_status_label", None)
+				fix = finding.get("llm_fix")
+				if not isinstance(fix, dict) or not fix.get("suggestion_html") or not finding.get("finding_id"):
+					continue
+				target = "ai-" + finding["finding_id"]
+				status = fix.get("review_status")
+				if not status and fix.get("incomplete"):
+					status = "Incomplete AI response"
+				if not status and fix.get("outdated"):
+					status = "Outdated AI suggestion"
+				finding["ai_target_id"] = target
+				finding["ai_status_label"] = status or "AI suggestion available"
+				ref = _action_ref_key(finding.get("action_ref"))
+				if ref:
+					links.setdefault(ref, []).append({
+						"target_id": target, "title": finding.get("title") or "Finding",
+						"label": "View AI response" if status else "View AI suggestion",
+					})
+	return links
+
+
+def _observed_query_ms(finding: dict):
+	"""A measured query total, kept separate from estimated recoverable impact."""
+	if finding.get("finding_type") not in {"N+1 Query", "Slow Query"}:
+		return None
+	value = (finding.get("technical_detail") or {}).get("total_time_ms")
+	if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0:
+		return value
+	return None
 
 
 def _root_cause_key(finding: dict) -> tuple | None:
@@ -54,6 +122,33 @@ def _root_cause_key(finding: dict) -> tuple | None:
 	if not fname or not fn_name:
 		return None
 	return (_os.path.basename(fname), fn_name)
+
+
+def _drilldown_display_rows(detail: dict) -> list[str] | None:
+	"""Frame labels (``function`` or ``function:lineno``) for a finding's
+	drill-down tree, matching what the primary card renders: the downward chain
+	prefixed with its root frame, else the ancestry path, else ``None`` when the
+	finding has no nested call path. Used to carry the drill-down onto the compact
+	sub-finding projection (which drops ``technical_detail``).
+	"""
+	if not isinstance(detail, dict):
+		return None
+	callsite = detail.get("callsite") or {}
+	wrapper = callsite.get("original_wrapper") or {}
+	root_fn = (wrapper.get("function") if wrapper else None) or callsite.get("function")
+
+	def _label(frame):
+		fn = frame.get("function") or ""
+		lineno = frame.get("lineno")
+		return f"{fn}:{lineno}" if lineno else fn
+
+	chain = detail.get("drilldown_chain")
+	if isinstance(chain, list) and chain:
+		return [root_fn or ""] + [_label(lv) for lv in chain]
+	ancestry = detail.get("drilldown_ancestry")
+	if ancestry:
+		return [_label(lv) for lv in ancestry]
+	return None
 
 
 def _group_findings_by_root_cause(findings: list[dict]) -> list[dict]:
@@ -109,12 +204,21 @@ def _group_findings_by_root_cause(findings: list[dict]) -> list[dict]:
 		# standalone cards elsewhere in the bucket.
 		primary["sub_findings"] = [
 			{
+				"finding_id": s.get("finding_id") or "",
+				"action_ref": s.get("action_ref"),
+				# The final sanitized display view, after settings and policy gates.
+				"llm_fix": s.get("llm_fix"),
 				"finding_type": s.get("finding_type") or "",
 				"severity": s.get("severity") or "Low",
 				"title": s.get("title") or "",
 				"customer_description": s.get("customer_description") or "",
 				"estimated_impact_ms": s.get("estimated_impact_ms") or 0,
 				"affected_count": s.get("affected_count") or 0,
+				"impact_scope_label": (s.get("technical_detail") or {}).get("impact_scope_label"),
+				"observed_query_ms": _observed_query_ms(s),
+				# A grouped sub-finding is still a finding in a nested function, so
+				# carry its own drill-down rows onto the compact projection.
+				"drill_rows": _drilldown_display_rows(s.get("technical_detail") or {}),
 			}
 			for s in subs
 		]
@@ -268,6 +372,89 @@ def _walk_drilldown_chain(
 	return chain
 
 
+def _find_node_path_in_tree(tree: dict, basename: str, function: str) -> list[dict] | None:
+	"""Like :func:`_find_node_in_tree`, but return the full ancestry path from the
+	tree root down to (and including) the first matching ``(basename, function)``
+	node, or ``None`` when no node matches. Used to show how a finding that sits
+	at a leaf user frame is reached (its nested call path).
+	"""
+	if not isinstance(tree, dict):
+		return None
+	want = (basename or "").strip()
+	want_fn = (function or "").strip()
+	if not want_fn:
+		return None
+	stack: list[tuple[dict, list[dict]]] = [(tree, [tree])]
+	while stack:
+		node, path = stack.pop()
+		if not isinstance(node, dict):
+			continue
+		node_file = (node.get("filename") or "").rsplit("/", 1)[-1]
+		if (node.get("function") or "") == want_fn and (not want or node_file == want):
+			return path
+		for child in reversed(node.get("children") or []):
+			if isinstance(child, dict):
+				stack.append((child, path + [child]))
+	return None
+
+
+def _walk_ancestor_chain(
+	tree: dict,
+	callsite: dict,
+	tracked_apps: tuple[str, ...] = (),
+) -> list[dict]:
+	"""Build the nested call path that *leads to* a finding whose own frame has no
+	deeper user-code descendants (so :func:`_walk_drilldown_chain` came back empty).
+
+	Locates the finding's frame in the ``tree`` and returns the user-app frames on
+	the path from the outermost tracked-app frame down to and including it, so a
+	leaf finding (an N+1 loop body, a redundant call, a framework call made from
+	user code) still shows the nesting it lives in. Framework and synthetic
+	``[other: N]`` frames on the path are skipped. Returns ``[]`` (never a
+	one-frame chain) when the finding is not nested under another user frame, so
+	the caller falls back to the existing placeholder.
+
+	Each entry is ``{filename, lineno, function, cumulative_ms}``; the last is the
+	finding's own frame (the terminal). Malformed input gives ``[]``.
+	"""
+	from optimus.analyzers.base import is_framework_callsite
+	from optimus.renderer.call_tree_renderer import _ct_is_other_frame
+
+	if not isinstance(tree, dict) or not isinstance(callsite, dict):
+		return []
+	filename = callsite.get("filename") or ""
+	function = _strip_doctype_suffix(callsite.get("function") or "")
+	if not function:
+		return []
+	if is_framework_callsite(filename, tracked_apps=tracked_apps or None):
+		return []
+	path = _find_node_path_in_tree(tree, filename.rsplit("/", 1)[-1], function)
+	if not path:
+		return []
+	rows: list[dict] = []
+	for node in path:
+		fn = node.get("function") or ""
+		nfile = node.get("filename") or ""
+		# Skip synthetic frames: the tree's ``<root>`` wrapper and collapse
+		# buckets carry no real filename (is_framework_callsite("") is False, so
+		# they must be dropped here); ``[other: N]`` nodes can't be drilled either.
+		if not fn or not nfile or _ct_is_other_frame(fn):
+			continue
+		if is_framework_callsite(nfile, tracked_apps=tracked_apps or None):
+			continue
+		rows.append({
+			"filename": nfile,
+			"lineno": int(node.get("lineno") or 0),
+			"function": fn,
+			"cumulative_ms": float(node.get("cumulative_ms") or 0),
+		})
+	# The finding's own frame must be the terminal; it must also be nested under at
+	# least one other user frame or there is no call path worth drawing.
+	if len(rows) < 2 or rows[-1]["function"] != function:
+		return []
+	return rows
+
+
 def _attach_drilldown_chains(findings, actions, tracked_apps: tuple[str, ...] = ()) -> None:
 	"""Attach a ``drilldown_chain`` to each finding's ``technical_detail``,
 	mutating findings in place. Tree JSON is parsed once per ``action_idx``
@@ -316,6 +503,16 @@ def _attach_drilldown_chains(findings, actions, tracked_apps: tuple[str, ...] = 
 		# user-code descendants) to decide whether to render a "no
 		# deeper user-code frame" placeholder in place of the chain.
 		detail["drilldown_chain"] = chain
+		# When the finding sits at a leaf user frame (nothing to drill into
+		# below it), it may still live inside a nested call path. Attach that
+		# ancestry so a finding in a nested function always shows its call path
+		# instead of the bare "no deeper user-code frame" placeholder. Only when
+		# it is genuinely nested (>= 2 user frames); leaf-but-top-level findings
+		# keep the placeholder.
+		if not chain:
+			ancestry = _walk_ancestor_chain(tree, callsite, tracked_apps=tracked_apps)
+			if ancestry:
+				detail["drilldown_ancestry"] = ancestry
 		finding["technical_detail"] = detail
 
 
@@ -668,6 +865,13 @@ def _markdown_to_safe_html(text) -> str:
 	raw = "" if text is None else str(text)
 	if not raw.strip():
 		return ""
+	from optimus.ai_responses import MARKDOWN_CHARS
+	if len(raw) > MARKDOWN_CHARS:
+		import html as _html
+
+		# Preserve every character without recursive Markdown or regex highlighting.
+		return '<pre tabindex="0" aria-label="AI suggestion, plain text" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:32rem;overflow:auto">' + _html.escape(raw) + '</pre>'
+
 	try:
 		import nh3
 
@@ -835,13 +1039,45 @@ def _finding_to_dict(child, file_cache: dict | None = None) -> dict:
 	except Exception:
 		raw_llm = {}
 	if isinstance(raw_llm, dict) and (raw_llm.get("suggestion") or "").strip():
+		from optimus.ai_guardrails import FIX_HEADINGS, render_limited, section, stored_policy_violations
+		from optimus.ai_prompts import FIX_PROCESSING_LIMITED, response_status
+
+		status = response_status(raw_llm)
+		suggestion = raw_llm["suggestion"]
+		policy_violations = stored_policy_violations(suggestion) if status in (None, "complete") else []
+		limited = render_limited(policy_violations)
+		policy_codes = [v.code for v in policy_violations]
+		if policy_violations:
+			# The old explanation describes rejected code; keep only its diagnosis
+			# and the update notice. The original answer remains in llm_fix_json.
+			diagnosis = section(suggestion, "Diagnosis", FIX_HEADINGS).strip()
+			if "raw-sql" in policy_codes:
+				notice = "Code withheld because this saved suggestion needs a Frappe API update."
+			elif "permission-behavior-change" in policy_codes:
+				notice = "Code withheld because this saved suggestion changes permission behavior or its preservation could not be verified."
+			elif "unbounded-write" in policy_codes:
+				notice = "Code withheld because this saved suggestion contains an unbounded or unverifiable database write."
+			elif "sql-semantics-dropped" in policy_codes:
+				notice = "Code withheld because this saved suggestion changes a query limit, offset or explicit ordering."
+			elif "unchecked-permission" in policy_codes:
+				notice = "Code withheld because this saved suggestion ignores a permission result."
+			else:
+				notice = "Code withheld because this saved suggestion could not be checked safely."
+			suggestion = diagnosis + "\n\n**Fix**: " + notice
+
 		llm_fix = {
-			"suggestion_html": _markdown_to_safe_html(raw_llm.get("suggestion")),
+			"suggestion_html": _markdown_to_safe_html(suggestion),
+			"sql_policy_outdated": "raw-sql" in policy_codes,
+			"policy_outdated": bool(policy_violations) and not limited,
+			"policy_codes": policy_codes,
 			"model": raw_llm.get("model") or "",
 			"provider": raw_llm.get("provider") or "",
 			"generated_at": raw_llm.get("generated_at") or "",
 			"source_available": raw_llm.get("source_available", True),
 			"prompt_version": raw_llm.get("prompt_version"),
+			"finish_reason": raw_llm.get("finish_reason"),
+			"completion_status": FIX_PROCESSING_LIMITED if limited else status,
+			"guardrail": raw_llm.get("guardrail"),
 			# Token usage the provider reported (Aerele managed proxy forwards
 			# the real billed count). None when the suggestion predates this or
 			# the provider returned no usage.
@@ -855,7 +1091,7 @@ def _finding_to_dict(child, file_cache: dict | None = None) -> dict:
 		"customer_description": child.customer_description or "",
 		"estimated_impact_ms": child.estimated_impact_ms or 0,
 		"affected_count": child.affected_count or 0,
-		"action_ref": child.action_ref or "",
+		"action_ref": _action_ref_key(child.action_ref),
 		"technical_detail": detail,
 		"llm_fix": llm_fix,
 	}
@@ -924,14 +1160,21 @@ def _attach_representative_callsites(findings, recordings, *, file_cache: dict |
 			continue
 		(filename, lineno, function), _weight = max(w["tally"].items(), key=lambda kv: kv[1])
 		abs_path = _resolve_source_path(filename)
-		w["finding"]["technical_detail"]["callsite"] = {
-			"filename": _bench_relative_display(abs_path) if abs_path else filename,
+		is_script = isinstance(abs_path, tuple) and abs_path[0] == "server_script"
+		callsite = {
+			"filename": _bench_relative_display(abs_path) if abs_path and not is_script else filename,
 			"_abs": abs_path,
 			"lineno": lineno,
 			"function": function,
-			"source_snippet": _read_source_snippet(abs_path or filename, lineno, cache=file_cache),
+			"source_snippet": _read_source_snippet(filename if is_script else (abs_path or filename), lineno, cache=file_cache),
 			"is_representative": True,
 		}
+		if is_script:
+			from optimus.server_script_source import desk_url
+
+			callsite["_abs"] = desk_url(abs_path[1], cache=file_cache)
+			callsite["_link_kind"] = "desk"
+		w["finding"]["technical_detail"]["callsite"] = callsite
 
 
 def _snippet_row(lines: list[str], idx: int, limit: int) -> dict:
@@ -1021,18 +1264,19 @@ def _strip_doctype_suffix(fn: str) -> str:
 
 
 def _pin_slow_hot_path_to_related_hot_line(findings, *, file_cache: dict | None = None) -> None:
-	"""Pin a Slow Hot Path card to the exact hot line inside its deepest
-	user-code frame.
+	"""Show a related finding's source line inside the deepest user-code frame.
 
 	A self-time hot path whose time is spent in DB calls otherwise shows only the
 	function signature (empty chain, e.g. a job that calls framework directly) or
 	a call-to-a-function line (a chain whose leaf calls framework), because the
 	call tree holds framework internals with no user line for the hot work. The
-	frame's related findings DO carry the real line: the N+1 / hot-line / redundant
-	finding for that same frame stores the offending statement's callsite. Pin the
-	card to the hottest such line (by estimated impact), reusing that finding's
+	frame's related findings carry a concrete line: the N+1 / hot-line / redundant
+	finding for that same frame stores its statement's callsite. Pin the
+	card to the highest-impact related line, reusing that finding's
 	already-resolved snippet + abs path (no path re-resolution here). These come
 	from persisted findings, so the pin survives a report re-render.
+	This is a navigation clue, not attribution of the whole function's time to
+	that statement. The template labels both the header and snippet accordingly.
 
 	A compute-bound leaf with no related finding is left untouched, for
 	``_expand_self_time_snippets`` / ``_retarget_phase1_callsites_to_drilldown_leaf``.
@@ -1103,8 +1347,8 @@ def _pin_slow_hot_path_to_related_hot_line(findings, *, file_cache: dict | None 
 		hot = hot_index.get((af, _strip_doctype_suffix(leaf_fn), _base(leaf_file)))
 		if not hot:
 			continue
-		# Keep the origin function for the "entered through <fn> - pinned here to
-		# the actual hot line" banner; move the card's file:line + snippet +
+		# Keep the origin function for the entry-context banner; move the
+		# card's file:line + snippet +
 		# function to the leaf's hot statement (reusing the source finding's
 		# resolved fields). phase2_lookup_* keeps the Line-Level Drilldown crosslink
 		# aimed at the leaf (its keys use the raw pyinstrument function name).

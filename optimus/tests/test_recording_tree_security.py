@@ -107,9 +107,14 @@ def test_new_snapshot_never_reads_or_embeds_tree_and_sidecar(monkeypatch):
 		assert key not in {redis_keys.tree("fake-recording"), redis_keys.sidecar("fake-recording")}
 		return None
 	monkeypatch.setattr(analyze, "frappe", SimpleNamespace(cache=SimpleNamespace(
-		hget=lambda key, *a: rec if key == analyze.RECORDER_REQUEST_HASH else None, get_value=value)))
+		hget=lambda key, *a: rec if key == analyze.RECORDER_REQUEST_HASH else None, get_value=value),
+		db=SimpleNamespace(get_value=lambda *a: None, set_value=lambda *a: None)))
 	monkeypatch.setattr(session, "get_session_meta", lambda *a: {})
-	monkeypatch.setattr(analyze, "_save_report_file", lambda **kw: captured.append(kw["content"]))
+	monkeypatch.setattr(analyze, "safe_commit", lambda: None)
+	def save(**kw):
+		captured.append(kw["content"])
+		return "/private/files/capture.json.gz"
+	monkeypatch.setattr(analyze, "_save_report_file", save)
 	analyze._persist_recordings_file("fake-doc", "fake-session", ["fake-recording"])
 	out = json.loads(gzip.decompress(captured[0]))
 	assert out["recordings"]["fake-recording"] == {"rec": {"uuid": "fake-recording", "calls": []}}
@@ -123,7 +128,8 @@ def test_snapshot_interrupt_is_not_swallowed(monkeypatch, boundary):
 	def fail(*a, **kw):
 		raise original
 	cache = SimpleNamespace(hget=fail if boundary == "cache" else lambda *a: {"uuid": "fake-recording"}, get_value=lambda *a: None)
-	monkeypatch.setattr(analyze, "frappe", SimpleNamespace(cache=cache, log_error=lambda **kw: None))
+	monkeypatch.setattr(analyze, "frappe", SimpleNamespace(cache=cache, log_error=lambda **kw: None,
+		db=SimpleNamespace(get_value=lambda *a: None)))
 	monkeypatch.setattr(session, "get_session_meta", lambda *a: {})
 	monkeypatch.setattr(analyze, "_save_report_file", fail)
 	with pytest.raises(Timeout) as caught:

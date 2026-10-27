@@ -18,9 +18,9 @@ debugger/profiler) owns it. They manipulate
 from __future__ import annotations
 
 import sys
+import unittest
 
 import frappe
-import pytest
 from frappe.tests.utils import FrappeTestCase
 
 import optimus
@@ -29,7 +29,7 @@ _HAS_MON = hasattr(sys, "monitoring")
 _PID = sys.monitoring.PROFILER_ID if _HAS_MON else None
 
 
-@pytest.mark.skipif(not _HAS_MON, reason="sys.monitoring requires Python 3.12+")
+@unittest.skipUnless(_HAS_MON, "sys.monitoring requires Python 3.12+")
 class TestPhase2ToolOrphanRecovery(FrappeTestCase):
 	"""End-to-end: _startup_probe_tool2 reclaims a leaked tool 2."""
 
@@ -194,8 +194,10 @@ class TestPhase2CaptureRedisContract(FrappeTestCase):
 		self.start()
 		with self.assertRaises(self.capture.CaptureError):
 			self.capture.start_line_profile_pass("fake-session", self.other, self.actor, prepared=self.prepared)
-		assert not frappe.cache.exists(frappe.cache.make_key(redis_keys.lp_picks(self.other)))
-		assert not frappe.cache.exists(frappe.cache.make_key(redis_keys.lp_source(self.other)))
+		# RedisWrapper.exists namespaces its argument itself. Double-prefixing
+		# would inspect an unrelated key and make these assertions vacuous.
+		assert not frappe.cache.exists(redis_keys.lp_picks(self.other))
+		assert not frappe.cache.exists(redis_keys.lp_source(self.other))
 
 	def test_raw_counter_round_trip_expiry_and_eviction_detection(self):
 		from optimus import redis_keys

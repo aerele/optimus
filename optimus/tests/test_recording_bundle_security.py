@@ -167,7 +167,8 @@ def test_new_snapshot_respects_the_same_size_limit_as_its_reader(monkeypatch):
 	monkeypatch.setattr(session, "get_session_meta", lambda *a: {})
 	monkeypatch.setattr(analyze, "_save_report_file", lambda **kw: stored.append(True))
 	monkeypatch.setattr(ai_fix, "log_ai_failure", lambda *a, **kw: logs.append((sys.exc_info()[0], kw)))
-	analyze._persist_recordings_file("fake-doc", "fake-session", ["fake-recording"])
+	with pytest.raises(recording_bundle.SnapshotUnavailable):
+		analyze._persist_recordings_file("fake-doc", "fake-session", ["fake-recording"])
 	assert stored == [], "never persist a snapshot the bounded reader must refuse"
 	assert len(logs) == 1 and logs[0][0] is None
 

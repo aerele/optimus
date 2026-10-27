@@ -90,9 +90,9 @@ class TestRunExplain:
 class TestIntrospection:
 	def test_existing_indexes_groups_ordered_columns(self, monkeypatch):
 		rows = [
-			{"index_name": "tabUser_pkey", "column_name": "name", "seq": 1, "is_unique": True},
-			{"index_name": "idx_ab", "column_name": "b", "seq": 2, "is_unique": False},
-			{"index_name": "idx_ab", "column_name": "a", "seq": 1, "is_unique": False},
+			{"index_name": "tabUser_pkey", "column_name": "name", "seq": 1, "is_unique": True, "eligible": True},
+			{"index_name": "idx_ab", "column_name": "b", "seq": 2, "is_unique": False, "eligible": True},
+			{"index_name": "idx_ab", "column_name": "a", "seq": 1, "is_unique": False, "eligible": True},
 		]
 		_install_db(monkeypatch, lambda q, *a, **k: rows)
 		by = {i.name: i for i in PostgresDialect().existing_indexes("tabUser")}

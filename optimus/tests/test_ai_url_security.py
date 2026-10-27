@@ -92,3 +92,23 @@ def test_plain_http_config_read_preserves_job_timeout(monkeypatch):
 		ai_fix._allow_key_over_http()
 	assert caught.value is not interrupt
 	assert caught.value.__context__ is None
+
+
+@pytest.mark.parametrize('address', ['169.254.169.254', '100.100.100.200', '0.0.0.0', '224.0.0.1'])
+def test_numeric_ipv4_aliases_cannot_reach_forbidden_endpoints(address, monkeypatch):
+	import ipaddress
+	import socket
+	number = int(ipaddress.IPv4Address(address))
+	parts = address.split('.')
+	aliases = [str(number), hex(number), '.'.join('0' + format(int(part), 'o') for part in parts),
+		parts[0] + '.' + str(number & 0xffffff), '.'.join(parts[:2]) + '.' + str(number & 0xffff)]
+	monkeypatch.setattr(socket, 'getaddrinfo', lambda *a, **kw: pytest.fail('URL validation must not use DNS'))
+	for alias in aliases:
+		with pytest.raises(ai_fix.AiFixError):
+			ai_fix.validate_base_url('http://' + alias + '/v1')
+
+
+@pytest.mark.parametrize('host', ['2130706433', '0x7f000001', '0177.0.0.1', '127.1'])
+def test_legacy_loopback_spelling_does_not_relax_key_transport(host):
+	assert ai_fix.validate_base_url('http://' + host + '/v1')
+	assert not ai_fix._is_loopback_host(host)

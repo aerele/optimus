@@ -12,6 +12,16 @@ def _text(value):
 	return value.strip() if isinstance(value, str) else ""
 
 
+def _invalidate_settings_cache():
+	"""A lost post-commit callback is bounded by CONFIG_CACHE_SECONDS."""
+	from optimus import redis_keys, safe_call
+	def invalidate():
+		frappe.cache.delete_value(redis_keys.settings_cache())
+		return True
+	if not safe_call.best_effort(invalidate, False):
+		safe_call.best_effort(lambda: frappe.logger("optimus").error("Optimus settings cache invalidation failed; the bounded cache will expire."))
+
+
 def _effective_endpoint(provider, base_url):
 	"""The effective provider and URL, with case-sensitive paths preserved."""
 	from optimus import ai_fix
@@ -48,9 +58,7 @@ class OptimusSettings(Document):
 		# Settings are read on every request (via the `enabled` gate in
 		# hooks_callbacks), so the cache version bumps on every save.
 		# The settings module's reader respects the cache version.
-		from optimus import redis_keys
-
-		frappe.cache.delete_value(redis_keys.settings_cache())
+		frappe.db.after_commit.add(_invalidate_settings_cache)
 
 	# Numeric floors per field a value below the floor would either
 	# break the analyzer at runtime (negative interval, zero retention)

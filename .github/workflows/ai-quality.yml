@@ -26,7 +26,7 @@ on:
   pull_request:
     branches: ['**']
   push:
-    branches: [main]
+    branches: [main, develop]
   workflow_dispatch:
 
 concurrency:
@@ -97,7 +97,7 @@ jobs:
           BASELINE: ${{ steps.base.outputs.baseline }}
         run: |
           semgrep scan --config "$RUNNER_TEMP/frappe-semgrep-rules/rules" \
-            --metrics=off --disable-version-check --error \
+            --metrics=off --disable-version-check --timeout=60 --strict --error \
             --baseline-commit "$BASELINE" \
             --exclude tests --exclude tests_integration \
             optimus/
@@ -107,7 +107,7 @@ jobs:
         continue-on-error: true
         run: |
           semgrep scan --config "$RUNNER_TEMP/frappe-semgrep-rules/rules" \
-            --metrics=off --disable-version-check --quiet \
+            --metrics=off --disable-version-check --timeout=60 --quiet \
             --exclude tests --exclude tests_integration \
             --json --output semgrep-full.json optimus/ || true
           python - >> "$GITHUB_STEP_SUMMARY" <<'EOF'
@@ -236,7 +236,7 @@ jobs:
           OPTIMUS_TEST_SQL: ${{ matrix.database }}
           OPTIMUS_TEST_SQL_SNAPSHOT: ${{ matrix.snapshot }}
           PYTHONDONTWRITEBYTECODE: '1'
-        run: python -m pytest optimus/tests/test_ai_refresh_sql.py -q -rA -p no:cacheprovider
+        run: python -m pytest optimus/tests/test_ai_refresh_sql.py optimus/tests/test_index_catalog_sql.py -q -rA -p no:cacheprovider
       - name: Show database service logs on failure
         if: failure()
         env:

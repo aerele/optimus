@@ -19,6 +19,7 @@ from typing import Any
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from markupsafe import Markup
 
+from optimus.ai_guardrails import render_validation_budget
 from optimus.analyzers.base import (
 	DEFAULT_DISPLAY_THRESHOLD_MS,
 	SEVERITY_ORDER,
@@ -136,11 +137,15 @@ from optimus.renderer.doc_event_renderer import (
 from optimus.renderer.finding_enrichment import (
 	_GROUPING_SEVERITY_RANK,
 	_SQL_REDFLAG_FINDING_TYPES,
+	_action_ref_key,
+	_ai_links_by_action,
+	_assign_finding_ids,
 	_attach_drilldown_chains,
 	_attach_representative_callsites,
 	_expand_self_time_snippets,
 	_find_call_line_in_function_body,
 	_find_node_in_tree,
+	_find_node_path_in_tree,
 	_finding_to_dict,
 	_group_findings_by_root_cause,
 	_markdown_to_safe_html,
@@ -148,6 +153,7 @@ from optimus.renderer.finding_enrichment import (
 	_pin_slow_hot_path_to_related_hot_line,
 	_retarget_phase1_callsites_to_drilldown_leaf,
 	_root_cause_key,
+	_walk_ancestor_chain,
 	_walk_drilldown_chain,
 )
 
@@ -275,6 +281,27 @@ def _finalize_prose(text: str, threshold_ms: float, *, scan: bool = True) -> str
 	return fmt(text, threshold_ms).replace("—", "-")
 
 
+def _sanitize_report_html(value):
+	"""Preserve rich notes on older v15 while excluding resource-bearing tags."""
+	from frappe.utils.html_utils import sanitize_html
+
+	try:
+		return sanitize_html(value, always_sanitize=True, disallowed_tags=["meta", "link"])
+	except TypeError as exc:
+		if "disallowed_tags" not in str(exc):
+			raise
+	# Old v15 lacks the keyword. Sanitize before parsing, strip resource tags,
+	# then sanitize the serialized DOM again to retain the fail-closed boundary.
+	from bs4 import BeautifulSoup
+
+	cleaned = sanitize_html(value, always_sanitize=True)
+	soup = BeautifulSoup(cleaned, "html.parser")
+	for tag in soup.find_all(["meta", "link"]):
+		tag.decompose()
+	return sanitize_html(str(soup), always_sanitize=True)
+
+
+@render_validation_budget()
 def render(
 	session_doc: Any,
 	recordings: list[dict] | None = None,
@@ -366,6 +393,7 @@ def render(
 		_finding_to_dict(f, _finding_file_cache)
 		for f in (session_doc.findings or [])
 	]
+	_assign_finding_ids(all_findings, session_doc.findings or [])
 	# Tokens every stored AI fix cost, counted before any filter or hide step below drops
 	# a finding (the tables' retired index-AI tokens are added where the tables are read).
 	_ai_fix_tokens = count_ai_tokens(all_findings, [])
@@ -724,15 +752,14 @@ def render(
 	notes_html = getattr(session_doc, "notes", None) or ""
 	if notes_html:
 		try:
-			from frappe.utils.html_utils import sanitize_html
-			notes_html = sanitize_html(notes_html, always_sanitize=True)
+			notes_html = _sanitize_report_html(notes_html)
 		except Exception:
 			# If sanitize_html blows up for any reason (unexpected input
 			# type, nh3/bleach internal error), fall back to HTML-escaping
 			# via html.escape so the report NEVER renders unsanitized
 			# user input - safe by default.
 			import html as html_mod
-			notes_html = html_mod.escape(notes_html)
+			notes_html = html_mod.escape(html_mod.unescape(notes_html))
 		# The Steps-to-Reproduce list bakes raw-ms durations at analyze time (e.g.
 		# "Submit Delivery Note: 12418.3 ms") and the AI humanizer writes free-text
 		# durations, so reformat with the prose fallback and strip em dashes. Order
@@ -815,6 +842,7 @@ def render(
 	observational_findings_by_app = _bucket_findings_by_app(
 		observational_findings, tracked_apps
 	)
+	_ai_links = _ai_links_by_action(findings_by_app + observational_findings_by_app)
 
 	# v0.6.x: prioritise custom-app rows in each of the 4 main listing
 	# sections (per-action, top-queries, background-jobs, hot-frames).
@@ -853,12 +881,14 @@ def render(
 	# still appear in their respective top-level sections.
 	_findings_by_action_ref: dict[str, list] = {}
 	for _f in actionable_findings:
-		_ref = str(_f.get("action_ref") or "").strip()
+		_ref = _action_ref_key(_f.get("action_ref"))
 		if _ref:
 			_findings_by_action_ref.setdefault(_ref, []).append(_f)
 	for _a in list(actions) + list(actions_framework):
+		_ref = _action_ref_key(_a.get("idx"))
+		_a["ai_suggestion_links"] = _ai_links.get(_ref, [])
 		_a["related_findings"] = _findings_by_action_ref.get(
-			str(_a.get("idx", "")), [],
+			_ref, [],
 		)
 	# v0.7.x: same linkage for RQ Jobs rows. Jobs carry the
 	# original action ``idx`` (set in ``build_background_jobs``) so
@@ -869,8 +899,10 @@ def render(
 		list(background_jobs.get("jobs", []) or [])
 		+ list(background_jobs.get("jobs_framework", []) or [])
 	):
+		_ref = _action_ref_key(_job.get("idx"))
+		_job["ai_suggestion_links"] = _ai_links.get(_ref, [])
 		_job["related_findings"] = _findings_by_action_ref.get(
-			str(_job.get("idx", "")), [],
+			_ref, [],
 		)
 	top_queries, top_queries_framework = _split_by_framework_app(
 		top_queries,
@@ -987,6 +1019,12 @@ def render(
 	# threshold caption to "(&gt;0.20s)" under a custom threshold <= 200 (the ";" in
 	# "&gt;" is not a URL-guard char), the very corruption the render-time path avoids.
 	stored_summary_html = getattr(session_doc, "summary_html", None) or ""
+	if stored_summary_html:
+		try:
+			stored_summary_html = _sanitize_report_html(stored_summary_html)
+		except Exception:
+			import html as html_mod
+			stored_summary_html = html_mod.escape(html_mod.unescape(stored_summary_html))
 	if not summary_html_rendered and stored_summary_html:
 		stored_summary_html = _finalize_prose(
 			stored_summary_html, _large_duration_threshold_ms, scan=False

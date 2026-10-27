@@ -308,6 +308,13 @@ def _explain_columns(ftype: str, table: str, query: str, parse) -> tuple[str, li
 		tab_tables = [t for t in (parsed.get("tables") or []) if str(t).startswith("tab")]
 		if len(tab_tables) == 1:
 			key = tab_tables[0]
+		elif ftype == "Slow Query" and len(query) >= QUERY_TEXT_LIMIT:
+			# sql_metadata 3 rejects a cut identifier instead of returning partial
+			# metadata. Recover only an unambiguous main table; the bounded WHERE
+			# scan below still decides whether any filter is complete enough to use.
+			sources = _from_clause(query, preserve_case=True) or []
+			if len(sources) == 1 and doctype_of(sources[0]) is not None:
+				key = sources[0]
 	if key is None:
 		return table, []
 	out: list[tuple[str, str]] = []
@@ -364,6 +371,11 @@ def table_aliases(query: str) -> dict:
 	"""sql_metadata's ``tables_aliases`` for ``query`` (``{alias: table}``), {} when it
 	cannot parse the query. A second parse of the query, so a render memoises it per query
 	text (``recipe_enrichment.make_query_parser``)."""
+
+	from optimus.sql_budget import within_budget
+
+	if not within_budget(query):
+		return {}
 
 	def aliases() -> dict:
 		from sql_metadata import Parser
@@ -457,12 +469,13 @@ def _where_columns(query: str, qualifiers, columns: Mapping[str, str], *, trunca
 _JOIN_SIDES: frozenset[str] = frozenset({"left", "right", "inner", "cross", "full", "natural"})
 
 
-def _from_clause(query: str) -> list[str] | None:
+def _from_clause(query: str, *, preserve_case: bool = False) -> list[str] | None:
 	"""Lowercase unquoted names of the tables in the main query's FROM clause (the first
 	one outside brackets), in order, "(derived)" for a subquery; None when there is none.
 	A "." qualifies only the table name right before it (``db.table``): the qualified
 	columns of a JOIN's ON clause (``ON gl.voucher_no = p.name``) are never table names, or
-	the joined table would drop out of the list."""
+	the joined table would drop out of the list. ``preserve_case`` retains schema spelling
+	when recovering the target of a truncated query."""
 	tokens = [tok for tok in _SQL_TOKEN_RE.findall(query or "") if not _COMMENT_RE.match(tok)]
 	depth = 0
 	start = None
@@ -496,10 +509,12 @@ def _from_clause(query: str) -> list[str] | None:
 		if low in (",", "join", "straight_join"):
 			expect = True
 		elif low == "." and out and named_at == i - 1 and i + 1 < len(tokens):
-			out[-1] = tokens[i + 1].strip('`"').lower()  # db.table: the table
+			name = tokens[i + 1].strip('`"')
+			out[-1] = name if preserve_case else name.lower()  # db.table: the table
 			named_at = i + 1
 		elif expect and _NAME_RE.fullmatch(tok) and low not in _JOIN_SIDES | {"outer", "lateral"}:
-			out.append(tok.strip('`"').lower())
+			name = tok.strip('`"')
+			out.append(name if preserve_case else name.lower())
 			expect = False
 			named_at = i
 	return out
@@ -519,7 +534,7 @@ def _key_lookup(valued: Mapping[str, str], evidence: TableEvidence | None) -> st
 	if evidence is None or by_name.get("parent") not in _EQUALITY_KINDS:
 		return ""
 	columns = {col.lower() for col in evidence.column_types}
-	index = next((ix for ix in evidence.indexes if ix.columns[:1] == ("parent",)), None)
+	index = next((ix for ix in evidence.usable_indexes if ix.columns[:1] == ("parent",)), None)
 	if index is not None and {"parent", "parenttype"} <= columns:
 		return (
 			f'The query finds its rows by parent, which the index "{index.name}" on table "{evidence.table}" '
@@ -653,7 +668,7 @@ def _index_order(
 
 _CLAUSE_ENDS: frozenset[str] = frozenset({
 	"limit", "for", "lock", "union", "having", "order", "group", "window", "offset", "into", "procedure",
-	"with",
+	"with", ";",
 })
 
 
@@ -1062,7 +1077,7 @@ def _unique_alone(evidence: TableEvidence, col: str) -> bool:
 	"""True when ``col`` is unique on its own: a Unique field or a one-column unique index
 	(a composite unique index it leads is only an index it leads)."""
 	field = evidence.fields.get(col)
-	return (field is not None and field.unique) or any(ix.unique and ix.columns == (col,) for ix in evidence.indexes)
+	return (field is not None and field.unique) or any(ix.unique and ix.columns == (col,) for ix in evidence.usable_indexes)
 
 
 def _serves(index_columns: tuple[str, ...], equality: tuple[str, ...], rest: tuple[str, ...]) -> bool:
@@ -1131,14 +1146,14 @@ def _existing_index_problem(
 				f"new index would not help. {tail}"
 			), "", False
 		# a unique index whose columns the equality filter all fixes returns at most one row
-		pinned = next((ix for ix in evidence.indexes if ix.unique and ix.columns and set(ix.columns) <= set(eq)), None)
+		pinned = next((ix for ix in evidence.usable_indexes if ix.unique and ix.columns and set(ix.columns) <= set(eq)), None)
 		if pinned is not None:
 			return (
 				f'The unique index "{pinned.name}" on table "{table}" covers {_cols_text(pinned.columns)}, which '
 				f"{compares} with known values, so the database finds the rows through it and a new index "
 				f"would not help. {tail}"
 			), pinned.name, False
-		covering = next((ix for ix in evidence.indexes if _serves(ix.columns, eq, rest)), None)
+		covering = next((ix for ix in evidence.usable_indexes if _serves(ix.columns, eq, rest)), None)
 		if covering is not None:
 			starts = tuple(covering.columns[: len(whole)])
 			same = "" if starts == whole else " (the same equality columns in another order)"
@@ -1151,7 +1166,7 @@ def _existing_index_problem(
 		if checks and (plain or rest):
 			# an existing index serves every other column (the range or sort tail too, as
 			# Frappe's creation index serves creation > ?), and Check fields add nothing
-			prefix = next((ix for ix in evidence.indexes if _serves(ix.columns, plain, rest)), None)
+			prefix = next((ix for ix in evidence.usable_indexes if _serves(ix.columns, plain, rest)), None)
 			if prefix is not None:
 				if not plain and sort_tail and _has_limit(query):
 					return None, "", False
@@ -1165,17 +1180,17 @@ def _existing_index_problem(
 		return None, "", False
 	col = whole[0]
 	if _unique_alone(evidence, col):
-		unique_ix = next((ix.name for ix in evidence.indexes if ix.unique and ix.columns == (col,)), "")
+		unique_ix = next((ix.name for ix in evidence.usable_indexes if ix.unique and ix.columns == (col,)), "")
 		return f'Column "{col}" is already unique, so the database already has an index on it. {tail}', unique_ix, False
-	led = next((ix for ix in evidence.indexes if ix.columns[:1] == (col,)), None)
+	led = next((ix for ix in evidence.usable_indexes if ix.columns[:1] == (col,)), None)
 	if led is not None:
 		return (
 			f'Column "{col}" already leads the index "{led.name}" on table "{table}", so a new '
 			f"index would not help. {tail}"
 		), led.name, False
 	for name, used in _explain_index_names(explain_row):
-		named = next((ix for ix in evidence.indexes if ix.name == name), None)
-		if (named is not None and named.columns[:1] == (col,)) or name in (col, f"{col}_index"):
+		named = next((ix for ix in evidence.usable_indexes if ix.name == name), None)
+		if named is not None and named.columns[:1] == (col,):
 			how = "uses" if used else "can use"
 			return (
 				f'EXPLAIN shows the database {how} the index "{name}" on column "{col}", so a new index '
@@ -1615,7 +1630,7 @@ def _advise(
 		# stays. The verdict is about the filter only, never the sort, so it
 		# names no sort-serving index
 		cut = [
-			ix for ix in evidence.indexes
+			ix for ix in evidence.usable_indexes
 			if ix.columns and set(ix.columns) <= equality and not set(ix.columns) & set(cols)
 		]
 		compares = "this query compares" if query else "the slow queries compare"
@@ -1693,7 +1708,7 @@ def _serves_sort(evidence: TableEvidence, name: str, equality: set[str], sorts: 
 	``sorts`` (the ORDER BY or GROUP BY columns, in order): it starts with equality columns
 	(in any order), then every sort column in order; or it is a unique index whose columns
 	are all equality columns, which returns at most one row."""
-	index = next((ix for ix in evidence.indexes if ix.name == name), None) if name else None
+	index = next((ix for ix in evidence.usable_indexes if ix.name == name), None) if name else None
 	if index is None or not sorts:
 		return False
 	if index.unique and set(index.columns) <= equality:
@@ -1731,7 +1746,7 @@ def _cap(cols: list[str], equality: set[str], evidence: TableEvidence | None) ->
 	block = [col for col in cols if col in equality]
 	if evidence is None or len(block) <= MAX_INDEX_COLUMNS:
 		return cols[:MAX_INDEX_COLUMNS], cols[MAX_INDEX_COLUMNS:]
-	full = [ix for ix in evidence.indexes if ix.columns and set(ix.columns) <= set(block)]
+	full = [ix for ix in evidence.usable_indexes if ix.columns and set(ix.columns) <= set(block)]
 	width = {col: max((len(ix.columns) for ix in full if col in ix.columns), default=0) for col in block}
 
 	def key(col: str) -> tuple:
@@ -2033,6 +2048,11 @@ def _advise_finding(
 		# top_queries keeps QUERY_TEXT_LIMIT characters, so a Slow Query that long may be cut
 		truncated = ftype == "Slow Query" and len(query) >= QUERY_TEXT_LIMIT
 		qualifiers = _target_qualifiers(query, table, getattr(parser, "aliases", None))
+		if truncated and _where_tokens(query, truncated=True) is None:
+			return _no_code(doctype, (), (
+				"Optimus could not read how this query combines its filters: the recorded SQL ends before "
+				"the WHERE clause is complete. So it gives no index code. Check the query with EXPLAIN."
+			), unknown=True)
 		if evidence is not None and _union_branches(query, qualifiers) > 1:
 			# one branch's filter is not the query's: never advise from one branch
 			return _no_code(doctype, _clean_columns([col for _label, col in labelled]), (
@@ -2064,6 +2084,9 @@ def _advise_finding(
 			]
 		dropped: list[str] = []
 		names = {col.lower(): col for col in evidence.column_types} if evidence is not None else {}
+		# Parser versions differ in whether they preserve the query's identifier
+		# casing. Use the actual schema spelling for both shape checks and advice.
+		labelled = [(label, names.get(col.lower(), col)) for label, col in labelled]
 		if evidence is not None and target in source:
 			# sql_metadata leaves out a bare column named like an SQL word (account, user, type,
 			# date, ...) and every unqualified column of a query on several tables (a subquery
@@ -2094,14 +2117,24 @@ def _advise_finding(
 		if sort_label and evidence is not None and source == [target]:
 			labelled = _recover_sort_clause(query, labelled, sort_label, qualifiers, names)
 		unusable, usable, valued = _scan_where(query, labelled, qualifiers, truncated=truncated)
+		from optimus.renderer.where_scan import scan_join_filters
+
+		join_unusable, join_usable = scan_join_filters(query, labelled, qualifiers)
+		unusable.update({col: kinds for col, kinds in join_unusable.items() if col not in usable})
+		for col, kind in join_usable.items():
+			if col not in usable:
+				usable[col] = kind
+			unusable.pop(col, None)
 		comparisons = {}
-		for label, col in labelled:  # filters come first, then the sort or group columns
+		# Parser recovery can append filters after sort/group columns. Classify
+		# filters first regardless of parser order, then derive their sort role.
+		for label, col in sorted(labelled, key=lambda item: item[0] in ("ORDER BY", "GROUP BY")):
 			if label in ("ORDER BY", "GROUP BY"):
 				current = comparisons.get(col)
 				if current != "eq":  # an equality-filtered sort column stays an equality column
 					comparisons[col] = "rsort" if current == "range" else "sort"
-			else:
-				comparisons.setdefault(col, "eq" if label == "JOIN" else usable.get(col, "range"))
+			elif col not in unusable:
+				comparisons.setdefault(col, usable.get(col, "range"))
 		lookup = _key_lookup(valued, evidence)
 		if lookup:
 			return _no_code(doctype, _clean_columns([col for _label, col in labelled]), lookup)
@@ -2115,11 +2148,29 @@ def _advise_finding(
 		maybe = tuple(col for col, kind in in_cols if kind == "in1")
 		if ftype in _SERVES:
 			sort_problem = _sort_problem(query, ftype, qualifiers, evidence)
+			if not sort_problem:
+				# A function/OR in WHERE can prevent filtering by a column without
+				# preventing ORDER BY on that bare column. Parser 3 reports both
+				# uses; the validated sort remains a candidate independently.
+				unusable = {
+					col: kinds for col, kinds in unusable.items()
+					if comparisons.get(col) != "sort"
+				}
 			# rows matching several values (IN, IS NULL OR =) never come back in one sorted run;
 			# a collapsed IN (?) may be one value, so it keeps the sort and the lead hedges
 			serves = _SERVES[ftype] if not sort_problem and not multi else ""
+	candidate_columns = [col for _label, col in labelled]
+	if serves:
+		# sql_metadata can order clause columns by their first SELECT mention.
+		# An index's sort suffix must follow the actual ORDER/GROUP BY sequence,
+		# including a column also used by a range predicate.
+		ordered = _clause_columns(query, "order" if ftype == "Filesort" else "group", qualifiers, names)
+		positions = {col: index for index, col in enumerate(ordered)}
+		candidate_columns.sort(key=lambda col: (
+			comparisons.get(col) in {"sort", "rsort"}, positions.get(col, len(positions))
+			if comparisons.get(col) in {"sort", "rsort"} else 0))
 	advice = advise(
-		table, [col for _label, col in labelled], evidence=evidence,
+		table, candidate_columns, evidence=evidence,
 		tracked_apps=tracked_apps, explain_row=detail.get("explain_row"), query=query, unusable=unusable,
 		comparisons=comparisons, serves=serves, removes=_SERVES.get(ftype, ""),
 	)

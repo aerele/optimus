@@ -14,11 +14,11 @@ from contextvars import ContextVar
 import frappe
 from frappe import _
 
-from optimus import ai_fix, safe_call, sql_work
+from optimus import ai_fix, queue_protocol, safe_call, sql_work
 from optimus import ai_refresh_store as store
 
 TABLE = "Optimus Phase Two Run"
-QUEUE_SECONDS = 1800
+QUEUE_SECONDS = queue_protocol.QUEUE_SECONDS
 JOB_SECONDS = 1500
 LEASE_SECONDS = JOB_SECONDS + 120
 MAX_ATTEMPTS = 4
@@ -86,6 +86,10 @@ class MissingInput(ValueError):
 	"""Captured Phase 2 data expired or is malformed; do not save empty results."""
 
 
+class InputChanged(ValueError):
+	"""A concurrent capture completion changed the snapshot; retry after it ends."""
+
+
 class Phase2Failed(RuntimeError):
 	"""A fixed, body-free worker error; details use the scrubbed log boundary."""
 
@@ -108,10 +112,11 @@ def _write(row, **values):
 
 
 def _authorized(parent, user):
-	from optimus.permissions import may_act_on_session
+	from optimus.permissions import may_act_on_session, refresh_worker_permissions
 
 	if not user or user == "Guest" or not frappe.db.get_value("User", user, "enabled"):
 		return False
+	refresh_worker_permissions(user, framework=frappe)
 	if user != "Administrator" and not {"System Manager", "Optimus User"}.intersection(frappe.get_roles(user)):
 		return False
 	return may_act_on_session(
@@ -187,9 +192,9 @@ def force_stop_captures(user):
 		"rows_marked_failed": failed_rows, "cleanup_failed": cleanup_failed}
 
 
-def _admit(docname, session_uuid, run_uuid, requested_by, *, generation, now, from_recording=False):
+def _admit(docname, session_uuid, run_uuid, requested_by, *, generation, now, from_recording=False, workers=True):
 	"""Caller commits this reservation before dispatch, under the AI mutex."""
-	reason = store.lock_phase2_parent(docname)
+	reason = store.lock_phase2_parent(docname, now=now)
 	if reason:
 		return {"status": "refused", "reason": reason}
 	parent, row = _locked(docname, run_uuid)
@@ -204,6 +209,12 @@ def _admit(docname, session_uuid, run_uuid, requested_by, *, generation, now, fr
 	attempts = row.get("analyze_attempts") or 0
 	if type(attempts) is not int or not 0 <= attempts < MAX_ATTEMPTS:
 		return {"status": "refused", "reason": "retry_limit"}
+	if workers is not True:
+		if row["status"] != "Failed":
+			message = ("Phase 2 needs a worker listening on the long queue. Start a worker and retry analysis while the captured input is available."
+				if workers is False else "Phase 2 worker availability could not be checked. Check Redis and the long queue worker, then retry analysis.")
+			_write(row, status="Failed", analyze_dispatch_pending=0, warnings_json=json.dumps([message]))
+		return {"status": "refused", "reason": "no_worker" if workers is False else "queue_unavailable"}
 	_write(row, status="Analyzing", analyze_generation=generation, analyze_requested_by=requested_by,
 		analyze_worker_token=None, analyze_attempts=attempts + 1, analyze_lease_until=now + QUEUE_SECONDS,
 		analyze_dispatch_at=0, analyze_dispatch_pending=1)
@@ -215,7 +226,7 @@ def _claim(docname, run_uuid, generation, worker_token, *, now):
 	if not (
 		parent and parent["status"] == "Ready" and row and row["status"] == "Analyzing"
 		and generation and row.get("analyze_generation") == generation
-		and not row.get("analyze_worker_token") and (row.get("analyze_lease_until") or 0) > now
+		and not row.get("analyze_worker_token") and queue_protocol.lease_alive(row.get("analyze_lease_until"), now)
 	):
 		return None
 	if not _authorized(parent, row.get("analyze_requested_by")):
@@ -228,9 +239,8 @@ def _claim(docname, run_uuid, generation, worker_token, *, now):
 
 def _owns(row, run, now):
 	return bool(row and row["status"] == "Analyzing" and run.get("analyze_worker_token")
-		and row.get("analyze_worker_token") == run["analyze_worker_token"]
-		and row.get("analyze_generation") == run["analyze_generation"]
-		and (row.get("analyze_lease_until") or 0) > now)
+		and queue_protocol.owner_matches(row.get("analyze_worker_token"), run["analyze_worker_token"], row.get("analyze_lease_until"), now)
+		and row.get("analyze_generation") == run["analyze_generation"])
 
 
 def _complete(run, *, now, persist):
@@ -256,6 +266,8 @@ def _fail(run, *, now, reason):
 	if not _owns(row, run, now):
 		return False
 	message = (
+		"Phase 2 samples changed during analysis. Wait for capture requests to finish, then retry analysis."
+		if reason == "input_changed" else
 		"Phase 2 input is missing or invalid. Record a new line-profile pass."
 		if reason == "input_missing" else
 		"Phase 2 analysis failed or was interrupted. Retry analysis while its captured input is available."
@@ -305,10 +317,12 @@ def request(docname, session_uuid, run_uuid, requested_by, *, from_recording=Fal
 	"""Gated callers admit one durable generation; SQL survives queue failure."""
 	_identity(docname, session_uuid, run_uuid, requested_by)
 	_transaction(lambda: None)
+	workers = _workers_listening(docname)
+	_transaction(lambda: None)  # Finish any availability log/settings read view before admission locks.
 	def admission():
 		sql_work.bound_http_lock_wait(frappe.db)
 		return _admit(docname, session_uuid, run_uuid, requested_by,
-			generation=uuid.uuid4().hex, now=_now(), from_recording=from_recording)
+			generation=uuid.uuid4().hex, now=_now(), from_recording=from_recording, workers=workers)
 	try:
 		out = _retry_sql(admission, retry_lock_waits=False)
 	except Exception as exc:
@@ -325,6 +339,8 @@ def request(docname, session_uuid, run_uuid, requested_by, *, from_recording=Fal
 	}
 	if response["status"] == "Refused":
 		response["message"] = {
+			"no_worker": _("Phase 2 needs a worker listening on the long queue. Start a worker and retry analysis."),
+			"queue_unavailable": _("Phase 2 worker availability could not be checked. Check Redis and the long queue worker, then retry analysis."),
 			"busy": _("The session is busy. Wait a moment and retry Phase 2 analysis."),
 			"retry_limit": _("This Phase 2 run has reached its four-attempt limit. Record a new line-profile pass."),
 			"permission": _("Your permission to update this session changed. Recheck session access."),
@@ -336,13 +352,23 @@ def request(docname, session_uuid, run_uuid, requested_by, *, from_recording=Fal
 	return response
 
 
+def _workers_listening(docname):
+	from frappe.utils.background_jobs import get_queue, get_workers
+
+	from optimus.analyze import _run_ai_step
+
+	listening, failed = _run_ai_step(lambda: bool(get_workers(queue=get_queue("long"))),
+		title="optimus ai phase 2 worker availability", docname=docname)
+	return None if failed else listening
+
+
 def _prepare_dispatch(run, *, now):
 	parent, row = _locked(run["parent"], run["run_uuid"], wait=False)
 	if not (parent and row and row["status"] == "Analyzing" and row.get("analyze_dispatch_pending")
 		and not row.get("analyze_worker_token") and row.get("analyze_generation")
 		and row.get("analyze_generation") == run.get("analyze_generation")
 		and (row.get("analyze_lease_until") or 0) > now
-		and (not row.get("analyze_dispatch_at") or row["analyze_dispatch_at"] + 30 <= now)):
+		and queue_protocol.dispatch_due(row.get("analyze_lease_until"), row.get("analyze_dispatch_at"), now, store.DISPATCH_INTERVAL)):
 		return None
 	_write(row, analyze_dispatch_at=now)
 	return {**row, "session_uuid": parent["session_uuid"]}
@@ -379,7 +405,7 @@ def _dispatch(run):
 
 def _legacy_generation(docname, session_uuid, run_uuid):
 	"""Adopt only an old queued delivery, never a completed/claimed generation."""
-	reason = store.lock_phase2_parent(docname)
+	reason = store.lock_phase2_parent(docname, now=_now())
 	if reason:
 		return None
 	parent, row = _locked(docname, run_uuid)
@@ -425,8 +451,9 @@ def run(session_uuid, run_uuid, *, generation=None):
 			if saved:
 				# This is outside the result transaction. Failure cannot revert a
 				# completed generation; even an ambiguous COMMIT is fenced by Ready.
-				_postprocess(run_row)
-				capture.cleanup_run(run_uuid)
+				from optimus.analyze import _run_ai_step
+				_run_ai_step(lambda: _postprocess(run_row), title="optimus ai phase 2 postprocess", docname=docname)
+				_run_ai_step(lambda: capture.cleanup_run(run_uuid), title="optimus ai phase 2 input cleanup", docname=docname)
 				queue_analyze_time_ai(docname)
 	except Exception as exc:
 		failure = exc
@@ -439,7 +466,7 @@ def run(session_uuid, run_uuid, *, generation=None):
 				frappe.db.rollback()
 				if run_row:
 					changed = _retry_sql(lambda: _fail(run_row, now=_now(),
-						reason="input_missing" if isinstance(failure, MissingInput) else "failed"))
+						reason="input_changed" if isinstance(failure, InputChanged) else "input_missing" if isinstance(failure, MissingInput) else "failed"))
 					if changed:
 						_notify(run_row, "phase_2_run_failed")
 		except Exception as exc:
@@ -490,6 +517,7 @@ def _notify(run, event):
 		"session_uuid": run["session_uuid"], "run_uuid": run["run_uuid"],
 		"parent": run["parent"], "user": run.get("analyze_requested_by"),
 		"render_pending": bool(run.get("analyze_render_pending")),
+		**({"error": "Analysis did not finish. Open the session for details and Retry Analyze."} if event == "phase_2_run_failed" else {}),
 	})
 
 
@@ -508,7 +536,10 @@ def _recover(docname, run_uuid, *, now):
 def recover_pending():
 	"""Bounded scheduler scan. Keep input for explicit retries, never rerun work."""
 	from optimus.analyze import _run_ai_step
+	from optimus.journal_schema import ready
 
+	if not ready(frappe, {TABLE: JOURNAL_FIELDS}):
+		return
 	_result, failed = _run_ai_step(_recover_pending, title="optimus ai phase 2 queue recovery")
 	if failed:
 		raise Phase2Failed("Phase 2 queue recovery failed; committed work is retained")

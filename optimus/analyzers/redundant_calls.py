@@ -260,7 +260,7 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 	drop_cross_request_spread = 0
 
 	for (fn_name, safe_key), occurrences in buckets.items():
-		threshold = _threshold_for(fn_name, cfg)
+		threshold = max(1, _threshold_for(fn_name, cfg))
 		if len(occurrences) < threshold:
 			continue
 

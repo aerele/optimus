@@ -20,6 +20,13 @@ backlog counter). The Frappe-managed MariaDB DocTypes
 (`Optimus Session`, `Optimus Finding`, etc.) are the durable record;
 Redis is the working memory.
 
+AI refresh ownership, attempts, usage and dispatch intent are durable SQL journal
+rows. Phase 2 analysis ownership and dispatch intent are also stored in SQL. RQ
+and Redis accelerate delivery; they do not authorize a second provider call or
+replace SQL claim and ownership checks. The CI SQL matrix exercises MariaDB 10.6,
+MariaDB 11.8 snapshot isolation and PostgreSQL 16 concurrency. See
+[AI-REFRESH.md](AI-REFRESH.md) and `.github/workflows/ai-quality.yml`.
+
 Every key Optimus writes comes from a builder in
 `optimus/redis_keys.py`: a single source of truth. The audit test
 `optimus/tests/test_redis_audit.py` enforces this: a `frappe.cache.*`
@@ -35,8 +42,9 @@ Schema versions are tracked by **two** mechanisms working together:
 
 A versioned-value envelope (`optimus.redis_schema.wrap_value` /
 `unwrap_value`) is the opt-in contract for **new** value-shape
-changes. Today (v0.12.0) NO existing value is wrapped the helpers
-are reserved for the next time a shape changes.
+changes. Session metadata, settings, onboarding and the other inventory rows
+marked **enveloped** already use it. Readers retain the documented legacy-shape
+compatibility; the inventory is the current contract.
 
 ---
 
@@ -91,7 +99,7 @@ when you add a new key; the audit test asserts this table matches
 | `profiler:explain:<cache_key>` | **enveloped** list[dict] (v0.12.17+) | Frappe pickle around `{"_v": 1, "data": [<row>, ...]}` | TTL via `optimus_explain_cache_ttl_seconds` site_config (default 3600s) | EXPLAIN result hash; persists across sessions. Migrated to the v0.12.0 envelope in v0.12.17. Reads accept legacy bare-list shape for backward compat with pre-v0.12.17 writers. |
 | `optimus:analyze:inflight` | string (holder's session uuid) | Frappe pickle, written by a raw `SET NX EX` | 300s (`_SINGLEFLIGHT_TTL_SECONDS`) | Single-flight guard; heartbeated by the live analyze; auto-clears on worker death. Taken only when free (`SET NX EX`, so two racing analyses cannot both take it), renewed with `EXPIRE` while held, and always read from Redis after dropping it from the job's `frappe.local.cache` (that cache lives for the whole RQ job, so a cached holder goes stale). |
 | `optimus:retention_backlog` | **enveloped** integer (v0.12.13+) | Frappe pickle around `{"_v": 1, "data": <int>}` | 3600s | Janitor backlog counter when daily sweep hits its per-run cap. Migrated to the v0.12.0 envelope in v0.12.13. Write-only inside the app operator dashboards reading directly from Redis see the envelope shape. |
-| `optimus_settings_cached` | **enveloped** dataclass dict (v0.12.11+) | Frappe pickle around `{"_v": 1, "data": {...}}` | none (invalidated by DocType `on_update`) | Pre-prefix legacy name; kept as-is to avoid a one-shot cache miss on upgrade. **First value migrated to the v0.12.0 versioned envelope (v0.12.11).** Reads still accept legacy bare-dict shape for backward compat with pre-v0.12.11 writers. |
+| `optimus_settings_cached` | **enveloped** dataclass dict (v0.12.11+) | Frappe pickle around `{"_v": 1, "data": {...}}` | 60 seconds (invalidated after the settings save commits) | No shared-cache fill from an uncommitted write transaction; failed reads are not cached. Pre-prefix legacy name; kept as-is to avoid a one-shot cache miss on upgrade. **First value migrated to the v0.12.0 versioned envelope (v0.12.11).** Reads still accept legacy bare-dict shape for backward compat with pre-v0.12.11 writers. |
 | `optimus:schema_version` | integer | raw | none | v0.12.0+ sentinel. Written at app import. See § 4. |
 | `optimus:ratelimit:<action>:<window>:<user>` | integer counter | raw (`INCR`, then `EXPIRE` when the counter is new or has no TTL) | `<window>` seconds (armed by the call that opens the window; a counter found without a TTL is re-armed) | Per-user fixed-window rate limit for mutating endpoints (`optimus/ratelimit.py`). Keyed only on action, window length and user, so no request field can open a fresh bucket. Written through `frappe.cache.make_key` (site-prefixed). Override limits in site_config `optimus_rate_limits`. |
 | `optimus:ai_refresh:<session_uuid>` | string (the running refresh's random token) | raw, written by `SET NX EX` | the longest one refresh can run: 60 s of fix calls, one more fix call and the Steps call at the Request timeout, and 60 s for the writes and the re-render (`api._refresh_flight_ttl`, 240 s at the default 60 s timeout) | Per-session single-flight for Refresh AI suggestions (`api.refill_ai_suggestions`): taken before the refresh counts itself or calls the provider, so a second refresh of the same session is answered "already running" without billing. Released in a `finally`, and only while a raw `GET` still returns this refresh's token (compare, then delete: not atomic, like the analyze flag). Written through `frappe.cache.make_key` (site-prefixed). A Redis failure lets the refresh run without the flag. The background engine reads it with a raw `GET` (`api._refresh_flight_held`) and refuses to admit a refresh of the session while it is held. |

@@ -16,7 +16,7 @@ pytestmark = [pytest.mark.rq, pytest.mark.usefixtures("bound_provider_credential
 
 
 @pytest.mark.parametrize("keyless", [False, True])
-def test_guarded_reask_reads_key_once_per_completion(monkeypatch, keyless):
+def test_guarded_reask_reads_key_once_per_completion_plus_source_privacy_snapshot(monkeypatch, keyless):
     import frappe
 
     reads = []
@@ -32,11 +32,19 @@ def test_guarded_reask_reads_key_once_per_completion(monkeypatch, keyless):
     ))
     monkeypatch.setattr(ai_fix, "_reask_enabled", lambda: True)
     fake = _post_sequence(_Replies._resp(_Replies._RAW), _Replies._resp(_Replies._GOOD))
-    monkeypatch.setattr(requests, "post", fake)
+    reads_at_dispatch = []
+    def post(*args, **kwargs):
+        reads_at_dispatch.append(len(reads))
+        return fake(*args, **kwargs)
+    monkeypatch.setattr(requests, "post", post)
     result = ai_fix.suggest_fix(dict(_Replies._FINDING), timeout=47)
     assert result["guardrail"] == {"violations": [], "reasked": True, "fallback": False}
     assert result["finish_reason"] == "stop"
-    assert len(fake.calls) == len(reads) == 2
+    assert len(fake.calls) == 2
+    # One snapshot scrubs source before request construction. Each dispatch
+    # then reads its current credential once, including the paid re-ask.
+    assert reads_at_dispatch == [2, 3]
+    assert len(reads) == 3
     assert all(0 < call.timeout[0] <= 10 and 0 < call.timeout[1] <= 47 for call in fake.calls)
     assert all((call.auth is None) == keyless for call in fake.calls)
 
@@ -68,6 +76,7 @@ def test_logged_reask_timeout_keeps_marker_without_failed_frames(monkeypatch):
         reply = next(replies)
         if isinstance(reply, BaseException):
             raise reply
+        kwargs["meta_out"]["finish_reason"] = "stop"
         return reply
 
     monkeypatch.setattr(ai_fix, "_dispatch_call", dispatch)

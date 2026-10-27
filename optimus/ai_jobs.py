@@ -60,6 +60,9 @@ class PreparedItem:
 	persist: Callable
 
 
+_PREPARATION_SKIPPED = object()
+
+
 def _now():
 	return time.time()
 
@@ -252,6 +255,9 @@ def _drive(run_id, docname, slice_no, worker_token):
 		if reason:
 			_end(run_id, docname, worker_token, reason)
 			return
+		if item is _PREPARATION_SKIPPED:
+			items += 1
+			continue  # Recheck lease, deadline and slice budget between unsent skips.
 		if item is None:
 			latest = _read_run(run_id)
 			_end(
@@ -310,8 +316,11 @@ def _drive(run_id, docname, slice_no, worker_token):
 			return
 		result = failure = None
 		guard = safe_call.InterruptGuard()
+		from optimus import ai_transport
+
 		try:
-			result = item.send(min(call_limit, remaining))
+			with ai_transport.attempt() as transport:
+				result = item.send(min(call_limit, remaining))
 		except Exception as exc:
 			guard.note(exc)
 			failure = exc
@@ -329,6 +338,8 @@ def _drive(run_id, docname, slice_no, worker_token):
 		outcome = (
 			"skipped" if kind in ai_fix.AI_SKIP_KINDS else "failed" if failure is not None else "succeeded"
 		)
+		if failure is not None and transport.certainty == "sent_unknown":
+			outcome = "uncertain"
 		if guard.pending():
 			outcome, kind = "uncertain", "timeout"
 		if tokens > ai_fix.MAX_TOKEN_COUNT:
@@ -369,6 +380,7 @@ def _drive(run_id, docname, slice_no, worker_token):
 				usage_complete=complete is True,
 				now=_now(),
 				error_kind=error_kind,
+				send_certainty=transport.certainty,
 				persist=(lambda: item.persist(result)) if persist else None,
 				signals=signals,
 			)
@@ -681,7 +693,7 @@ def _yield(run_id, docname, worker_token, *, progressed=True):
 		_note_ending(run, docname)
 
 
-def _check_run(run, *, locked=False):
+def _check_run(run, *, locked=False, kind=None):
 	"""Recheck the session, the requester and Phase 2 activity; raise ``StopRefresh``.
 
 	With ``locked`` the session and Phase 2 rows are read with locks, and both locking reads
@@ -691,7 +703,7 @@ def _check_run(run, *, locked=False):
 	read is a FOR UPDATE by filter, the engine's one gap-locking read (not on a journal
 	table): on MariaDB another session's Phase 2 insert can wait for this short
 	transaction."""
-	from optimus.permissions import may_act_on_session
+	from optimus.permissions import may_act_on_session, refresh_worker_permissions
 
 	parent = frappe.db.get_value("Optimus Session", run["session_name"], "*", as_dict=True, for_update=locked)
 	if not parent or parent.get("status") != "Ready" or parent.get("session_uuid") != run["session_uuid"]:
@@ -706,6 +718,7 @@ def _check_run(run, *, locked=False):
 	user = run.get("requested_by")
 	if not user or user == "Guest" or not frappe.db.get_value("User", user, "enabled"):
 		raise StopRefresh("permission")
+	refresh_worker_permissions(user, framework=frappe)
 	if user != "Administrator" and not {"System Manager", "Optimus User"}.intersection(
 		frappe.get_roles(user)
 	):
@@ -727,7 +740,25 @@ def _check_run(run, *, locked=False):
 		raise StopRefresh("permission")
 	if phase2:
 		raise StopRefresh("phase2")
+	_check_ai_consent(run, kind=kind)
 	return parent
+
+
+def _consent_enabled(field):
+	from optimus.ai_privacy import opted_in
+	return opted_in(frappe.db.get_single_value("Optimus Settings", field, cache=False))
+
+
+def _check_ai_consent(run, *, kind=None):
+	if run.get("scope") and run["scope"] != "all":
+		if not (_consent_enabled("ai_enabled") and _consent_enabled("ai_auto_suggest")):
+			raise StopRefresh("disabled")
+		fixes = run.get("include_fixes") and _consent_enabled("ai_suggest_findings")
+		steps = run.get("include_steps") and _consent_enabled("ai_humanize_steps")
+		if not (fixes or steps):
+			raise StopRefresh("disabled")
+	if kind and not (_consent_enabled("ai_enabled") and _consent_enabled("ai_humanize_steps" if kind == "steps" else "ai_suggest_findings")):
+		raise StopRefresh("disabled")
 
 
 def _the_row_answers_as_the_name(user):
@@ -789,28 +820,45 @@ def _chain(run):
 	return names
 
 
+def uncertain_attempts(docname):
+	"""The same bounded predicate backs retry blocking and the session UI count.
+
+	Pre-release timeout/transport failures without certainty may have been billed.
+	History is preserved; new workers conservatively block these legacy rows.
+	"""
+	fields = ["name", "run_id", "kind", "target_name", "input_hash", "state"]
+	rows = []
+	for filters in (
+		{"state": "uncertain"},
+		{"state": "failed", "error_kind": ["in", ["timeout", "transport"]], "send_certainty": ["is", "not set"]},
+	):
+		part = frappe.get_all(store.ATTEMPT, filters={"session_name": docname, **filters},
+			fields=fields, limit_page_length=10001)
+		if len(part) > 10000:
+			raise StopRefresh("history_limit")
+		rows.extend(part)
+	return rows
+
+
 def _attempts(run):
 	"""``(tried, uncertain, fixes_spent)``: this run's attempts, the session's uncertain
 	attempts as ``(kind, target, input_hash)`` keys, and the fix attempts of the whole resume
 	chain, which is what the item cap limits: a resume continues the same refresh, so it
 	does not get the cap again."""
-	fields = ["run_id", "kind", "target_name", "input_hash", "state"]
+	fields = ["run_id", "kind", "target_name", "input_hash", "state", "error_kind", "send_certainty"]
 	chain = _chain(run)
 	attempts = frappe.get_all(
 		store.ATTEMPT, filters={"run_id": ["in", chain]}, fields=fields, limit_page_length=10001
 	)
 	uncertain = []
 	if not run.get("retry_uncertain"):
-		uncertain = frappe.get_all(
-			store.ATTEMPT,
-			filters={"session_name": run["session_name"], "state": "uncertain"},
-			fields=fields,
-			limit_page_length=10001,
-		)
+		uncertain = uncertain_attempts(run["session_name"])
 	if len(attempts) > 10000 or len(uncertain) > 10000:
 		raise StopRefresh("history_limit")
 	tried = [a for a in attempts if a["run_id"] == run["name"]]
-	fixes_spent = sum(a["kind"] == "fix" for a in attempts)
+	fixes_spent = sum(a["kind"] == "fix" and not (
+		a.get("state") == "skipped" and a.get("error_kind") == "not_eligible" and a.get("send_certainty") == "not_sent"
+	) for a in attempts)
 	return tried, {(a["kind"], a["target_name"], a["input_hash"]) for a in uncertain}, fixes_spent
 
 
@@ -841,7 +889,7 @@ def _valid_item(run, doc, row, fingerprint):
 			return False
 	reason = None
 	try:
-		_check_run(run, locked=True)
+		_check_run(run, locked=True, kind="steps" if row is None else "fix")
 	except StopRefresh as exc:
 		reason = exc.reason
 	if reason:
@@ -876,6 +924,8 @@ def _grounding(doc, row, memo, run_id=None):
 	recordings = analyze.load_recordings_light(
 		doc, [uuid] if uuid else [], memo=memo.setdefault("recordings", {})
 	)
+	if uuid and not any(rec.get("uuid") == uuid for rec in recordings):
+		raise ValueError("Required recording unavailable; no AI request was sent.")
 	if "phase2_index" not in memo:
 		memo["phase2_index"] = analyze.phase2_index_for(doc)
 	if "evidence" not in memo:
@@ -900,12 +950,12 @@ def _touch_session(name, **values):
 	return sql_work.touch_session(frappe.db, name, **values)
 
 
-def _fix_item(run, doc, row, memo):
+def _fix_item(run, doc, row, memo, *, grounding=None):
 	fingerprint = _signature(doc, row)
 	payload = _build_payload(
 		row,
 		memo.setdefault("source", {}),
-		_grounding(doc, row, memo, run["name"]),
+		grounding if grounding is not None else _grounding(doc, row, memo, run["name"]),
 		principal=run["requested_by"],
 	)
 
@@ -952,9 +1002,11 @@ def _steps_item(run, doc, memo):
 	from optimus import analyze
 
 	fingerprint = _signature(doc)
-	actions = analyze.actions_for_humanizer(
-		analyze.load_recordings_light(doc, memo=memo.setdefault("recordings", {}))
-	)
+	recordings = analyze.load_recordings_light(doc, memo=memo.setdefault("recordings", {}))
+	expected = {a.get("recording_uuid") for a in doc.get("actions") or [] if a.get("recording_uuid")}
+	if expected - {rec.get("uuid") for rec in recordings}:
+		raise ValueError("Required recordings unavailable; no Steps request was sent.")
+	actions = analyze.actions_for_humanizer(recordings)
 	if not actions:
 		return None
 
@@ -991,10 +1043,50 @@ def _steps_item(run, doc, memo):
 		# A total above the bound never reaches ``ai_tokens_spent`` either (``_token_count``
 		# reads it as 0); only the run and the attempt keep it, and ``_drive`` logs one row.
 		tokens = min(result["tokens"].get("total_tokens", 0), ai_fix.MAX_TOKEN_COUNT)
-		_touch_session(doc.name, notes=result["notes"], ai_steps_tokens=tokens)
+		_touch_session(doc.name, notes=result["notes"], ai_steps_tokens=tokens, auto_notes_sha256=None)
 		return True
 
 	return PreparedItem("steps", doc.name, fingerprint, send, valid, persist)
+
+
+def _prepare_item(run, *, kind, target, prepare):
+	"""Journal an unsent item-local preparation failure without blocking later work.
+
+	Calling and skipped are written in one transaction: no committed provider
+	intent, unknown spend, breaker increment or consumed provider-call cap.
+	Shared grounding is prepared by the caller outside this boundary.
+	"""
+	guard = safe_call.InterruptGuard(base=True)
+	failure_type = None
+	try:
+		with guard:
+			return prepare()
+	except StopRefresh:
+		raise
+	except Exception as exc:
+		if sql_work.is_database_error(exc, framework=frappe):
+			raise
+		failure_type = type(exc).__name__
+	if guard.pending():
+		raise guard.interrupt()
+	frappe.db.rollback()
+	_check_run(run)
+
+	def skip():
+		store.lock_run(run["name"], run["session_name"])
+		_check_run(run, locked=True, kind=kind)
+		attempt = store.begin_attempt(run["name"], docname=run["session_name"],
+			worker_token=run["worker_token"], kind=kind, target=target,
+			input_hash=hashlib.sha256(b"preparation_failed").hexdigest(), now=_now())
+		if attempt:
+			store.settle_attempt(run["name"], attempt["name"], docname=run["session_name"],
+				worker_token=run["worker_token"], outcome="skipped", tokens=0, usage_complete=True,
+				error_kind="not_eligible", send_certainty="not_sent", now=_now())
+	_retry_sql(skip)
+	ai_fix.log_ai_failure("optimus ai refresh prepare", RuntimeError(failure_type),
+		docname=run["session_name"], run_id=run["name"], item=kind, target=target)
+	_transaction(lambda: None)
+	return None
 
 
 def _next_item(run, memo):
@@ -1011,6 +1103,7 @@ def _next_item(run, memo):
 	if not ai_fix.is_available():
 		# Switched off mid-run: nothing more can be sent, which is not a complete refresh.
 		raise StopRefresh("disabled")
+	_check_ai_consent(run)
 	doc = frappe.get_doc("Optimus Session", run["session_name"])
 	tried, uncertain, fixes_spent = _attempts(run)
 	names = {(a["kind"], a["target_name"]) for a in tried}
@@ -1028,23 +1121,25 @@ def _next_item(run, memo):
 	# Hash only the rows an uncertain attempt names: none, on the usual run.
 	maybe = {target for kind, target, _ in uncertain if kind == "fix"}
 	blocked = {
-		row.name for row in rows if row.name in maybe and ("fix", row.name, _signature(doc, row)) in uncertain
+		row.name for row in rows if row.name in maybe and (
+			run["scope"] != "all" or ("fix", row.name, _signature(doc, row)) in uncertain
+		)
 	}
 	step_state = run.get("steps_state") or "not_requested"
 	steps = bool(run.get("include_steps") and step_state != "carried" and ("steps", doc.name) not in names)
+	if steps and run["scope"] != "all":
+		from optimus.auto_steps import may_rewrite
+		if not may_rewrite(doc):
+			step_state, steps = "kept", False
 	if steps and not ai_fix.is_available(section="humanize"):
 		step_state, steps = "toggle_off", False
 	if steps:
 		step_state = "pending"
-		notes = (doc.get("notes") or "").strip()
-		if (
-			run["scope"] != "all"
-			and notes
-			and not notes.startswith((analyze._AUTO_NOTES_PREAMBLE, analyze._HUMANIZED_NOTES_PREAMBLE))
-		):
-			step_state, steps = "kept", False
-		elif uncertain and ("steps", doc.name, _signature(doc)) in uncertain:
+		if uncertain and any(kind == "steps" and target == doc.name and (
+			run["scope"] != "all" or fingerprint == _signature(doc)
+		) for kind, target, fingerprint in uncertain):
 			step_state, steps = "uncertain", False
+
 	blocked_count = min(remaining, len(blocked)) + int(step_state == "uncertain")
 
 	def progress():
@@ -1064,12 +1159,17 @@ def _next_item(run, memo):
 	if remaining:
 		for row in rows:
 			if row.name not in blocked:
-				return _fix_item(run, doc, row, memo)
+				item = _prepare_item(run, kind="fix", target=row.name,
+					prepare=lambda: _fix_item(run, doc, row, memo))
+				if item is not None:
+					return item
+				return _PREPARATION_SKIPPED
 	if steps:
-		item = _steps_item(run, doc, memo)
+		item = _prepare_item(run, kind="steps", target=doc.name, prepare=lambda: _steps_item(run, doc, memo))
 		if item is not None:
 			return item
-		step_state, steps = "no_input", False
+		run = _read_run(run["name"])
+		step_state, steps = (run.get("steps_state") if run.get("steps_state") == "skipped" else "no_input"), False
 		progress()
 	return None
 
@@ -1187,9 +1287,17 @@ def start_refresh(
 	"""
 	if any(not isinstance(v, str) or not v or len(v) > 140 for v in (docname, session_uuid, requested_by)):
 		raise ValueError("Invalid AI refresh identity")
+	if resume_from:
+		previous = frappe.db.get_value(store.RUN, resume_from, "*", as_dict=True)
+		if not previous or previous.get("session_name") != docname:
+			raise ValueError("Invalid refresh resume parent")
+		scope = previous["scope"]
+		include_fixes, include_steps = bool(previous.get("include_fixes")), bool(previous.get("include_steps"))
+		regenerate_all = bool(previous.get("regenerate_all"))
 	reason = None
 	try:
-		_check_run({"session_name": docname, "session_uuid": session_uuid, "requested_by": requested_by})
+		_check_run({"session_name": docname, "session_uuid": session_uuid, "requested_by": requested_by, "scope": scope,
+			"include_fixes": include_fixes, "include_steps": include_steps})
 	except StopRefresh as exc:
 		reason = exc.reason
 	if reason:
@@ -1217,6 +1325,8 @@ def start_refresh(
 	gated, excluded = _selection_counts(docname, include_fixes, resume_from)
 	run_id = uuid.uuid4().hex
 
+	from optimus.ratelimit import effective_limits
+
 	def admission():
 		_bound_http_lock_wait()
 		return store.admit(
@@ -1237,11 +1347,13 @@ def start_refresh(
 			retry_uncertain=retry_uncertain,
 			gated=gated,
 			excluded=excluded,
+			manual_quota=effective_limits("refill_ai_suggestions", 6, 3600) if scope == "all" else None,
 		)
 
 	out = _retry_sql(admission, retry_lock_waits=False)
 	# A takeover commits with every answer, a refusal included.
-	_note_ending(out.pop("taken_over", None), docname)
+	taken_over = out.pop("taken_over", None)
+	_admission_step(lambda: _note_ending(taken_over, docname), docname, run_id)
 	if out["status"] == "already_running" and not out.get("run"):
 		# The unique reservation refused the insert, but that run was not visible to the
 		# admission's snapshot (Postgres): read it again in a fresh transaction.
@@ -1252,15 +1364,31 @@ def start_refresh(
 			return {"status": "refused", "reason": "busy"}
 		out = {"status": "already_running", "run": current}
 	if out["status"] == "queued":
+		# Ready notifications precede automatic admission. Wake idle open forms
+		# only after the durable reservation commits, including other tabs/users.
+		def notify():
+			from optimus.realtime import publish_session_event
+
+			publish_session_event("optimus_ai_refresh_admitted", {"docname": docname, "session_uuid": session_uuid})
+			_transaction(lambda: None)  # Close the audience lookup's read view before dispatch.
+		_isolated(notify)
 		# The admission already waited for the session row: the dispatch takes it with
 		# NOWAIT, so the click waits once. A busy row leaves the committed intent
 		# pending for the next click (``_resend_pending``) instead of failing the response.
-		_dispatch_pending(run_id, docname, nowait=True)
+		_admission_step(lambda: _dispatch_pending(run_id, docname, nowait=True), docname, run_id)
 	if out.get("run"):
-		return {"status": out["status"], "refresh": public_state(out["run"])}
+		view, failed = _admission_step(lambda: public_state(out["run"]), docname, run_id)
+		if failed:
+			return {"status": "unknown"}
+		return {"status": out["status"], "refresh": view}
 	return out
 
 
+
+
+def _admission_step(operation, docname, run_id):
+	from optimus.analyze import _run_ai_step
+	return _run_ai_step(operation, title="optimus ai refresh admission followup", docname=docname, run_id=run_id)
 
 
 def live_run(docname):
@@ -1390,8 +1518,14 @@ def recover_pending():
 	``ended``, ``uncertain`` for its open call, ``release`` when it was inconsistent.
 
 	Returns the counts: ``interrupted``, ``dispatched``, ``busy`` and ``failed``."""
-	now = _now()
+	from optimus.journal_schema import ready
 	counts = dict.fromkeys(("interrupted", "dispatched", "busy", "failed"), 0)
+	if not ready(frappe, {
+		store.CONTROL: ("generation",), store.ATTEMPT: ("state",),
+		store.RUN: ("state", "lease_until", "deadline", "dispatch_pending", "dispatched_at_epoch", "active_session"),
+	}):
+		return counts
+	now = _now()
 	failures, ended = [], []
 	active = ["in", sorted(store.ACTIVE)]
 	passes = (
@@ -1486,6 +1620,20 @@ def active_refresh(docname):
 	return public_state(run) if run else None
 
 
+def attach_refresh(docname):
+	"""Attach a Refresh POST and best-effort redeliver its existing queue intent.
+
+	Status readers use active_refresh; only this command retries delivery. A
+	queue failure cannot hide the SQL run or require new admission settings.
+	"""
+	run = live_run(docname)
+	if not run:
+		return None
+	now = _now()
+	_resend_pending(run, docname, now)
+	return public_state(run, now=now)
+
+
 def refresh_plan(doc):
 	return refresh_view.refresh_plan(doc, now=_now())
 
@@ -1508,14 +1656,16 @@ def prepare_analyze_retry(docname, session_uuid, *, requested_by):
 	"""Called after the action gate; a stale refresh cannot write into a retry."""
 	_transaction(lambda: None)
 	def reserve():
-		captures = []
+		captures, cancelled = [], []
 		changed = store.prepare_analyze_retry(docname, session_uuid, requested_by=requested_by,
-			now=_now(), stopped_captures=captures)
-		return changed, captures
-	changed, captures = _retry_sql(reserve)
+			now=_now(), stopped_captures=captures, cancelled_refreshes=cancelled)
+		return changed, captures, cancelled
+	changed, captures, cancelled = _retry_sql(reserve)
 	if captures:
 		from optimus.line_profile.jobs import stop_captures
 		stop_captures(captures)
+	for run in cancelled:
+		_isolated(lambda: _note_ending(run, docname))
 	return changed
 
 
@@ -1556,7 +1706,7 @@ def _cleanup_deleted_captures(captures):
 		guard = safe_call.InterruptGuard(base=True)
 		try:
 			with guard:
-				frappe.logger("optimus").warning(
+				frappe.logger("optimus").error(
 					"optimus deleted capture cleanup: failed=%d; new capture input expires within 24 hours", failures)
 		except Exception:
 			pass  # Logging cannot undo a committed deletion.

@@ -190,6 +190,24 @@ def test_start_commits_reservation_before_enqueuing(queue, monkeypatch):
 	assert len(queue.journal.db.rows[queue.journal.mod.RUN]) == 1
 
 
+def test_committed_admission_wakes_session_audience_before_dispatch(queue, monkeypatch):
+	from optimus import realtime
+	queue.journal.db.rows[queue.journal.mod.RUN] = {}
+	monkeypatch.setattr(queue.jobs, '_workers_listening', lambda docname=None: True)
+	monkeypatch.setattr(queue.jobs, '_check_run', lambda run: None)
+	monkeypatch.setattr(ai_fix, 'is_available', lambda: True)
+	events = []
+	def publish(event, payload):
+		assert not queue.journal.db.active
+		assert len(queue.journal.db.rows[queue.journal.mod.RUN]) == 1
+		assert not queue.sent
+		events.append((event, payload))
+	monkeypatch.setattr(realtime, 'publish_session_event', publish)
+	out = queue.jobs.start_refresh(docname='fake-session-doc', session_uuid='fake-session', requested_by='fake-owner')
+	assert out['status'] == 'queued'
+	assert events == [('optimus_ai_refresh_admitted', {'docname': 'fake-session-doc', 'session_uuid': 'fake-session'})]
+
+
 def test_recovery_handles_a_crash_between_admission_commit_and_dispatch(queue, monkeypatch):
 	from optimus.tests.fixtures.ai_refresh_journal import admit
 
@@ -1057,3 +1075,48 @@ def test_the_rows_of_the_sweep_are_committed_after_the_last_one(queue, monkeypat
 def test_scheduler_wires_durable_recovery_every_minute():
 	from optimus import hooks
 	assert "optimus.ai_jobs.recover_pending" in hooks.scheduler_events["cron"]["* * * * *"]
+
+
+@pytest.mark.parametrize('step', ['ending', 'dispatch', 'view'])
+def test_post_commit_admission_failures_never_claim_the_request_was_refused(admitting, monkeypatch, step):
+	queue = admitting
+	queue.journal.db.rows[queue.journal.mod.RUN].clear()
+	def fail(*a, **kw):
+		raise RuntimeError('synthetic postcommit failure')
+	monkeypatch.setattr(queue.jobs, {'ending': '_note_ending', 'dispatch': '_dispatch_pending', 'view': 'public_state'}[step], fail)
+	out = _start(queue)
+	assert out['status'] == ('unknown' if step == 'view' else 'queued')
+	runs = list(queue.journal.db.rows[queue.journal.mod.RUN].values())
+	assert len(runs) == 1 and runs[0]['active_session'] == 'fake-session-doc'
+	assert runs[0]['dispatch_pending'] == 1
+
+
+def test_ai_dispatch_uses_shared_interval(queue, monkeypatch):
+	monkeypatch.setattr(queue.journal.mod, 'DISPATCH_INTERVAL', 7)
+	for now, expected in [(100, True), (106, False), (107, True)]:
+		with queue.journal.db.transaction():
+			assert bool(queue.journal.mod.prepare_dispatch('fake-run', docname='fake-session-doc', now=now)) == expected
+
+
+def test_only_accepted_manual_runs_consume_refresh_quota(admitting):
+	from datetime import datetime, timedelta
+	queue = admitting
+	mod, db = queue.journal.mod, queue.journal.db
+	db.rows[mod.RUN].clear()
+	kwargs = dict(docname='fake-session-doc', session_uuid='fake-session', requested_by='fake-owner',
+		scope='all', now=100, max_seconds=3600, site_cap=2, user_cap=2, cap=10,
+		include_fixes=True, include_steps=False, regenerate_all=False, manual_quota=(2,3600))
+	def start(run_id):
+		with db.transaction():
+			return mod.admit(run_id=run_id, **kwargs)
+	# A pre-admission refusal costs no slot.
+	db.rows['Optimus Session']['fake-session-doc']['status'] = 'Analyzing'
+	assert start('refused')['reason'] == 'not_ready'
+	db.rows['Optimus Session']['fake-session-doc']['status'] = 'Ready'
+	for run_id in ('one', 'two'):
+		assert start(run_id)['status'] == 'queued'
+		db.rows[mod.RUN][run_id].update(state='complete', active_session=None, creation=datetime(2026,10,14,11,59))
+	assert start('three')['reason'] == 'hourly_limit'
+	assert set(db.rows[mod.RUN]) == {'one', 'two'}
+	db.rows[mod.RUN]['one']['creation'] -= timedelta(hours=2)
+	assert start('three')['status'] == 'queued'

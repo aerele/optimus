@@ -87,6 +87,7 @@ def test_a_job_timeout_escapes_the_failure_isolation_fresh(monkeypatch, entry):
 	lock wait into a busy refusal; an RQ timeout in either must still stop the job, fresh."""
 	from optimus import ai_refresh_store as store
 
+	monkeypatch.setattr("optimus.journal_schema.ready", lambda *a: True)
 	JobTimeoutException = pytest.importorskip("rq.timeouts", exc_type=ImportError).JobTimeoutException
 	original = JobTimeoutException("fake job timeout")
 

@@ -22,7 +22,7 @@ import hashlib
 
 import frappe
 
-from optimus import ai_fix, safe_call, sql_work
+from optimus import ai_fix, queue_protocol, safe_call, sql_work
 
 RUN = "Optimus AI Refresh Run"
 ATTEMPT = "Optimus AI Refresh Attempt"
@@ -37,7 +37,7 @@ IDLE_SLICE_LIMIT = 3
 # three-in-a-row stop.
 PER_PROMPT_KINDS = frozenset({"context", "refused"})
 # Seconds before a slice's pending dispatch intent may be sent to RQ again.
-DISPATCH_INTERVAL = 30
+DISPATCH_INTERVAL = queue_protocol.DISPATCH_INTERVAL
 
 
 class JournalUnavailable(RuntimeError):
@@ -171,16 +171,17 @@ def admit(
 	retry_uncertain=False,
 	gated=0,
 	excluded=0,
+	manual_quota=None,
 ):
-	"""Reserve a session and, for a user refresh, enforce the site/user caps.
+	"""Reserve a session within the shared site cap and the manual-requester cap.
 
 	Caller checks permissions, provider configuration, Phase 2 and workers before admission,
 	and starts a fresh transaction (``ai_jobs._retry_sql``). No queue call happens here.
 
-	Lock order (Q4): the session row first, then, only for ``scope == "all"`` (the only scope
-	with caps), the site mutex with NOWAIT; a held mutex is a ``busy`` refusal, never a wait
+	Lock order (Q4): the session row first, then the site mutex with NOWAIT;
+	a held mutex is a ``busy`` refusal, never a wait
 	and never an error. An admission waiting on its own session therefore never holds the
-	mutex. Analyze-time ``fixes_missing`` runs never take it.
+	mutex. Both manual and analyze-time admissions take and update the same mutex.
 
 	Every read of other runs is a plain read after those locks, so its read view opens after
 	every admission that could change the count has committed: admissions with caps serialize
@@ -193,7 +194,9 @@ def admit(
 	The caps count live runs only: active, with lease and deadline not passed. A run that is
 	``expired`` can neither claim a slice nor begin a call, so it holds no slot, even while it
 	still holds its own session's reservation until that session's next admission or the
-	sweep ends it. Every run that can still call a provider is counted.
+	sweep ends it. Every run that can still call a provider consumes site capacity.
+	The per-requester cap continues to count manual ``all`` runs only; automatic work
+	shares the site limit without consuming a user's manual-refresh allowance.
 
 	Lazy takeover: a run that holds the reservation but whose lease or deadline has
 	passed (``expired``) is ended in this transaction, as the recovery sweep would end it:
@@ -240,16 +243,14 @@ def admit(
 		return {"status": "refused", "reason": "busy"}
 	if not parent or parent.get("session_uuid") != session_uuid or parent["status"] != "Ready":
 		return {"status": "refused", "reason": "not_ready"}
-	control = None
-	if scope == "all":
-		control, busy = _lock_site_mutex()
-		if busy:
-			return {"status": "refused", "reason": "busy"}
-		if not control:
-			raise JournalUnavailable(
-				"AI refresh storage is not initialized; repair: bench --site <site> execute "
-				"optimus.patches.v0_12_0.initialize_ai_refresh_store.execute"
-			)
+	control, busy = _lock_site_mutex()
+	if busy:
+		return {"status": "refused", "reason": "busy"}
+	if not control:
+		raise JournalUnavailable(
+			"AI refresh storage is not initialized; repair: bench --site <site> execute "
+			"optimus.patches.v0_12_0.initialize_ai_refresh_store.execute"
+		)
 	# The run being resumed belongs to this session, so its row is locked after the session.
 	previous = _read(RUN, resume_from, lock=True) if resume_from else None
 	# Phase 2 writers also hold and change the parent. Read these rows before
@@ -312,24 +313,39 @@ def admit(
 		if previous.get("steps_state") in {"updated", "carried"}:
 			steps_state = "carried"
 		render_pending = int(bool(previous.get("render_pending")))
-	if scope == "all":
-		active = frappe.db.get_values(
-			RUN,
-			# the complement of ``expired``: a dead run of another session holds no slot
-			{
-				"scope": "all",
-				"state": ["in", sorted(ACTIVE)],
-				"lease_until": [">", now],
-				"deadline": [">", now],
-			},
-			["requested_by"],
-			as_dict=True,
-			limit=site_cap + 1,
-		)
-		if len(active) >= site_cap:
-			return _answer(taken_over, status="refused", reason="site_cap")
-		if sum(row["requested_by"] == requested_by for row in active) >= user_cap:
-			return _answer(taken_over, status="refused", reason="user_cap")
+	active = frappe.db.get_values(
+		RUN,
+		# the complement of ``expired``: a dead run of another session holds no slot
+		{
+			"state": ["in", sorted(ACTIVE)],
+			"lease_until": [">", now],
+			"deadline": [">", now],
+		},
+		["requested_by", "scope"],
+		as_dict=True,
+		limit=site_cap + 1,
+	)
+	if len(active) >= site_cap:
+		return _answer(taken_over, status="refused", reason="site_cap")
+	if scope == "all" and sum(
+		row["scope"] == "all" and row["requested_by"] == requested_by for row in active
+	) >= user_cap:
+		return _answer(taken_over, status="refused", reason="user_cap")
+	if scope == "all" and manual_quota is not None:
+		from datetime import timedelta
+
+		from frappe.utils import now_datetime
+		limit, seconds = manual_quota
+		if any(type(value) is not int or value < 1 for value in (limit, seconds)):
+			raise ValueError("Invalid manual refresh quota")
+		# Count accepted runs under the same mutex as admission. Resumes keep
+		# the selection cutoff, so creation (not requested_at_epoch) is used.
+		recent = frappe.db.get_values(RUN, {
+			"requested_by": requested_by, "scope": "all",
+			"creation": [">", now_datetime() - timedelta(seconds=seconds)],
+		}, ["name"], limit=limit)
+		if len(recent) >= limit:
+			return _answer(taken_over, status="refused", reason="hourly_limit")
 	run = _insert_new(
 		RUN,
 		run_id,
@@ -343,7 +359,7 @@ def admit(
 		slice_no=0,
 		requested_at_epoch=now if requested_at_epoch is None else requested_at_epoch,
 		deadline=now + max_seconds,
-		lease_until=now + 1800,
+		lease_until=now + queue_protocol.QUEUE_SECONDS,
 		heartbeat=now,
 		dispatch_pending=1,
 		dispatched_at_epoch=0,
@@ -387,7 +403,25 @@ def admit(
 	return _answer(taken_over, status="queued", run=run)
 
 
-def lock_phase2_parent(docname, *, allow_failed=False):
+def release_expired_reservation(docname, *, now):
+	"""With the parent already locked, release a dead owner or return the live run.
+
+	The plain probe avoids a missing-key gap lock; all writers hold this parent
+	before the run/attempt locks. Recovery uses the same uncertain-call accounting
+	as admission takeover and participates in the caller's transaction.
+	"""
+	run = frappe.db.get_value(RUN, {"active_session": docname}, "*", as_dict=True)
+	if run and expired(run, now):
+		run = _read(RUN, run["name"], lock=True)
+		if not run or run.get("active_session") != docname:
+			return None
+		if expired(run, now):
+			_release(run, docname, state="interrupted", reason=expiry_reason(run, now), now=now)
+			return None
+	return run
+
+
+def lock_phase2_parent(docname, *, now, allow_failed=False):
 	"""Serialize Phase 2 admission with AI through the parent row.
 
 	Every accepted admission's writer updates this row before committing, fencing
@@ -397,7 +431,7 @@ def lock_phase2_parent(docname, *, allow_failed=False):
 	parent = _read("Optimus Session", docname, lock=True)
 	if not parent or parent.get("status") not in ({"Ready", "Failed"} if allow_failed else {"Ready"}):
 		return "not_ready"
-	if frappe.db.get_value(RUN, {"active_session": docname}, "name"):
+	if release_expired_reservation(docname, now=now):
 		return "ai_refresh"
 	return None
 
@@ -447,8 +481,7 @@ def owns(run, worker_token, now):
 		and run
 		and run["state"] == "running"
 		and run.get("active_session")
-		and run.get("worker_token") == worker_token
-		and (run.get("lease_until") or 0) > now
+		and queue_protocol.owner_matches(run.get("worker_token"), worker_token, run.get("lease_until"), now)
 	)
 
 
@@ -550,6 +583,7 @@ def settle_attempt(
 	persist=None,
 	error_kind="",
 	signals=None,
+	send_certainty=None,
 ):
 	"""Save an outcome and its result, at most once, and add its usage to the session.
 
@@ -566,6 +600,7 @@ def settle_attempt(
 		or type(tokens) is not int
 		or tokens < 0
 		or type(usage_complete) is not bool
+		or send_certainty not in {None, "not_sent", "known_response", "sent_unknown"}
 	):
 		raise ValueError("Invalid refresh outcome")
 	answer = outcome == "succeeded"
@@ -618,6 +653,7 @@ def settle_attempt(
 		tokens_reported=tokens,
 		usage_complete=int(not incomplete),
 		error_kind=error_kind,
+		send_certainty=send_certainty,
 	)
 	counter = {
 		"succeeded": "completed",
@@ -630,14 +666,15 @@ def settle_attempt(
 	counts["uncertain"] -= int(was_uncertain)
 	counts[counter] += 1
 	streak = run.get("consecutive_failures") or 0
-	if final == "failed" and error_kind not in PER_PROMPT_KINDS:
+	transport_failure = final == "uncertain" and send_certainty == "sent_unknown" and not was_uncertain
+	if (final == "failed" and error_kind not in PER_PROMPT_KINDS) or transport_failure:
 		streak += 1
 	elif final == "succeeded":
 		streak = 0
 	breaker = run.get("breaker_kind") or ""
 	# Q2, #72's rule: stop at once only when the operator must act (``AI_FATAL_KINDS``);
 	# any other failure, a rate limit included, counts toward three in a row.
-	if final == "failed" and (error_kind in ai_fix.AI_FATAL_KINDS or streak >= 3):
+	if (final == "failed" and error_kind in ai_fix.AI_FATAL_KINDS) or (final == "failed" or transport_failure) and streak >= 3:
 		breaker = error_kind or "internal"
 	_update(
 		RUN,
@@ -800,14 +837,16 @@ def cancel(run_id, *, docname, now, cancelled_by=None):
 	return _release(run, docname, state="cancelled", reason="cancelled", now=now)
 
 
-def prepare_analyze_retry(docname, session_uuid, *, requested_by, now, stopped_captures=None):
+def prepare_analyze_retry(docname, session_uuid, *, requested_by, now, stopped_captures=None, cancelled_refreshes=None):
 	"""Fence optional workers and reset a Failed parent in the same transaction."""
 	parent = _read("Optimus Session", docname, lock=True)
 	if not parent or parent.get("session_uuid") != session_uuid or parent.get("status") != "Failed":
 		return False
 	run_id = frappe.db.get_value(RUN, {"active_session": docname}, "name")
 	if run_id:
-		cancel(run_id, docname=docname, now=now, cancelled_by=requested_by)
+		cancelled = cancel(run_id, docname=docname, now=now, cancelled_by=requested_by)
+		if cancelled and cancelled_refreshes is not None:
+			cancelled_refreshes.append(cancelled)
 	for child in frappe.db.get_values(
 		"Optimus Phase Two Run", {"parent": docname, "status": ["in", ["Recording", "Analyzing"]]},
 		["name", "run_uuid", "recording_user", "status"], as_dict=True, for_update=True,
@@ -859,10 +898,9 @@ def prepare_dispatch(run_id, *, docname, now, wait=True):
 	parent, run = lock_run(run_id, docname, wait=wait)
 	if not parent or not run or run["state"] != "queued" or not run.get("dispatch_pending"):
 		return None
-	if (run.get("lease_until") or 0) <= now or run["deadline"] <= now:
-		return None
-	previous = run.get("dispatched_at_epoch") or 0
-	if previous and now - previous < DISPATCH_INTERVAL:
+	if run["deadline"] <= now or not queue_protocol.dispatch_due(
+		run.get("lease_until"), run.get("dispatched_at_epoch"), now, DISPATCH_INTERVAL
+	):
 		return None
 	_update(RUN, run, dispatched_at_epoch=now)
 	return run

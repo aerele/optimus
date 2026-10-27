@@ -218,7 +218,7 @@
   },
   {
    "default": "2000",
-   "description": "Each recording enriches at most this many queries with the full treatment (tidy formatting, a query plan and normalization). Anything past the limit is dropped with a warning. Keep it sensible, since each query adds one database round-trip. Set it to 0 for no limit, which enriches every query but makes analyze time grow with the number of queries, so save that for deep investigations. Reference values: Strict: 0  ·  Recommended: 2000  ·  Relaxed: 1000.",
+   "description": "Each recording fully enriches at most this many queries (tidy formatting, a query plan and index lookups). Queries past the limit are only grouped by shape, so they still count in totals, N+1 and Top Queries, and the report shows a warning. Keep it sensible, since each enriched query adds database round-trips. Set it to 0 for no limit, which enriches every query but makes analyze time grow with the number of queries, so save that for deep investigations. Reference values: Strict: 0  ·  Recommended: 2000  ·  Relaxed: 1000.",
    "fieldname": "max_queries_per_recording",
    "fieldtype": "Int",
    "label": "Max Queries per Recording",
@@ -510,7 +510,7 @@
   },
   {
    "depends_on": "eval:doc.ai_enabled",
-   "description": "Leave this blank to use the provider's default model. Examples: claude-sonnet-4-6 (Anthropic), gpt-4.1-mini (OpenAI), kimi-k2-0905-preview (Kimi), deepseek-chat (DeepSeek) or the name of your local model.",
+   "description": "Leave this blank to use the provider's default model. Examples: claude-sonnet-4-6 (Anthropic), gpt-4.1-mini (OpenAI), kimi-k2-0905-preview (Kimi), deepseek-flash (DeepSeek) or the name of your local model.",
    "fieldname": "ai_model",
    "fieldtype": "Data",
    "label": "Model"
@@ -561,7 +561,7 @@
   {
    "default": "1",
    "depends_on": "eval:doc.ai_enabled",
-   "description": "Allow manual Refresh AI suggestions to rewrite Steps to Reproduce. Provider failure preserves the saved note; captured actions remain available. When off, no new Steps request is sent. Existing notes remain until replaced or the session is analyzed again.",
+   "description": "Allow Refresh AI suggestions to rewrite Steps to Reproduce. When automatic suggestions are on, also humanize freshly captured Steps after profiling. Automatic work preserves user-written notes and stops treating captured Steps as unedited after any document save. Provider failure keeps the saved note. When off, no new Steps request is sent.",
    "fieldname": "ai_humanize_steps",
    "fieldtype": "Check",
    "label": "Humanized \"Steps to Reproduce\""
@@ -575,10 +575,10 @@
   {
    "default": "1",
    "depends_on": "eval:doc.ai_enabled",
-   "description": "After profiling results are saved as Ready, queue optional AI fixes for eligible findings. This uses provider tokens and requires a background worker. If a Phase 2 pass is armed, finish it before manually refreshing AI. Turn off to request AI only through Refresh AI suggestions.",
+   "description": "After profiling is saved as Ready, queue the finding fixes and/or captured Steps selected above. This uses provider tokens and requires a background worker. Turning off stops further queued or running automatic work; an already dispatched call may still finish. If Phase 2 is armed, its completion can start this work. When off, request AI through Refresh AI suggestions.",
    "fieldname": "ai_auto_suggest",
    "fieldtype": "Check",
-   "label": "Suggest AI fixes in the report by default"
+   "label": "Run AI suggestions automatically after profiling"
   },
   {
    "depends_on": "eval:doc.ai_enabled",
@@ -647,7 +647,7 @@
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-10-03 00:00:00.000000",
+ "modified": "2026-10-20 10:11:41.945295",
  "modified_by": "Administrator",
  "module": "Optimus",
  "name": "Optimus Settings",

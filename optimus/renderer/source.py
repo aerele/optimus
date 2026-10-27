@@ -130,7 +130,7 @@ def _installed_apps():
 		guard = _InterruptGuard(base=True)
 		try:
 			with guard:
-				frappe.logger("optimus").warning("optimus source access: installed apps unavailable (%s)", problem)
+				frappe.logger("optimus").error("optimus source access: installed apps unavailable (%s)", problem)
 		except Exception:
 			pass  # The source boundary remains closed if logging also fails.
 		if guard.pending():

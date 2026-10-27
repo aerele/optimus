@@ -319,12 +319,12 @@ class TestFailOpen:
 		("fields", "method"),
 		[
 			# an ai_fix.py frame in the error: the error is withheld, the
-			# title (no frame, no key) kept
-			({"error": LEAKY, "method": "optimus ai_fix"}, "optimus ai_fix"),
+			# title and metadata are also unverified and withheld
+			({"error": LEAKY, "method": "optimus ai_fix"}, error_log_mask.WITHHELD_TITLE),
 			# the key in the title only
 			({"error": "Traceback ...", "method": f"bad key {KEY}"}, error_log_mask.WITHHELD_TITLE),
-			# a long title that holds neither: cut, as v16's validate cuts it
-			({"error": LEAKY, "method": "t" * 200}, "t" * 140),
+			# a long title is also unverified after a failed scrub
+			({"error": LEAKY, "method": "t" * 200}, error_log_mask.WITHHELD_TITLE),
 		],
 		ids=["frame_in_error", "key_in_title", "long_plain_title"],
 	)
@@ -338,13 +338,13 @@ class TestFailOpen:
 		assert _one_line(env).endswith("withheld: its masking failed (ValueError)")
 
 	@pytest.mark.parametrize(("length", "cut"), [(140, False), (141, True)])
-	def test_a_plain_title_is_cut_only_past_its_column_when_the_text_is_withheld(self, env, monkeypatch, length, cut):
+	def test_any_plain_title_is_withheld_when_the_record_scrub_fails(self, env, monkeypatch, length, cut):
 		monkeypatch.setattr(maintenance, "_mask", _boom)
 		title = "t" * length
 		doc = _run(_Doc(error=LEAKY, method=title))
 		assert doc.error == error_log_mask.WITHHELD
-		assert doc.method == "t" * 140
-		assert ("method" in doc.sets) is cut
+		assert doc.method == error_log_mask.WITHHELD_TITLE
+		assert "method" in doc.sets
 
 	def test_the_withheld_note_says_where_the_reason_is(self):
 		# Stored Error Log content: fixed, untranslated, key-free, with a
@@ -355,11 +355,11 @@ class TestFailOpen:
 		assert error_log_mask.WITHHELD_TITLE == "Optimus withheld this error title: it could not be masked."
 		assert len(error_log_mask.WITHHELD_TITLE) <= error_log_mask._TITLE_LIMIT
 
-	def test_metadata_without_a_frame_or_the_key_is_kept_when_the_text_is_withheld(self, env, monkeypatch):
+	def test_unverified_metadata_is_withheld_even_without_a_frame_or_current_key(self, env, monkeypatch):
 		monkeypatch.setattr(maintenance, "_mask", _boom)
 		meta = json.dumps({"user": "a@b.c"})
 		doc = _run(_Doc(error=LEAKY, method="optimus ai_fix", metadata=meta))
-		assert doc.error == error_log_mask.WITHHELD and doc.metadata == meta
+		assert doc.error == error_log_mask.WITHHELD and doc.metadata == error_log_mask.WITHHELD
 
 	def test_a_record_whose_ai_check_fails_is_masked_as_one_of_optimus_s(self, env, monkeypatch):
 		# Nothing shows it is not Optimus's: it is masked as an AI record,
@@ -1074,7 +1074,7 @@ class TestTheStaleFallbackFailsClosedForAnAiRecord:
 		doc = _Doc(error=error, method="optimus ai_fix", metadata=json.dumps({"tb": f"{path} {ROTATED}"}))
 		stale(doc, "before_insert")
 		assert doc.error == error_log_mask.WITHHELD
-		assert doc.method == "optimus ai_fix"
+		assert doc.method == error_log_mask.WITHHELD_TITLE
 		assert doc.metadata == error_log_mask.WITHHELD
 		assert ROTATED not in json.dumps(doc.fields())
 		assert _one_line(env).endswith(
@@ -1087,17 +1087,17 @@ class TestTheStaleFallbackFailsClosedForAnAiRecord:
 		assert doc.error == error_log_mask.WITHHELD and doc.method == error_log_mask.WITHHELD_TITLE
 		assert "metadata" not in doc.sets
 
-	def test_a_key_shorter_than_8_characters_does_not_withhold_the_title(self, env, stale):
+	def test_failed_record_scrub_withholds_title_regardless_of_current_key_length(self, env, stale):
 		env.key = "1234567"
 		env.placeholder = "*" * 7
 		doc = _Doc(error=LEAKY, method="retry 1234567 failed")
 		stale(doc, "before_insert")
-		assert doc.error == error_log_mask.WITHHELD and doc.method == "retry 1234567 failed"
+		assert doc.error == error_log_mask.WITHHELD and doc.method == error_log_mask.WITHHELD_TITLE
 
-	def test_a_long_plain_title_is_cut_to_its_column(self, env, stale):
+	def test_a_long_plain_title_is_withheld_on_scrub_failure(self, env, stale):
 		doc = _Doc(error=LEAKY, method="t" * 200)
 		stale(doc, "before_insert")
-		assert doc.error == error_log_mask.WITHHELD and doc.method == "t" * 140
+		assert doc.error == error_log_mask.WITHHELD and doc.method == error_log_mask.WITHHELD_TITLE
 
 	def test_with_no_stored_key_an_ai_record_is_still_withheld(self, env, stale):
 		env.placeholder = None
@@ -1129,7 +1129,7 @@ class TestTheOuterFailurePathFailsClosedForAnAiRecord:
 
 	def test_an_ai_record_is_withheld(self, env, failing):
 		doc = _run(_Doc(error=LEAKY, method="optimus ai_fix", metadata=json.dumps({"tb": FRAME})))
-		assert doc.error == error_log_mask.WITHHELD and doc.method == "optimus ai_fix"
+		assert doc.error == error_log_mask.WITHHELD and doc.method == error_log_mask.WITHHELD_TITLE
 		assert doc.metadata == error_log_mask.WITHHELD
 		assert KEY not in json.dumps(doc.fields())
 		assert _one_line(env).endswith("withheld: its masking failed unexpectedly (RuntimeError)")

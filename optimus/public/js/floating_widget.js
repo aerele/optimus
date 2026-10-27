@@ -24,7 +24,7 @@
 	// earlier page load. If the build ID in the console / in the
 	// widget's title attribute doesn't match what we think is current,
 	// the user is on cached JS and needs a hard refresh + bench restart.
-	const WIDGET_BUILD_ID = "2026-04-16-hide-when-disabled";
+	const WIDGET_BUILD_ID = "2026-10-18-role-gate-mount";
 
 	// Developer-only diagnostic. Defaults to silent in production so the
 	// browser console isn't spammed on every Desk page. Set
@@ -68,7 +68,6 @@
 	// on busy sites. POLL_INTERVAL_MS is kept as a legacy constant (some
 	// external integrations may reference it) but no timer uses it.
 	const POLL_INTERVAL_MS = 0;
-	const REQUIRED_ROLES = ["System Manager", "Optimus User", "Administrator"];
 
 	let widget = null;
 	let elapsedHandle = null;
@@ -80,22 +79,6 @@
 		started_at: null,
 		display: "inactive", // inactive | recording | stopping | analyzing | ready
 	};
-
-	function userHasRole() {
-		// frappe.user_roles is set by Desk.set_globals(). On initial page
-		// load our app_include_js script may run before set_globals, so
-		// fall back to frappe.boot.user.roles which is populated inline
-		// in the Desk HTML before any script executes.
-		// Administrator is always allowed (matches api._require_profiler_user).
-		if (frappe.session && frappe.session.user === "Administrator") {
-			return true;
-		}
-		const roles =
-			frappe.user_roles
-			|| (frappe.boot && frappe.boot.user && frappe.boot.user.roles)
-			|| [];
-		return REQUIRED_ROLES.some((r) => roles.includes(r));
-	}
 
 	function init() {
 		// v0.5.2 round 4: hide widget entirely when Optimus Settings ▸
@@ -116,14 +99,13 @@
 			return;
 		}
 
-		// Mount the widget UNCONDITIONALLY for any logged-in user. The
-		// server-side `_require_profiler_user()` check in api.py is the
-		// real permission gate; this client-side check is just a hint
-		// and was causing race-condition bugs because `frappe.user_roles`
-		// may not be populated when this script runs (see desk.js:329
-		// set_globals runs after Desk class construction). We err on the
-		// side of always mounting; users without the role will see a
-		// permission error if they actually click Start.
+		// Skip non-profilers: api.status would 403 and pop an error modal.
+		// boot.py sets the flag with the API's role check; missing means an old cached boot.
+		if (frappe.boot && frappe.boot.optimus_can_profile === false) {
+			_diag("[optimus] user lacks a profiler role, widget will not mount");
+			return;
+		}
+
 		mountWidget();
 		// v0.5.1: one-shot rehydrate on page load. Covers the case
 		// where the user reloaded / navigated back to the Desk while
@@ -353,6 +335,8 @@
 			if (currentState.docname) {
 				frappe.set_route("Form", "Optimus Session", currentState.docname);
 				currentState.display = "inactive";
+				// Opening the completed report releases this widget for a new session.
+				currentState.session_uuid = null;
 				setDisplay("inactive", "Profiler", "");
 			}
 		}
@@ -371,8 +355,7 @@
 			callback: () => {
 				frappe.show_alert({
 					message: __(
-						"Phase 2 stopped analyzing now. Open the session " +
-						"to see the line-level report when it's ready."
+						"Phase 2 stopped analyzing now. Open the session to see the line-level report when it's ready."
 					),
 					indicator: "blue",
 				});
@@ -732,15 +715,26 @@
 			return;
 		}
 
-		// Helper: skip events for sessions the widget isn't tracking.
-		function matchesCurrentSession(data) {
+		// A socket can receive the same event through its user and document
+		// rooms. Shared-form events must never take over this user's widget.
+		const seenEvents = new Set();
+		function matchesCurrentSession(data, phase2 = false) {
 			if (!data || !data.session_uuid) return false;
+			const principal = phase2 ? data.user : data.recording_user;
+			if (principal && principal !== frappe.session.user) return false;
+			if (!principal && (phase2 || data.session_uuid !== currentState.session_uuid)) return false;
 			if (
 				currentState.session_uuid
 				&& data.session_uuid !== currentState.session_uuid
 			) {
 				return false;
 			}
+			if (data.event_id) {
+				if (seenEvents.has(data.event_id)) return false;
+				seenEvents.add(data.event_id);
+				if (seenEvents.size > 128) seenEvents.delete(seenEvents.values().next().value);
+			}
+			currentState.session_uuid = data.session_uuid;
 			return true;
 		}
 
@@ -801,7 +795,7 @@
 		// existing Stop API path (api.stop_line_profile_pass), which the
 		// form's history list reflects after refresh.
 		frappe.realtime.on("phase_2_run_recording", (data) => {
-			if (!matchesCurrentSession(data)) return;
+			if (!matchesCurrentSession(data, true)) return;
 			currentState.display = "recording";
 			currentState.phase2 = true;
 			currentState.run_uuid = data.run_uuid;
@@ -814,7 +808,7 @@
 		});
 
 		frappe.realtime.on("phase_2_run_analyzing", (data) => {
-			if (!matchesCurrentSession(data)) return;
+			if (!matchesCurrentSession(data, true)) return;
 			currentState.display = "analyzing";
 			currentState.phase2 = true;
 			currentState.run_uuid = data.run_uuid || currentState.run_uuid;
@@ -822,7 +816,7 @@
 		});
 
 		frappe.realtime.on("phase_2_run_ready", (data) => {
-			if (!matchesCurrentSession(data)) return;
+			if (!matchesCurrentSession(data, true)) return;
 			currentState.display = "ready";
 			currentState.phase2 = false;
 			currentState.run_uuid = null;
@@ -835,7 +829,7 @@
 		});
 
 		frappe.realtime.on("phase_2_run_failed", (data) => {
-			if (!matchesCurrentSession(data)) return;
+			if (!matchesCurrentSession(data, true)) return;
 			currentState.display = "ready";
 			currentState.phase2 = false;
 			setDisplay("ready", "Phase 2 failed", "click to view");
@@ -873,11 +867,8 @@
 		}
 	}
 
-	// Bootstrap: wait for document.body to exist, then mount the widget
-	// UNCONDITIONALLY. We don't gate on frappe.user_roles or frappe.boot
-	// because those may not be populated when our app_include_js script
-	// runs (Desk.set_globals at desk.js:329 runs later, asynchronously).
-	// The server-side _require_profiler_user check is the real gate.
+	// Bootstrap: wait for document.body to exist, then run init(), which
+	// gates on the enabled flag and the user's roles before mounting.
 	function bootstrap() {
 		_diag("[optimus] bootstrap() called, document.body exists:", !!document.body);
 		if (!document.body) {

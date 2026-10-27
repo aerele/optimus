@@ -4,6 +4,10 @@
     "action-name": 3,
     "action-plan": 1,
     "action-step": 3,
+    "ai-suggestion-action": 1,
+    "ai-suggestion-link": 1,
+    "ai-suggestion-links": 1,
+    "ai-suggestion-title": 1,
     "ai-tag": 1,
     "bar-cell": 3,
     "bar-fill": 3,
@@ -116,7 +120,6 @@
     "severity-pill": 8,
     "small": 29,
     "smoking": 3,
-    "sql-snip": 1,
     "stat-num": 2,
     "sub-desc": 2,
     "sub-finding-row": 2,
@@ -153,6 +156,7 @@
   },
   "section_ids": [
     "actions",
+    "ai-finding-pos-3",
     "background-jobs",
     "db",
     "db-tables",
@@ -170,7 +174,7 @@
     "waterfall"
   ],
   "tag_counts": {
-    "a": 28,
+    "a": 29,
     "aside": 2,
     "b": 1,
     "body": 1,
@@ -179,7 +183,7 @@
     "colgroup": 5,
     "details": 3,
     "div": 164,
-    "em": 11,
+    "em": 10,
     "g": 1,
     "h1": 1,
     "h2": 11,
@@ -188,15 +192,15 @@
     "header": 1,
     "html": 1,
     "img": 1,
-    "li": 19,
-    "meta": 2,
+    "li": 20,
+    "meta": 3,
     "nav": 1,
     "p": 40,
     "path": 2,
-    "pre": 4,
+    "pre": 3,
     "section": 11,
     "small": 41,
-    "span": 82,
+    "span": 85,
     "strong": 41,
     "style": 1,
     "summary": 3,
@@ -210,6 +214,6 @@
     "time": 2,
     "title": 1,
     "tr": 19,
-    "ul": 4
+    "ul": 5
   }
 }

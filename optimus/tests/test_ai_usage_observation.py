@@ -32,9 +32,9 @@ def provider(monkeypatch):
 
 	def install(usage, *, content="answer", protocol="openai"):
 		body = (
-			{"choices": [{"message": {"content": content}}]}
+			{"choices": [{"message": {"content": content}, "finish_reason": "stop"}]}
 			if protocol == "openai"
-			else {"content": [{"type": "text", "text": content}]}
+			else {"content": [{"type": "text", "text": content}], "stop_reason": "end_turn"}
 		)
 		if usage is not None:
 			body["usage"] = usage
@@ -65,7 +65,7 @@ def test_openai_usage_presence_is_not_inferred_from_normalized_zero(provider, ra
 	usage = ai_fix.Usage()
 	ai_fix._call_openai_chat(
 		"https://fake.invalid/v1", "", "fake", "system", [], usage_out=usage, session_uuid="fake-session"
-	)
+	, max_tokens=4096)
 	assert usage.complete is known and usage.calls == 1
 	assert usage["total_tokens"] == total
 	assert provider.spend == []
@@ -96,7 +96,7 @@ def test_anthropic_usage_accounts_for_cache_components(provider, raw, known, tot
 	usage = ai_fix.Usage()
 	ai_fix._call_anthropic(
 		"https://fake.invalid", "", "fake", "system", [], usage_out=usage, session_uuid="fake-session"
-	)
+	, max_tokens=4096)
 	assert usage.complete is known and usage["total_tokens"] == total
 	assert provider.spend == []
 
@@ -104,7 +104,7 @@ def test_anthropic_usage_accounts_for_cache_components(provider, raw, known, tot
 def test_unattributed_call_collects_usage_without_ambient_spending(provider):
 	provider.install({"total_tokens": 7})
 	usage = ai_fix.Usage()
-	ai_fix._call_openai_chat("https://fake.invalid/v1", "", "fake", "system", [], usage_out=usage)
+	ai_fix._call_openai_chat("https://fake.invalid/v1", "", "fake", "system", [], usage_out=usage, max_tokens=4096)
 	assert usage["total_tokens"] == 7 and provider.spend == []
 
 
@@ -157,6 +157,7 @@ def test_failed_reask_preserves_first_spend_and_distinguishes_pre_send_failure(p
 			usage_out.begin()
 			usage_out.observe(True)
 			usage_out.update(prompt_tokens=4, completion_tokens=3, total_tokens=7)
+			kw["meta_out"]["finish_reason"] = "stop"
 			return "fake unsafe answer"
 		if sent:
 			usage_out.begin()

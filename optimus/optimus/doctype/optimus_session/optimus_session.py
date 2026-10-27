@@ -5,12 +5,19 @@ from frappe.model.document import Document
 
 
 class OptimusSession(Document):
+	def before_insert(self):
+		from optimus.managed import protect_session
+
+		protect_session(self)
+
 	def before_validate(self):
 		# The AI counters (ai_tokens_spent, ai_refresh_count) only change through SQL
 		# increments: keep the stored values so a save never writes back counts older than
 		# the row's (analyze._keep_session_counters). Runs on every save.
 		from optimus.analyze import _keep_session_counters
+		from optimus.managed import protect_session
 
+		protect_session(self)
 		_keep_session_counters(self)
 
 	def validate(self):

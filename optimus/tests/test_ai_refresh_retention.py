@@ -133,7 +133,7 @@ def test_deleted_capture_cleanup_is_best_effort_and_counts_only(monkeypatch, log
 			raise OSError("fake log failure")
 	monkeypatch.setattr(capture, "stop_line_profile_pass", fail_stop)
 	monkeypatch.setattr(capture, "cleanup_run", cleaned.append)
-	monkeypatch.setattr(ai_jobs, "frappe", SimpleNamespace(logger=lambda name: SimpleNamespace(warning=warning)))
+	monkeypatch.setattr(ai_jobs, "frappe", SimpleNamespace(logger=lambda name: SimpleNamespace(error=warning)))
 	ai_jobs._cleanup_deleted_captures((("private-run", "private-user"),))
 	assert len(seen) == 1 and "failed=1" in seen[0]
 	assert "private" not in seen[0] and "new capture input" in seen[0]

@@ -4,6 +4,15 @@ This document inventories **exactly** what data leaves your host when Optimus's 
 
 If you're picking up Optimus for the first time: every AI feature here is **off by default**. The rest of this doc only matters once an operator explicitly turns one on.
 
+Saved answers remain available when findings are grouped under another finding.
+Expand the related finding in **Findings**, or follow **View AI suggestion** from
+its action or background job. Each answer appears once, with its original review
+status and safety warnings. Incomplete or withheld answers use **View AI response**.
+**Regenerate Reports** displays these saved answers without requesting new ones;
+**Refresh AI suggestions** requests new answers and uses provider tokens. A related
+query's observed time is separate from the enclosing function's time; a query fix
+does not establish that all of the function's time is recoverable.
+
 ---
 
 ## 1. TL;DR: default OFF
@@ -19,7 +28,7 @@ When AI is enabled, three knobs gate every outbound call:
 | Knob (Optimus Settings → AI) | Default | What it does |
 |---|---|---|
 | `ai_enabled` | OFF | Master gate. OFF → zero LLM calls ever. |
-| `ai_auto_suggest` | ON | Batch mode (takes effect only once `ai_enabled` is on). ON → a separate background run sends eligible findings after profiling is saved as Ready. OFF → AI runs only when the operator uses the session's **Refresh AI suggestions** action. |
+| `ai_auto_suggest` | ON | Batch mode (takes effect only once `ai_enabled` is on). ON → a separate background run sends the enabled finding fixes and fresh captured Steps after profiling is saved as Ready. OFF → AI runs only when the operator uses the session's **Refresh AI suggestions** action. |
 | `ai_excluded_finding_types` | empty | One finding type per line (v0.9.0+). Listed types are skipped in **both** auto-suggest and on-demand the request body is never built and never sent. |
 
 With the master `ai_enabled=OFF` nothing is sent regardless. Once AI is enabled, three axes of consent remain: feature-level (the master), event-level (`ai_auto_suggest` — on by default so suggestions are built into the report; set it OFF to require a session refresh) and type-level (the exclusion list).
@@ -76,7 +85,7 @@ Oversized title and callsite text are clipped before wrapping. A source line is 
 
 ### 2.2 Humanize "Steps to Reproduce" (`/v1/messages` or `/chat/completions`)
 
-Included in manual Refresh AI suggestions when `ai_humanize_steps` is enabled; automatic fix enrichment does not rewrite Steps. Built by `_build_steps_messages` in `optimus/ai_fix.py`.
+Included in Refresh AI suggestions when `ai_humanize_steps` is enabled. With `ai_auto_suggest` on, automatic work also humanizes freshly captured Steps. User-written notes, prior humanized notes, and any captured note saved through Desk are preserved by automatic work. Manual refresh can replace notes. Built by `_build_steps_messages` in `optimus/ai_fix.py`.
 
 **System prompt** (static, ~2.9 KB): ERPNext workflow knowledge, Frappe API decoding rules, collapse rules, output spec (ordered Markdown list + one-sentence summary).
 
@@ -281,7 +290,7 @@ auth object without decrypting again.
 | `Anthropic` | Messages | `https://api.anthropic.com` | Yes | Default model: `claude-sonnet-4-6`. |
 | `OpenAI` | Chat completions | `https://api.openai.com/v1` | Yes | Default model: `gpt-4.1-mini`. |
 | `Kimi (Moonshot)` | Chat completions | `https://api.moonshot.ai/v1` | Yes | Default model: `kimi-k2-0905-preview`. |
-| `DeepSeek` | Chat completions | `https://api.deepseek.com/v1` | Yes | Default model: `deepseek-chat` (V3). `deepseek-reasoner` (R1) also works. |
+| `DeepSeek` | Chat completions | `https://api.deepseek.com/v1` | Yes | Default model: `deepseek-flash`. Thinking is explicitly disabled so the completion budget goes to the answer. |
 | `Aerele` | Chat completions | `https://api.aerele.in/optimus/v1` | Yes | Managed service buy a fixed token pack up front. See § 10. |
 | `OpenAI-compatible` | Chat completions | (you set it) | No (configurable) | Use this for local LLMs and any other OpenAI-shaped server. |
 
@@ -310,15 +319,43 @@ Adding a whitelist decorator or editing an argument on a later signature line tr
 
 The rules come in tiers.
 
-- **Block rules** mean the code is fabricated, unsafe or wrong: code not copied from the shown source, new raw SQL or any DDL, formatted SQL, a removed permission check or `ignore_permissions` / `allow_guest`, `eval` / `exec`, pickle or marshal loads, shell commands, switching to Administrator, a manual commit, a process-wide cache, `enqueue` without `enqueue_after_commit=True`, the four headings, and every Frappe rule a pinned semgrep rule checks: untranslated messages, untyped whitelisted arguments, a positional `order` in `orderby`, `get_value` on a Single DocType, controller writes that are never saved, child rows changed while iterating, module or request-proxy state, and an unchecked `has_permission`. Optimus sends the model one follow-up turn listing every broken block rule and keeps the rewrite only if it has the four headings and breaks fewer block rules. Code that still breaks a block rule is removed, and a profiler note names each broken rule in plain English (the first two, then how many more). A heading problem alone never removes code.
+Newly generated or manually refreshed **N+1 Query** fixes must show how repeated
+reads change. A SQL-to-ORM rewrite, an IN filter still inside the same loop, or a
+dummy wrapping loop does not establish fewer calls. Such answers trigger the
+existing optional single repair request; if repair is disabled, unavailable or
+unsuccessful, Optimus withholds both the code and its unsupported improvement
+claim. Read replacements whose diff omits the enclosing loop need a complete
+grounded diff or directional advice without code. Other finding types retain
+advisory notes for partial per-query improvements. These are bounded static
+checks, not proof of runtime equivalence or measured query savings. Prompt
+version remains 4: saved answers are not invalidated or automatically regenerated
+by this quality check. Replace existing suggestions explicitly to regenerate them.
+For new N+1 fixes, function references, lambdas and newly extracted query helpers
+require local review or directional advice: static inspection cannot establish
+how often their caller runs. A memo must visibly persist outside the loop and
+must not be reset. Ambiguous loop/header rewrites can be withheld conservatively.
+
+- **Block rules** mean the code is fabricated, unsafe or wrong: code not copied from the shown source, added, moved or changed raw SQL (including parameter-only changes) or any DDL, formatted SQL, a removed permission check or `ignore_permissions` / `allow_guest`, `eval` / `exec`, pickle or marshal loads, shell commands, switching to Administrator, a manual commit, a process-wide cache, `enqueue` without `enqueue_after_commit=True`, the four headings, and every Frappe rule a pinned semgrep rule checks: untranslated messages, untyped whitelisted arguments, a positional `order` in `orderby`, `get_value` on a Single DocType, controller writes that are never saved, child rows changed while iterating, module or request-proxy state, and an unchecked `has_permission`. Optimus sends the model one follow-up turn listing every broken block rule and keeps the rewrite only if it has the four headings and breaks fewer block rules. Code that still breaks a block rule is removed, and a profiler note names each broken rule in plain English (the first two, then how many more). A heading problem alone never removes code.
 - **Advise rules** are conventions no pinned semgrep rule checks: no dynamic imports, and no index led by a Frappe metadata column. They never cost a follow-up turn and never remove code: one profiler note lists them.
 - **Notes** tell you about the answer: Customize Form has no index option, the model saw only part of the prompt, an image or an off-site link was removed, captured-data markers were echoed.
 
-An answer cut off at the output limit is never re-asked and its code is removed. A reply longer than 16,384 characters (16 per token of the largest budget; only a server that ignores `max_tokens` sends one) is cut there and treated the same way, so the checks stay fast. The follow-up turn is on by default; set `optimus_ai_reask` to `false` in site_config to skip it on a slow local model.
+A cut-off answer is never automatically re-asked. The received final-answer text is retained in the finding's `llm_fix_json.received_responses` before guardrail fallback, while unfinished code stays out of the report. Provider termination is recorded separately from local validation. New answers are `complete` after local validation, `incomplete`, `blocked`, or `processing_limited`. A missing or unfamiliar finish reason alone does not discard valid text; the original provider reason and its unconfirmed status remain in retained evidence. A reported exhausted output budget, explicit truncation, paused turn, tool request, abort or unclosed fence remains incomplete. Empty replies fail without a repair call. Blocked responses never trigger a guardrail repair call. Manual Refresh includes incomplete answers and historical unknown answers; blocked and locally limited answers are kept unless the operator explicitly chooses to replace all suggestions. The optional repair of a complete answer with rule violations remains controlled by `optimus_ai_reask` in site_config.
+
+The 16,384-character threshold now selects a literal renderer instead of truncating the answer. Long answers are validated using explicit fenced code, with no recursive Markdown conversion. Resource limits are explicit: 1,048,576 characters for validation, 4,096 per line, 64 fenced blocks and 131,072 total fenced-code characters; ambiguous indented/nested prose requires local review. Exceeding these limits produces `processing_limited`, preserving the provider's actual finish reason. Storage retains up to 4,194,304 UTF-8 bytes per received answer (at most two attempts), with a full-text hash, original length and an explicit retention-truncated flag. These are resource envelopes, not generation-length targets. Raw retained text is unvalidated, never applied, excluded from report views and exports, and shares the parent session's access permissions and deletion/reset lifecycle. It is not written to logs or usage journals. Numeric reasoning-token counts are retained when reported, without adding them to total usage again; absent counts remain unknown.
+
+This retention happens when the finding result is saved. It does not checkpoint a running request, recover bytes lost in a transport timeout, or restore partial code discarded by older versions. There is no prefix continuation or streaming recovery yet. Refresh requests a fresh answer and spends provider tokens; retained text is not automatically re-sent.
+
+Report rendering checks at most `RENDER_VALIDATION_CHARS = 262144` characters and `RENDER_VALIDATION_ANSWERS = 128` distinct saved answers, in report order. Identical answers share one check within that render. An answer that does not fit is withheld without consuming the remaining budget, so later smaller answers can still be checked. Limited answers show “Response needs local review”, without an outdated label or an automatic paid retry. The saved answer is unchanged. Generation and refresh eligibility outside rendering still perform the full individual safety check; no provider call is made while rendering.
 
 ### 4.2 Context window and answer size
 
-Each provider has a context window in `_PROVIDER_DEFAULTS` (`context_tokens`): Anthropic 200,000, OpenAI 128,000, Kimi 128,000, DeepSeek 64,000, OpenAI-compatible 4,096. For OpenAI-compatible servers set **Optimus Settings > AI > Context window (tokens)** to the window your server really has (0 uses Optimus's 4,096-token budget). Optimus reserves a fifth of the window for the answer (between 512 and 1,024 tokens), sizes the user message to the rest, and refuses with a clear message when the window cannot hold the prompt. Sizes count every non-ASCII character (Chinese, Japanese, Arabic, Hebrew, accented letters) as a whole token, to reduce underestimation for those scripts; token counts remain estimates. Offline corpus checks fit the first request inside 4,096 tokens. A follow-up is sent only when the first call's reported usage leaves room; live model quality still requires evaluation.
+DeepSeek’s request options follow its [thinking-mode API](https://api-docs.deepseek.com/guides/thinking_mode/); provider defaults are data in `_PROVIDER_DEFAULTS`, and other providers receive no DeepSeek-specific options.
+
+Input assembly reserves a minimum answer and tokenization margin first; the final request's allowance is `min(requested output budget, known model output maximum, context window − estimated input − margin)`. The margin is at least 256 tokens and 10% of estimated input. Re-asks recalculate from their full conversation history and reported usage, without the former twice-first-answer ceiling. Small local models use the same remaining-context calculation. Counts remain estimates, so a provider can still reject a prompt its tokenizer counts differently.
+
+Default model capabilities are data in `_PROVIDER_DEFAULTS`, scoped to exact model IDs: [GPT-4.1 mini](https://developers.openai.com/api/docs/models/gpt-4.1-mini) (1,047,576 context / 32,768 output), [Claude Sonnet 4.6](https://platform.claude.com/docs/en/models/sonnet-4-6/overview) (1M / 128K), and [DeepSeek Flash](https://api-docs.deepseek.com/api/create-chat-completion/) (1M / 393,216). The configured `deepseek-v4-flash` alias retains its identity. The default requested output budget is 4,096 tokens (8,192 for reasoning models or enabled thinking); it is separate from model capacity. Set `optimus_ai_max_output_tokens` to an integer from 512 through 131,072 to change it (for example, `bench --site <site> set-config -p optimus_ai_max_output_tokens 4096`; `-p` preserves its numeric type). Reasoning consumes this same budget, so a reasoning-heavy model may need a larger setting. Unknown models also receive the bounded requested budget. Unknown Anthropic IDs use a conservative 200,000-token context fallback, which operators can override with actual capacities. Retained `budget_source` distinguishes known capacities from context fallbacks. Test AI connection sends the same resolved budget as a real request and asks only for OK. No provider discovery or paid probe runs automatically. See the [Messages max_tokens contract](https://platform.claude.com/docs/en/api/typescript/messages/create) and [Chat Completions max_completion_tokens contract](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create).
+
+Operators can declare model capacities in site_config: `"optimus_ai_model_limits": {"Provider name": {"model-id": [context_tokens, output_tokens]}}`. Both values must be positive integers and describe actual model limits. The existing Context window setting still takes precedence for custom OpenAI-compatible endpoints. A different model never inherits the default model's output maximum. DeepSeek thinking defaults to disabled; `"optimus_ai_thinking": {"DeepSeek": "enabled"}` opts into the provider's declared thinking mode. The exact configured alias and mode still require a user-triggered live conformance test.
 
 The code guardrails apply to finding fixes in every rendered block, regardless of its fence label or section. Static checks do not establish that a suggestion fixes the performance problem. Review its semantics before applying it.
 
@@ -358,17 +395,18 @@ The list is empty by default. The exclusion list is **additive**: types not list
 
 Each failure message says what happened and what to do next, and it is translated. A context failure names the cause ("The prompt did not fit the model's context window") and, for a hosted provider, points at a model with a larger window; for your own model server it gives the server's context setting (Ollama: `OLLAMA_CONTEXT_LENGTH` or `num_ctx`). A timeout names the call's whole time budget in seconds, also when a guardrail re-ask had only what was left of it. A connect timeout with the full 10 seconds to connect (the cap on connecting) is a `transport` failure that asks you to check the network, not a slow model; when less than that was left of the call's budget (a parameter retry, a redirect, a guardrail re-ask), it is a `timeout`, since the budget ran out. A rejected request names the Model, and the Base URL only for a provider whose Base URL you set. When the provider sent a reply, it follows the message as "The provider replied: ...", scrubbed and cut at 300 characters. An unexpected error names only its type; its Error Log row adds where it happened, as plain `file:line:function` frames, never what it said. A transport failure's row keeps only the error's type and the type of the error it wraps (for example `ConnectionError (NameResolutionError)`), never its message, which can quote the URL and a key in it.
 
-`optimus.api.refill_ai_suggestions` returns, in its `fixes` result, `added`, `failed`, `skipped_time`, `skipped`, `gated` (AI-eligible findings and Framework N+1 that the report answers with Optimus's own advice or a note; index findings are not counted), `excluded` (AI-eligible types under Excluded finding types in Optimus Settings) and `skipped_ineligible`. The old `indexes` result is removed: `optimus.api.ai_capabilities` always reports `indexes: false`. Missing and outdated suggestions are refreshed first, so repeated refreshes make every eligible finding current.
+`optimus.api.refill_ai_suggestions` returns, in its `fixes` result, `added`, `failed`, `skipped_time`, `skipped`, `gated` (AI-eligible findings and Framework N+1 that the report answers with Optimus's own advice or a note; index findings are not counted), `excluded` (AI-eligible types under Excluded finding types in Optimus Settings) and `skipped_ineligible`. The old `indexes` result is removed: `optimus.api.ai_capabilities` always reports `indexes: false`. Missing, incomplete and outdated suggestions are refreshed first, so repeated refreshes make every eligible finding current.
 
 **How findings are selected.** One selection (`analyze.eligible_findings`) is the shared definition, and one rule (`ai_prompts.fix_state`) classifies a finding's stored answer, the same rule that decides the report's "earlier version" footer:
 
 - `missing`: nothing stored. Always picked.
-- `current`: a usable answer (suggestion text, as the report shows a card) made with this prompt version or a newer one. A newer answer is current, not downgraded. A guardrail-fallback answer (its code removed) is usable and current.
+- `incomplete`: a provider output cutoff (`length` / `max_tokens`) or the guardrail’s `truncated` violation. Manual Refresh retries it; automatic missing-only runs do not. Unfinished code remains removed.
+- `current`: a usable answer (suggestion text, as the report shows a card) made with this prompt version or a newer one. A newer answer is current, not downgraded. A non-truncation guardrail fallback (its code removed) remains usable and current.
 - `outdated`: anything else that is stored: unparseable text, an older, absent, float, boolean or string `prompt_version`, or no suggestion text. Picked by a selection that includes outdated answers.
 
-The **Refresh AI suggestions** button queues missing and outdated eligible findings by default. Replacing current answers requires the explicit **Also replace current suggestions** choice. The worker applies the same eligibility rules after admission and before sending each call.
+The **Refresh AI suggestions** button queues missing, incomplete and outdated eligible findings by default. Replacing current answers requires the explicit **Also replace current suggestions** choice. The worker applies the same eligibility rules after admission and before sending each call.
 
-Order: missing, outdated, then current. Inside each, severity (High first, a blank severity as Low, an unrecognised one last), the larger impact, then the older answer. Findings whose type is excluded, and findings the eligibility gate refuses, are never picked; the selection also returns how many of each (`gated`, `excluded`). To resume an interrupted run, `requested_at` skips answers generated at or after the request: a naive datetime is read in the site's System Settings timezone (as Frappe stores it), an aware one keeps its offset, a value of another type raises `TypeError` and an unparseable string raises `ValueError`.
+Order: missing, incomplete, outdated, then current. Inside each, severity (High first, a blank severity as Low, an unrecognised one last), the larger impact, then the older answer. Findings whose type is excluded, and findings the eligibility gate refuses, are never picked; the selection also returns how many of each (`gated`, `excluded`). To resume an interrupted run, `requested_at` skips answers generated at or after the request: a naive datetime is read in the site's System Settings timezone (as Frappe stores it), an aware one keeps its offset, a value of another type raises `TypeError` and an unparseable string raises `ValueError`.
 
 **Token spend and refresh count.** Session counters change through atomic SQL increments with savepoint isolation. Every queued provider attempt settles its reported tokens with its answer and durable outcome, once. There is no worker-local spend marker: `suggest_fix` and `humanize_steps` return usage to their caller and attribute Error Logs only to the explicit session reference. Missing usage remains unknown, never a known zero. The journal records incomplete attempts and retains known tokens from interrupted or unusable replies. A failed counter statement is logged while the durable attempt remains the reconciliation source; a whole-transaction conflict retries the short write, never the provider call. A normal Session save retains the counters stored in SQL.
 
@@ -387,12 +425,13 @@ Parameter retries and permitted redirects use the remaining request budget. Each
 - `optimus ai_fix`: provider/protocol failures, with the explicit session reference and call metadata.
 - `optimus ai spend` and `optimus ai refresh count`: counter writes and their reconciliation outcomes.
 - `optimus ai recording cache read`, `optimus ai load recordings bundle` and `optimus ai phase 2 context`: unavailable grounding or recording data.
-- `optimus ai admission after analyze`, `optimus ai refresh admission` and `optimus ai refresh status`: automatic admission, manual admission and status-read failures.
-- `optimus ai refresh worker`, `optimus ai refresh cleanup`, `optimus ai refresh item`, `optimus ai refresh result storage`, `optimus ai refresh enqueue`, `optimus ai refresh worker availability`, `optimus ai refresh recovery`, `optimus ai refresh release`, `optimus ai refresh selection`, `optimus ai refresh evidence`, `optimus ai refresh discarded`, `optimus ai refresh duplicate blocked`, `optimus ai refresh uncertain` and `optimus ai refresh ended`: worker transitions, calls, settlement and recovery. See [the engine runbook](AI-REFRESH.md) for each outcome and its action.
+- `optimus ai refresh admission followup`, `optimus ai admission after analyze`, `optimus ai refresh admission` and `optimus ai refresh status`: automatic admission, manual admission and status-read failures.
+- `optimus ai refresh prepare`, `optimus ai refresh worker`, `optimus ai refresh cleanup`, `optimus ai refresh item`, `optimus ai refresh result storage`, `optimus ai refresh enqueue`, `optimus ai refresh worker availability`, `optimus ai refresh recovery`, `optimus ai refresh release`, `optimus ai refresh selection`, `optimus ai refresh evidence`, `optimus ai refresh discarded`, `optimus ai refresh duplicate blocked`, `optimus ai refresh uncertain` and `optimus ai refresh ended`: worker transitions, calls, settlement and recovery. See [the engine runbook](AI-REFRESH.md) for each outcome and its action.
 - `optimus ai refresh report`, `optimus ai regenerate report` and `optimus ai phase 2 report`: report replacement failed. Saved results remain; reload and use Regenerate Reports. A lost commit acknowledgement can mean the new attachment was already saved.
+- `optimus ai recording cleanup`, `optimus ai empty recording cleanup`, `optimus ai ready progress`, `optimus ai ready notification`, `optimus ai phase 2 postprocess` and `optimus ai phase 2 input cleanup`: independent cleanup and notification failures after durable profiling results.
 - `optimus ai recording tree read`, `optimus ai recording sidecar read`, `optimus ai recording tree load`, `optimus ai save recording File`, `optimus ai persist recordings` and `optimus ai analyze`: recording verification, snapshot persistence and analysis failures.
 - `optimus ai auto-arm phase 2`, `optimus ai Phase 2 admission cleanup` and `optimus ai Phase 2 capture recovery`: optional capture admission or recovery failures.
-- `optimus ai phase 2 enqueue`, `optimus ai phase 2 worker`, `optimus ai phase 2 recovery` and `optimus ai phase 2 queue recovery`: durable Phase 2 dispatch, execution and recovery failures. Retry analysis only for a failed generation; a pending report needs rendering, not repeated analysis.
+- `optimus ai phase 2 worker availability`, `optimus ai phase 2 enqueue`, `optimus ai phase 2 worker`, `optimus ai phase 2 recovery` and `optimus ai phase 2 queue recovery`: durable Phase 2 dispatch, execution and recovery failures. Retry analysis only for a failed generation; a pending report needs rendering, not repeated analysis.
 
 A failure row opens with the lines that tell you what to do, then the technical detail:
 
@@ -498,7 +537,7 @@ calling the provider. Refresh AI suggestions remains the action for new AI
 answers. Both report regeneration and step humanization can load the saved
 recording JSON without deserializing its Python trees or sidecars. This
 feature queues optional AI only after the profiling result is saved. Manual
-refresh is asynchronous, selects missing and outdated suggestions by default,
+refresh is asynchronous, selects missing, incomplete and outdated suggestions by default,
 and shows its capped selection before admission. A listening worker and an
 enabled scheduler are required for execution and recovery. See
 [background refresh operations](AI-REFRESH.md) for deployment, cancellation,
@@ -508,7 +547,7 @@ uncertain usage, resume limits, report recovery and API response changes.
 
 - **"The model's context window (N tokens) is too small for the Optimus prompt."** The window cannot hold the system prompt plus a minimal answer (about 2,760 tokens for a fix suggestion, 2,168 for the Steps to Reproduce rewrite). Raise the server's window and the Context window (tokens) setting together.
 - **A suggestion ends with "the model saw only part of the prompt".** The server reported far fewer prompt tokens than Optimus sent, which is what Ollama does when its real `num_ctx` is smaller than the prompt (it drops tokens silently). Set `OLLAMA_CONTEXT_LENGTH` (or `num_ctx`) and the Context window (tokens) setting to the same value.
-- **"the suggested code was removed because it was cut off at the output limit".** The answer hit its token budget. A larger context window raises the budget (up to 1,024 tokens).
+- **"the suggested code was removed because it was cut off at the output limit".** The stored answer is incomplete. The old fixed completion ceiling and destructive 16K-character cutoff are removed. Use **Refresh AI suggestions** with replacement of current suggestions unchecked to request a fresh answer while keeping completed ones. Old discarded partial code cannot be reconstructed; future received text is retained privately. No automatic paid continuation occurs.
 - **"the suggested code was removed because it broke these Frappe rules: ..."** The model's code broke a block rule it was told about and the one follow-up turn did not fix it; the note quotes each rule (the first two, then "And N more"; section 4.1 lists them all). Review the diagnosis and treat the fix as a direction.
 - **"change the suggested code before you apply it: ..."** The code is kept, but it breaks a convention the profiler only advises on (a dynamic import, index advice led by a metadata column). Apply the listed changes when you copy the code.
 - **"The prompt did not fit the model's context window."** One prompt was too large for the window: Optimus refused it before sending, or the provider rejected it (its reply follows the message). On your own model server, raise its window and the Context window (tokens) setting together; on a hosted provider, choose a model with a larger window. It is a `context` failure: counted and logged, not fatal, so the other findings are still asked.
@@ -650,3 +689,94 @@ What is **NOT** sent (matches § 3):
 - The bench's `encryption_key` or any other site secret beyond the Aerele key itself.
 - Cross-session correlation IDs, recording UUIDs, schema, or DocType names beyond what the finding-specific payload already includes.
 - Heartbeat / pack-status / usage-counting calls. Aerele tracks consumption from the actual `/chat/completions` traffic; the bench never pings out otherwise.
+
+### Frappe API policy for saved suggestions (0.12.77)
+
+The initial and repair prompts prefer `frappe.db.get_value` for one value, `get_all`/`get_list` for rows, `frappe.db.count` for counts, and query builder for complex queries. `frappe.db` itself is a supported API namespace. Moving a raw SQL call or replacing its parameters no longer exempts it from validation. Removed lines and unchanged diff context may still show existing SQL. An unused read should be removed only when its lack of required side effects is established; moving a call must preserve permissions, return shape, ordering, conditions and exception handling.
+
+This is maintained, condensed Frappe guidance in the runtime prompt, not dynamic loading of external skills. Static checks enforce changed SQL calls, not general semantic equivalence: suggestions still require review. The existing single repair request and private received-answer retention apply unchanged.
+
+Saved answers are checked locally against this SQL policy. Only affected answers become outdated and eligible for explicit manual Refresh; prompt version remains 4 so unrelated good answers stay current. Missing-only automatic runs do not retry these answers. Regenerated reports withhold the affected code and show “Frappe API update needed”, keeping the original answer and usage in the saved finding. Checking, rendering and opening the dialog make no provider requests. Previously downloaded HTML remains a snapshot; regenerate reports to see the new status.
+
+
+### Visible Frappe safety checks (v0.12.80)
+
+Suggestion checking now rejects newly introduced or moved unfiltered deletes, literal-empty `set_value` selectors, truncation and visibly executed Query Builder writes without a `where`. Computed filters are unknown to this static check; it does not establish that they are safe. `None` for `set_value` remains governed by the Single DocType helper rule, not a claim that it always updates every row.
+
+Known `frappe.has_permission` calls must keep their arguments, denial mode, immediate result-use category and visible execution conditions. Direct permission conditionals also retain visible raise/return/throw branches; later uses of an assigned Boolean are not tracked. Adding `throw=True` to a previously ignored Boolean check changes behavior and is rejected. A new discarded non-throwing check is rejected too. Verbatim moves of existing discarded checks remain allowed; enforced checks cannot move outside a visible loop or conditional/exception boundary.
+
+For one literal SQL SELECT replaced by one ORM read assigned to the same result variable in the same function and table, the checker rejects lost/changed literal LIMIT/OFFSET and missing/empty explicit ORDER BY. This is not general SQL equivalence: filters, joins, field shape, arbitrary aliases, runtime values and hidden control flow still require review. Unparseable sensitive permission fragments fail closed.
+
+A cheaper read that replaces a read inside the same visible loop gets an advisory that per-row database work remains. Its code stays available and the warning does not trigger a paid repair. Batch, cached and simple per-key memoized replacements are exempt. Hidden loops and opaque helpers remain outside this check.
+
+The same reconstructable blocking checks classify saved Fix code locally. Affected answers show “Safety review needed”, retain diagnosis and withhold code and obsolete rationale. Raw-SQL answers retain “Frappe API update needed”. Original response text and usage stay in the private saved finding. Prompt version stays 4; unrelated good answers remain current. Manual Refresh can replace affected answers after the existing cost confirmation; automatic missing-only runs and report regeneration do not retry them. Existing HTML files remain snapshots.
+
+Permission or paired SQL changes supplied as full replacement code require a grounded diff at generation so before/after evidence is available. Stored non-diff permission bodies are not retroactively classified as behavior changes. Parser failures withhold code rather than breaking the report; repaired fragments carry an unverified-structure note. Dynamic permission argument expansion requires explicit arguments. Checks are static and do not prove assigned-result dataflow, arbitrary control flow, or all Frappe conventions.
+
+Static alias analysis also limits logical resolution to 100 nested hops, 10,000
+resolution visits and 128 candidate identities per lookup, in addition to the
+4,000-node / 100-level AST limits. Each identity is limited to 1,024 characters,
+with at most 1,048,576 characters allocated by identity extension per resolver.
+Deep or branching aliases that exceed these bounds receive `unverified-safety`;
+their code is withheld without crashing report
+rendering. These checks execute no suggested code and make no provider requests.
+
+Preparation failures are recorded as unsent skips (`optimus ai refresh prepare`), with zero tokens and complete usage. They do not consume the provider-call cap or trip the breaker; subsequent findings and Steps can continue. Shared SQL failures retain worker recovery semantics.
+
+Raw SQL uses current committed `sensitive_sql_columns` rules at the input boundary. If those rules cannot be read, or sensitive-literal redaction fails, the query is omitted. Error Log masking covers schemeless Authorization and oversized quoted header values; when an AI record cannot be scrubbed, its error, title and metadata are withheld together.
+
+Phase 2 requires a worker on the long queue; a stopped capture without an available worker is marked Failed without using an analysis attempt. Start a worker and retry while the captured input remains available. A late concurrent flush asks for a retry; genuinely missing or corrupt input still asks for a new pass. Idle Session forms stop AI status polling; active and unknown runs continue recovery polling.
+
+
+### Recording snapshots and recovery
+
+Analysis commits a private JSON recording File and its Session binding before deleting
+Recorder input from Redis. A missing recording, encoding, File or commit failure
+marks the session Failed with a fixed recovery message; Retry Analyze can reuse the
+retained input. Redis is temporary: clearing Frappe Recorder or eviction can remove
+it. The daily janitor removes input from sessions that remain Failed with the snapshot-failure
+warning after a seven-day recovery window, in batches of at most 100 independently
+of report retention. A subsequent retry crash can replace that warning; broader
+Recorder cleanup across all failure and deletion states remains outside this bound.
+With the scheduler disabled that sweep must be run manually. The last report remains
+available; regeneration refuses to replace it when expected recordings are missing.
+AI refresh skips affected items without sending a request when required input is absent.
+Representative SQL finding callsites are persisted with the findings.
+
+Both the writer and reader enforce 4,000,000 JSON nodes, 64 MiB decompressed and
+16 MiB compressed, depth 64 and 20,000 recordings. The measured full-detail envelope
+is 12 recordings of 1,300 queries with 20 four-field stack frames and an EXPLAIN row
+per query. On the local Python 3.14 check this encoded in 3.04s, read in 1.63s, and
+peaked at 241MiB RSS in a standalone process; these are measurements, not production
+latency or memory guarantees. A 26,000-query test exceeded the structural budget
+and round-tripped every query with at most 3 application frames and no EXPLAIN
+results (0.59s read, 89MiB peak). A reduced snapshot records its detail mode and
+shows a warning. If even this bounded form cannot fit, analysis retains Redis and
+fails; queries are never silently truncated from a snapshot.
+
+Raw SQL consent preserves business literals only in queries without sensitive-column
+names. Queries mentioning a default or configured sensitive column use the private
+literal-stripping path (or are omitted when that cannot be established), including
+PostgreSQL dollar strings, ILIKE, casts and array expressions in example queries.
+
+
+Manual refresh limits count accepted SQL journal runs, including resumes, within the configured window (default six per hour). Disabled-provider, worker-unavailable, session-busy and other refused admissions consume no accepted-run allowance. A separate request limit protects the endpoint from repeated requests. System Managers who delete a session also delete its journal history; that administrative deletion can reset the corresponding quota history. Ordinary Optimus Users cannot delete sessions.
+
+During a refresh, Save is paused to prevent a stale form save from replacing worker updates; edits remain in the form. Cancel the run or wait for it to finish, then save. A rejected admission releases Save immediately. An ambiguous network/server response checks SQL before releasing Save. Plain Optimus Users receive administrator guidance for failed AI work; System Managers receive the Error Log search prefix.
+
+PostgreSQL schema identifiers and numbered parameters are preserved in redacted prompts. Old persisted primary findings whose identifiers were already erased by Frappe must be regenerated from retained recordings; refreshing only AI answers cannot reconstruct those identifiers. Ambiguous backslash-quoted queries and unsupported nested comments are omitted in redacted mode rather than risking disclosure of literal values.
+
+The existing `optimus_rate_limits.refill_ai_suggestions` setting now controls accepted-run quota; the separate `refill_ai_requests` setting controls request abuse limits. File source URLs are checked before core can read or rewrite them. Frappe 15 additionally checks protected private source URLs because it lacks v16's native read gate. Ordinary supplied-byte uploads and unchanged saves cause no artifact lookup. A scoped URL/hash check protects fallback/custom controllers and destructive alias changes. The guard is installed at app startup and retried at request/job entry, following the existing capture-wrapper lifecycle; restart web and worker processes after upgrade.
+
+
+Source credential checks cover both the context window and Phase 2 hottest-line
+text. When either carries a detected credential, all source grounding is withheld
+and the request asks for advice without a diff. This avoids creating a patch
+against placeholder secret values. Ordinary source remains verbatim for grounding.
+The detector is intentionally bounded and does not certify arbitrary source as
+secret-free.
+
+Known model-limit entries are reviewed metadata, not an allowlist. Other model IDs
+use the configured context and bounded requested output (normally 4096 tokens,
+or 8192 for configured thinking/reasoning), with provider errors reported normally.
+No live provider verification is implied by the local request tests.

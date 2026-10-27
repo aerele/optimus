@@ -237,7 +237,7 @@ def test_refresh_count_without_a_docname_is_a_no_op(counter_db):
 
 _PROVIDER = {
 	"name": "fake", "protocol": "openai", "base_url": "https://fake.invalid/v1", "model": "fake",
-	"needs_key": False, "context_tokens": 128000,
+	"needs_key": False, "context_tokens": 128000, "max_output_tokens": 32768,
 }
 _ANSWER = "## Diagnosis\nRepeated work.\n## Fix\nBatch the call.\n## Why it works\nFewer calls.\n## Verify\nProfile again."
 
@@ -537,6 +537,7 @@ def test_an_increment_after_get_doc_survives_a_real_session_save(monkeypatch, ig
 	DocStatus = pytest.importorskip("frappe.model.docstatus", exc_type=ImportError).DocStatus
 	import frappe
 
+	from optimus.managed import save_session
 	from optimus.optimus.doctype.optimus_session.optimus_session import OptimusSession
 
 	monkeypatch.setattr(frappe, "flags", frappe._dict(in_test=True))
@@ -568,7 +569,7 @@ def test_an_increment_after_get_doc_survives_a_real_session_save(monkeypatch, ig
 	)
 	stored.get = lambda key: getattr(stored, key, None)
 	stored.ai_tokens_spent, stored.ai_refresh_count = 52, 1  # humanize tokens; a refresh
-	doc.save(ignore_permissions=True)
+	save_session(doc)
 	assert loads == [(("Optimus Session", "SESS-1"), {"for_update": True})]
 	assert written == [{"ai_tokens_spent": 52, "ai_refresh_count": 1, "notes": "analyzed notes"}]
 

@@ -56,7 +56,7 @@ _BASE_LOGGERS = frozenset({"log_error", "log_ai_failure"})
 _SENDERS = frozenset({"_http_post", "_call_openai_chat", "_call_anthropic"})  # ai_fix.py
 _FUNCS = (ast.FunctionDef, ast.AsyncFunctionDef)
 _SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
-_TRIES = (ast.Try, ast.TryStar)
+_TRIES = (ast.Try,) + ((ast.TryStar,) if hasattr(ast, "TryStar") else ())
 
 
 def _scanned() -> tuple[str, ...]:
@@ -349,7 +349,7 @@ def test_the_helper_is_used_where_the_skeleton_was():
 		for mod in ("analyze.py", "api.py")
 	}
 	assert uses == {
-		"analyze.py": {"load_recordings_light", "phase2_index_for"},
+		"analyze.py": {"load_recordings_light", "phase2_index_for", "run"},
 		"api.py": {"_render_session_report", "ai_refresh_status", "refill_ai_suggestions"},
 	}
 

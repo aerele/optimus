@@ -515,7 +515,9 @@ def test_the_engine_is_in_the_title_audit():
 	assert "ai_jobs.py" in titles._MODULES
 	found = {t for t, modules in titles._code_titles().items() if "ai_jobs.py" in modules}
 	assert found == {
+		"optimus ai refresh admission followup",
 		"optimus ai refresh worker",
+		"optimus ai refresh prepare",
 		"optimus ai refresh cleanup",
 		"optimus ai refresh item",
 		"optimus ai refresh result storage",

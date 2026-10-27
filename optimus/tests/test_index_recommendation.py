@@ -169,17 +169,15 @@ def evidence(monkeypatch):
 
 
 class TestRenderedIndexCandidatePanel:
-	def test_renders_recommendation_and_patch(self, evidence):
+	def test_renders_recommendation_without_installation_code(self, evidence):
 		from optimus import renderer
-		from optimus.renderer import index_recipes
 
 		html = renderer.render_raw(_doc([_table_entry()]), recordings=[])
-		name = index_recipes.optimus_index_name("Sales Invoice", ("customer", "posting_date"))
-		entry = {"doctype": "Sales Invoice", "columns": ["customer", "posting_date"], "index_name": name}
 		assert "Index candidate" in html
-		assert json.dumps(entry) in _html.unescape(html)
-		assert "SHOW INDEX FROM" in html
-		assert "ensure_indexes() function creates the index" in html
+		assert "(customer, posting_date)" in html
+		assert "EXPLAIN" in html and "existing indexes" in html
+		assert "ensure_indexes" not in html
+		assert "hooks.py" not in html
 		assert "Other columns this session filtered on" in html and "status" in html
 
 	def test_write_hot_warning(self, evidence):
@@ -222,5 +220,7 @@ class TestRenderedIndexCandidatePanel:
 			"together_count": 3, "read_count": 4, "also_filtered": [],
 		})
 		html = renderer.render_raw(_doc([entry]), recordings=[])
-		assert "Index candidate - to speed up reads" in html
-		assert "One column: bench migrate drops a single-column index" in html
+		assert "Index candidate" in html
+		assert "(customer)" in html
+		assert "existing indexes" in html
+		assert "ensure_indexes" not in html

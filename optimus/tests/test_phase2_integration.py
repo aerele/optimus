@@ -10,10 +10,8 @@ test_line_profile_capture.py (aggregate_samples + serialize_stats) by
 covering the impure orchestration layer.
 """
 
-import json
 import sys
 import types
-from unittest.mock import patch
 
 import pytest
 

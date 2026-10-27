@@ -40,21 +40,18 @@ _AI_CFG = SimpleNamespace(
 
 
 
-def test_run_touches_the_flag_right_before_persist():
-	tree = ast.parse(textwrap.dedent(inspect.getsource(analyze.run)))
-	for node in ast.walk(tree):
-		for field in ("body", "orelse", "finalbody"):
-			block = getattr(node, field, None)
-			if not isinstance(block, list):
-				continue
-			for i, stmt in enumerate(block):
-				call = stmt.value if isinstance(stmt, ast.Expr) else None
-				if isinstance(call, ast.Call) and getattr(call.func, "id", None) == "_persist":
-					previous = block[i - 1].value if i and isinstance(block[i - 1], ast.Expr) else None
-					assert isinstance(previous, ast.Call) and getattr(previous.func, "id", None) == "_touch_singleflight"
-					return
-	raise AssertionError("no _persist call found in analyze.run")
-
+def test_run_touches_the_flag_before_the_guarded_persist():
+ tree = ast.parse(textwrap.dedent(inspect.getsource(analyze.run)))
+ for node in ast.walk(tree):
+  body = getattr(node, "body", None)
+  if not isinstance(body, list):
+   continue
+  for i, stmt in enumerate(body):
+   if isinstance(stmt, ast.If) and any(isinstance(c, ast.Call) and getattr(c.func, "id", "") == "_persist" for c in ast.walk(stmt.test)):
+    previous = body[i - 1].value
+    assert isinstance(previous, ast.Call) and previous.func.id == "_touch_singleflight"
+    return
+ raise AssertionError("guarded persistence did not refresh its heartbeat")
 
 
 
@@ -113,7 +110,7 @@ def test_a_touch_refreshes_only_a_flag_this_session_may_hold(monkeypatch, holder
 
 
 
-def _drive_run(monkeypatch, *, cache, scheduler_disabled, deadline=None, configured=600, n=3, build=0.0, touch=None):
+def _drive_run(monkeypatch, *, cache, scheduler_disabled, deadline=None, configured=600, n=3, build=0.0, touch=None, snapshot=None, cleanup=None):
 	"""Run the real ``analyze.run`` on a virtual clock, from the single-flight gate through
 	the AI loop, _persist's humanize call and the render step (stubbed); every provider
 	call uses its whole timeout and each finding's payload costs ``build`` seconds."""
@@ -133,7 +130,7 @@ def _drive_run(monkeypatch, *, cache, scheduler_disabled, deadline=None, configu
 		clock.now += build
 		return {"finding_type": "N+1 Query"}
 
-	db = SimpleNamespace(get_value=lambda *a, **k: "PS-A", set_value=lambda *a, **k: None, rollback=lambda *a, **k: None)
+	db = SimpleNamespace(get_value=lambda *a, **k: "Analyzing" if len(a)>2 and a[2] == "status" else "PS-A", set_value=lambda *a, **k: None, rollback=lambda *a, **k: None)
 	monkeypatch.setattr(analyze, "time", SimpleNamespace(
 		monotonic=lambda: clock.now, time=lambda: clock.now, sleep=lambda seconds: None,
 	))
@@ -162,6 +159,10 @@ def _drive_run(monkeypatch, *, cache, scheduler_disabled, deadline=None, configu
 	for name in ("_publish_session_event", "_publish_progress", "queue_analyze_time_ai", "_render_and_attach_reports",
 	             "_persist_recordings_file", "_cleanup_redis", "_auto_arm_phase2"):
 		monkeypatch.setattr(analyze, name, lambda *a, **k: None)
+	if snapshot is not None:
+		monkeypatch.setattr(analyze, "_persist_recordings_file", snapshot)
+	if cleanup is not None:
+		monkeypatch.setattr(analyze, "_cleanup_redis", cleanup)
 	if touch is not None:
 		monkeypatch.setattr(analyze, "_touch_singleflight", lambda uuid: touch(clock.now))
 	with patch("optimus.settings.get_config", return_value=_AI_CFG), \

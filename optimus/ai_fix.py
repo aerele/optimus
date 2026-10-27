@@ -24,6 +24,7 @@ import json
 import re
 import time
 import traceback
+from copy import deepcopy
 from datetime import datetime, timezone
 from functools import wraps
 from typing import Any, NamedTuple
@@ -31,7 +32,16 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import requests
 
-from optimus import ai_budget, ai_grounding, ai_guardrails, ai_privacy, ai_prompts, safe_call
+from optimus import (
+	ai_budget,
+	ai_grounding,
+	ai_guardrails,
+	ai_privacy,
+	ai_prompts,
+	ai_responses,
+	ai_transport,
+	safe_call,
+)
 from optimus.analyzers.base import INDEX_FINDING_TYPES, humanize_duration_ms, row_get
 
 
@@ -260,14 +270,16 @@ AI_ELIGIBLE_FINDING_TYPES: frozenset[str] = frozenset({
 # REQUIRES both (no hosted default to fall back to).
 _PROVIDER_DEFAULTS: dict[str, dict[str, Any]] = {
 	"Anthropic": {
-		"context_tokens": 200000,
+		"context_tokens": 1000000,
+		"model_limits": {"claude-sonnet-4-6": (1000000, 128000)},
 		"protocol": "anthropic",
 		"base_url": "https://api.anthropic.com",
 		"model": "claude-sonnet-4-6",
 		"needs_key": True,
 	},
 	"OpenAI": {
-		"context_tokens": 128000,
+		"context_tokens": 1047576,
+		"model_limits": {"gpt-4.1-mini": (1047576, 32768), "gpt-4.1-mini-2025-04-14": (1047576, 32768)},
 		"protocol": "openai",
 		"base_url": "https://api.openai.com/v1",
 		"model": "gpt-4.1-mini",
@@ -281,15 +293,16 @@ _PROVIDER_DEFAULTS: dict[str, dict[str, Any]] = {
 		"needs_key": True,
 	},
 	"DeepSeek": {
-		"context_tokens": 64000,
-		# DeepSeek's API is OpenAI-compatible, so it reuses the OpenAI wire
-		# path. Default to deepseek-chat (V3). deepseek-reasoner (R1) also works
-		# and ignores a custom temperature instead of rejecting it, so the
-		# temperature retry in _call_openai_chat never needs to fire for it.
+		"context_tokens": 1000000,
+		"model_limits": {"deepseek-flash": (1000000, 393216), "deepseek-v4-flash": (1000000, 393216)},
 		"protocol": "openai",
 		"base_url": "https://api.deepseek.com/v1",
-		"model": "deepseek-chat",
+		"model": "deepseek-flash",
 		"needs_key": True,
+		# Thinking defaults to enabled on this endpoint and shares the output budget.
+		# Prefer a direct answer; operators may select a declared thinking mode.
+		"request_options": {"thinking": {"type": "disabled"}},
+		"thinking_modes": {mode: {"thinking": {"type": mode}} for mode in ("enabled", "disabled")},
 	},
 	"OpenAI-compatible": {
 		"context_tokens": 4096,
@@ -361,7 +374,6 @@ def _is_hosted_endpoint(url) -> bool:
 # bench, or a settings cache miss during early bootstrap). v0.9.0+ the live
 # value comes from cfg.ai_request_timeout_seconds (clamped 10–600s).
 _HTTP_TIMEOUT = 60            # seconds; one shot, no retries
-_MAX_OUTPUT_TOKENS = 2000
 _SOURCE_LINES_BEFORE = 24     # how much code window the caller should gather
 _SOURCE_LINES_AFTER = 24
 _MAX_SOURCE_WINDOW_LINES = 80
@@ -579,28 +591,32 @@ def suggest_fix(
 	provider = _provider_config()
 	_require_configured(provider)
 	ctx = _context_tokens(provider)
+	send_raw = ai_privacy.raw_values_enabled()
 	system, messages, shown = _build_fix_request(
-		finding, threshold_ms=_resolve_display_threshold_ms(), context_tokens=ctx, out_tokens=_output_tokens(provider),
-		send_raw=ai_privacy.raw_values_enabled(),
+		finding, threshold_ms=_resolve_display_threshold_ms(), context_tokens=ctx, out_tokens=ai_budget.MIN_OUTPUT_TOKENS,
+		send_raw=send_raw,
 	)
 	_check_context_fits(
-		system, ctx, messages=messages, out_tokens=_output_tokens(provider),
+		system, ctx, messages=messages, out_tokens=ai_budget.MIN_OUTPUT_TOKENS,
 		hosted=_is_hosted_endpoint(provider.get("base_url")),
 	)
 	usage = usage_out if isinstance(usage_out, Usage) else Usage()
-	text, guardrail, finish = with_usage_on_failure(lambda: _complete_with_guardrails(
-		provider,
-		system,
-		messages,
-		shown_lines=shown,
-		usage=usage,
-		metadata=_session_call_metadata(provider, session_uuid=session_uuid, docname=docname, finding_type=finding.get("finding_type")),
-		session_uuid=session_uuid,
-		docname=docname,
-		started_at=time.monotonic(),
-		timeout=int(timeout or request_timeout_seconds()),
-	), usage)
+	response_out = {"received_responses": []}
+	with ai_privacy.raw_request_scope(send_raw):
+		text, guardrail, finish = with_usage_on_failure(lambda: _complete_with_guardrails(
+			provider,
+			system,
+			messages,
+			shown_lines=shown, response_out=response_out, send_raw=send_raw, finding_type=finding.get("finding_type"),
+			usage=usage,
+			metadata=_session_call_metadata(provider, session_uuid=session_uuid, docname=docname, finding_type=finding.get("finding_type")),
+			session_uuid=session_uuid,
+			docname=docname,
+			started_at=time.monotonic(),
+			timeout=int(timeout or request_timeout_seconds()),
+		), usage)
 	result = {
+		**response_out,
 		"suggestion": text,
 		"model": provider["model"],
 		"provider": provider["name"],
@@ -638,21 +654,23 @@ def humanize_steps(
 		raise AiFixError(_("There are no recorded actions to summarise."), kind="config")
 	provider = _provider_config()
 	_require_configured(provider)
+	send_raw = ai_privacy.raw_values_enabled()
 	system, messages = _build_steps_messages(
 		actions, session_title, threshold_ms=_resolve_display_threshold_ms(), context_tokens=_context_tokens(provider),
-		send_raw=ai_privacy.raw_values_enabled(),
+		send_raw=send_raw,
 	)
 	_check_context_fits(
-		system, _context_tokens(provider), messages=messages, out_tokens=_output_tokens(provider),
+		system, _context_tokens(provider), messages=messages, out_tokens=ai_budget.MIN_OUTPUT_TOKENS,
 		hosted=_is_hosted_endpoint(provider.get("base_url")),
 	)
 	usage = Usage()
 	try:
-		text = with_usage_on_failure(lambda: _dispatch_call(
-			provider, system, messages, usage_out=usage,
-			metadata=_session_call_metadata(provider, session_uuid=session_uuid, docname=docname, finding_type="Steps to Reproduce"),
-			timeout=timeout, session_uuid=session_uuid, docname=docname,
-		), usage)
+		with ai_privacy.raw_request_scope(send_raw):
+			text = with_usage_on_failure(lambda: _dispatch_call(
+				provider, system, messages, usage_out=usage,
+				metadata=_session_call_metadata(provider, session_uuid=session_uuid, docname=docname, finding_type="Steps to Reproduce"),
+				timeout=timeout, session_uuid=session_uuid, docname=docname,
+			), usage)
 	finally:
 		if usage_out is not None:
 			usage_out.update(usage)
@@ -748,7 +766,7 @@ def test_connection() -> dict:
 	usage: dict = {}
 	try:
 		text = _dispatch_call(
-			provider, "You are a connectivity probe. Reply with exactly: OK", messages, usage_out=usage, max_tokens=16,
+			provider, "You are a connectivity probe. Reply with exactly: OK", messages, usage_out=usage,
 			timeout=min(request_timeout_seconds(), 60),
 		)
 	except AiFixError as e:
@@ -1038,6 +1056,18 @@ def _host_ip(host: str):
 	return address
 
 
+def _endpoint_ip(host):
+	"""Classify legacy numeric IPv4 without DNS; keep key-transport rules strict."""
+	address = _host_ip(host)
+	if address is not None:
+		return address
+	import socket
+	try:
+		return ipaddress.IPv4Address(socket.inet_aton(host))
+	except (OSError, ValueError):
+		return None
+
+
 def validate_base_url(url: str) -> str:
 	"""Validate an administrator's endpoint without DNS or network access.
 
@@ -1080,7 +1110,7 @@ def validate_base_url(url: str) -> str:
 			reason = _("it is not a valid bracketed address")
 		else:
 			host = host.rstrip(".").lower()
-			address = _host_ip(host)
+			address = _endpoint_ip(host)
 			if host in _METADATA_HOSTNAMES or address in _METADATA_IPS:
 				reason = _("it points at a cloud metadata service")
 			elif address is not None and (address.is_link_local or address.is_unspecified or address.is_multicast):
@@ -1166,6 +1196,29 @@ def _provider_config(cfg=None) -> dict:
 	# base_url), like the Base URL: the field is hidden for hosted providers.
 	ctx_override = 0 if defaults["base_url"] else int(getattr(cfg, "ai_context_tokens", 0) or 0)
 
+	# Exact model capabilities; never inherit a different model's output maximum.
+	limits = defaults.get("model_limits", {}).get(model)
+	import frappe
+	configured = safe_call.best_effort(lambda: frappe.conf.get("optimus_ai_model_limits", {}), {})
+	if isinstance(configured, dict):
+		override = configured.get(name, {}).get(model) if isinstance(configured.get(name, {}), dict) else None
+		if override is not None:
+			if not isinstance(override, (list, tuple)) or len(override) != 2 or any(type(v) is not int or v <= 0 for v in override):
+				raise AiFixError("optimus_ai_model_limits must map provider/model to [context tokens, output tokens].", kind="config")
+			limits = override
+
+	options = deepcopy(defaults.get("request_options", {}))
+	requested = safe_call.best_effort(lambda: frappe.conf.get("optimus_ai_max_output_tokens"), None)
+	if requested is not None and (type(requested) is not int or not ai_budget.MIN_OUTPUT_TOKENS <= requested <= 131072):
+		raise AiFixError("optimus_ai_max_output_tokens must be an integer between 512 and 131072.", kind="config")
+	thinking = safe_call.best_effort(lambda: frappe.conf.get("optimus_ai_thinking", {}), {})
+	mode = thinking.get(name) if isinstance(thinking, dict) else None
+	if mode is not None:
+		modes = defaults.get("thinking_modes", {})
+		if not isinstance(mode, str) or mode not in modes:
+			raise AiFixError("optimus_ai_thinking contains an unsupported mode for this provider.", kind="config")
+		options.update(deepcopy(modes[mode]))
+
 	# A key may be set for any provider: some OpenAI-compatible routers
 	# (OpenRouter, Together, Groq) need one even though local endpoints don't.
 	return {
@@ -1174,9 +1227,11 @@ def _provider_config(cfg=None) -> dict:
 		"base_url": base_url,
 		"model": model,
 		"needs_key": bool(defaults["needs_key"]),
-		"context_tokens": ctx_override if ctx_override > 0 else int(defaults["context_tokens"]),
-		"max_output_tokens": defaults.get("max_output_tokens"),
+		"context_tokens": ctx_override if ctx_override > 0 else int(limits[0] if limits else (200000 if name == "Anthropic" else defaults["context_tokens"])),
+		"max_output_tokens": limits[1] if limits else defaults.get("max_output_tokens"),
+		"requested_output_tokens": requested,
 		"send_session_metadata": bool(defaults.get("send_session_metadata", False)),
+		"request_options": options,
 	}
 
 
@@ -1233,7 +1288,7 @@ def _build_steps_messages(
 	system = ai_prompts.STEPS_SYSTEM_PROMPT
 	limit = min(
 		_MAX_STEPS_USER_CHARS,
-		ai_budget.user_char_budget(context_tokens, system, out_tokens=ai_budget.output_tokens(context_tokens)),
+		ai_budget.user_char_budget(context_tokens, system, out_tokens=ai_budget.MIN_OUTPUT_TOKENS),
 	)
 	text = "\n".join(lines)
 	if ai_budget.text_size(text) > limit - 60:
@@ -1663,6 +1718,8 @@ def _log_http_error(
 	from the database. ``extra`` adds more ``k=v`` lines to the row (the parameter ladder's
 	``attempts`` and ``dropped``); the row also carries the failure's ``kind``, ``fatal`` and
 	``hint`` (``log_ai_failure``)."""
+	if ai_transport.journaled():
+		return  # the journal writes one attempt-level error after settlement
 	context = {"provider": provider, "where": where, "status": status, "detail": detail, **extra}
 	if provider_error:
 		context["provider_error"] = provider_error
@@ -2007,6 +2064,7 @@ def _http_post(
 			failure = _timeout_failure(budget)
 			_log_http_error(provider, where, None, "timeout", exc=failure, auth=auth, session_uuid=session_uuid, docname=docname, **(log_extra or {}))
 			raise failure
+		ai_privacy.before_http_send()
 		failed_kind: str | None = None
 		error_name = ""
 		unexpected_frames: list[str] = []
@@ -2017,6 +2075,7 @@ def _http_post(
 			with guard:
 				resp = requests.post(target, headers=headers, json=body, timeout=(connect_timeout, remaining), auth=None if withheld else auth, allow_redirects=False)
 		except requests.exceptions.ConnectTimeout as e:
+			ai_transport.observe("not_sent")
 			error_name = type(e).__name__
 			detail = _error_types(e)
 			# With the full connect cap it is not a slow model but a reachability failure,
@@ -2025,14 +2084,17 @@ def _http_post(
 			full_cap = connect_timeout >= _CONNECT_TIMEOUT_CAP - _CONNECT_CAP_SLACK
 			failed_kind = "transport" if full_cap else "timeout"
 		except requests.exceptions.Timeout:
+			ai_transport.observe("sent_unknown")
 			failed_kind = "timeout"
 			detail = "timeout"
 		except requests.exceptions.RequestException as e:
+			ai_transport.observe(ai_transport.exception_certainty(e))
 			failed_kind = "transport"
 			error_name = type(e).__name__
 			# Types only: the message can quote the URL, and so a key in it.
 			detail = _error_types(e)
 		except Exception as e:
+			ai_transport.observe("sent_unknown")
 			failed_kind = "internal"
 			error_name = type(e).__name__
 			# file:line:function per frame, read straight off the traceback:
@@ -2058,6 +2120,7 @@ def _http_post(
 				detail = error_name + "".join(f"\n  {frame}" for frame in unexpected_frames)
 			_log_http_error(provider, where, None, detail, exc=failure, auth=auth, session_uuid=session_uuid, docname=docname, **(log_extra or {}))
 			raise failure
+		ai_transport.observe(ai_transport.response_certainty(resp.status_code))
 		if resp.status_code not in (307, 308) or redirects >= _MAX_REDIRECTS:
 			break
 		# 307 / 308 keep the method and the body. The key goes again only to
@@ -2219,6 +2282,8 @@ def _same_origin_redirect(current: str, resp) -> str | None:
 				return None
 			if _URL_CONTROL_RE.search(location.strip(" ")):
 				return None  # urljoin would silently discard some controls.
+			if "?" in location or "#" in location:
+				return None  # Older Python urljoin drops empty query/fragment delimiters.
 			follow = urljoin(current, location.strip())
 			validate_base_url(follow)
 			old, new = urlsplit(current), urlsplit(follow)
@@ -2369,7 +2434,7 @@ def _session_call_metadata(provider, *, session_uuid, docname, finding_type=None
 
 def _call_anthropic(
 	base_url: str, api_key: str, model: str, system: str, messages: list[dict],
-	*, max_tokens: int = _MAX_OUTPUT_TOKENS, usage_out: dict | None = None,
+	*, max_tokens: int | None = None, usage_out: dict | None = None,
 	timeout: int | None = None, meta_out: dict | None = None, session_uuid: str | None = None,
 	docname: str | None = None, budget: float | None = None,
 ) -> str:
@@ -2377,6 +2442,8 @@ def _call_anthropic(
 
 	The caller owns SQL settlement. Failure rows use only the explicit session reference.
 	The total call budget includes response processing and any parameter retries."""
+	if max_tokens is None:
+		max_tokens = _output_tokens({"name": "Anthropic", "protocol": "anthropic", "base_url": base_url, "model": model, "context_tokens": 200000}, system, messages)
 	url = base_url.rstrip("/") + "/v1/messages"
 	headers = {
 		"content-type": "application/json",
@@ -2402,14 +2469,16 @@ def _call_anthropic(
 		meta_out["prompt_tokens_reported"] = any(_usage_block(data).get(k) is not None for k in (
 			"input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
 		))
-		meta_out["finish_reason"] = _ANTHROPIC_FINISH.get(_text_or_empty(data.get("stop_reason")))
+		raw_reason = _text_or_empty(data.get("stop_reason"))[:128] or None
+		meta_out["provider_finish_reason"] = raw_reason
+		meta_out["finish_reason"] = _ANTHROPIC_FINISH.get(raw_reason, raw_reason)
 	blocks = data.get("content")
 	if isinstance(blocks, list):
-		for b in blocks:
-			if isinstance(b, dict) and b.get("type") == "text":
-				return _text_or_empty(b.get("text"))
-		if blocks and isinstance(blocks[0], dict):
-			return _text_or_empty(blocks[0].get("text"))
+		texts = [_text_or_empty(b.get("text")) for b in blocks if isinstance(b, dict) and b.get("type") == "text"]
+		if texts:
+			return "\n".join(texts)
+		if blocks or (meta_out is not None and ai_responses.completion_status(meta_out.get("finish_reason")) != "complete"):
+			return ""
 	from frappe import _
 
 	raise AiFixError(_(
@@ -2558,10 +2627,11 @@ def _first_choice(data: dict) -> dict:
 
 def _call_openai_chat(
 	base_url: str, api_key: str, model: str, system: str, messages: list[dict],
-	*, max_tokens: int = _MAX_OUTPUT_TOKENS, usage_out: dict | None = None,
+	*, max_tokens: int | None = None, usage_out: dict | None = None,
 	metadata: dict | None = None, timeout: int | None = None, meta_out: dict | None = None,
 	session_uuid: str | None = None, docname: str | None = None,
 	adapted_params: list | None = None, budget: float | None = None,
+	request_options: dict | None = None,
 ) -> str:
 	"""Send an OpenAI-compatible request through the bounded parameter ladder.
 
@@ -2571,13 +2641,14 @@ def _call_openai_chat(
 	headers = {"content-type": "application/json"}
 	auth = _ApiKeyAuth("authorization", api_key, prefix="Bearer ") if api_key else None
 	body = {
+		# Trusted provider defaults only; never settings, captured content or user input.
+		**deepcopy(request_options or {}),
 		"model": model,
 		"messages": [{"role": "system", "content": system}, *messages],
 	}
-	if _is_reasoning_model(model):
-		body["max_completion_tokens"] = max_tokens
-	else:
-		body["max_tokens"] = max_tokens
+	if max_tokens is not None:
+		body["max_completion_tokens" if _is_reasoning_model(model) else "max_tokens"] = max_tokens
+	if not _is_reasoning_model(model):
 		body["temperature"] = _TEMPERATURE
 	# Opt-in endpoints: attribute this call to the originating Optimus Session.
 	if metadata:
@@ -2593,11 +2664,22 @@ def _call_openai_chat(
 	first = _first_choice(data)
 	if meta_out is not None:
 		meta_out["prompt_tokens_reported"] = _usage_block(data).get("prompt_tokens") is not None
-		meta_out["finish_reason"] = _OPENAI_FINISH.get(_text_or_empty(first.get("finish_reason")))
+		raw_reason = _text_or_empty(first.get("finish_reason"))[:128] or None
+		meta_out["provider_finish_reason"] = raw_reason
+		meta_out["finish_reason"] = _OPENAI_FINISH.get(raw_reason, raw_reason)
+		details = _usage_block(data).get("completion_tokens_details")
+		if isinstance(details, dict) and _valid_reported_count(details.get("reasoning_tokens")):
+			meta_out["reasoning_tokens"] = int(details["reasoning_tokens"])
 	msg = first.get("message")
+	if isinstance(msg, dict) and msg.get("refusal"):
+		if meta_out is not None:
+			meta_out["finish_reason"] = "refusal"
+		return ""  # refusal text is not a suggested fix
 	content = msg.get("content") if isinstance(msg, dict) else None
+	if content is None and meta_out is not None and ai_responses.completion_status(meta_out.get("finish_reason")) != "complete":
+		return ""
 	if isinstance(content, list):
-		content = "".join(_text_or_empty(p.get("text")) for p in content if isinstance(p, dict))
+		content = "".join(_text_or_empty(p.get("text")) for p in content if isinstance(p, dict) and p.get("type") in (None, "text", "output_text"))
 	if isinstance(content, str):
 		return _strip_leading_think(content, usage=usage)
 	from frappe import _
@@ -2614,7 +2696,10 @@ def _reask_enabled() -> bool:
 	try:
 		import frappe
 
-		return bool(frappe.conf.get("optimus_ai_reask", True))
+		value = frappe.conf.get("optimus_ai_reask", True)
+		if isinstance(value, str):
+			return value.strip().lower() not in ("false", "0", "off", "no", "")
+		return bool(value)
 	except Exception as exc:
 		failure = exc
 	if isinstance(failure, _job_timeout_types()):
@@ -2639,8 +2724,17 @@ def _context_tokens(provider: dict) -> int:
 	return int(provider.get("context_tokens") or _DEFAULT_CONTEXT_TOKENS)
 
 
-def _output_tokens(provider: dict) -> int:
-	return int(provider.get("max_output_tokens") or ai_budget.output_tokens(_context_tokens(provider)))
+def _output_tokens(provider: dict, system: str = "", messages=(), *, input_floor: int = 0) -> int:
+	limits = _PROVIDER_DEFAULTS.get(provider.get("name"), {}).get("model_limits", {}).get(provider.get("model"))
+	maximum = provider.get("max_output_tokens") or (limits[1] if limits else None)
+	ctx = _context_tokens(provider)
+	estimated = max(input_floor, ai_budget.input_tokens(system, messages))
+	available = ai_budget.output_tokens(ctx, input_tokens=estimated, model_max=maximum)
+	if available < ai_budget.MIN_OUTPUT_TOKENS:
+		raise AiFixError(_context_message(hosted=_is_hosted_endpoint(provider.get("base_url")), window=ctx), kind="context")
+	thinking = provider.get("request_options", {}).get("thinking", {}).get("type") == "enabled"
+	requested = provider.get("requested_output_tokens") or (8192 if thinking or _is_reasoning_model(provider.get("model")) else 4096)
+	return min(available, requested)
 
 
 def _context_advice(*, hosted: bool = False) -> str:
@@ -2719,7 +2813,16 @@ def _dispatch_call(
 		from frappe import _
 
 		raise AiFixError(_("No API key is configured for this AI provider. Set it under Optimus Settings > AI Fix Suggestions."), kind="config")
-	out = int(max_tokens or _output_tokens(provider))
+	out = max_tokens if max_tokens is not None else _output_tokens(provider, system, messages)
+	if meta_out is not None:
+		meta_out["output_budget"] = out
+		meta_out["budget_source"] = "requested/context/model" if provider.get("max_output_tokens") else "requested/context-fallback"
+		if not provider.get("max_output_tokens"):
+			limits = _PROVIDER_DEFAULTS.get(provider.get("name"), {}).get("model_limits", {}).get(provider.get("model"))
+			if limits:
+				meta_out["budget_source"] = "requested/context/model"
+			else:
+				meta_out["budget_context_tokens"] = _context_tokens(provider)
 	if provider["protocol"] == "anthropic":
 		return _call_anthropic(
 			provider["base_url"], api_key, provider["model"], system, messages,
@@ -2730,6 +2833,7 @@ def _dispatch_call(
 		provider["base_url"], api_key, provider["model"], system, messages,
 		max_tokens=out, usage_out=usage_out, metadata=metadata, timeout=timeout, meta_out=meta_out, session_uuid=session_uuid,
 		docname=docname, adapted_params=adapted_params, budget=budget,
+		request_options=provider.get("request_options"),
 	)
 
 
@@ -2749,6 +2853,9 @@ def _complete_with_guardrails(
 	*,
 	shown_lines: list[str],
 	usage: dict,
+	finding_type: str | None = None,
+	response_out: dict | None = None,
+	send_raw: bool = False,
 	metadata: dict | None = None,
 	started_at: float,
 	timeout: int,
@@ -2771,15 +2878,17 @@ def _complete_with_guardrails(
 	request the first call's parameter ladder ended with. The re-ask gets what is
 	left of ``timeout``, but a timeout message still names ``timeout`` itself."""
 	ctx = _context_tokens(provider)
-	out = _output_tokens(provider)
+	out = _output_tokens(provider, system, messages)
 	meta: dict = {}
 	adapted: list[str] = []
 	text = _dispatch_call(
 		provider, system, messages, usage_out=usage, metadata=metadata, timeout=timeout, max_tokens=out, meta_out=meta,
 		session_uuid=session_uuid, docname=docname, adapted_params=adapted,
 	)
+	if response_out is not None:
+		response_out["received_responses"].append(ai_responses.retain(text or "", meta, system=system, messages=messages, provider=provider, send_raw=send_raw))
 	text = (text or "").strip()
-	if not text:
+	if not text and ai_responses.completion_status(meta.get("finish_reason")) in ("complete", "unknown"):
 		from frappe import _
 
 		raise AiFixError(_(
@@ -2789,8 +2898,14 @@ def _complete_with_guardrails(
 	first_usage = dict(usage)
 	if meta.get("prompt_tokens_reported") is False:
 		first_usage.pop("prompt_tokens", None)  # normalized zero is not a reported zero
-	text, finish = ai_budget.cap_reply(text, meta.get("finish_reason"))
-	violations = ai_guardrails.verify_fix(text, source_lines=shown_lines, finish_reason=finish)
+	finish = meta.get("finish_reason")
+	status = ai_responses.validatable_status(finish, completion_tokens=usage.get("completion_tokens"), output_budget=meta.get("output_budget"))
+	if status == "blocked" or not ai_guardrails.can_validate(text):
+		status = status if status != "complete" else "processing_limited"
+		if response_out is not None:
+			response_out.update(completion_status=status, provider_finish_reason=meta.get("provider_finish_reason"))
+		return ai_responses.unavailable_note(status), {"violations": [], "reasked": False, "fallback": True}, finish
+	violations = ai_guardrails.verify_fix(text, source_lines=shown_lines, finish_reason="length" if status == "incomplete" else finish, finding_type=finding_type)
 	to_fix = ai_guardrails.reaskable(violations)
 	reasked = False
 	if to_fix:
@@ -2802,13 +2917,16 @@ def _complete_with_guardrails(
 			+ ai_budget.TEMPLATE_TOKENS,
 			"completion_tokens": first_usage.get("completion_tokens") or ai_budget.estimate_tokens(text),
 		}
+		reask_messages = [*messages, {"role": "assistant", "content": text}, {"role": "user", "content": reask_text}]
 		elapsed = time.monotonic() - started_at
 		if not _reask_enabled():
 			_log_reask("skipped-knob")
 		elif elapsed >= timeout * 0.5:
 			_log_reask("skipped-budget")
-		elif not ai_budget.reask_fits(ctx, fit_usage, reask_text, out_tokens=out):
+		elif not ai_budget.reask_fits(ctx, fit_usage, reask_text, out_tokens=ai_budget.MIN_OUTPUT_TOKENS):
 			_log_reask("skipped-fit")
+		elif not ai_privacy.raw_retry_allowed():
+			_log_reask("skipped-consent")
 		else:
 			reasked = True
 			reask_usage = Usage()
@@ -2819,11 +2937,11 @@ def _complete_with_guardrails(
 				rewritten = _dispatch_call(
 					provider,
 					system,
-					[*messages, {"role": "assistant", "content": text}, {"role": "user", "content": reask_text}],
+					reask_messages,
 					usage_out=reask_usage,
 					metadata=metadata,
 					timeout=max(1, int(timeout - elapsed)),
-					max_tokens=ai_budget.reask_output_tokens(out, fit_usage["completion_tokens"]),
+					max_tokens=_output_tokens(provider, system, reask_messages, input_floor=sum(fit_usage.values()) + ai_budget.estimate_tokens(reask_text) + ai_budget.TEMPLATE_TOKENS),
 					meta_out=reask_meta, session_uuid=session_uuid, docname=docname,
 					adapted_params=adapted,
 					budget=timeout,
@@ -2847,10 +2965,12 @@ def _complete_with_guardrails(
 				error_type = type(reask_error).__name__
 				reask_error = None
 				_log_reask("failed", [error_type])
+			if rewritten is not None and response_out is not None:
+				response_out["received_responses"].append(ai_responses.retain(rewritten, reask_meta, system=system, messages=reask_messages, provider=provider, send_raw=send_raw))
 			rewritten = (rewritten or "").strip()
-			if rewritten:
-				rewritten, rewritten_finish = ai_budget.cap_reply(rewritten, reask_meta.get("finish_reason"))
-				new = ai_guardrails.verify_fix(rewritten, source_lines=shown_lines, finish_reason=rewritten_finish)
+			if rewritten and ai_responses.validatable_status(reask_meta.get("finish_reason"), completion_tokens=reask_usage.get("completion_tokens"), output_budget=reask_meta.get("output_budget")) == "complete" and ai_guardrails.can_validate(rewritten):
+				rewritten_finish = reask_meta.get("finish_reason")
+				new = ai_guardrails.verify_fix(rewritten, source_lines=shown_lines, finish_reason=rewritten_finish, finding_type=finding_type)
 				adopt = (
 					not any(v.action == ai_guardrails.TRUNCATED for v in new)
 					and not ai_guardrails.check_headings(rewritten)
@@ -2859,9 +2979,13 @@ def _complete_with_guardrails(
 				_log_reask("adopted" if adopt else "kept-original", [v.code for v in to_fix])
 				if adopt:
 					text, violations, finish = rewritten, new, rewritten_finish
+					meta = reask_meta
 	sent_size = ai_budget.text_size(system) + sum(ai_budget.text_size(m.get("content") or "") for m in messages)
 	if ctx <= _TRUNCATION_CHECK_MAX_CONTEXT and ai_budget.context_truncated(first_usage, sent_size):
 		violations = [*violations, ai_guardrails.Violation("context-truncated")]
+	status = "incomplete" if any(v.code == "truncated" for v in violations) else ai_responses.validatable_status(finish)
+	if response_out is not None:
+		response_out.update(completion_status=status, provider_finish_reason=meta.get("provider_finish_reason"))
 	final = ai_guardrails.apply_fallback(text, violations)
 	# fallback = the code was removed (a block rule still holds or the answer was cut off).
 	guardrail = {
@@ -2938,10 +3062,11 @@ def _loop_facts_text(finding: dict, rows: list[dict] | None = None) -> str:
 	)
 
 
+@ai_privacy.sql_redaction_scope()
 def _build_fix_request(
 	finding: dict, *, threshold_ms: float, context_tokens: int, out_tokens: int | None = None, send_raw: bool = False,
 ) -> tuple[str, list[dict], list[str]]:
-	"""Build ``(system, [user_message], shown_lines)`` for one finding. Pure.
+	"""Build ``(system, [user_message], shown_lines)`` without provider I/O.
 
 	The user message is assembled from priority parts inside the context budget:
 	priority 0 parts are always sent (the source window shrinks around the target
@@ -2953,7 +3078,7 @@ def _build_fix_request(
 	from optimus.analyzers.base import format_durations
 
 	system = ai_prompts.SYSTEM_PROMPT
-	out = int(out_tokens or ai_budget.output_tokens(context_tokens))
+	out = int(out_tokens or ai_budget.MIN_OUTPUT_TOKENS)
 	budget = ai_budget.user_char_budget(context_tokens, system, out_tokens=out)
 	nonce = ai_budget.new_nonce()
 	detail = finding.get("technical_detail") or {}
@@ -3009,6 +3134,18 @@ def _build_fix_request(
 	hot_content = ""
 	if isinstance(hot, dict) and hot.get("lineno") is not None:
 		hot_content = str(hot.get("content") or "").strip()
+	raw_window = finding.get("source_window") or callsite.get("source_snippet") or []
+	window, source_withheld = [], False
+	if raw_window or hot_content:
+		api_key = _current_key_or_empty()
+		window = ai_privacy.source_window(raw_window, api_key=api_key) if raw_window else []
+		hot_rows = ai_privacy.source_window([{"content": hot_content}], api_key=api_key) if hot_content else []
+		api_key = None
+		source_withheld = bool(raw_window and not window or hot_content and not hot_rows)
+		if source_withheld:
+			# A second source channel must never restore withheld patch grounding.
+			window, hot_content = [], ""
+	if isinstance(hot, dict) and hot.get("lineno") is not None:
 		hl_ms = hot.get("total_ms") or 0
 		hl_hits = hot.get("hits") or 0
 		timing = ""
@@ -3040,7 +3177,6 @@ def _build_fix_request(
 	if detail.get("validation_note"):
 		tail.append((6, "Note:\n" + block("validation", str(detail["validation_note"]))))
 
-	window = finding.get("source_window") or callsite.get("source_snippet") or []
 	content, shown = "", []
 	for max_lines in (*_WINDOW_STEPS, 4, 2, 1, 0):
 		trimmed = ai_budget.trim_window(window, max_lines=max_lines)
@@ -3050,9 +3186,9 @@ def _build_fix_request(
 				"line; it is a window, so if the code this finding is about is not in it, write no diff):\n"
 				+ block("source", _window_lines(trimmed), "python")
 			)
-		elif had_callsite or window:
+		elif had_callsite or raw_window or source_withheld:
 			source = (
-				"Source: NOT AVAILABLE within this request. Write no diff; start **Fix** "
+				"Source: NOT AVAILABLE after privacy and size checks. Write no diff; start **Fix** "
 				"with \"Without seeing the code, the likely fix is\"."
 			)
 		else:

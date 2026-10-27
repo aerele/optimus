@@ -176,7 +176,7 @@ def test_sample_counters_and_cleanup_stay_in_the_current_site(env, monkeypatch):
 	assert capture.read_all_samples("same-run") == [batch]
 
 
-def test_repeated_append_contention_marks_only_this_site_incomplete(env):
+def test_atomic_append_avoids_optimistic_contention_and_keeps_site_boundary(env):
 	cache, _ = env
 	cache.set_value(redis_keys.lp_source("fake-run"), "{}")
 	key = cache.make_key(redis_keys.lp_source("fake-run"))
@@ -185,17 +185,42 @@ def test_repeated_append_contention_marks_only_this_site_incomplete(env):
 		conflicts.append(True)
 		cache.versions[key] += 1
 	cache.before_execute = conflict
-	with pytest.raises(capture.CaptureInputError):
-		capture.flush_samples("fake-run", [{"file": "fake.py", "qualname": "example", "lineno": 1, "hits": 1, "total_us": 1}])
-	assert len(conflicts) == 3
-	assert cache.data[cache.make_key(redis_keys.lp_sample_state("fake-run"))] == b"-1"
+	capture.flush_samples("fake-run", [{"file": "fake.py", "qualname": "example", "lineno": 1, "hits": 1, "total_us": 1}])
+	assert not conflicts
+	assert int(cache.data[cache.make_key(redis_keys.lp_sample_state("fake-run"))]) > 0
 	assert all(key.startswith(b"fake-site|") for key in cache.data)
-	with pytest.raises(capture.CaptureInputError):
-		capture.read_all_samples("fake-run")
+	assert len(capture.read_all_samples("fake-run")) == 1
 
 
 def sample_target():
 	return 1
+
+
+def test_server_expanded_library_pick_is_skipped_before_import(env, monkeypatch):
+	from optimus.line_profile import picker
+	resolve = picker.resolve_freeform
+	seen = []
+	def checked(path):
+		seen.append(path)
+		assert not path.startswith("json."), "library frames must not reach import resolution"
+		return resolve(path)
+	monkeypatch.setattr(picker, "resolve_freeform", checked)
+	app = __name__ + ".sample_target"
+	prepared = capture.prepare_line_profile_picks([
+		{"dotted_path": app, "source": "curated"},
+		{"dotted_path": "json.loads", "source": "auto_expand"},
+	], server_expanded=frozenset({"json.loads"}))
+	assert seen == [app]
+	assert prepared.resolved[0]["eligible"]
+	assert not prepared.resolved[1]["eligible"]
+	assert "installed app" in prepared.resolved[1]["ineligible_reason"]
+
+
+def test_client_auto_expand_label_does_not_authorize_import(env, monkeypatch):
+	from optimus.line_profile import picker
+	monkeypatch.setattr(picker, "resolve_freeform", lambda path: pytest.fail("untrusted import"))
+	with pytest.raises(capture.CaptureError):
+		capture.prepare_line_profile_picks([{"dotted_path": "json.loads", "source": "auto_expand"}])
 
 
 def test_competing_starts_publish_only_one_complete_capture(env):

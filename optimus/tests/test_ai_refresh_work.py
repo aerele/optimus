@@ -185,6 +185,32 @@ def test_already_attempted_finding_does_not_repeat_on_next_slice(work):
 	assert work.jobs._next_item(work.journal.run, {}) is None
 
 
+def test_manual_refresh_settles_an_incomplete_answer_once_and_never_loops(work):
+	from optimus import ai_prompts
+
+	answer = {"suggestion": "Direction only", "prompt_version": ai_prompts.PROMPT_VERSION,
+		"finish_reason": "length", "tokens": {"total_tokens": 3186}, "usage_complete": True}
+	work.row["llm_fix_json"] = json.dumps(answer)
+	work.journal.run["scope"] = "fixes_missing"
+	assert work.jobs._next_item(work.journal.run, {}) is None
+	work.journal.run["scope"] = "all"
+	item = work.jobs._next_item(work.journal.run, {})
+	assert item.target == work.row.name
+	attempt = _begin(work, item)
+	item.send(10)
+	for _ in range(2):  # a replayed settlement must neither charge nor save twice
+		with work.journal.db.transaction():
+			work.journal.mod.settle_attempt(
+				"fake-run", attempt["name"], docname="fake-session-doc", worker_token="worker",
+				outcome="succeeded", tokens=3186, usage_complete=True, now=20,
+				persist=lambda: item.persist(answer),
+			)
+	assert work.jobs._next_item(work.journal.run, {}) is None
+	assert len(work.sends) == 1
+	assert work.journal.run["tokens_reported"] == 3186
+	assert json.loads(work.row["llm_fix_json"])["finish_reason"] == "length"
+
+
 def test_auto_refresh_preserves_human_written_steps(work):
 	work.journal.run.update(scope="fixes_missing", include_steps=1, include_fixes=0)
 	work.parent["notes"] = "Human authored reproduction notes"
@@ -319,7 +345,7 @@ def test_the_steps_token_count_is_clamped_to_the_32_bit_field(work, monkeypatch,
 	monkeypatch.setattr(work.jobs, "_touch_session", lambda name, **values: touched.append(values))
 	with work.journal.db.transaction():
 		assert item.persist({"notes": "fake notes", "tokens": {"total_tokens": total}}) is True
-	assert touched == [{"notes": "fake notes", "ai_steps_tokens": stored}]
+	assert touched == [{"notes": "fake notes", "ai_steps_tokens": stored, "auto_notes_sha256": None}]
 
 
 @pytest.mark.parametrize("complete", [True, False])

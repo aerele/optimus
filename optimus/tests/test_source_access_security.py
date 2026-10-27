@@ -43,11 +43,11 @@ def test_installed_app_read_failure_warns_once_without_exception_text(bench, mon
 	monkeypatch.setattr(source, "_APPS_WARNING_SENT", False, raising=False)
 	def fail():
 		raise RuntimeError("private database detail")
-	def warning(message, *args):
-		assert sys.exception() is None
+	def error(message, *args):
+		assert sys.exc_info()[1] is None
 		seen.append(message % args)
 	monkeypatch.setattr(frappe, "get_installed_apps", fail)
-	monkeypatch.setattr(frappe, "logger", lambda name: SimpleNamespace(warning=warning), raising=False)
+	monkeypatch.setattr(frappe, "logger", lambda name: SimpleNamespace(error=error), raising=False)
 	for _ in range(3):
 		assert source._installed_apps() == frozenset()
 	assert len(seen) == 1 and "RuntimeError" in seen[0]
@@ -322,6 +322,17 @@ def test_analyze_enrichment_checks_session_owner(scripts):
 	findings = [{"technical_detail_json": json.dumps({"callsite": {"filename": "<serverscript>: fake_script", "lineno": 1}})}]
 	analyze._enrich_findings_with_source_snippets(findings, owner="fake-owner")
 	assert "source_snippet" not in json.loads(findings[0]["technical_detail_json"])["callsite"]
+	assert not scripts["body_reads"]
+
+
+def test_representative_sql_callsite_does_not_read_an_owners_forbidden_script(scripts):
+	import json
+	scripts["allowed"].remove("fake-owner")
+	findings = [{"finding_type": "Missing Index", "technical_detail_json": json.dumps({"normalized_query": "SELECT name FROM tabUser"})}]
+	recordings = [{"calls": [{"normalized_query": "SELECT name FROM tabUser", "query": "SELECT name FROM tabUser", "duration": 1,
+		"stack": [{"filename": "<serverscript>: fake_script", "lineno": 1, "function": "run"}]}]}]
+	analyze._persist_representative_callsites(findings, recordings, owner="fake-owner")
+	assert "PRIVATE-SCRIPT-CANARY" not in findings[0]["technical_detail_json"]
 	assert not scripts["body_reads"]
 
 

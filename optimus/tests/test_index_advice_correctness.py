@@ -105,8 +105,8 @@ class TestLeadChecksOnlyForOneColumn:
 		assert 'Column "customer" already leads the index "customer_index"' in _text(advice)
 		row = {"type": "ALL", "possible_keys": "customer_index", "key": None}
 		advice = self._advise("Full Table Scan", "SELECT name FROM `tabSales Invoice` WHERE customer = ?", row, ev=_SI)
-		assert advice.route == ir.ROUTE_NO_CODE
-		assert 'EXPLAIN shows the database can use the index "customer_index" on column "customer"' in _text(advice)
+		assert advice.route == ir.ROUTE_ENSURE_INDEXES
+		assert 'EXPLAIN shows the database can use' not in _text(advice)
 
 	def test_a_composite_that_leads_with_the_column_blocks_only_a_single_column_recipe(self):
 		ev = _with_index(_SI, ("idx_si_customer_custom", ["customer", "company"], False))
@@ -2183,13 +2183,14 @@ class TestSortOnlyRecipeNeedsLimit:
 			"narrowing filter first."
 		) in text
 
-	def test_video_gives_no_code(self):
+	def test_video_keeps_useful_range_filter_before_sort_only_candidate(self):
 		q = (
 			"SELECT publish_date, title, view_count FROM `tabVideo` WHERE view_count is not null and publish_date "
 			"between ? and ? ORDER BY view_count desc"
 		)
 		advice = self._advise(q, self._VIDEO, "tabVideo")
-		assert advice.route == ir.ROUTE_NO_CODE and "rarely walks a whole index" in _text(advice), _text(advice)
+		assert advice.columns == ("publish_date",) and advice.route != ir.ROUTE_NO_CODE, _text(advice)
+		assert advice.sort_stays == "stays"
 
 	def test_postgres_names_postgres(self):
 		ev = dataclasses.replace(self._ST, dialect="postgres", column_types={**self._ST.column_types, "date": "date"})

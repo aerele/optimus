@@ -38,8 +38,8 @@ class _FakeResp:
 		return self._payload
 
 
-_OPENAI_OK = {"choices": [{"message": {"content": "**Fix**\n\nuse a join"}}]}
-_ANTHROPIC_OK = {"content": [{"type": "text", "text": "**Fix**\n\nadd an index"}]}
+_OPENAI_OK = {"choices": [{"message": {"content": "**Fix**\n\nuse a join"}, "finish_reason": "stop"}]}
+_ANTHROPIC_OK = {"content": [{"type": "text", "text": "**Fix**\n\nadd an index"}], "stop_reason": "end_turn"}
 
 
 def _wire_headers(headers, auth):
@@ -169,13 +169,13 @@ class TestBuildMessages:
 		_, messages = ai_fix._build_messages(self._finding())
 		assert ai_prompts.FINDING_TYPE_HINTS["N+1 Query"] in messages[0]["content"]
 		_, msgs2 = ai_fix._build_messages({"finding_type": "Redundant Call", "title": "x"})
-		assert "throw=True" in msgs2[0]["content"]  # a repeated has_permission is hoisted, never removed
+		assert "verbatim" in msgs2[0]["content"]  # existing permission denial behavior stays unchanged
 
-	def test_query_is_truncated_when_huge(self):
+	def test_over_budget_query_is_omitted_before_parsing(self):
 		f = self._finding()
 		f["technical_detail"]["normalized_query"] = "SELECT " + "x," * 5000 + "1"
 		_, messages, _ = ai_fix._build_fix_request(f, threshold_ms=1000, context_tokens=32768, send_raw=True)
-		assert "(truncated)" in messages[0]["content"]
+		assert "x,x,x,x,x" not in messages[0]["content"]
 
 	def test_handles_minimal_finding_without_detail(self):
 		# A finding with no technical_detail / source window must not crash.
@@ -473,7 +473,7 @@ class TestUsageNormalization:
 		assert out == self._ZERO
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, {**_ANTHROPIC_OK, "usage": usage})))
 		out = {}
-		assert ai_fix._call_anthropic("https://fake.invalid", "k", "m", "s", [{"role": "user", "content": "x"}], usage_out=out) == (
+		assert ai_fix._call_anthropic("https://fake.invalid", "k", "claude-sonnet-4-6", "s", [{"role": "user", "content": "x"}], usage_out=out) == (
 			"**Fix**\n\nadd an index"
 		)
 		assert out == self._ZERO
@@ -483,7 +483,7 @@ class TestAnthropicCall:
 	def test_extracts_text_block(self, monkeypatch):
 		fp = _post_returning(_FakeResp(200, _ANTHROPIC_OK))
 		monkeypatch.setattr(requests, "post", fp)
-		text = ai_fix._call_anthropic("https://api.anthropic.com", "key", "claude", "sys", [{"role": "user", "content": "hi"}])
+		text = ai_fix._call_anthropic("https://api.anthropic.com", "key", "claude-sonnet-4-6", "sys", [{"role": "user", "content": "hi"}])
 		assert text == "**Fix**\n\nadd an index"
 		assert fp.last.url == "https://api.anthropic.com/v1/messages"
 		assert fp.last.headers["x-api-key"] == "key"
@@ -495,14 +495,14 @@ class TestAnthropicCall:
 	def test_a_text_that_is_not_a_string_is_no_text(self, monkeypatch, text, typed):
 		block = {"type": "text", "text": text} if typed else {"text": text}
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, {"content": [block]})))
-		out = ai_fix._call_anthropic("https://api.anthropic.com", "key", "claude", "sys", [{"role": "user", "content": "hi"}])
+		out = ai_fix._call_anthropic("https://api.anthropic.com", "key", "claude-sonnet-4-6", "sys", [{"role": "user", "content": "hi"}])
 		assert out == ""
 
 	def test_suggest_fix_reports_a_non_string_text_as_an_empty_response(self, monkeypatch):
 		# Not an AttributeError from .strip(): that would escape the endpoint as
 		# a 500 whose snapshot holds the prompt.
 		monkeypatch.setattr(requests, "post", _post_returning(
-			_FakeResp(200, {"content": [{"type": "text", "text": {"echo": "x"}}]})))
+			_FakeResp(200, {"content": [{"type": "text", "text": {"echo": "x"}}], "stop_reason": "end_turn"})))
 		prov = {"name": "Anthropic", "protocol": "anthropic", "base_url": "https://api.anthropic.com",
 		        "model": "claude-sonnet-4-6", "needs_key": True, "has_key": True}
 		with _provider(prov):
@@ -610,8 +610,17 @@ class TestResolveProvider:
 			p = ai_fix._resolve_provider()
 		assert p["protocol"] == "openai"
 		assert p["base_url"] == "https://api.deepseek.com/v1"
-		assert p["model"] == "deepseek-chat"
+		assert p["model"] == "deepseek-flash"
+		assert p["context_tokens"] == 1000000
 		assert p["needs_key"] is True
+
+	def test_provider_request_options_are_not_shared_between_calls(self):
+		provider = ai_fix._provider_config(_cfg(ai_provider="DeepSeek"))
+		provider["request_options"]["thinking"]["type"] = "enabled"
+		assert ai_fix._provider_config(_cfg(ai_provider="DeepSeek"))["request_options"] == {
+			"thinking": {"type": "disabled"}
+		}
+		assert ai_fix._provider_config(_cfg(ai_provider="OpenAI"))["request_options"] == {}
 
 	def test_deepseek_ignores_base_url_override(self):
 		# Hosted provider: a stored ai_base_url must not override its built-in
@@ -740,7 +749,7 @@ class TestSuggestFix:
 		assert out["provider"] == "Anthropic"
 
 	def test_empty_response_raises(self, monkeypatch):
-		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, {"choices": [{"message": {"content": "   "}}]})))
+		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, {"choices": [{"message": {"content": "   "}, "finish_reason": "stop"}]})))
 		with _provider(dict(self._PROVIDER)):
 			with pytest.raises(ai_fix.AiFixError, match="empty"):
 				ai_fix.suggest_fix({"finding_type": "Slow Query", "title": "x", "technical_detail": {}})
@@ -867,7 +876,7 @@ class TestGuardrailNotesThroughSuggestFix:
 	retired index path's copy)."""
 
 	def test_metadata_column_index_advice_gets_a_note(self, monkeypatch):
-		bad = {"choices": [{"message": {"content": "**Fix**\n\nALTER TABLE `tabX` ADD INDEX (`docstatus`);"}}]}
+		bad = {"choices": [{"message": {"content": "**Fix**\n\nALTER TABLE `tabX` ADD INDEX (`docstatus`);"}, "finish_reason": "stop"}]}
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, bad)))
 		prov = {"name": "OpenAI", "protocol": "openai", "base_url": "https://api.openai.com/v1",
 		        "model": "gpt-4.1-mini", "needs_key": True, "has_key": True}
@@ -884,7 +893,7 @@ class TestGuardrailNotesThroughSuggestFix:
 			"-    e = frappe.db.get_value('User', u, 'email')\n"
 			"+rows = frappe.db.sql(\"SELECT name, email FROM `tabUser`\", as_dict=True)\n"
 			"```"
-		}}]}
+		}, "finish_reason": "stop"}]}
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, bad)))
 		prov = {"name": "OpenAI", "protocol": "openai", "base_url": "https://api.openai.com/v1",
 		        "model": "gpt-4.1-mini", "needs_key": True, "has_key": True}
@@ -1021,7 +1030,7 @@ class TestCallChokepointCollectsUsage:
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, payload)))
 		usage = {}
 		ai_fix._call_openai_chat(
-			"https://fake.invalid/v1", "k", "m", "s", [{"role": "user", "content": "x"}], usage_out=usage
+			"https://fake.invalid/v1", "k", "claude-sonnet-4-6", "s", [{"role": "user", "content": "x"}], usage_out=usage
 		)
 		assert usage["total_tokens"] == 10
 		assert recorded == []
@@ -1037,40 +1046,39 @@ class TestCallChokepointCollectsUsage:
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, payload)))
 		usage = {}
 		ai_fix._call_anthropic(
-			"https://fake.invalid/v1", "k", "m", "s", [{"role": "user", "content": "x"}], usage_out=usage
+			"https://fake.invalid/v1", "k", "claude-sonnet-4-6", "s", [{"role": "user", "content": "x"}], usage_out=usage
 		)
 		assert usage["total_tokens"] == 10
 		assert recorded == []
 
 
 class TestFinishReason:
-	@pytest.mark.parametrize("raw,want", [("stop", "stop"), ("length", "length"), ("content_filter", None), (None, None)])
+	@pytest.mark.parametrize("raw,want", [("stop", "stop"), ("length", "length"), ("content_filter", "content_filter"), (None, None)])
 	def test_openai_finish_reason(self, monkeypatch, raw, want):
 		payload = {"choices": [{"message": {"content": "ok"}, "finish_reason": raw}]}
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, payload)))
 		meta: dict = {}
 		ai_fix._call_openai_chat("https://fake.invalid/v1", "k", "m", "s", [{"role": "user", "content": "x"}], meta_out=meta)
-		assert meta == {"finish_reason": want, "prompt_tokens_reported": False}
+		assert meta == {"finish_reason": want, "provider_finish_reason": raw, "prompt_tokens_reported": False}
 
 	@pytest.mark.parametrize(
 		"raw,want",
 		[("end_turn", "stop"), ("stop_sequence", "stop"), ("max_tokens", "length"),
-		 ("model_context_window_exceeded", "length"), ("tool_use", None)],
+		 ("model_context_window_exceeded", "length"), ("tool_use", "tool_use")],
 	)
 	def test_anthropic_finish_reason(self, monkeypatch, raw, want):
 		payload = dict(_ANTHROPIC_OK, stop_reason=raw)
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, payload)))
 		meta: dict = {}
-		ai_fix._call_anthropic("https://fake.invalid", "k", "m", "s", [{"role": "user", "content": "x"}], meta_out=meta)
-		assert meta == {"finish_reason": want, "prompt_tokens_reported": False}
+		ai_fix._call_anthropic("https://fake.invalid", "k", "claude-sonnet-4-6", "s", [{"role": "user", "content": "x"}], meta_out=meta)
+		assert meta == {"finish_reason": want, "provider_finish_reason": raw, "prompt_tokens_reported": False}
 
 	def test_meta_out_is_set_even_when_the_text_is_missing(self, monkeypatch):
 		payload = {"choices": [{"message": {"content": None}, "finish_reason": "length"}]}
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, payload)))
 		meta: dict = {}
-		with pytest.raises(ai_fix.AiFixError):
-			ai_fix._call_openai_chat("https://fake.invalid/v1", "k", "m", "s", [{"role": "user", "content": "x"}], meta_out=meta)
-		assert meta == {"finish_reason": "length", "prompt_tokens_reported": False}
+		assert ai_fix._call_openai_chat("https://fake.invalid/v1", "k", "m", "s", [{"role": "user", "content": "x"}], meta_out=meta) == ""
+		assert meta == {"finish_reason": "length", "provider_finish_reason": "length", "prompt_tokens_reported": False}
 
 
 class TestGuardedCompletion:
@@ -1122,11 +1130,34 @@ class TestGuardedCompletion:
 		out = self._run(fake, monkeypatch)
 		assert len(fake.calls) == 1
 		assert set(out) == {"suggestion", "model", "provider", "generated_at", "source_available",
-		                    "prompt_version", "guardrail", "finish_reason", "usage_complete"}
+		                    "prompt_version", "guardrail", "finish_reason", "usage_complete",
+		                    "completion_status", "provider_finish_reason", "received_responses"}
 		assert out["suggestion"] == self._GOOD
 		assert out["prompt_version"] == ai_prompts.PROMPT_VERSION == 4
 		assert out["guardrail"] == {"violations": [], "reasked": False, "fallback": False}
 		assert out["finish_reason"] == "stop"
+
+	@pytest.mark.parametrize("provider_name", ["DeepSeek", "OpenAI"])
+	@pytest.mark.parametrize("finish", ["stop", "length"])
+	def test_compact_completion_budget_and_provider_options(self, monkeypatch, provider_name, finish):
+		provider = ai_fix._provider_config(_cfg(ai_provider=provider_name))
+		usage = {"prompt_tokens": 2162, "completion_tokens": 1450, "total_tokens": 3612}
+		fake = _post_sequence(self._resp(self._GOOD, usage=usage, finish=finish))
+		out = self._run(fake, monkeypatch, provider=provider)
+		assert len(fake.calls) == 1
+		assert fake.calls[0].body["max_tokens"] == 4096
+		if provider_name == "DeepSeek":
+			assert fake.calls[0].body["thinking"] == {"type": "disabled"}
+		else:
+			assert "thinking" not in fake.calls[0].body
+		assert out["tokens"] == usage
+		assert out["usage_complete"]
+		if finish == "stop":
+			assert out["suggestion"] == self._GOOD
+			assert ai_prompts.fix_state(out)[0] == "current"
+		else:
+			assert "```" not in out["suggestion"]
+			assert ai_prompts.fix_state(out)[0] == "incomplete"
 
 	def test_violation_reasks_once_and_adopts_a_better_rewrite(self, monkeypatch):
 		fake = _post_sequence(self._resp(self._RAW), self._resp(self._GOOD))
@@ -1170,18 +1201,15 @@ class TestGuardedCompletion:
 		assert out["guardrail"] == {"violations": ["truncated"], "reasked": False, "fallback": True}
 		assert "```" not in out["suggestion"] and "cut off" in out["suggestion"]
 
-	def test_an_oversized_reply_is_cut_and_treated_as_cut_off(self, monkeypatch):
-		# A server that ignores max_tokens can return any size; the guardrails' Markdown
-		# checks are superlinear, so the reply is cut at MAX_REPLY_CHARS first.
-		from optimus import ai_budget
-
+	def test_hostile_long_reply_is_retained_and_marked_processing_limited(self, monkeypatch):
 		huge = self._GOOD + "\n" + "[" * 60_000 + "](" * 60_000 + "`" * 60_000
 		fake = _post_sequence(self._resp(huge))
 		out = self._run(fake, monkeypatch)
-		assert len(fake.calls) == 1  # a cut-off answer is never re-asked
-		assert out["finish_reason"] == "length"
-		assert out["guardrail"] == {"violations": ["truncated"], "reasked": False, "fallback": True}
-		assert len(out["suggestion"].split("> **Profiler note:**")[0]) <= ai_budget.MAX_REPLY_CHARS
+		assert len(fake.calls) == 1
+		assert out["finish_reason"] == "stop"
+		assert out["completion_status"] == "processing_limited"
+		assert out["received_responses"][0]["text"] == huge
+		assert len(out["suggestion"]) < 1000
 
 	def test_an_oversized_rewrite_is_cut_and_not_adopted(self, monkeypatch):
 		huge = self._GOOD + "\n" + "x" * 50_000
@@ -1228,7 +1256,8 @@ class TestGuardedCompletion:
 	def test_output_budget_follows_the_context_window(self, monkeypatch):
 		fake = _post_sequence(self._resp(self._GOOD))
 		self._run(fake, monkeypatch, provider=dict(self._PROVIDER, context_tokens=4096))
-		assert fake.calls[0].body["max_tokens"] == 819
+		assert 512 < fake.calls[0].body["max_tokens"] < 4096
+		assert fake.calls[0].body["max_tokens"] + ai_budget.input_tokens(ai_prompts.SYSTEM_PROMPT, fake.calls[0].body["messages"][1:]) < 4096
 		fake = _post_sequence(self._resp(self._GOOD))
 		self._run(fake, monkeypatch, provider=dict(self._PROVIDER, context_tokens=8192, max_output_tokens=2048))
 		assert fake.calls[0].body["max_tokens"] == 2048
@@ -1465,7 +1494,7 @@ class TestAnthropicEndToEnd:
 		assert call.body["system"] == [
 			{"type": "text", "text": ai_prompts.SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}
 		]
-		assert call.body["max_tokens"] == ai_budget.output_tokens(200000)
+		assert call.body["max_tokens"] == 4096
 		assert call.headers["anthropic-version"] and "x-api-key" not in call.raw_headers  # the key rides on auth
 		assert call.auth is not None
 		assert out["suggestion"] == self._G._GOOD
@@ -1505,8 +1534,8 @@ def _codes(text: str, src=()) -> set:
 class TestRawSqlPolicy:
 	"""Fix answers no longer go through the regex raw-SQL detector (it serves only
 	the untouched index path until PR-L1); the same inputs run through
-	ai_guardrails.verify_fix. Policy (N2): moved SQL and a parameterised reshape of
-	SQL in the `-` lines are allowed; net-new frappe.db.sql / multisql is raw-sql;
+	ai_guardrails.verify_fix. Policy: added, moved or changed SQL calls are raw-sql;
+	only removed calls and unchanged context are allowed;
 	DDL in any form is raw-ddl (the regex detector's DDL exemption does not apply)."""
 
 	# --- clean inputs ------------------------------------------------------------
@@ -1612,7 +1641,7 @@ class TestBuildFixRequest:
 		c = messages[0]["content"]
 		assert ">> 42:" in c and shown  # the source is kept
 		assert "Example affected queries" not in c  # the priority-5 part went first
-		budget = ai_budget.user_char_budget(4096, ai_prompts.SYSTEM_PROMPT, out_tokens=ai_budget.output_tokens(4096))
+		budget = ai_budget.user_char_budget(4096, ai_prompts.SYSTEM_PROMPT, out_tokens=ai_budget.MIN_OUTPUT_TOKENS)
 		assert len(c) <= budget
 
 	def test_long_window_is_trimmed_around_the_target(self):
@@ -1624,7 +1653,7 @@ class TestBuildFixRequest:
 		c = messages[0]["content"]
 		assert ">> 70:" in c
 		assert 8 <= len(shown) < 80
-		budget = ai_budget.user_char_budget(4096, ai_prompts.SYSTEM_PROMPT, out_tokens=ai_budget.output_tokens(4096))
+		budget = ai_budget.user_char_budget(4096, ai_prompts.SYSTEM_PROMPT, out_tokens=ai_budget.MIN_OUTPUT_TOKENS)
 		assert len(c) <= budget
 
 	def test_hostile_source_cannot_close_the_fence_or_the_tag(self):
@@ -1645,7 +1674,7 @@ class TestBuildFixRequest:
 		# first call fits with the conservative 3.3 chars/token estimate, keeps its
 		# target line, and leaves room for one re-ask at the token counts a provider
 		# reports (measured 3.6 to 4.05 chars/token; 4.0 used here).
-		out = ai_budget.output_tokens(4096)
+		out = ai_budget.MIN_OUTPUT_TOKENS
 		reask = ai_guardrails.reask_message([
 			ai_guardrails.Violation("ungrounded", "`x = frappe.get_doc(\"User\", name)`"),
 			ai_guardrails.Violation("raw-sql", "frappe.db.sql"),
@@ -1696,7 +1725,7 @@ class TestNonLatinBudget:
 		system, messages, shown = ai_fix._build_fix_request(f, threshold_ms=1000.0, context_tokens=4096)
 		user = messages[0]["content"]
 		assert ">> 60:" in user and shown
-		out = ai_budget.output_tokens(4096)
+		out = ai_budget.MIN_OUTPUT_TOKENS
 		assert _pessimistic_tokens(system) + _pessimistic_tokens(user) + out + ai_budget.TEMPLATE_TOKENS <= 4096
 
 	def test_non_latin_action_labels_fit_4096(self):
@@ -1710,7 +1739,7 @@ class TestNonLatinBudget:
 		system, messages = ai_fix._build_steps_messages(actions, _CJK, context_tokens=4096, send_raw=True)
 		user = messages[0]["content"]
 		assert "(truncated)" in user
-		out = ai_budget.output_tokens(4096)
+		out = ai_budget.MIN_OUTPUT_TOKENS
 		assert _pessimistic_tokens(system) + _pessimistic_tokens(user) + out + ai_budget.TEMPLATE_TOKENS <= 4096
 
 
@@ -1724,7 +1753,7 @@ class TestProviderContext:
 		monkeypatch.setattr(ai_fix, "_get_api_key", lambda needs_key=True, **kw: "")
 		with patch("optimus.settings.get_config", return_value=_cfg(ai_provider="Anthropic")):
 			p = ai_fix._resolve_provider()
-		assert p["context_tokens"] == 200000 and p["max_output_tokens"] is None
+		assert p["context_tokens"] == 1000000 and p["max_output_tokens"] == 128000
 		assert "api_key" not in p
 
 	def test_settings_override_applies_to_openai_compatible_only(self, monkeypatch):
@@ -1734,7 +1763,7 @@ class TestProviderContext:
 		with patch("optimus.settings.get_config", return_value=cfg):
 			assert ai_fix._resolve_provider()["context_tokens"] == 8192
 		with patch("optimus.settings.get_config", return_value=_cfg(ai_provider="OpenAI", ai_context_tokens=8192)):
-			assert ai_fix._resolve_provider()["context_tokens"] == 128000  # hosted: stale value ignored
+			assert ai_fix._resolve_provider()["context_tokens"] == 1047576  # hosted: stale value ignored
 		cfg0 = _cfg(ai_provider="OpenAI-compatible", ai_base_url="http://x/v1", ai_model="m", ai_context_tokens=0)
 		with patch("optimus.settings.get_config", return_value=cfg0):
 			assert ai_fix._resolve_provider()["context_tokens"] == 4096  # 0 = provider default
@@ -1801,8 +1830,8 @@ class TestGuardrailBoundaries:
         monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, payload)))
         call = ai_fix._call_openai_chat if protocol == "openai" else ai_fix._call_anthropic
         meta = {}
-        assert call("http://fake.invalid", "fake-key", "m", "s", [], meta_out=meta) == "ok"
-        assert meta == {"finish_reason": None, "prompt_tokens_reported": False}
+        assert call("http://fake.invalid", "fake-key", "m", "s", [], max_tokens=4096, meta_out=meta) == "ok"
+        assert meta == {"finish_reason": None, "provider_finish_reason": None, "prompt_tokens_reported": False}
 
     def test_dropped_hot_line_is_not_available_for_grounding(self):
         f = {"finding_type": "Hot Line", "title": "x",
@@ -1824,7 +1853,7 @@ class TestGuardrailBoundaries:
         else:
             f["title"] = huge
         system, messages, shown = ai_fix._build_fix_request(f, threshold_ms=1000, context_tokens=4096)
-        limit = ai_budget.user_char_budget(4096, system, out_tokens=ai_budget.output_tokens(4096))
+        limit = ai_budget.user_char_budget(4096, system, out_tokens=ai_budget.MIN_OUTPUT_TOKENS)
         content = messages[0]["content"]
         assert ai_budget.text_size(content) <= limit
         assert all(line in content for line in shown)
@@ -1846,12 +1875,13 @@ class TestGuardrailBoundaries:
 def test_output_override_cannot_overfill_context(monkeypatch, entry):
     provider = dict(TestGuardedCompletion._PROVIDER, context_tokens=4096, max_output_tokens=4000)
     monkeypatch.setattr(ai_fix, "_provider_config", lambda: provider)
-    sent = []
-    monkeypatch.setattr(ai_fix, "_dispatch_call", lambda *a, **k: sent.append(True) or "ok")
-    with pytest.raises(ai_fix.AiFixError) as exc:
-        if entry == "fix":
-            ai_fix.suggest_fix({"finding_type": "Slow Query", "title": "x"})
-        else:
-            ai_fix.humanize_steps([{"label": "Save"}])
-    assert exc.value.kind == "config"
-    assert sent == []
+    monkeypatch.setattr(ai_fix, "_get_api_key", lambda *a, **k: "sk-test")
+    fake = _post_sequence(TestGuardedCompletion._resp(TestGuardedCompletion._GOOD))
+    monkeypatch.setattr(requests, "post", fake)
+    if entry == "fix":
+        ai_fix.suggest_fix({"finding_type": "Slow Query", "title": "x"})
+    else:
+        ai_fix.humanize_steps([{"label": "Save"}])
+    body = fake.calls[0].body
+    estimated = ai_budget.input_tokens(body["messages"][0]["content"], body["messages"][1:])
+    assert body["max_tokens"] + estimated < 4096

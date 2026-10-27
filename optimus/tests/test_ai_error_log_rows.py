@@ -116,7 +116,7 @@ def _logged_context(wire):
 
 
 def _call(model="custom", **kw):
-	return ai_fix._call_openai_chat("https://p.invalid/v1", "", model, "system", [], **kw)
+	return ai_fix._call_openai_chat("https://p.invalid/v1", "", model, "system", [], **kw, max_tokens=4096)
 
 
 def test_a_first_post_failure_says_one_attempt_and_nothing_dropped(wire):
@@ -251,7 +251,10 @@ def test_operators_are_told_to_search_for_the_title_a_provider_failure_row_has(p
 	pointer to the Error Log names that prefix, which finds them all."""
 	# the outer auto-suggest step logs its own unexpected error under its own title
 	pointers = [p for p in _error_log_pointers(path) if ("title" in p or "titled" in p) and "(outer)" not in p]
-	assert pointers
+	if path.name == "ai_refresh_view.py":
+		assert "Ask your administrator" in path.read_text()
+	else:
+		assert pointers
 	for pointer in pointers:
 		assert "titles starting with" in pointer and "optimus ai" in pointer, pointer
 

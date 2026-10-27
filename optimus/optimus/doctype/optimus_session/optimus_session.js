@@ -113,6 +113,16 @@ function render_ai_buttons(frm) {
 		frappe.router.on("change", () => {
 			if (frm._optimus_ai && !_ai_current(frm, frm._optimus_ai)) _ai_stop(frm, frm._optimus_ai);
 		});
+		if (frappe.realtime) frappe.realtime.on("optimus_ai_refresh_admitted", (payload) => {
+			const current = frm._optimus_ai;
+			if (current && payload && payload.session_uuid === current.session_uuid && _ai_current(frm, current)) {
+				_ai_poll(frm, current);
+			}
+		});
+		if (typeof document !== "undefined") document.addEventListener("visibilitychange", () => {
+			const current = frm._optimus_ai;
+			if (!document.hidden && current && _ai_current(frm, current)) _ai_poll(frm, current);
+		});
 	}
 	// Frappe may reset Save while refreshing the same form.
 	if (state.busy || state.submitting || state.unknown) _ai_hold_save(frm, state);
@@ -128,33 +138,51 @@ function _ai_schedule(frm, state, delay) {
 	}, delay);
 }
 
-function _ai_unknown(frm, state) {
+function _ai_unknown(frm, state, admission = false) {
 	// Even the first failed poll can hide another process's active reservation.
 	state.unknown = true;
 	_ai_hold_save(frm, state);
 	state.can_act = false;
 	frm.remove_custom_button(__("Refresh AI suggestions"), __("AI"));
 	frm.remove_custom_button(__("Resume AI refresh"), __("AI"));
-	_single_banner(frm, "optimus-ai-progress", "form-message orange",
-		'<span role="status">' + frappe.utils.escape_html(__("AI refresh status is unavailable. Checking again; saved profiling results are retained.")) + '</span>');
+	const text = admission ?
+		__("Checking whether the AI refresh started. Save is paused until its status is confirmed; your edits are kept.") :
+		__("AI refresh status is unavailable. Checking again; Save is paused to protect your edits and saved profiling results.");
+	_ai_status_banner(frm, state, text, false, "orange");
 	state.delay = Math.min(30000, state.delay * 2);
 	_ai_schedule(frm, state, state.delay);
 }
 
 function _ai_poll(frm, state) {
 	if (!_ai_current(frm, state)) return _ai_stop(frm, state);
+	if (typeof document !== "undefined" && document.hidden) {
+		clearTimeout(state.timer);
+		state.needs_poll = true;
+		return;
+	}
+	state.needs_poll = false;
 	if (state.submitting) return _ai_schedule(frm, state, 5000);
 	const epoch = ++state.epoch;
+	let settled = false;
 	frappe.call({
 		method: "optimus.api.ai_refresh_status", args: {session_uuid: state.session_uuid},
 		callback: (r) => {
+			settled = true;
 			if (!_ai_current(frm, state) || state.epoch !== epoch) return;
 			const data = r && r.message;
 			if (!data || data.status !== "ok") return _ai_unknown(frm, state);
 			_ai_apply_status(frm, state, data);
 		},
 		error: () => {
+			if (settled) return;
+			settled = true;
 			if (_ai_current(frm, state) && state.epoch === epoch) _ai_unknown(frm, state);
+		},
+		always: () => {
+			if (!settled && _ai_current(frm, state) && state.epoch === epoch) {
+				settled = true;
+				_ai_unknown(frm, state);
+			}
 		},
 	});
 }
@@ -175,6 +203,7 @@ function _ai_apply_status(frm, state, data) {
 	state.busy = !!run && ["queued", "running"].includes(run.state);
 	state.can_act = !!data.can_act;
 	state.plan = data.plan;
+	state.session_uncertain_count = data.session_uncertain_count || 0;
 	frm._optimus_ai_enabled = state.can_act && !!state.plan && !!(state.plan.total || state.plan.steps);
 	state.delay = 5000;
 	if (state.busy) _ai_hold_save(frm, state);
@@ -194,7 +223,16 @@ function _ai_apply_status(frm, state, data) {
 			indicator: run.state === "complete" ? "green" : "orange"});
 		_reload_clean_form(frm);
 	}
-	_ai_schedule(frm, state, state.busy ? 5000 : 30000);
+	// Refresh/navigation/realtime events check again when the session changes.
+	// Idle forms must not perpetually read the journal in background tabs.
+	if (state.busy) _ai_schedule(frm, state, 5000);
+	else clearTimeout(state.timer);
+}
+
+function _ai_error_guidance() {
+	const manager = frappe.user && frappe.user.has_role && frappe.user.has_role("System Manager");
+	return manager ? __("Search the Error Log for titles starting with optimus ai before retrying.") :
+		__("Ask your administrator to check AI errors for this session before retrying.");
 }
 
 function _ai_progress_banner(frm, state) {
@@ -205,36 +243,63 @@ function _ai_progress_banner(frm, state) {
 	const usage = run.usage || {};
 	let text = __("AI refresh: {0}. Saved {1}, failed {2}, skipped {3}, uncertain {4}, not reached {5}. Reported tokens: {6}.",
 		[labels[run.state], run.done || 0, run.failed || 0, run.skipped || 0,
-			(run.uncertain || 0) + (run.blocked_uncertain || 0), run.not_reached || 0, usage.tokens_reported || 0]);
+			Math.max(run.uncertain || 0, run.blocked_uncertain || 0), run.not_reached || 0, usage.tokens_reported || 0]);
 	if (usage.incomplete_attempts) text += " " + __("Provider usage is incomplete; these counts are not an exact bill.");
-	if (run.failed) text += " " + __("Saved suggestions are kept. Search the Error Log for titles starting with optimus ai before retrying.");
+	if (run.failed) text += " " + __("Saved suggestions are kept.") + " " + _ai_error_guidance();
 	if (run.render_pending) text += " " + __("Saved answers still need a report update. Use Regenerate Reports after the refresh stops.");
 	if (run.end_reason) text += " " + _ai_end_message(run);
-	const cancel = state.busy && state.can_act;
-	const html = '<span role="status">' + frappe.utils.escape_html(text) + '</span>' +
-		(cancel ? ' <button type="button" class="btn btn-xs btn-default optimus-ai-cancel">' + frappe.utils.escape_html(__("Cancel AI refresh")) + '</button>' : '');
-	const banner = _single_banner(frm, "optimus-ai-progress", "form-message blue", html);
-	if (banner && cancel) banner.find(".optimus-ai-cancel").on("click", () => {
-		if (!_ai_current(frm, state)) return;
-		const run_id = run.run_id;
+	if (state.busy) text += " " + __("Save is paused while AI updates this session; your edits are kept. Cancel the refresh to resume editing safely.");
+	_ai_status_banner(frm, state, text, state.busy && state.can_act, "blue");
+}
+
+function _ai_status_banner(frm, state, text, cancel, color) {
+	const html = '<span role="status" class="optimus-ai-status-text">' + frappe.utils.escape_html(text) + '</span>' +
+		' <button type="button" class="btn btn-xs btn-default optimus-ai-cancel"' + (cancel ? '' : ' style="display:none"') + '>' +
+		frappe.utils.escape_html(__("Cancel AI refresh")) + '</button>';
+	const banner = _single_banner(frm, "optimus-ai-progress", "form-message " + color, html, null, ($b) => {
+		$b.find(".optimus-ai-status-text").text(text);
+		$b.find(".optimus-ai-cancel").toggle(!!cancel).prop("disabled", !!state.cancelling);
+	});
+	if (!banner) return;
+	const button = banner.find(".optimus-ai-cancel");
+	const element = button[0];
+	if ((element && state.cancel_element === element) || (!element && state.cancel_bound)) return;
+	state.cancel_element = element;
+	state.cancel_bound = true;
+	// Keep the same button across polls. Remember the generation on pointer/key
+	// down so a late click cannot cancel a newer run that replaced this one.
+	button.on("pointerdown keydown", () => { state.cancel_intent = state.run && state.run.run_id; });
+	button.on("click", () => {
+		if (!_ai_current(frm, state) || !state.busy || !state.can_act || state.cancelling || !state.run) return;
+		const run_id = state.run.run_id;
+		const intent = state.cancel_intent;
+		state.cancel_intent = null;
+		if (intent && intent !== run_id) return;
+		state.cancelling = true;
+		if (button.prop) button.prop("disabled", true);
 		const epoch = ++state.epoch;
-		const current = () => _ai_current(frm, state) && state.epoch === epoch && state.run && state.run.run_id === run_id;
+		let settled = false;
+		const finish = (r, failed) => {
+			if (settled) return;
+			settled = true;
+			state.cancelling = false;
+			if (!_ai_current(frm, state) || state.epoch !== epoch || !state.run || state.run.run_id !== run_id) return;
+			if (r && r.message && r.message.status === "refused") {
+				frappe.msgprint(frappe.utils.escape_html(r.message.message || __("Cancellation could not be confirmed.")));
+			}
+			if (failed) _ai_unknown(frm, state);
+			else _ai_poll(frm, state);
+		};
 		frappe.call({
 			method: "optimus.api.cancel_ai_refresh", args: {session_uuid: state.session_uuid, run_id},
-			callback: (r) => {
-				if (!current()) return;
-				if (r && r.message && r.message.status === "refused") {
-					frappe.msgprint(frappe.utils.escape_html(r.message.message));
-				}
-				_ai_poll(frm, state);
-			},
-			error: () => { if (current()) _ai_unknown(frm, state); },
+			callback: (r) => finish(r, false), error: (r) => finish(r, true),
+			always: (r) => finish(r, true),
 		});
 	});
 }
 
 function _ai_end_message(run) {
-	if (run.end_reason === "breaker") return __("Repeated provider errors or a provider limit stopped this run. Check the provider configuration and search the Error Log for titles starting with optimus ai before retrying.");
+	if (run.end_reason === "breaker") return __("Repeated provider errors or a provider limit stopped this run. Check the provider configuration.") + " " + _ai_error_guidance();
 	if (run.end_reason === "deadline") return __("The refresh time limit was reached.");
 	if (run.end_reason === "render_failed") return __("Report update could not be confirmed. Reload the session; use Regenerate Reports if needed.");
 	if (["uncertain", "lease_expired", "worker_interrupted"].includes(run.end_reason)) return __("An interrupted call may have been billed. It will not be repeated automatically.");
@@ -253,12 +318,12 @@ function _ai_end_message(run) {
 // per-tick event stacked one bar per tick instead of updating one. This keeps a
 // single element found and removed by `idClass` (which must be unique to this
 // banner) and rewrites its contents in place, returning it so the caller can tag
-// it. Pass html=null to remove it. `extraClasses` are added only when the element
-// is created (e.g. Frappe theme classes); `styler` runs once on a freshly created
+// it. Pass html=null to remove it. `extraClasses` update on reuse so a new state
+// receives the current theme classes; `styler` runs once on a freshly created
 // element whose classes do not carry its colours. The element is prepended to
 // .form-layout, outside .form-message-container, so Frappe's own show_message()
 // clearing on each refresh never removes it.
-function _single_banner(frm, idClass, extraClasses, html, styler) {
+function _single_banner(frm, idClass, extraClasses, html, styler, update) {
 	const root = frm.$wrapper;
 	if (!root || !root.length) return null;
 	if (html == null) {
@@ -266,6 +331,7 @@ function _single_banner(frm, idClass, extraClasses, html, styler) {
 		return null;
 	}
 	let $b = root.find("." + idClass);
+	const existing = !!$b.length;
 	if (!$b.length) {
 		const cls = extraClasses ? idClass + " " + extraClasses : idClass;
 		$b = $('<div class="' + cls + '"></div>');
@@ -273,7 +339,9 @@ function _single_banner(frm, idClass, extraClasses, html, styler) {
 		const $host = root.find(".form-layout").first();
 		($host.length ? $host : root).prepend($b);
 	}
-	$b.html(html);
+	$b.attr("class", extraClasses ? idClass + " " + extraClasses : idClass);
+	if (existing && update) update($b);
+	else $b.html(html);
 	return $b;
 }
 
@@ -317,12 +385,27 @@ function render_analyze_progress(frm) {
 // Session form you shouldn't have to stare at a static "Analyzing" status
 // especially when AI fix suggestions are being generated, which can take
 // a while). Cleared + reloaded when the session reaches Ready / Failed.
+function _new_session_event(frm, payload) {
+	if (!payload.event_id) return true;
+	const seen = frm._optimus_realtime_ids || (frm._optimus_realtime_ids = new Set());
+	if (seen.has(payload.event_id)) return false;
+	seen.add(payload.event_id);
+	if (seen.size > 128) seen.delete(seen.values().next().value);
+	return true;
+}
+
 function subscribe_session_progress(frm) {
 	if (frm.is_new()) return;
 	if (frm._progress_subscribed) return;
 	frm._progress_subscribed = true;
 
-	const mine = (p) => p && p.session_uuid === frm.doc.session_uuid;
+	const mine = (p) => p && p.session_uuid === frm.doc.session_uuid && _new_session_event(frm, p);
+	const reload = () => {
+		const session_uuid = frm.doc.session_uuid;
+		setTimeout(() => {
+			if (frm.doc.session_uuid === session_uuid) _reload_clean_form(frm);
+		}, 800);
+	};
 
 	frappe.realtime.on("optimus_progress", (p) => {
 		if (!mine(p)) return;
@@ -342,31 +425,30 @@ function subscribe_session_progress(frm) {
 		if (!mine(p)) return;
 		_progress_banner(frm, null);
 		frappe.show_alert({ message: __("Report ready"), indicator: "green" });
-		setTimeout(() => frm.reload_doc(), 800);
+		reload();
 	});
 	frappe.realtime.on("optimus_session_failed", (p) => {
 		if (!mine(p)) return;
 		_progress_banner(frm, null);
-		setTimeout(() => frm.reload_doc(), 800);
+		reload();
 	});
 	// v0.7.x: auto-arm fires server-side during analyze (off-form). Tell the
 	// user a pass is armed and what to do next; the reload re-runs
 	// render_phase2_button → the in-form banner + Stop button appear.
 	frappe.realtime.on("optimus_phase2_armed", (p) => {
-		if (!p || p.docname !== frm.doc.name) return;
+		if (!p || p.docname !== frm.doc.name || !_new_session_event(frm, p)) return;
 		const fns = (p.functions || []).join(", ");
 		frappe.show_alert(
 			{
 				message: __(
-					"Line profiling armed for {0} hot path(s){1}. Re-run your " +
-					"flow, then click Stop Phase 2 Run to capture the exact lines.",
+					"Line profiling armed for {0} hot path(s){1}. Re-run your flow, then click Stop Phase 2 Run to capture the exact lines.",
 					[p.count || 0, fns ? " (" + frappe.utils.escape_html(fns) + ")" : ""]
 				),
 				indicator: "orange",
 			},
 			12
 		);
-		setTimeout(() => frm.reload_doc(), 800);
+		reload();
 	});
 }
 
@@ -375,19 +457,24 @@ function render_ai_refill_button(frm, state) {
 		if (!_ai_current(frm, state) || state.busy || state.submitting) return;
 		if (frm.is_dirty && frm.is_dirty()) return frappe.msgprint(__("Save or discard your edits before starting an AI refresh."));
 		const plan = state.plan;
-		const description = (all) => frappe.utils.escape_html(__("Current selection: {0} finding(s), plus {1} Steps to Reproduce rewrite. The worker rechecks eligibility; the finding limit for this refresh is {2}. Saved profiling results remain available.",
-			[all ? plan.selected_all : plan.selected, plan.steps ? 1 : 0, plan.cap || __("unlimited")]));
+		const description = (all) => frappe.utils.escape_html(
+			__("Current selection: {0} finding(s), plus {1} Steps to Reproduce rewrite. The worker rechecks eligibility; the finding limit for this refresh is {2}. Saved profiling results remain available.",
+				[all ? plan.selected_all : plan.selected, plan.steps ? 1 : 0, plan.cap || __("unlimited")])
+			+ (all ? "" : " " + __("Includes {0} incomplete or unconfirmed suggestion(s). Completed current suggestions, blocked responses and answers awaiting local review will be kept. This retry uses provider tokens.", [plan.selected_incomplete || 0])));
 		const dialog = new frappe.ui.Dialog({title: __("Refresh AI suggestions"), fields: [
 			{fieldtype: "HTML", fieldname: "summary", options: description(false)},
+			{fieldtype: "Check", fieldname: "retry_uncertain", default: 0,
+				hidden: !state.session_uncertain_count,
+				label: __("Repeat calls with unknown outcomes, accepting possible duplicate provider charges")},
 			{fieldtype: "Check", fieldname: "regenerate_all", default: 0,
-				label: __("Also replace current suggestions"), onchange: () => {
+				label: __("Also replace current suggestions and responses awaiting review"), onchange: () => {
 					dialog.fields_dict.summary.df.options = description(!!dialog.get_value("regenerate_all"));
 					dialog.refresh_field("summary");
 				}},
 		], primary_action_label: __("Queue refresh"), primary_action: (values) => {
-			if (!values.regenerate_all && !plan.selected && !plan.steps) return frappe.msgprint(__("No missing or outdated suggestions need a refresh."));
+			if (!values.regenerate_all && !plan.selected && !plan.steps) return frappe.msgprint(__("No missing, incomplete or outdated suggestions need a refresh."));
 			dialog.hide();
-			_refill_ai_call(frm, state, {regenerate_all: !!values.regenerate_all});
+			_refill_ai_call(frm, state, {regenerate_all: !!values.regenerate_all, retry_uncertain: !!values.retry_uncertain});
 		}});
 		dialog.show();
 	}, __("AI"));
@@ -396,11 +483,11 @@ function render_ai_refill_button(frm, state) {
 function _ai_resume_dialog(frm, state) {
 	if (!_ai_current(frm, state) || state.busy || state.submitting) return;
 	const run = state.run;
-	const uncertain = (run.uncertain || 0) + (run.blocked_uncertain || 0);
+	const uncertain = run.uncertain || run.blocked_uncertain || state.session_uncertain_count;
 	const dialog = new frappe.ui.Dialog({title: __("Resume AI refresh"), fields: [
 		{fieldtype: "HTML", fieldname: "summary", options: frappe.utils.escape_html(__("Resume the original selection and cap. Already saved answers will be kept."))},
 		{fieldtype: "Check", fieldname: "retry_uncertain", default: 0, hidden: !uncertain,
-			label: __("Repeat uncertain calls, accepting possible duplicate provider charges")},
+			label: __("Repeat calls with unknown outcomes, accepting possible duplicate provider charges")},
 	], primary_action_label: __("Queue resume"), primary_action: (values) => {
 		dialog.hide();
 		_refill_ai_call(frm, state, {resume_from: run.run_id, retry_uncertain: !!values.retry_uncertain});
@@ -412,34 +499,53 @@ function _refill_ai_call(frm, state, options) {
 	if (!_ai_current(frm, state) || state.busy || state.submitting) return;
 	if (frm.is_dirty && frm.is_dirty()) return frappe.msgprint(__("Save or discard your edits before starting an AI refresh."));
 	state.submitting = true;
+	const submission = state.submission = {};
 	state.epoch++; // invalidate a status response sent before this request
 	clearTimeout(state.timer);
 	_ai_hold_save(frm, state);
+	function finish_submission() {
+		if (state.submission !== submission) return false;
+		state.submission = null;
+		state.submitting = false;
+		// Frappe reuses this form after navigation. Finish request bookkeeping
+		// offscreen too, then reconcile with SQL when the user returns.
+		if (!_ai_current(frm, state)) {
+			state.unknown = true;
+			return false;
+		}
+		return true;
+	}
+	_ai_status_banner(frm, state, __("Requesting AI refresh. Save is paused until admission is confirmed; your edits are kept."), false, "blue");
+	function settle(r, failed) {
+		if (!finish_submission()) return;
+		const data = r && r.message;
+		// Frappe always() can pass parsed exc_type before error() sees the XHR. Its timeout
+		// handlers skip error(), so always() must also finish bookkeeping.
+		const rejected = failed && r && (r.status === 429 || r.status === 417 ||
+			["ValidationError", "PermissionError", "RateLimitExceededError"].includes(r.exc_type));
+		if (!failed && data && data.ok && data.refresh) {
+			_ai_apply_status(frm, state, {refresh: data.refresh, can_act: true, plan: null});
+		} else if (rejected || (!failed && data && data.status === "refused")) {
+			state.busy = false;
+			state.unknown = false;
+			_ai_release_save(frm, state);
+			_ai_progress_banner(frm, state);
+			const message = (data && data.message) || (rejected ?
+				__("AI refresh was not started. Wait and try again; your edits are kept.") : __("AI refresh could not start."));
+			frappe.msgprint(frappe.utils.escape_html(message));
+			_ai_poll(frm, state);
+		} else {
+			// A lost response or server failure can follow a committed admission.
+			state.busy = true;
+			_ai_unknown(frm, state, true);
+		}
+	}
 	frappe.call({
 		method: "optimus.api.refill_ai_suggestions",
 		args: {session_uuid: state.session_uuid, ...options},
-		callback: (r) => {
-			if (!_ai_current(frm, state)) return;
-			state.submitting = false;
-			const data = r && r.message;
-			if (data && data.ok && data.refresh) {
-				_ai_apply_status(frm, state, {refresh: data.refresh, can_act: true, plan: null});
-			} else if (data && data.status === "refused") {
-				_ai_release_save(frm, state);
-				frappe.msgprint(frappe.utils.escape_html(data.message || __("AI refresh could not start.")));
-				_ai_poll(frm, state);
-			} else {
-				state.busy = true;
-				_ai_unknown(frm, state);
-			}
-		},
-		error: () => {
-			if (!_ai_current(frm, state)) return;
-			state.submitting = false;
-			// A lost HTTP response can follow a committed admission. Poll SQL.
-			state.busy = true;
-			_ai_unknown(frm, state);
-		},
+		callback: (r) => settle(r, false),
+		error: (r) => settle(r, true),
+		always: (r) => settle(r, true),
 	});
 }
 
@@ -485,8 +591,7 @@ function render_phase2_button(frm) {
 					callback: function () {
 						frappe.show_alert({
 							message: __(
-								"Phase 2 stopped. Analyzing now the report " +
-								"section will refresh when ready."
+								"Phase 2 stopped. Analyzing now the report section will refresh when ready."
 							),
 							indicator: "blue",
 						});
@@ -509,11 +614,7 @@ function render_phase2_button(frm) {
 		_phase2_armed_banner(
 			frm,
 			__(
-				"🔬 Line profiling is armed. Re-run your flow now so the hot " +
-				"path(s) execute again, then click \"Stop Phase 2 Run\" above " +
-				"the report will then pinpoint the exact hot line(s). " +
-				"(Profiling has to re-execute your code; it can't replay the " +
-				"original run.)"
+				"🔬 Line profiling is armed. Re-run your flow now so the hot path(s) execute again, then click \"Stop Phase 2 Run\" above the report will then pinpoint the exact hot line(s). (Profiling has to re-execute your code; it can't replay the original run.)"
 			)
 		);
 	} else {
@@ -580,9 +681,7 @@ function render_phase2_button(frm) {
 	frm.add_custom_button(__("Force Stop Stuck Run"), function () {
 		frappe.confirm(
 			__(
-				"Clear any in-flight phase-2 active flag for your user " +
-				"and mark stuck Recording rows as Failed? Use this if " +
-				"the picker keeps reporting 'phase-2 already active'."
+				"Clear any in-flight phase-2 active flag for your user and mark stuck Recording rows as Failed? Use this if the picker keeps reporting 'phase-2 already active'."
 			),
 			function () {
 				frappe.call({
@@ -622,8 +721,7 @@ function open_phase2_picker(frm) {
 				frappe.msgprint({
 					title: __("line_profiler not installed"),
 					message: __(
-						"Phase 2 needs the line_profiler package. Install it via " +
-						"<code>bench pip install line_profiler</code> and restart."
+						"Phase 2 needs the line_profiler package. Install it via <code>bench pip install line_profiler</code> and restart."
 					),
 					indicator: "red",
 				});
@@ -809,8 +907,7 @@ function show_phase2_dialog(frm, data) {
 			fieldtype: "Section Break",
 			label: __("Hot frames from your apps"),
 			description: __(
-				"Click a row's chevron to expand its nested calls. " +
-				"Tick the boxes you want to line-profile."
+				"Click a row's chevron to expand its nested calls. Tick the boxes you want to line-profile."
 			),
 		});
 		fields.push({
@@ -852,10 +949,7 @@ function show_phase2_dialog(frm, data) {
 		fieldtype: "Small Text",
 		label: __("One dotted path per line"),
 		description: __(
-			"e.g. <code>my_app.tasks.heavy_helper</code>. Paths that " +
-			"can't be imported are rejected before phase 2 starts. Use " +
-			"this when the curated list above doesn't surface the " +
-			"function you want, or to disambiguate a class method."
+			"e.g. <code>my_app.tasks.heavy_helper</code>. Paths that can't be imported are rejected before phase 2 starts. Use this when the curated list above doesn't surface the function you want, or to disambiguate a class method."
 		),
 	});
 	fields.push({
@@ -872,11 +966,7 @@ function show_phase2_dialog(frm, data) {
 		label: __("Auto-expand hot chain (recommended)"),
 		default: auto_expand_default,
 		description: __(
-			"For each curated pick, walks phase-1's call tree downward " +
-			"following the hottest user-code child until it hits an ORM " +
-			"call or framework wrapper. The run instruments the entire " +
-			"chain so you see exactly which descendant line is the time " +
-			"sink no need to re-pick and re-record level by level."
+			"For each curated pick, walks phase-1's call tree downward following the hottest user-code child until it hits an ORM call or framework wrapper. The run instruments the entire chain so you see exactly which descendant line is the time sink no need to re-pick and re-record level by level."
 		),
 	});
 
@@ -978,6 +1068,7 @@ function subscribe_phase2_events(frm) {
 		function (event) {
 			frappe.realtime.on(event, function (payload) {
 				if (!payload || payload.session_uuid !== frm.doc.session_uuid) return;
+				if (!_new_session_event(frm, payload)) return;
 				if (event === "phase_2_run_ready") {
 					frappe.show_alert({
 						message: payload.render_pending
@@ -1067,10 +1158,7 @@ function render_regenerate_report_button(frm) {
 							if (total && rec < total) {
 								msg += " "
 									+ __(
-										"Only {0} of {1} recordings were "
-										+ "available (others expired from "
-										+ "Redis); per-query drill-down "
-										+ "may be partial.",
+										"Only {0} of {1} recordings were available (others expired from Redis); per-query drill-down may be partial.",
 										[rec, total],
 									);
 							}

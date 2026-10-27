@@ -90,3 +90,22 @@ class Cache:
 						cache.versions[key] = cache.versions.get(key, 0) + 1
 					return [True] * len(self.commands)
 		return Pipeline()
+
+	def eval(self, script, numkeys, *args):
+		assert numkeys == 3
+		sample, state, source, payload, max_bytes, max_batches, mode, ttl = args
+		with self.lock:
+			if source not in self.data:
+				return 0
+			count = len(self.data.get(sample, []))
+			raw = self.data.get(state)
+			try:
+				used = int(raw) if raw is not None else (0 if count == 0 else -1)
+			except (TypeError, ValueError):
+				used = -1
+			if mode == 'incomplete' or used < 0 or used + len(payload) > max_bytes or count >= max_batches:
+				self.set(state, b'-1')
+				return -1
+			self.set(state, str(used + len(payload)).encode())
+			self.data.setdefault(sample, []).append(payload)
+			return 1

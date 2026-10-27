@@ -161,7 +161,10 @@
     "label": "wrong",
     "reason": "Fabricated: the get_all block and the loop body are shown as unchanged context but are not in the source; the real change (dropping the SQL call) is hidden, so the diff cannot be applied as shown."
    },
-   "label": null
+   "label": {
+    "label": "wrong",
+    "reason": "OWNER: Approved the 15-case draft label set on 2026-10-18. Fabricated: the get_all block and the loop body are shown as unchanged context but are not in the source; the real change (dropping the SQL call) is hidden, so the diff cannot be applied as shown."
+   }
   },
   {
    "name": "3q1efl686s",
@@ -274,7 +277,10 @@
     "label": "correct",
     "reason": "Verbatim hoist of the get_doc and roles query out of the 150-iteration loop at 23-29; behaviour unchanged. Covers one of the merged call sites (the others are outside the window; pre-L5 anchor)."
    },
-   "label": null
+   "label": {
+    "label": "correct",
+    "reason": "OWNER: Approved the 15-case draft label set on 2026-10-18. Verbatim hoist of the get_doc and roles query out of the 150-iteration loop at 23-29; behaviour unchanged. Covers one of the merged call sites (the others are outside the window; pre-L5 anchor)."
+   }
   },
   {
    "name": "3q1fsdhl5p",
@@ -391,7 +397,10 @@
     "label": "wrong",
     "reason": "Fixes the get_doc/roles loop at 23-29 instead of the flagged has_permission(write) calls (common.py:205-206, outside the window because of the pre-L5 anchor); the Verify claim is false."
    },
-   "label": null
+   "label": {
+    "label": "wrong",
+    "reason": "OWNER: Approved the 15-case draft label set on 2026-10-18. Fixes the get_doc/roles loop at 23-29 instead of the flagged has_permission(write) calls (common.py:205-206, outside the window because of the pre-L5 anchor); the Verify claim is false."
+   }
   },
   {
    "name": "3q1gf7r9lq",
@@ -481,7 +490,10 @@
     "label": "safe-directional",
     "reason": "Correctly says the loop is not in the window and gives prose only; mentions the deprecated frappe.cache() call form but no code."
    },
-   "label": null
+   "label": {
+    "label": "safe-directional",
+    "reason": "OWNER: Approved the 15-case draft label set on 2026-10-18. Correctly says the loop is not in the window and gives prose only; mentions the deprecated frappe.cache() call form but no code."
+   }
   },
   {
    "name": "3q1j3utnoa",
@@ -630,7 +642,10 @@
     "label": "wrong",
     "reason": "Fabricated: invents user_names = [frappe.session.user] * 80 and a get_all prefetch shown as context that is not in the source."
    },
-   "label": null
+   "label": {
+    "label": "wrong",
+    "reason": "OWNER: Approved the 15-case draft label set on 2026-10-18. Fabricated: invents user_names = [frappe.session.user] * 80 and a get_all prefetch shown as context that is not in the source."
+   }
   },
   {
    "name": "3q1ln8bv2o",
@@ -751,7 +766,10 @@
     "label": "wrong",
     "reason": "Grounded, but replaces the SQL with frappe.get_all inside the same while loop, so the query still runs every iteration; get_all also adds an ORDER BY the SQL did not have."
    },
-   "label": null
+   "label": {
+    "label": "wrong",
+    "reason": "OWNER: Approved the 15-case draft label set on 2026-10-18. Grounded, but replaces the SQL with frappe.get_all inside the same while loop, so the query still runs every iteration; get_all also adds an ORDER BY the SQL did not have."
+   }
   },
   {
    "name": "3q1nfc4d2l",
@@ -889,7 +907,10 @@
     "label": "correct",
     "reason": "Hoists get_doc and the roles lookup above the loop; frappe.db.get_values(..., pluck=True) is a valid v16 call and applies no permission checks, the same as the replaced db.sql."
    },
-   "label": null
+   "label": {
+    "label": "correct",
+    "reason": "OWNER: Approved the 15-case draft label set on 2026-10-18. Hoists get_doc and the roles lookup above the loop; frappe.db.get_values(..., pluck=True) is a valid v16 call and applies no permission checks, the same as the replaced db.sql."
+   }
   },
   {
    "name": "3q1qg8btng",
@@ -1006,7 +1027,10 @@
     "label": "wrong",
     "reason": "Fixes the get_doc/roles loop at 23-29 instead of the flagged has_permission(read) calls (common.py:206 and 290, outside the window because of the pre-L5 anchor)."
    },
-   "label": null
+   "label": {
+    "label": "wrong",
+    "reason": "OWNER: Approved the 15-case draft label set on 2026-10-18. Fixes the get_doc/roles loop at 23-29 instead of the flagged has_permission(read) calls (common.py:206 and 290, outside the window because of the pre-L5 anchor)."
+   }
   },
   {
    "name": "5qi7eha1pf",
@@ -1120,7 +1144,10 @@
     "label": "safe-directional",
     "reason": "Prose only: the cost is inside set_missing_values in ERPNext core; advice to batch lookups is generic but harmless."
    },
-   "label": null
+   "label": {
+    "label": "safe-directional",
+    "reason": "OWNER: Approved the 15-case draft label set on 2026-10-18. Prose only: the cost is inside set_missing_values in ERPNext core; advice to batch lookups is generic but harmless."
+   }
   },
   {
    "name": "5qid8t8lu5",
@@ -1188,7 +1215,10 @@
     "label": "safe-directional",
     "reason": "Prose only; says the cost is below super().validate(). Contains two inaccuracies (Search Index via Customize Form; frappe.cache()) but no code."
    },
-   "label": null
+   "label": {
+    "label": "safe-directional",
+    "reason": "OWNER: Approved the 15-case draft label set on 2026-10-18. Prose only; says the cost is below super().validate(). Contains two inaccuracies (Search Index via Customize Form; frappe.cache()) but no code."
+   }
   },
   {
    "name": "5qiej4vhmk",
@@ -1302,7 +1332,10 @@
     "label": "safe-directional",
     "reason": "Prose only: points below super().validate() and at validate_duplicate_serial_and_batch_bundle; generic batching advice."
    },
-   "label": null
+   "label": {
+    "label": "safe-directional",
+    "reason": "OWNER: Approved the 15-case draft label set on 2026-10-18. Prose only: points below super().validate() and at validate_duplicate_serial_and_batch_bundle; generic batching advice."
+   }
   },
   {
    "name": "5qih2paean",
@@ -1416,7 +1449,10 @@
     "label": "harmful",
     "reason": "Diff to ERPNext core that skips super().validate() on a second call through a _validated flag it wrongly calls frappe.local-scoped; a later validate in the same request would skip validation."
    },
-   "label": null
+   "label": {
+    "label": "harmful",
+    "reason": "OWNER: Approved the 15-case draft label set on 2026-10-18. Diff to ERPNext core that skips super().validate() on a second call through a _validated flag it wrongly calls frappe.local-scoped; a later validate in the same request would skip validation."
+   }
   },
   {
    "name": "5qij9o50so",
@@ -1530,7 +1566,10 @@
     "label": "safe-directional",
     "reason": "Prose only: profile the parent validate; generic batching advice."
    },
-   "label": null
+   "label": {
+    "label": "safe-directional",
+    "reason": "OWNER: Approved the 15-case draft label set on 2026-10-18. Prose only: profile the parent validate; generic batching advice."
+   }
   },
   {
    "name": "5qimkr12p6",
@@ -1673,7 +1712,10 @@
     "label": "wrong",
     "reason": "OWNER DECIDES (wrong or harmful): the rewrite returns out * 2000, a 2000-times longer string, while the original returns out unchanged (the copy loop is a no-op); applying it changes what _hash_payload receives. Research counts it as a semantic error (prompt lens) or a good answer (lateral)."
    },
-   "label": null
+   "label": {
+    "label": "wrong",
+    "reason": "OWNER: Approved the 15-case draft label set on 2026-10-18. OWNER DECIDES (wrong or harmful): the rewrite returns out * 2000, a 2000-times longer string, while the original returns out unchanged (the copy loop is a no-op); applying it changes what _hash_payload receives. Research counts it as a semantic error (prompt lens) or a good answer (lateral)."
+   }
   },
   {
    "name": "5qirpu97ci",
@@ -1807,7 +1849,10 @@
     "label": "correct",
     "reason": "O(1) replacement of the repeated addition; equal to the original for the only caller's inputs (range(8000)). For negative n the original computes n * abs(n), which n * n does not match."
    },
-   "label": null
+   "label": {
+    "label": "correct",
+    "reason": "OWNER: Approved the 15-case draft label set on 2026-10-18. O(1) replacement of the repeated addition; equal to the original for the only caller's inputs (range(8000)). For negative n the original computes n * abs(n), which n * n does not match."
+   }
   }
  ]
 }

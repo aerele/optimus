@@ -81,6 +81,7 @@ def _stub_frappe(cache: _FakeCache, *, has_doctype: bool = False):
 	db = types.SimpleNamespace()
 	db.exists = lambda *_a, **_kw: False if not has_doctype else True
 	frappe.db = db
+	frappe.get_doc = lambda *a, **kw: {}
 	frappe.get_cached_doc = lambda *_a, **_kw: (_ for _ in ()).throw(
 		RuntimeError("get_cached_doc should not be called when has_doctype=False")
 	)
@@ -94,7 +95,7 @@ class TestSettingsEnvelopeWrite:
 
 	def test_fresh_write_stores_envelope_not_bare_dict(self, fresh):
 		cache = _FakeCache()
-		frappe_stub = _stub_frappe(cache)
+		frappe_stub = _stub_frappe(cache, has_doctype=True)
 
 		with mock.patch.dict(sys.modules, {"frappe": frappe_stub}):
 			cfg = fresh.get_config()
@@ -183,7 +184,7 @@ class TestSettingsEnvelopeDriftHandling:
 		# Seed with an envelope tagged as schema version 999 a future
 		# version this build doesn't recognise.
 		cache.store[fresh._CACHE_KEY] = {"_v": 999, "data": {"ai_enabled": True}}
-		frappe_stub = _stub_frappe(cache)
+		frappe_stub = _stub_frappe(cache, has_doctype=True)
 
 		with mock.patch.dict(sys.modules, {"frappe": frappe_stub}):
 			cfg = fresh.get_config()

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import re
+from contextlib import contextmanager
 
 from optimus import safe_call
 from optimus.analyzers.base import TAB_TABLE_RE
@@ -15,6 +16,7 @@ from optimus.dbdialect.base import (
 	InfraSnapshot,
 	NormalizedPlan,
 	PlanTable,
+	prepare_explain_query,
 	to_float,
 	to_int,
 	to_int_or_none,
@@ -53,12 +55,42 @@ class MariaDBDialect(Dialect):
 		# module-level infra_capture._db_max_connections_cached.
 		self._max_connections_cached: int | None = None
 
+	# -- statement time limit -------------------------------------------
+
+	@contextmanager
+	def statement_time_limit(self, seconds: float):
+		import frappe
+
+		try:
+			previous = frappe.db.sql("SELECT @@SESSION.max_statement_time")[0][0]
+			frappe.db.sql(f"SET SESSION max_statement_time = {float(seconds)}")
+		except Exception:
+			previous = None
+		try:
+			yield
+		finally:
+			if previous is not None:
+				try:
+					frappe.db.sql(f"SET SESSION max_statement_time = {float(previous)}")
+				except Exception:
+					pass
+
+	def is_statement_timeout(self, error: Exception) -> bool:
+		# ER_STATEMENT_TIMEOUT, raised when max_statement_time is exceeded.
+		return bool(getattr(error, "args", None)) and error.args[0] == 1969
+
 	# -- EXPLAIN ---------------------------------------------------------
 
 	def run_explain(self, query: str) -> NormalizedPlan:
 		import frappe
 
 		try:
+			query = prepare_explain_query(query)
+		except ValueError as exc:
+			return NormalizedPlan(ok=False, reason=str(exc))
+		try:
+			# Recorded SQL, guarded above against compound statements; EXPLAIN cannot bind SQL as a value.
+			# nosemgrep: frappe-sql-format-injection
 			rows = frappe.db.sql(f"EXPLAIN {query}", as_dict=True) or []
 		except Exception:
 			return NormalizedPlan(ok=False, tables=[], raw=[])
@@ -104,23 +136,40 @@ class MariaDBDialect(Dialect):
 			if not key_name:
 				continue
 			entry = by_name.setdefault(
-				key_name, {"_cols": [], "unique": not r.get("Non_unique")}
+				key_name, {"_cols": [], "unique": not r.get("Non_unique"), "usable": True}
 			)
+			# Every key part must be an ordinary, full-column, enabled b-tree.
+			# Missing visibility/type metadata is not proof that an index is usable.
+			usable = (
+				str(r.get("Index_type", "")).upper() == "BTREE"
+				and str(r.get("Ignored", "")).upper() == "NO"
+				and "Sub_part" in r and r["Sub_part"] is None
+				and bool(r.get("Column_name") or r.get("column_name"))
+			)
+			entry["usable"] &= usable
 			try:
 				seq = int(r.get("Seq_in_index") or r.get("seq_in_index") or 0)
 			except (TypeError, ValueError):
 				seq = 0
-			entry["_cols"].append((seq, r.get("Column_name") or r.get("column_name")))
+			entry["_cols"].append((seq, r.get("Column_name") or r.get("column_name"), usable))
 
 		out: list = []
 		for key_name, e in by_name.items():
-			cols = [c for _seq, c in sorted(e["_cols"]) if c]
+			parts = sorted(e["_cols"], key=lambda part: part[0])
+			cols = [c for _seq, c, _usable in parts if c]
+			prefix = []
+			for seq, col, usable in parts:
+				if not usable or seq != len(prefix) + 1:
+					break
+				prefix.append(col)
 			out.append(
 				IndexInfo(
 					name=key_name,
 					columns=cols,
 					unique=bool(e["unique"]),
-					leftmost=(cols[0] if cols else None),
+					leftmost=(prefix[0] if prefix else None),
+					eligible=e["usable"], reason="" if e["usable"] else "not_full_btree",
+					usable_prefix=tuple(prefix),
 				)
 			)
 		return out

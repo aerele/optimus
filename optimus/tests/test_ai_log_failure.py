@@ -607,7 +607,8 @@ class TestExceptionText:
 				raise ai_fix.AiFixError(reply)  # noqa: B904 (chained on purpose)
 		except ai_fix.AiFixError as e:
 			exc = e
-		exc.add_note("NOTE-MARKER")
+		# __notes__ is the storage contract; add_note() was added in Python 3.11.
+		exc.__notes__ = ["NOTE-MARKER"]
 		setattr(exc, ai_fix._LOG_TEXT_ATTR, self._LOG_TEXT)
 		text = ai_fix._exception_text(exc)
 		assert text.startswith("Traceback (most recent call last):\n")
@@ -809,7 +810,7 @@ class TestHttpFailurePath:
 		with pytest.raises(ai_fix.AiFixError) as ei:
 			ai_fix._call_openai_chat(
 				"http://alice:hunter2-pass@llm.internal:11434/v1", "", "m", "s", [{"role": "user", "content": "x"}]
-			)
+			, max_tokens=4096)
 		message = str(ei.value)
 		assert ei.value.kind == "config"
 		assert "alice" not in message and "hunter2-pass" not in message
@@ -822,7 +823,7 @@ class TestHttpFailurePath:
 		with pytest.raises(ai_fix.AiFixError) as ei:
 			ai_fix._call_openai_chat(
 				f"https://gw.internal/{KEY}/v1", "", "m", "s", [{"role": "user", "content": "x"}]
-			)
+			, max_tokens=4096)
 		assert "https://gw.internal/********/v1/chat/completions" in ei.value.detail
 		assert "gw.internal" not in str(ei.value) and KEY not in ei.value.detail
 		assert KEY not in str(ei.value)
@@ -837,7 +838,7 @@ class TestHttpFailurePath:
 		with pytest.raises(ai_fix.AiFixError) as ei:
 			ai_fix._call_openai_chat(
 				"https://llm.internal/hunter2-pass/v1", "", "m", "s", [{"role": "user", "content": "x"}]
-			)
+			, max_tokens=4096)
 		message = str(ei.value)
 		assert "(the configured Base URL)" in ei.value.detail
 		assert "hunter2-pass" not in ei.value.detail and "llm.internal" not in ei.value.detail
@@ -1215,7 +1216,7 @@ class TestARedirectIsNeverFollowed:
 		sent = []
 		monkeypatch.setattr(requests.sessions, "HTTPAdapter", lambda *a, **k: _RedirectingAdapter(sent))
 		with pytest.raises(ai_fix.AiFixError) as ei:
-			call(_RedirectingAdapter.PROVIDER, KEY, "m", "system", [{"role": "user", "content": "hi"}])
+			call(_RedirectingAdapter.PROVIDER, KEY, "m", "system", [{"role": "user", "content": "hi"}], max_tokens=4096)
 		assert ei.value.kind == "bad_response" and ei.value.status_code == 302
 		assert len(sent) == 1  # the redirect was not followed
 		url, headers = sent[0]
@@ -1272,7 +1273,7 @@ class TestOnlyASameOriginRedirectIsFollowed:
 	def _run(self, monkeypatch, call, base, script):
 		sent = []
 		monkeypatch.setattr(requests.sessions, "HTTPAdapter", lambda *a, **k: _ScriptedAdapter(sent, script))
-		text = call(base, KEY, "m", "system", [{"role": "user", "content": "hi"}])
+		text = call(base, KEY, "m", "system", [{"role": "user", "content": "hi"}], max_tokens=4096)
 		return text, sent
 
 	@pytest.mark.parametrize(("call", "base", "path", "header", "value"), _CALLS, ids=["anthropic", "openai"])
@@ -1333,7 +1334,7 @@ class TestOnlyASameOriginRedirectIsFollowed:
 		script = [(status, location), (200, None)]
 		monkeypatch.setattr(requests.sessions, "HTTPAdapter", lambda *a, **k: _ScriptedAdapter(sent, script))
 		with pytest.raises(ai_fix.AiFixError) as ei:
-			call(base, KEY, "m", "system", [{"role": "user", "content": "hi"}])
+			call(base, KEY, "m", "system", [{"role": "user", "content": "hi"}], max_tokens=4096)
 		assert ei.value.kind == "bad_response" and ei.value.status_code == status
 		assert "a Base URL that answers 301, 302 or 303, or redirects to another host, must be set to the final URL" in str(ei.value)
 		assert len(sent) == 1 and sent[0][1] == base + path  # not followed
@@ -1356,12 +1357,12 @@ class TestOnlyASameOriginRedirectIsFollowed:
 		script = [(307, location), (200, None)]
 		monkeypatch.setattr(requests.sessions, "HTTPAdapter", lambda *a, **k: _ScriptedAdapter(sent, script))
 		if followed:
-			assert ai_fix._call_anthropic(base, KEY, "m", "s", [{"role": "user", "content": "hi"}]) == "ok"
+			assert ai_fix._call_anthropic(base, KEY, "m", "s", [{"role": "user", "content": "hi"}], max_tokens=4096) == "ok"
 			assert [u for _m, u, _h, _b in sent] == [base + "/v1/messages", location]
 			assert sent[1][2]["x-api-key"] == KEY
 		else:
 			with pytest.raises(ai_fix.AiFixError) as ei:
-				ai_fix._call_anthropic(base, KEY, "m", "s", [{"role": "user", "content": "hi"}])
+				ai_fix._call_anthropic(base, KEY, "m", "s", [{"role": "user", "content": "hi"}], max_tokens=4096)
 			assert ei.value.kind == "bad_response" and len(sent) == 1
 
 	@pytest.mark.parametrize(("call", "base", "path", "header", "value"), _CALLS, ids=["anthropic", "openai"])
@@ -1370,7 +1371,7 @@ class TestOnlyASameOriginRedirectIsFollowed:
 		script = [(307, f"/hop{i}") for i in range(1, 5)] + [(200, None)]
 		monkeypatch.setattr(requests.sessions, "HTTPAdapter", lambda *a, **k: _ScriptedAdapter(sent, script))
 		with pytest.raises(ai_fix.AiFixError) as ei:
-			call(base, KEY, "m", "system", [{"role": "user", "content": "hi"}])
+			call(base, KEY, "m", "system", [{"role": "user", "content": "hi"}], max_tokens=4096)
 		assert ei.value.kind == "bad_response" and ei.value.status_code == 307
 		assert [u.rsplit("/", 1)[-1] for _m, u, _h, _b in sent][1:] == ["hop1", "hop2", "hop3"]
 		assert len(logs) == 1 and "hop" not in logs[0]["message"]
@@ -1381,7 +1382,7 @@ class TestOnlyASameOriginRedirectIsFollowed:
 		monkeypatch.setattr(requests.sessions, "HTTPAdapter", lambda *a, **k: _ScriptedAdapter(sent, script))
 		monkeypatch.setattr(ai_fix, "urljoin", _raising(job_timeout, holds=KEY))
 		with pytest.raises(_JobTimeout) as ei:
-			ai_fix._call_anthropic(_CALLS[0][1], KEY, "m", "s", [{"role": "user", "content": "hi"}])
+			ai_fix._call_anthropic(_CALLS[0][1], KEY, "m", "s", [{"role": "user", "content": "hi"}], max_tokens=4096)
 		assert ei.value is not job_timeout and ei.value.__context__ is None
 		assert len(sent) == 1 and logs == []
 
@@ -1389,7 +1390,7 @@ class TestOnlyASameOriginRedirectIsFollowed:
 		sent = []
 		script = [(307, "/hop1"), (308, "/hop2"), (307, "/hop3"), (200, None)]
 		monkeypatch.setattr(requests.sessions, "HTTPAdapter", lambda *a, **k: _ScriptedAdapter(sent, script))
-		assert ai_fix._call_anthropic(_CALLS[0][1], KEY, "m", "s", [{"role": "user", "content": "hi"}]) == "ok"
+		assert ai_fix._call_anthropic(_CALLS[0][1], KEY, "m", "s", [{"role": "user", "content": "hi"}], max_tokens=4096) == "ok"
 		assert len(sent) == 4
 
 
@@ -1465,7 +1466,7 @@ class TestNothingIsLoggedOrSentWhileAnExceptionIsActive:
 		monkeypatch.setattr(requests, "post", fake)
 		text = ai_fix._call_openai_chat(
 			"https://x.invalid/v1", "", "kimi-k2", "s", [{"role": "user", "content": "x"}]
-		)
+		, max_tokens=4096)
 		assert text == "done"
 		assert fake.active_at_send == [None, None]
 
@@ -1477,7 +1478,7 @@ class TestNothingIsLoggedOrSentWhileAnExceptionIsActive:
 		with pytest.raises(ai_fix.AiFixError) as ei:
 			ai_fix._call_openai_chat(
 				"https://x.invalid/v1", "", "kimi-k2", "s", [{"role": "user", "content": "x"}]
-			)
+			, max_tokens=4096)
 		assert ei.value.status_code == 500
 		assert ei.value.__context__ is None and ei.value.__cause__ is None
 		# one terminal failure row, written with no exception active
@@ -1879,7 +1880,7 @@ class TestCallSitesLogOnce:
 
 	def test_non_http_failure_is_logged_by_the_caller(self, logs, monkeypatch):
 		analyze, doc = _backfill_env(monkeypatch)
-		empty = {"choices": [{"message": {"content": "   "}}]}
+		empty = {"choices": [{"message": {"content": "   "}, "finish_reason": "stop"}]}
 		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(200, empty)))
 		for row in doc.findings:
 			analyze._run_ai_step(

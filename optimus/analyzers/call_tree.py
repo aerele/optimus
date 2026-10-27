@@ -543,6 +543,25 @@ def _frames_match(node: dict, frame: dict) -> bool:
 	return (node.get("function") or "") == (frame.get("function") or "")
 
 
+def _same_file(node: dict, frame: dict) -> bool:
+	"""True when one filename is a path suffix of the other (recorder and pyinstrument trim differently)."""
+	a = (node.get("filename") or "").replace("\\", "/").strip("/")
+	b = (frame.get("filename") or "").replace("\\", "/").strip("/")
+	return bool(a and b) and (a == b or a.endswith("/" + b) or b.endswith("/" + a))
+
+
+def _match_child(current: dict, frame: dict):
+	"""Child matching ``frame`` by name, preferring the same file; a name-only match must be unambiguous."""
+	named = [c for c in current.get("children", []) if _frames_match(c, frame)]
+	if len(named) < 2:
+		return named[0] if named else None
+	for child in named:
+		if _same_file(child, frame):
+			return child
+	# Several share the name and none is in this file: too ambiguous to descend.
+	return None
+
+
 def _find_graft_point(root: dict, stack: list):
 	"""Walk a recorder stack against the pyi tree; return (graft_node, partial).
 
@@ -561,12 +580,7 @@ def _find_graft_point(root: dict, stack: list):
 	last_matched_index = -1
 
 	for i, frame in enumerate(stack):
-		# Look for a child of `current` that matches this frame
-		next_child = None
-		for child in current.get("children", []):
-			if _frames_match(child, frame):
-				next_child = child
-				break
+		next_child = _match_child(current, frame)
 		if next_child is None:
 			# No further match stop descending
 			break
@@ -762,6 +776,7 @@ HOT_PATH_HIGH_MS_MULTIPLIER = 2.5      # 500 / 200
 # severity its absolute impact deserves without this, the TL;DR
 # headline picks smaller High findings over larger Medium ones.
 HOT_PATH_HIGH_ABS_MULTIPLIER = 2.0     # 2× high_ms → 1000ms by default
+SELF_TIME_MIN_SHARE = 0.5              # fraction of time in callees at which it is not reported as self-time
 SQL_DOMINANCE_SUPPRESSION_PCT = 0.80
 
 
@@ -1134,7 +1149,44 @@ def _walk_for_findings(
 					or action_label.endswith(f".{fn_name}")
 					or action_label.endswith(f":{fn_name}")
 				)
-				if self_referential:
+				# Time mostly in callees: report the slow callees, and own time only when hot by itself.
+				callee_ms = sum(
+					c.get("cumulative_ms", 0) for c in node.get("children") or []
+					if c.get("kind") == "python"
+				)
+				own_time_unreported = False
+				if self_referential and callee_ms >= cumulative * SELF_TIME_MIN_SHARE:
+					before = len(findings)
+					_walk_children(
+						node, parent_chain, action_idx, action_label, action_wall_time_ms,
+						findings, tracked_apps, installed_apps,
+					)
+					own_ms = node.get("self_ms") or 0
+					own_pct = min(1.0, own_ms / action_wall_time_ms) if action_wall_time_ms else 0
+					if own_pct >= med_pct and own_ms >= med_ms:
+						impact_ms = own_ms
+						pct_str = f"{own_pct * 100:.0f}%"
+						severity = "High" if (
+							(own_pct >= high_pct and own_ms >= high_ms)
+							or own_ms >= HOT_PATH_HIGH_ABS_MULTIPLIER * high_ms
+						) else "Medium"
+					elif len(findings) > before:
+						return
+					else:
+						self_referential = False
+						own_time_unreported = True
+				if own_time_unreported:
+					title = (
+						f"{fn_name} and its callees took "
+						f"{pct_str} of the action ({dur(impact_ms)})"
+					)
+					desc = (
+						f"**{fn_name}** and the functions it calls consumed "
+						f"{pct_str} of the action time ({dur(impact_ms)}). "
+						"Its own body is not the hot spot. Open the call tree "
+						"to see which callees and queries the time goes to."
+					)
+				elif self_referential:
 					title = (
 						f"{fn_name} is a self-time hot path "
 						f"({pct_str} of the action, {dur(impact_ms)})"
@@ -1192,7 +1244,23 @@ def _walk_for_findings(
 			# overlapping nested findings.
 			return
 
-	# Recurse into children
+	_walk_children(
+		node, parent_chain, action_idx, action_label, action_wall_time_ms, findings,
+		tracked_apps, installed_apps,
+	)
+
+
+def _walk_children(
+	node: dict,
+	parent_chain: list,
+	action_idx: int,
+	action_label: str,
+	action_wall_time_ms: float,
+	findings: list,
+	tracked_apps: tuple[str, ...] | None = None,
+	installed_apps: frozenset[str] | None = None,
+) -> None:
+	"""Run ``_walk_for_findings`` over the node's python children."""
 	new_chain = parent_chain + [node]
 	for child in node.get("children", []):
 		if child.get("kind") == "sql":
@@ -1587,7 +1655,10 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 		# "all trees at once" to "one at a time". Covers the pyi-is-None branch
 		# below too. (Guarded by a test that no later analyzer reads pyi_session.)
 		pyi = recording.pop("pyi_session", None)
-		calls = [c for c in recording.get("calls") or [] if not is_error_log_hook_query(c.get("stack"))]
+		calls = [
+			c for c in recording.get("calls") or []
+			if isinstance(c, dict) and not is_error_log_hook_query(c.get("stack"))
+		]
 		# Track SQL time even if no pyi tree
 		sql_total_ms += sum(c.get("duration", 0) for c in calls)
 

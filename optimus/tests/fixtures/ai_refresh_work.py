@@ -15,6 +15,8 @@ from optimus.tests.fixtures.ai_refresh_journal import journal as _journal_fixtur
 
 class Doc(dict):
 	def __getattr__(self, key):
+		if key.startswith("__"):
+			raise AttributeError(key)
 		return self.get(key)
 
 	def as_dict(self):
@@ -94,7 +96,9 @@ def work(journal, monkeypatch):
 	user_permission.get_user_permissions = lambda user=None: env.user_permissions
 	monkeypatch.setitem(sys.modules, user_permission.__name__, user_permission)
 	monkeypatch.setattr(jobs, "_now", lambda: 20)
-	monkeypatch.setattr("optimus.settings.get_config", lambda: SimpleNamespace(ai_excluded_finding_types=[]))
+	monkeypatch.setattr("optimus.settings.get_config", lambda: SimpleNamespace(
+		ai_excluded_finding_types=[], ai_enabled=True, ai_auto_suggest=True, ai_suggest_findings=True,
+	))
 	monkeypatch.setattr(ai_fix, "is_available", lambda **kw: True)
 	monkeypatch.setattr(
 		jobs,

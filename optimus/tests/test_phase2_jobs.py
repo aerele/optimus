@@ -17,6 +17,7 @@ def phase2(monkeypatch):
 
 	monkeypatch.setattr("frappe.utils.now_datetime", lambda: datetime(2026, 10, 14, 12))
 	mod = import_module("optimus.line_profile.jobs")
+	monkeypatch.setattr("optimus.journal_schema.ready", lambda *a: True)
 	from optimus import ai_refresh_store
 	db = Database()
 	db.rows[ai_refresh_store.CONTROL] = {"site": {"name": "site", "generation": 0}}
@@ -28,6 +29,7 @@ def phase2(monkeypatch):
 	monkeypatch.setattr(mod, "frappe", fake)
 	monkeypatch.setattr(ai_refresh_store, "frappe", fake)
 	monkeypatch.setattr(mod, "_authorized", lambda *a: True)
+	monkeypatch.setattr(mod, "_workers_listening", lambda *a: True)
 	return SimpleNamespace(mod=mod, db=db, row=lambda: db.rows[mod.TABLE]["fake-child"])
 
 
@@ -63,6 +65,37 @@ def test_retry_cannot_overwrite_recording_or_finished_results(phase2, status):
 def test_stopping_recording_uses_same_durable_queue(phase2):
 	phase2.row()["status"] = "Recording"
 	assert admit(phase2, from_recording=True)["status"] == "queued"
+
+
+@pytest.mark.parametrize('workers', [False, None])
+@pytest.mark.parametrize('status', ['Recording', 'Failed', 'Analyzing'])
+def test_no_worker_refuses_without_stranding_capture_or_spending_attempt(phase2, workers, status):
+	phase2.row()['status'] = status
+	phase2.row()['warnings_json'] = '["Existing input diagnostic"]'
+	out = admit(phase2, from_recording=status == 'Recording', workers=workers)
+	assert out['status'] == 'refused'
+	assert phase2.row()['status'] == 'Failed' and phase2.row()['analyze_attempts'] == 0
+	assert ('Existing input diagnostic' if status == 'Failed' else 'worker') in phase2.row()['warnings_json']
+	if workers is None and status != 'Failed':
+		assert 'could not be checked' in phase2.row()['warnings_json']
+
+
+def test_exhausted_retry_preserves_diagnostic_before_worker_check(phase2):
+	phase2.row().update(analyze_attempts=4, warnings_json='["Input missing: record a new pass"]')
+	assert admit(phase2, workers=False)['reason'] == 'retry_limit'
+	assert phase2.row()['warnings_json'] == '["Input missing: record a new pass"]'
+
+
+def test_late_capture_snapshot_requests_retry_instead_of_new_pass(worker, monkeypatch):
+	admit(worker)
+	def changed(*a):
+		raise worker.mod.InputChanged()
+	monkeypatch.setattr(worker.analyzer, '_compute_run', changed)
+	with pytest.raises(worker.mod.Phase2Failed):
+		run_worker(worker)
+	assert worker.row()['status'] == 'Failed'
+	assert 'retry analysis' in worker.row()['warnings_json']
+	assert 'Record a new' not in worker.row()['warnings_json']
 
 
 def test_duplicate_delivery_including_same_token_cannot_claim_twice(phase2):
@@ -456,14 +489,16 @@ def test_worker_uses_current_actor_permissions(monkeypatch, user, enabled, roles
 
 
 def test_realtime_timeout_remains_a_fresh_interrupt(monkeypatch):
+	from optimus import realtime
 	from optimus.line_profile import analyzer
 	Timeout = pytest.importorskip("rq.timeouts", exc_type=ImportError).JobTimeoutException
 	original = Timeout("fake realtime timeout")
 	def timeout(*a, **kw):
 		raise original
-	monkeypatch.setattr(analyzer, "frappe", SimpleNamespace(publish_realtime=timeout))
+	monkeypatch.setattr(realtime, "frappe", SimpleNamespace(publish_realtime=timeout,
+		db=SimpleNamespace(get_value=lambda *a, **kw: {"name": "fake-doc", "user": "fake-owner"})))
 	with pytest.raises(Timeout) as caught:
-		analyzer._publish("fake-event", {"user": "fake-owner"})
+		analyzer._publish("fake-event", {"parent": "fake-doc", "user": "fake-owner"})
 	assert caught.value is not original and caught.value.__context__ is None
 
 
@@ -725,3 +760,25 @@ def test_force_stop_preserves_input_if_analysis_claims_it(phase2, monkeypatch, r
 	out = phase2.mod.force_stop_captures("capture-user")
 	assert out["rows_marked_failed"] == int(not raced)
 	assert phase2.row()["status"] == ("Analyzing" if raced else "Failed")
+
+
+def test_redis_cleanup_failure_does_not_skip_ai_admission_after_ready(worker, monkeypatch):
+	from optimus.line_profile import capture
+	admit(worker)
+	def fail(*a):
+		raise ConnectionError("synthetic cleanup outage")
+	monkeypatch.setattr(capture, "cleanup_run", fail)
+	run_worker(worker)
+	assert worker.row()["status"] == "Ready"
+	assert len(worker.calls.persist) == len(worker.calls.ai) == 1
+	run_worker(worker)
+	assert len(worker.calls.persist) == len(worker.calls.ai) == 1
+
+
+def test_phase2_dispatch_uses_shared_interval(phase2, monkeypatch):
+	monkeypatch.setattr(phase2.mod.store, "DISPATCH_INTERVAL", 7)
+	admit(phase2)
+	run = {"parent": "fake-session-doc", "run_uuid": "fake-phase2", "analyze_generation": "generation-1"}
+	for now, expected in [(100, True), (106, False), (107, True)]:
+		with phase2.db.transaction():
+			assert bool(phase2.mod._prepare_dispatch(run, now=now)) == expected

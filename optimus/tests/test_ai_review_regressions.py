@@ -53,10 +53,10 @@ def test_plain_block_context_sql_cannot_pay_for_a_new_call():
     assert "raw-sql" in violations('```python\n'+source[0]+'\nmore = frappe.db.sql("select 2")\n```', source)
 
 
-def test_kept_sql_opener_can_still_have_its_parameters_fixed():
+def test_kept_sql_opener_does_not_exempt_changed_parameters():
     source = ['rows = frappe.db.sql(', '    f"select {name}"', ')']
     body = '```diff\n rows = frappe.db.sql(\n-    f"select {name}"\n+    "select %(name)s", {"name": name}\n )\n```'
-    assert violations(body, source) == set()
+    assert violations(body, source) == {"raw-sql"}
 
 
 @pytest.mark.parametrize("heading", ["Diagnosis", "Why it works", "Verify"])
@@ -113,6 +113,6 @@ def test_anthropic_prompt_usage_distinguishes_missing_input(monkeypatch, usage, 
         "content": [{"type": "text", "text": Replies._GOOD}], "stop_reason": "end_turn", "usage": usage,
     }))
     monkeypatch.setattr(requests, "post", fake)
-    with _provider(dict(Replies._PROVIDER, protocol="anthropic", name="Anthropic", context_tokens=8192)):
+    with _provider(dict(Replies._PROVIDER, protocol="anthropic", name="Anthropic", model="claude-sonnet-4-6", context_tokens=8192)):
         result = ai_fix.suggest_fix(dict(Replies._FINDING))
     assert ("context-truncated" in result["guardrail"]["violations"]) is expected

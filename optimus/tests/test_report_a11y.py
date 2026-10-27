@@ -156,6 +156,21 @@ _HOSTILE_SUGGESTION = (
 )
 
 
+def test_report_csp_keeps_styles_and_embedded_images_without_active_content():
+	html = _render()
+	policy = re.search(r'<meta http-equiv="Content-Security-Policy" content="([^"]+)">', html)
+	assert policy is not None
+	directives = {parts[0]: parts[1:] for item in policy[1].split(";") if (parts := item.split())}
+	assert directives == {
+		"default-src": ["'none'"],
+		"style-src": ["'unsafe-inline'"],
+		"img-src": ["data:"],
+		"base-uri": ["'none'"],
+		"form-action": ["'none'"],
+	}
+	assert policy.start() < html.index("<style>")
+
+
 def test_report_is_self_contained_offline():
 	# A distinct callsite and type so root-cause grouping never folds it into
 	# the first finding's card.

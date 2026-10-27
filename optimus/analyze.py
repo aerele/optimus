@@ -18,7 +18,7 @@ import os
 import pickle
 import re
 import time
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from dataclasses import asdict
 from datetime import datetime, timezone
 
@@ -32,7 +32,7 @@ from frappe.recorder import (
 )
 from frappe.utils.scheduler import is_scheduler_disabled
 
-from optimus import ai_grounding, ai_prompts, renderer, safe_call, safe_commit, session
+from optimus import ai_grounding, ai_privacy, ai_prompts, renderer, safe_call, safe_commit, session
 from optimus.analyzers import (
 	call_tree,
 	explain_flags,
@@ -144,7 +144,8 @@ def _publish_progress(percent: float, description: str, session_uuid: str):
 	"""Emit an optimus_progress update for the floating widget and form UI.
 	Best-effort, never raises."""
 	try:
-		frappe.publish_realtime(
+		from optimus.realtime import publish_session_event
+		publish_session_event(
 			"optimus_progress",
 			{
 				"session_uuid": session_uuid,
@@ -163,7 +164,7 @@ def _publish_session_event(
 	docname: str | None,
 	**extra,
 ) -> None:
-	"""Publish a session-state transition event to the session owner's Desk tabs.
+	"""Publish a state transition to the recording user and authorized open forms.
 
 	Runs in the background analyze job (no request-scoped user), so the user is
 	looked up from the Optimus Session row. Events: optimus_session_analyzing,
@@ -171,17 +172,10 @@ def _publish_session_event(
 	publish failure never derails analyze (the state is durable on the row).
 	"""
 	try:
-		user = None
-		if docname:
-			try:
-				user = frappe.db.get_value(
-					"Optimus Session", docname, "user"
-				)
-			except Exception:
-				user = None
+		from optimus.realtime import publish_session_event
 		payload = {"session_uuid": session_uuid, "docname": docname}
 		payload.update(extra)
-		frappe.publish_realtime(event_name, payload, user=user)
+		publish_session_event(event_name, payload)
 	except Exception:
 		pass
 
@@ -407,7 +401,7 @@ def _acquire_singleflight(session_uuid: str, docname: str, deadline) -> bool:
 
 	# Keep the UI honest, throttle and re-enqueue ourselves to yield the worker.
 	try:
-		frappe.db.set_value("Optimus Session", docname, "status", "Analyzing")
+		frappe.db.set_value("Optimus Session", {"name": docname, "status": ["in", list(_ANALYZE_PENDING)]}, "status", "Analyzing")
 		safe_commit()
 	except Exception:
 		pass
@@ -601,7 +595,7 @@ def _bg_wait_for_pending_jobs(session_uuid: str, docname: str, deadline):
 	# self-heals this status too, so a stranded drain can't get stuck.
 	try:
 		frappe.db.set_value(
-			"Optimus Session", docname, "status", "Capturing Background Jobs"
+			"Optimus Session", {"name": docname, "status": ["in", list(_ANALYZE_PENDING)]}, "status", "Capturing Background Jobs"
 		)
 		safe_commit()
 	except Exception:
@@ -726,7 +720,8 @@ def _arm_phase2(docname: str, context) -> None:
 	# form tell them a pass is armed and what to do next (re-run + Stop),
 	# since arming alone does nothing until the flow re-executes.
 	functions = [r["dotted_path"].rsplit(".", 1)[-1] for r in eligible][:5]
-	frappe.publish_realtime(
+	from optimus.realtime import publish_session_event
+	publish_session_event(
 		"optimus_phase2_armed",
 		{
 			"docname": docname,
@@ -734,8 +729,10 @@ def _arm_phase2(docname: str, context) -> None:
 			"count": len(eligible),
 			"functions": functions,
 		},
-		user=user,
 	)
+
+
+_ANALYZE_PENDING = frozenset({"Stopping", "Capturing Background Jobs", "Analyzing"})
 
 
 def run(session_uuid: str, _bg_wait_until: float | None = None,
@@ -772,8 +769,11 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 	analyze_start = time.monotonic()
 	bg_jobs_unfinished = 0
 	failure = None
+	completed_elsewhere = False
 
 	try:
+		if frappe.db.get_value("Optimus Session", docname, "status") not in _ANALYZE_PENDING:
+			return  # Late queue/janitor delivery must not reopen a completed session.
 		# v0.6.0: wait for the background jobs the profiled flow enqueued to
 		# finish before gathering recordings so jobs a worker picks up
 		# shortly after Stop aren't lost. Re-enqueues self (yielding the
@@ -793,8 +793,8 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 			return  # re-enqueued this invocation is done
 
 		# Phase: Analyzing
-		frappe.db.set_value("Optimus Session", docname, "status", "Analyzing")
-		safe_commit()
+		if not _begin_analysis(docname):
+			return  # A preceding delivery completed while this job was waiting.
 		# v0.5.1: push "analyzing" to any open widgets on this user's
 		# session. Without this the widget would either have to poll
 		# status() to learn about the transition, or rely on the inline
@@ -813,10 +813,23 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		# each recording's pyi_session is dropped after call_tree finishes
 		# with it (handled in the analyzer itself).
 		recordings = list(_fetch_recordings(recording_uuids))
+		from optimus.recording_bundle import SnapshotUnavailable
+		if set(recording_uuids) - {rec.get("uuid") for rec in recordings}:
+			raise SnapshotUnavailable("snapshot_recording_missing")
 
 		if not recordings:
-			_finalize_with_empty_session(docname)
-			session.delete_session_state(session_uuid)
+			if session.get_session_meta(session_uuid) is None:
+				raise SnapshotUnavailable("snapshot_session_missing")
+			previous_queries = frappe.db.get_value("Optimus Session", docname, "total_queries")
+			try:
+				had_queries = float(previous_queries or 0) > 0
+			except (TypeError, ValueError):
+				had_queries = False
+			if had_queries:
+				raise SnapshotUnavailable("snapshot_inputs_missing")
+			if not _with_active_analysis(docname, lambda: _finalize_with_empty_session(docname)):
+				return
+			_run_ai_step(lambda: session.delete_session_state(session_uuid), title="optimus ai empty recording cleanup", session_uuid=session_uuid)
 			_publish_progress(100, "Complete (no data)", session_uuid)
 			return
 
@@ -936,11 +949,17 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		# v0.6.0: attach ±1-line source snippets to each finding's callsite
 		# before persisting, so finding cards can show the offending line
 		# without requiring a per-render file read.
-		_enrich_findings_with_source_snippets(context.findings, owner=frappe.db.get_value("Optimus Session", docname, "owner"))
+		owner = frappe.db.get_value("Optimus Session", docname, "owner")
+		_persist_representative_callsites(context.findings, recordings, owner=owner)
+		_enrich_findings_with_source_snippets(context.findings, owner=owner)
 
 		_publish_progress(80, "Writing session data", session_uuid)
 		_touch_singleflight(session_uuid)  # _persist's humanize call is capped below the TTL too
-		_persist(docname, context, recordings, analyze_elapsed_ms)
+		if not _with_active_analysis(docname, lambda: _persist(docname, context, recordings, analyze_elapsed_ms)):
+			return
+		# Commit the complete recording snapshot before rendering and deleting Redis.
+		if not _with_active_analysis(docname, lambda: _persist_recordings_file(docname, session_uuid, recording_uuids)):
+			return
 
 		_touch_singleflight(session_uuid)  # M2 heartbeat before the render phase
 		_publish_progress(90, "Rendering reports", session_uuid)
@@ -949,50 +968,44 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		# reads raw SQL, headers, form_dict and full stack traces from the
 		# in-memory recordings list (not from the DocType, which only has
 		# normalized data).
-		_render_and_attach_reports(docname, recordings)
-
-		# v0.13: snapshot the raw recordings to a File BEFORE cleanup deletes
-		# them, so AI re-runs (steps humanize / fix grounding) and report
-		# drill-down regeneration still work on this session post-analyze.
-		_persist_recordings_file(docname, session_uuid, recording_uuids)
-
-		_cleanup_redis(session_uuid, recording_uuids)
+		if not _with_active_analysis(docname, lambda: _render_and_attach_reports(docname, recordings)):
+			return
 
 		# Phase: Ready
-		frappe.db.set_value("Optimus Session", docname, "status", "Ready")
-		safe_commit()
-		_publish_progress(100, "Report ready", session_uuid)
-
-		# Notify the UI so the floating widget can navigate the user to
-		# the report. v0.5.1: routed through _publish_session_event so
-		# it looks up the user consistently with the other state
-		# transitions (analyzing / failed).
-		_publish_session_event(
-			"optimus_session_ready",
-			session_uuid=session_uuid,
-			docname=docname,
-		)
+		if not _with_active_analysis(docname, lambda: frappe.db.set_value("Optimus Session", docname, "status", "Ready")):
+			return
 
 	except Exception as exc:
 		failure = exc
 		frappe.db.rollback()
+		changed = None
 		try:
-			frappe.db.set_value("Optimus Session", docname, "status", "Failed")
-			safe_commit()
+			from optimus.recording_bundle import SNAPSHOT_FAILURE_WARNING, SnapshotUnavailable
+			snapshot_missing = isinstance(exc, SnapshotUnavailable)
+			def fail():
+				frappe.db.set_value("Optimus Session", docname, "status", "Failed")
+				if snapshot_missing:
+					frappe.db.set_value("Optimus Session", docname, "analyzer_warnings", SNAPSHOT_FAILURE_WARNING)
+			changed = _with_active_analysis(docname, fail, statuses=_ANALYZE_PENDING)
 		except Exception:
 			pass
+		if changed is False:
+			completed_elsewhere = True
+			if not isinstance(exc, safe_call.job_timeout_types()):
+				failure = None
 		# v0.5.1: push "failed" to any open widgets so they transition
 		# out of "Analyzing…" immediately instead of hanging forever.
 		# Best-effort and isolated so a publish failure can't mask the
 		# original exception, logged and raised after this handler.
-		try:
-			_publish_session_event(
-				"optimus_session_failed",
-				session_uuid=session_uuid,
-				docname=docname,
-			)
-		except Exception:
-			pass
+		if changed is not False:
+			try:
+				_publish_session_event(
+					"optimus_session_failed",
+					session_uuid=session_uuid,
+					docname=docname,
+				)
+			except Exception:
+				pass
 	finally:
 		# v0.7.x (M2): always release the single-flight flag so the next
 		# session can analyze. Compare-then-delete (only if we still hold it);
@@ -1006,11 +1019,49 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 	if failure is not None:
 		_log_ai_step_failure("optimus ai analyze", failure, session_uuid=session_uuid)
 		raise failure
+	if completed_elsewhere:
+		return
 
+	# The report and Ready status are durable. Cleanup/notification outages
+	# cannot demote the result or skip independent optional admission.
+	_run_ai_step(lambda: _cleanup_redis(session_uuid, recording_uuids),
+		title="optimus ai recording cleanup", session_uuid=session_uuid)
+	_run_ai_step(lambda: _publish_progress(100, "Report ready", session_uuid),
+		title="optimus ai ready progress", session_uuid=session_uuid)
+	_run_ai_step(lambda: _publish_session_event("optimus_session_ready", session_uuid=session_uuid, docname=docname),
+		title="optimus ai ready notification", session_uuid=session_uuid)
 	# This is outside the profiling failure handler. Optional admission may
 	# fail or time out, but the committed Ready result must stay usable.
 	_auto_arm_phase2(docname, context)
 	queue_analyze_time_ai(docname)
+
+
+def _begin_analysis(docname):
+	"""Recheck late deliveries in a fresh, short parent-lock transaction."""
+	from optimus import sql_work
+	def begin():
+		status = frappe.db.get_value("Optimus Session", docname, "status", for_update=True)
+		if status not in _ANALYZE_PENDING:
+			return False
+		frappe.db.set_value("Optimus Session", docname, "status", "Analyzing")
+		return True
+	return sql_work.retry(begin, framework=frappe,
+		transaction=lambda operation: sql_work.transaction(operation, commit=safe_commit, rollback=frappe.db.rollback))
+
+
+def _with_active_analysis(docname, operation, *, statuses=("Analyzing",)):
+	"""Fence writes against a terminal result, even without Redis single-flight."""
+	from optimus import sql_work
+	def guarded():
+		if frappe.db.get_value("Optimus Session", docname, "status", for_update=True) not in statuses:
+			return False
+		operation()
+		return True
+	# Persistence mutates its in-memory trees and registers rollback File cleanup.
+	# A conflict must fail this delivery, preserving input for an explicit retry;
+	# replaying this callback could persist a marker whose File was rolled back.
+	sql_work.transaction(lambda: None, commit=safe_commit, rollback=frappe.db.rollback)
+	return sql_work.transaction(guarded, commit=safe_commit, rollback=frappe.db.rollback)
 
 
 # ---------------------------------------------------------------------------
@@ -1033,7 +1084,7 @@ def queue_analyze_time_ai(docname: str) -> None:
 		with guard:
 			cfg = get_config()
 			fixes = bool(cfg.ai_enabled and cfg.ai_auto_suggest and cfg.ai_suggest_findings)
-			steps = bool(cfg.ai_enabled and cfg.ai_humanize_steps)
+			steps = bool(cfg.ai_enabled and cfg.ai_auto_suggest and cfg.ai_humanize_steps)
 			if not (fixes or steps):
 				return
 			row = frappe.db.get_value("Optimus Session", docname, "*", as_dict=True)
@@ -1369,12 +1420,18 @@ def _enrich_recordings(recordings: list[dict]) -> list[str]:
 		cap = MAX_QUERIES_ENRICHED_PER_RECORDING
 
 	for recording in recordings:
-		calls = recording.get("calls") or []
+		# Normalize entries before enrichment and every downstream analyzer. A
+		# malformed entry must neither abort the session nor consume its SQL cap.
+		calls = [c for c in recording.get("calls") or [] if isinstance(c, dict)]
+		recording["calls"] = calls
 		total_queries_seen += len(calls)
+		past_cap = []
 		if cap and len(calls) > cap:
 			truncated_queries += len(calls) - cap
+			past_cap = calls[cap:]
 			calls = calls[:cap]
-			recording["calls"] = calls
+		# Raw SQL before formatting, so past-cap calls compare like with like.
+		enriched_raw = [c.get("query") or "" for c in calls]
 
 		for call in calls:
 			query = call.get("query", "")
@@ -1383,12 +1440,15 @@ def _enrich_recordings(recordings: list[dict]) -> list[str]:
 
 			# sqlparse format (idempotent on already-formatted SQL)
 			try:
-				call["query"] = sqlparse.format(
-					query.strip(),
-					keyword_case="upper",
-					reindent=True,
-					strip_comments=True,
-				)
+				from optimus.sql_budget import within_budget
+
+				if within_budget(query):
+					call["query"] = sqlparse.format(
+						query.strip(),
+						keyword_case="upper",
+						reindent=True,
+						strip_comments=True,
+					)
 			except Exception:
 				pass
 
@@ -1398,6 +1458,18 @@ def _enrich_recordings(recordings: list[dict]) -> list[str]:
 
 			if not is_query_type(call["query"], ("select", "update", "delete")):
 				call["explain_result"] = []
+				continue
+
+			# Check the original SQL before cache lookup or sqlparse's interpretation
+			# can hide a declined compound query. The adapters enforce this too.
+			from optimus.dbdialect.base import prepare_explain_query
+			try:
+				prepare_explain_query(query)
+			except ValueError as exc:
+				call["explain_result"] = []
+				call["explain_warning"] = str(exc)
+				if str(exc) not in warnings:
+					warnings.append(str(exc))
 				continue
 
 			# Dedupe EXPLAIN by normalized query shape. The recorder
@@ -1430,6 +1502,10 @@ def _enrich_recordings(recordings: list[dict]) -> list[str]:
 				# dicts (run_explain returns ok=False / empty tables on failure,
 				# so the stored shape matches the old empty-list-on-error path).
 				plan = get_dialect().run_explain(call["query"])
+				if plan.reason:
+					call["explain_warning"] = plan.reason
+					if plan.reason not in warnings:
+						warnings.append(plan.reason)
 				result = [asdict(t) for t in plan.tables]
 				call["explain_result"] = result
 				_cap_explain_cache(explain_cache, cache_key, result)
@@ -1457,7 +1533,14 @@ def _enrich_recordings(recordings: list[dict]) -> list[str]:
 
 		# mark_duplicates adds normalized_query, exact_copies, normalized_copies, index
 		try:
-			mark_duplicates(recording)
+			if getattr(frappe.db, "db_type", None) == "postgres":
+				for call in past_cap:
+					call["past_enrich_cap"] = True
+				_mark_postgres_duplicates(recording, calls, enriched_raw, past_cap)
+			elif past_cap:
+				_mark_duplicates_past_cap(recording, calls, enriched_raw, past_cap)
+			else:
+				mark_duplicates(recording)
 		except Exception:
 			pass
 
@@ -1477,9 +1560,8 @@ def _enrich_recordings(recordings: list[dict]) -> list[str]:
 			f"⚠ TRUNCATED: {truncated_queries} queries "
 			f"({pct}% of the flow) exceeded the {cap}-queries-per-"
 			"recording enrichment cap and were analyzed without "
-			"EXPLAIN / normalization. The report covers the first "
-			f"{cap} queries per recording; the rest are visible in "
-			"Top Queries but not in index-suggestion / full-scan / "
+			"EXPLAIN or index lookups. They still count in query totals, N+1 and "
+			"Top Queries, but not in index-suggestion / full-scan / "
 			"filter-ratio findings. "
 			"To get full coverage, raise "
 			"<b>Optimus Settings ▸ Max Queries per Recording</b> "
@@ -1487,6 +1569,141 @@ def _enrich_recordings(recordings: list[dict]) -> list[str]:
 			" OR profile a shorter flow."
 		)
 	return warnings
+
+
+# Numeric literal forms supported by PostgreSQL, including v16 separators
+# and nondecimal forms. Only tried at a numeric token boundary.
+_PG_PLACEHOLDER = re.compile(r"\$[1-9][0-9]*")
+_PG_NUMBER = re.compile(r"(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|0[oO][0-7_]+|(?:[0-9][0-9_]*(?:\.[0-9_]*)?|\.[0-9][0-9_]*)(?:[eE][+-]?[0-9][0-9_]*)?)")
+
+
+def _postgres_literal_shape(query):
+	"""Linear grouping lexer; preserve identifiers and never retain value tokens."""
+	if not isinstance(query, str) or len(query) > ai_privacy.MAX_QUERY_CHARS or "\\" in query or "\x00" in query:
+		return ""
+	parts, index, size = [], 0, len(query)
+	while index < size:
+		char = query[index]
+		if char in ("'", '"'):
+			start, quote = index, char
+			index += 1
+			while True:
+				end = query.find(quote, index)
+				if end < 0:
+					return ""
+				index = end + 1
+				if index < size and query[index] == quote:
+					index += 1
+					continue
+				break
+			parts.append(query[start:index] if quote == '"' else "?")
+		elif query.startswith("/*", index) or query.startswith("--", index):
+			block = query.startswith("/*", index)
+			end = query.find("*/" if block else "\n", index + 2)
+			if end < 0:
+				if block:
+					return ""
+				end = size
+			comment = query[index:end]
+			if block and "/*" in comment[2:]:
+				return ""  # Unsupported nested comments must not expose their tail.
+			if "'" in comment or '"' in comment:
+				return ""
+			parts.append(" ")
+			index = end + 2 if block else end
+		elif char == "$":
+			placeholder = _PG_PLACEHOLDER.match(query, index)
+			if not placeholder:
+				return ""  # Dollar strings need the full bounded parser.
+			parts.append(placeholder.group())
+			index = placeholder.end()
+		elif (char.isascii() and char.isdigit() or char == "." and index + 1 < size and query[index + 1].isdigit()) and (
+			index == 0 or not (query[index - 1].isalnum() or query[index - 1] in "_$")
+		):
+			number = _PG_NUMBER.match(query, index)
+			if not number:
+				return ""
+			parts.append("?")
+			index = number.end()
+		else:
+			parts.append(char.lower())
+			index += 1
+	return _collapse_pg_in_lists(re.sub(r"\s+", " ", "".join(parts)).strip())
+
+
+def _collapse_pg_in_lists(query):
+	chunks = re.split(r'("(?:[^"]|"")*")', query)
+	for index in range(0, len(chunks), 2):
+		chunks[index] = re.sub(r"\bin\s*\(\s*\?(?:\s*,\s*\?)*\s*\)", "in (?)", chunks[index], flags=re.I)
+	return "".join(chunks)
+
+
+def _mark_postgres_duplicates(recording, enriched, enriched_raw, past_cap):
+	"""Keep PG schema identity, with parsing confined to the enrichment cap."""
+	calls = recording.get("calls") or []
+	raw = enriched_raw + [c.get("query") or "" for c in past_cap]
+	normalized_cache = OrderedDict()
+	for index, (call, query) in enumerate(zip(calls, raw, strict=True)):
+		shape = _postgres_literal_shape(query)
+		if shape and shape in normalized_cache:
+			normalized = normalized_cache[shape]
+		elif index < len(enriched):
+			normalized = _collapse_pg_in_lists(ai_privacy.query_text(query, send_raw=False))
+			if shape:
+				normalized_cache[shape] = normalized
+		else:
+			normalized = shape
+		# Distinct opaque omissions cannot manufacture duplicate-query findings.
+		call["normalized_query"] = normalized or f"[SQL omitted: call {index + 1}]"
+	exact = Counter(raw)
+	normalized = Counter(c["normalized_query"] for c in calls)
+	for index, (call, query) in enumerate(zip(calls, raw, strict=True)):
+		call.update(index=index, exact_copies=exact[query], normalized_copies=normalized[call["normalized_query"]])
+
+
+_LITERAL_RE = re.compile(r"'(?:[^'\\]|\\.|'')*'|\"(?:[^\"\\]|\\.)*\"|\b\d+(?:\.\d+)?\b")
+_IN_LIST_RE = re.compile(r"\bin\s*\(\s*\?(?:\s*,\s*\?)*\s*\)")
+
+
+def _literal_shape(query: str) -> str:
+	"""Cheap literal-free key (regex only) so past-cap calls group without a sqlparse pass each."""
+	key = re.sub(r"\s+", " ", _LITERAL_RE.sub("?", query)).strip().lower()
+	return _IN_LIST_RE.sub("in (?)", key)
+
+
+def _mark_duplicates_past_cap(recording: dict, enriched: list, enriched_raw: list, past_cap: list) -> None:
+	"""mark_duplicates for a capped recording: full normalize for the enriched
+	calls, then past-cap calls reuse the normalized form of their literal shape."""
+	from frappe.recorder import normalize_query
+
+	past_raw = [c.get("query") or "" for c in past_cap]
+	mark_duplicates({"calls": enriched})
+
+	normalized_by_shape: dict[str, str] = {}
+	for call, q in zip(enriched, enriched_raw, strict=True):
+		if call.get("normalized_query"):
+			normalized_by_shape.setdefault(_literal_shape(q), call["normalized_query"])
+	for call, q in zip(past_cap, past_raw, strict=True):
+		call["past_enrich_cap"] = True
+		shape = _literal_shape(q)
+		if shape not in normalized_by_shape:
+			# A shape the enriched calls never saw: pay one format + normalize for it.
+			try:
+				formatted = sqlparse.format(q.strip(), keyword_case="upper", reindent=True, strip_comments=True)
+				normalized_by_shape[shape] = normalize_query(formatted)
+			except Exception:
+				normalized_by_shape[shape] = shape
+		call["normalized_query"] = normalized_by_shape[shape]
+
+	calls = enriched + past_cap
+	raw = enriched_raw + past_raw
+	recording["calls"] = calls
+	exact = Counter(raw)
+	normalized = Counter(c.get("normalized_query") for c in calls)
+	for index, call in enumerate(calls):
+		call["index"] = index
+		call["exact_copies"] = exact[raw[index]]
+		call["normalized_copies"] = normalized[call.get("normalized_query")]
 
 
 def _shape_key(query: str) -> str:
@@ -1619,7 +1836,7 @@ def _session_query_totals(recordings: list[dict]) -> tuple[int, float]:
 	time_ms = 0
 	for r in recordings:
 		for c in r.get("calls") or []:
-			if isinstance(c, dict) and is_error_log_hook_query(c.get("stack")):
+			if not isinstance(c, dict) or is_error_log_hook_query(c.get("stack")):
 				continue
 			count += 1
 			time_ms += c.get("duration", 0)
@@ -1646,10 +1863,13 @@ def _persist(
 	# empty → we populate it here. Power users who typed something into
 	# the notes field on the doc form between start and stop get their
 	# text left alone.
+	generated_notes = False
+	doc.auto_notes_sha256 = None
 	if not (doc.notes or "").strip():
 		notes_html = _build_auto_notes_html(recordings)
 		if notes_html:
 			doc.notes = notes_html
+			generated_notes = True
 
 	doc.total_requests = total_requests
 	doc.total_queries = total_queries
@@ -1805,7 +2025,14 @@ def _persist(
 	except Exception:
 		frappe.log_error(title="optimus persist background_jobs")
 
-	doc.save(ignore_permissions=True)
+	from optimus.managed import save_session
+
+	save_session(doc)
+	if generated_notes:
+		from optimus.auto_steps import notes_hash
+		# Hash the actual saved representation, after Frappe sanitizes it.
+		saved_notes = frappe.db.get_value("Optimus Session", docname, "notes")
+		frappe.db.set_value("Optimus Session", docname, "auto_notes_sha256", notes_hash(saved_notes), update_modified=False)
 	safe_commit()
 
 
@@ -1996,6 +2223,26 @@ def _truncate_finding_titles(findings: list[dict]) -> None:
 _FINDING_SNIPPET_TRUNCATE_CHARS = 200
 
 
+def _persist_representative_callsites(findings, recordings, *, owner=None):
+	"""Keep SQL findings actionable independently of the recording File lifecycle."""
+	from optimus.renderer.finding_enrichment import _attach_representative_callsites
+	from optimus.renderer.source import server_script_readers
+	views = []
+	originals = []
+	for finding in findings:
+		try:
+			detail = json.loads(finding.get("technical_detail_json") or "{}")
+		except (ValueError, TypeError):
+			continue
+		if isinstance(detail, dict):
+			views.append({**finding, "technical_detail": detail})
+			originals.append(finding)
+	with server_script_readers(owner):
+		_attach_representative_callsites(views, recordings)
+	for finding, view in zip(originals, views, strict=True):
+		finding["technical_detail_json"] = json.dumps(view["technical_detail"], default=str)
+
+
 def _enrich_findings_with_source_snippets(findings: list[dict], *, owner: str | None = None) -> None:
 	"""Mutate findings in place: attach a source snippet to each finding whose
 	technical_detail.callsite resolves to a readable file.
@@ -2072,6 +2319,7 @@ def _enrich_findings_with_source_snippets(findings: list[dict], *, owner: str | 
 
 
 
+@ai_privacy.sql_redaction_scope()
 def ai_payload_for_finding(
 	child,
 	file_cache: dict,
@@ -2250,11 +2498,18 @@ def _maybe_attach_recorded_queries(
 
 	send_raw = ai_privacy.raw_values_enabled() if send_raw is None else send_raw
 	top = []
+	seen_queries = set()
 	for c in sorted(calls, key=lambda c: -(c.get("duration") or c.get("duration_ms") or 0)):
 		dur_ms = c.get("duration") or c.get("duration_ms") or 0
 		if dur_ms < _AI_EXAMPLE_QUERY_MIN_MS:
 			continue
-		q = ai_privacy.query_text(c.get("query") if send_raw else (c.get("normalized_query") or c.get("query")), send_raw=send_raw)
+		# Old PG normalized fields may already have lost identifiers. Always
+		# redact from the original when available; query_text owns the boundary.
+		raw_query = c.get("query") or c.get("normalized_query")
+		if not isinstance(raw_query, str) or raw_query in seen_queries:
+			continue
+		seen_queries.add(raw_query)
+		q = ai_privacy.query_text(raw_query, send_raw=send_raw)
 		if not q or q in top:
 			continue
 		top.append(q)
@@ -2516,7 +2771,11 @@ def _impact_ms(row) -> float:
 	return impact if math.isfinite(impact) else 0.0
 
 
-_FIX_STATE_RANK = {ai_prompts.FIX_MISSING: 0, ai_prompts.FIX_OUTDATED: 1, ai_prompts.FIX_CURRENT: 2}
+_FIX_STATE_RANK = {
+	ai_prompts.FIX_MISSING: 0, ai_prompts.FIX_INCOMPLETE: 1,
+	ai_prompts.FIX_OUTDATED: 2, ai_prompts.FIX_CURRENT: 3,
+	ai_prompts.FIX_BLOCKED: 4, ai_prompts.FIX_PROCESSING_LIMITED: 5,
+}
 
 
 class AiSelection(list):
@@ -2543,33 +2802,41 @@ def eligible_findings(rows, cfg, *, regenerate_all=False, requested_at=None, inc
 	one definition shared with the report:
 
 	- ``missing`` (nothing stored) is always chosen;
+	- ``incomplete`` (a cut-off answer) is chosen when ``include_outdated`` or
+	  ``regenerate_all``, so automatic missing-only runs never retry it;
 	- ``outdated`` (unparseable, an older or non-integer ``prompt_version``, an error record or
-	  no suggestion text; NOT a newer version, NOT a guardrail-fallback answer) is chosen when
+	  no suggestion text; NOT a newer version, NOT a non-truncated guardrail fallback) is chosen when
 	  ``include_outdated`` or ``regenerate_all``;
 	- ``current`` is chosen only when ``regenerate_all``.
 
 	``requested_at`` (see :func:`_requested_cutoff`) resumes an interrupted run: a stored
 	answer generated at or after it is skipped, missing rows never are.
 
-	Order: missing, then outdated, then current; inside each, severity (High first; a missing
+	Order: missing, incomplete, outdated, current; inside each, severity (High first; a missing
 	or unknown severity last), then the larger ``estimated_impact_ms``, then the older answer.
 	``_run_ai_backfill`` asks in exactly this order: it takes the list as returned, only cut to
 	its cap."""
 	from optimus import ai_fix
 
 	cutoff = _requested_cutoff(requested_at)
+	inputs = {}
+	def gate_input(row):
+		key = id(row)
+		if key not in inputs:
+			inputs[key] = ai_fix.gate_input(row)
+		return inputs[key]
 	eligible, gated, excluded = _ai_selection(
 		rows or (), ai_fix,
-		type_of=lambda r: ai_fix.gate_input(r)["finding_type"],
-		gate=lambda r: ai_fix.llm_gate_note(ai_fix.gate_input(r)),
+		type_of=lambda r: gate_input(r)["finding_type"],
+		gate=lambda r: ai_fix.llm_gate_note(gate_input(r)),
 		cfg=cfg,
 	)
 	chosen = []
 	for row in eligible:
 		state, fix = ai_prompts.fix_state(row_get(row, "llm_fix_json"))
-		if state == ai_prompts.FIX_CURRENT and not regenerate_all:
+		if state in (ai_prompts.FIX_CURRENT, ai_prompts.FIX_BLOCKED, ai_prompts.FIX_PROCESSING_LIMITED) and not regenerate_all:
 			continue
-		if state == ai_prompts.FIX_OUTDATED and not (include_outdated or regenerate_all):
+		if state in (ai_prompts.FIX_INCOMPLETE, ai_prompts.FIX_OUTDATED) and not (include_outdated or regenerate_all):
 			continue
 		generated = _generated_timestamp(fix)
 		if state != ai_prompts.FIX_MISSING and cutoff and generated >= cutoff:
@@ -2582,7 +2849,7 @@ def eligible_findings(rows, cfg, *, regenerate_all=False, requested_at=None, inc
 
 
 def _refresh_order_key(row, state: str, generated: float) -> tuple:
-	"""The order Refresh asks in: state (missing, outdated, current), severity, larger impact,
+	"""The order Refresh asks in: state (missing, incomplete, outdated, current), severity, larger impact,
 	older answer."""
 	severity = row_get(row, "severity")
 	# A blank severity ranks as Low, like the report and the analyze-time order; anything else
@@ -3025,7 +3292,9 @@ def _finalize_with_empty_session(docname: str) -> None:
 		"were made, or the session was stopped before any flow was performed.</li>\n"
 		"</ul>"
 	)
-	doc.save(ignore_permissions=True)
+	from optimus.managed import save_session
+
+	save_session(doc)
 	safe_commit()
 
 
@@ -3033,7 +3302,7 @@ def _render_and_attach_reports(docname: str, recordings: list[dict]) -> bool:
 	"""Atomically replace the private HTML report, preserving the old file on failure."""
 	from optimus.report_refresh import render_report
 
-	return bool(render_report(docname, recordings)["regenerated"])
+	return bool(render_report(docname, recordings, required_status="Analyzing")["regenerated"])
 
 
 def _save_report_file(*, docname: str, filename: str, attached_to_field: str, content) -> str | None:
@@ -3055,7 +3324,10 @@ def _save_report_file(*, docname: str, filename: str, attached_to_field: str, co
 			try:
 				# Preserve the narrow generated-file extension exception.
 				frappe.local.request = None
-				file_doc.insert(ignore_permissions=True)
+				from optimus.managed import artifact_writer
+
+				with artifact_writer(docname, attached_to_field):
+					file_doc.insert(ignore_permissions=True)
 			finally:
 				frappe.local.request = saved_request
 			return file_doc.file_url
@@ -3086,8 +3358,10 @@ def _persist_recordings_file(docname: str, session_uuid: str, recording_uuids: l
 			for uuid in recording_uuids:
 				rec = frappe.cache.hget(RECORDER_REQUEST_HASH, uuid)
 				if not isinstance(rec, dict):
-					continue
+					raise recording_bundle.InvalidBundle("snapshot_recording_missing")
 				rec = {key: value for key, value in rec.items() if key not in {"pyi_session", "sidecar", "tree_b64"}}
+				if isinstance(rec.get("calls"), list):
+					rec["calls"] = [call for call in rec["calls"] if isinstance(call, dict)]
 				entry: dict = {"rec": rec}
 				sparse = frappe.cache.hget(RECORDER_REQUEST_SPARSE_HASH, uuid)
 				if isinstance(sparse, dict):
@@ -3102,6 +3376,8 @@ def _persist_recordings_file(docname: str, session_uuid: str, recording_uuids: l
 				recordings[uuid] = entry
 
 			if not recordings:
+				if recording_uuids:
+					raise recording_bundle.InvalidBundle("snapshot_inputs_missing")
 				return
 
 			bundle = {
@@ -3110,22 +3386,41 @@ def _persist_recordings_file(docname: str, session_uuid: str, recording_uuids: l
 				"session_state": session.get_session_meta(session_uuid),
 				"recordings": recordings,
 			}
-			payload = recording_bundle.encode(bundle)
+			payload, degraded = recording_bundle.encode_snapshot(bundle)
+			if degraded:
+				warnings = frappe.db.get_value("Optimus Session", docname, "analyzer_warnings") or ""
+				if recording_bundle.DEGRADED_WARNING not in warnings.splitlines():
+					frappe.db.set_value("Optimus Session", docname, "analyzer_warnings", (warnings + "\n" + recording_bundle.DEGRADED_WARNING).strip())
+			# A lost commit acknowledgement may leave a valid snapshot already
+			# bound. Reuse it instead of creating duplicate File rows/URLs.
+			previous = frappe.db.get_value("Optimus Session", docname, "recordings_file")
+			if previous:
+				from types import SimpleNamespace
+				existing = _load_recordings_bundle(SimpleNamespace(
+					name=docname, session_uuid=session_uuid, recordings_file=previous))
+				if existing is not None and recording_bundle.encode(existing) == payload:
+					safe_commit()
+					return
 			url = _save_report_file(
 				docname=docname,
 				filename=f"optimus_recordings_{session_uuid}.json.gz",
 				attached_to_field="recordings_file",
 				content=payload,
 			)
-			if url:
-				frappe.db.set_value("Optimus Session", docname, "recordings_file", url)
+			if not url:
+				raise recording_bundle.InvalidBundle("snapshot_file_missing")
+			frappe.db.set_value("Optimus Session", docname, "recordings_file", url)
+			# File row and parent binding must be durable before Redis cleanup.
+			safe_commit()
 	except Exception:
 		failed = True
 	if guard.pending():
 		recordings = rec = bundle = payload = None
 		raise guard.interrupt()
 	if failed:
+		recordings = rec = entry = sparse = infra_blob = resolved_doc = bundle = payload = existing = None
 		log_ai_failure("optimus ai persist recordings", reason="snapshot_write_failed")
+		raise recording_bundle.SnapshotUnavailable("snapshot_write_failed")
 
 
 def _load_recordings_bundle(session_doc):

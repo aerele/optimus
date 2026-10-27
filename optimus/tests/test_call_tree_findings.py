@@ -3,6 +3,8 @@
 
 """Tests for findings, aggregation and analyzer entry point of call_tree."""
 
+import json
+
 from optimus.analyzers import call_tree
 from optimus.analyzers.base import AnalyzeContext
 
@@ -159,6 +161,100 @@ def test_self_referential_hot_path_uses_clear_phrasing():
 	# Still carries the function name + percentage.
 	assert "apply_pricing_rule" in title
 	assert "96%" in title
+
+
+def test_self_referential_endpoint_surfaces_the_slow_child():
+	tree = _node("<root>", "", 1000, [
+		_node("get_report", "apps/my_app/api.py", 1000, [
+			_node("slow_child", "apps/my_app/calc.py", 950, self_ms=950),
+		], self_ms=50),
+	])
+	findings = call_tree._emit_per_action_findings(
+		tree, action_idx=0, action_label="my_app.api.get_report", action_wall_time_ms=1000,
+	)
+	slow = [f for f in findings if f["finding_type"] == "Slow Hot Path"]
+	assert len(slow) == 1
+	assert "slow_child" in slow[0]["title"]
+	assert "self-time" not in slow[0]["title"]
+
+
+def test_self_referential_endpoint_with_spread_callees_is_not_self_time():
+	children = [_node(f"step_{i}", "apps/my_app/calc.py", 100, self_ms=100) for i in range(9)]
+	tree = _node("<root>", "", 1000, [
+		_node("get_report", "apps/my_app/api.py", 1000, children, self_ms=100),
+	])
+	findings = call_tree._emit_per_action_findings(
+		tree, action_idx=0, action_label="my_app.api.get_report", action_wall_time_ms=1000,
+	)
+	slow = [f for f in findings if f["finding_type"] == "Slow Hot Path"]
+	assert len(slow) == 1
+	assert slow[0]["title"].startswith("get_report and its callees took 100%")
+	assert json.loads(slow[0]["technical_detail_json"])["is_self_referential"] is False
+
+
+def test_self_referential_endpoint_reports_hot_own_time_next_to_the_slow_child():
+	tree = _node("<root>", "", 1000, [
+		_node("get_report", "apps/my_app/api.py", 1000, [
+			_node("slow_child", "apps/my_app/calc.py", 500, self_ms=500),
+		], self_ms=500),
+	])
+	findings = call_tree._emit_per_action_findings(
+		tree, action_idx=0, action_label="my_app.api.get_report", action_wall_time_ms=1000,
+	)
+	slow = {f["title"]: f for f in findings if f["finding_type"] == "Slow Hot Path"}
+	assert len(slow) == 2
+	own = next(f for t, f in slow.items() if "self-time" in t)
+	assert own["estimated_impact_ms"] == 500
+	assert any("slow_child" in t for t in slow)
+
+
+def test_self_referential_endpoint_with_sql_heavy_callee_makes_no_spread_claim():
+	sql = {"function": "<sql>", "filename": "x", "lineno": 1, "self_ms": 900,
+		"cumulative_ms": 900, "kind": "sql", "children": []}
+	tree = _node("<root>", "", 1000, [
+		_node("get_report", "apps/my_app/api.py", 1000, [
+			_node("load_rows", "apps/my_app/calc.py", 950, [sql], self_ms=50),
+		], self_ms=50),
+	])
+	findings = call_tree._emit_per_action_findings(
+		tree, action_idx=0, action_label="my_app.api.get_report", action_wall_time_ms=1000,
+	)
+	slow = [f for f in findings if f["finding_type"] == "Slow Hot Path"]
+	assert len(slow) == 1
+	assert slow[0]["title"].startswith("get_report and its callees took")
+	assert "spread" not in slow[0]["customer_description"]
+
+
+def test_self_referential_endpoint_ignores_sql_leaves_when_weighing_callees():
+	sql = {"function": "<sql>", "filename": "x", "lineno": 1, "self_ms": 600,
+		"cumulative_ms": 600, "kind": "sql", "children": []}
+	tree = _node("<root>", "", 1000, [
+		_node("get_report", "apps/my_app/api.py", 1000, [
+			sql, _node("helper", "apps/my_app/calc.py", 100, self_ms=100),
+		], self_ms=300),
+	])
+	findings = call_tree._emit_per_action_findings(
+		tree, action_idx=0, action_label="my_app.api.get_report", action_wall_time_ms=1000,
+	)
+	slow = [f for f in findings if f["finding_type"] == "Slow Hot Path"]
+	assert len(slow) == 1
+	assert "self-time" in slow[0]["title"]
+	assert slow[0]["estimated_impact_ms"] == 1000
+
+
+def test_hot_own_time_is_high_on_absolute_impact_at_a_low_share():
+	tree = _node("<root>", "", 4000, [
+		_node("get_report", "apps/my_app/api.py", 4000, [
+			_node("slow_child", "apps/my_app/calc.py", 2800, self_ms=2800),
+		], self_ms=1200),
+	])
+	findings = call_tree._emit_per_action_findings(
+		tree, action_idx=0, action_label="my_app.api.get_report", action_wall_time_ms=4000,
+	)
+	own = [f for f in findings if "self-time" in f["title"]]
+	assert len(own) == 1
+	assert own[0]["estimated_impact_ms"] == 1200
+	assert own[0]["severity"] == "High"
 
 
 def test_non_self_referential_hot_path_keeps_classic_phrasing():

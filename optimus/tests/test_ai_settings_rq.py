@@ -18,13 +18,13 @@ def test_settings_layers_propagate_a_fresh_job_timeout(monkeypatch, stage):
 		raise original
 	cache = SimpleNamespace(get_value=lambda *a: None, set_value=lambda *a: None)
 	db = SimpleNamespace(exists=lambda *a: True)
-	fake = SimpleNamespace(cache=cache, db=db, get_cached_doc=lambda *a: {}, conf={})
+	fake = SimpleNamespace(cache=cache, db=db, get_doc=lambda *a: {}, conf={})
 	if stage == "cache":
 		cache.get_value = fail
 	elif stage == "exists":
 		db.exists = fail
 	elif stage == "doctype":
-		fake.get_cached_doc = fail
+		fake.get_doc = fail
 	elif stage == "resolve":
 		monkeypatch.setattr(settings, "_resolve", fail)
 	else:

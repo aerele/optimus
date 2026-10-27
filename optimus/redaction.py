@@ -80,12 +80,32 @@ def redact_sensitive(payload, *, extra_keys: tuple[str, ...] = ()):
 				out[k] = f"<REDACTED:{k}>"
 			else:
 				out[k] = redact_sensitive(v, extra_keys=extra_keys)
+		# set_value style args: the secret sits under "value", named by "fieldname".
+		field = out.get("fieldname")
+		if "value" in out and is_sensitive_key(field, extra=extra_keys):
+			out["value"] = f"<REDACTED:{field}>"
 		return out
 	if isinstance(payload, list):
 		return [redact_sensitive(item, extra_keys=extra_keys) for item in payload]
 	if isinstance(payload, tuple):
 		return tuple(redact_sensitive(item, extra_keys=extra_keys) for item in payload)
+	if isinstance(payload, str):
+		return _redact_json_string(payload, extra_keys)
 	return payload
+
+
+def _redact_json_string(text: str, extra_keys: tuple[str, ...]) -> str:
+	"""Redact inside a JSON-encoded object or list (savedocs ``doc``, ``args``)."""
+	if not text.lstrip().startswith(("{", "[")):
+		return text
+	try:
+		parsed = json.loads(text)
+		if not isinstance(parsed, dict | list):
+			return text
+		redacted = redact_sensitive(parsed, extra_keys=extra_keys)
+	except (ValueError, RecursionError):
+		return text
+	return text if redacted == parsed else json.dumps(redacted)
 
 
 @lru_cache(maxsize=16)
@@ -101,12 +121,12 @@ def _sql_literal_regex(columns: tuple[str, ...]) -> re.Pattern:
 	# the quoted-only pattern leaked verbatim.
 	return re.compile(
 		r"""(\b(?:""" + "|".join(re.escape(c) for c in columns)
-		+ r""")\b\s*(?:=|LIKE|IN)\s*)("[^"]*"|'[^']*'|\([^)]*\)|[\w.+-]+)""",
+		+ r""")\b[`"]?\s*(?:=|LIKE|IN)\s*)("(?:[^"\\]|\\.|"")*"|'(?:[^'\\]|\\.|'')*'|\([^)]*\)|[\w.+-]+)""",
 		re.IGNORECASE,
 	)
 
 
-def redact_sql_literals(sql_str: str, *, extra_columns: tuple[str, ...] = ()) -> str:
+def redact_sql_literals(sql_str: str, *, extra_columns: tuple[str, ...] = (), strict: bool = False) -> str:
 	"""Return ``sql_str`` with literal values in ``<sensitive_column> = '...'``
 	comparisons replaced by ``'<REDACTED>'``.
 
@@ -127,6 +147,8 @@ def redact_sql_literals(sql_str: str, *, extra_columns: tuple[str, ...] = ()) ->
 	try:
 		return _sql_literal_regex(columns).sub(r"\1'<REDACTED>'", sql_str)
 	except Exception:
+		if strict:
+			raise
 		return sql_str
 
 
@@ -222,14 +244,25 @@ _SECRET_PATTERNS: tuple[re.Pattern, ...] = (
 	# a header value an HTTP library could not send, quoted in its message:
 	# http.client's "Invalid header value b'<value>'" and requests' "... in
 	# header value: '<value>'"; the quoted repr is masked whole, its escape
-	# pairs consumed together (bounded, so a planted huge value stays cheap)
-	re.compile(r"""(\b(?:Invalid header value|in header value:) b?(['"]))(?!\*{8}\2|\*{1,8}\r?$)(?:\\[^\r\n]|(?!\2)[^\\\r\n]){1,2048}()(\2|(?=\r?$))""", re.MULTILINE),
+	# pairs consumed together (disjoint alternatives keep overflow linear)
+	re.compile(r"""(\b(?:Invalid header value|in header value:) b?(['"]))(?!\*{8}\2|\*{1,8}\r?$)(?:\\[^\r\n]|(?!\2)[^\\\r\n])+()(\2|(?=\r?$))""", re.MULTILINE),
 	# credentials in a URL's authority: scheme://user:password@host, up to the
 	# LAST "@" before the path, query or fragment (a password may hold a raw
 	# "@"); the userinfo holds no "/", "?" or "#", so an address in a query
 	# string (?to=a@b.com) or a fragment is not a credential; never across a
 	# quote, so an address in the next field of compact JSON is not swallowed
 	re.compile(r"""(://)()()(?!\*{8}@)[^/?#\s'"]+(@)"""),
+	# Explicit Authorization containers also hold schemeless/rotated tokens.
+	# Exclude known schemes here: their rules above preserve the scheme and
+	# truncated placeholders, and repeated scrubbing must remain idempotent.
+	re.compile(
+		r"""((['"])(?:proxy-)?authorization\2\s*:\s*b?(['"]))(?!\*|(?:bearer|basic|token|key|apikey)\s)[^'"\r\n]+(\3|(?=\r?$))""",
+		re.IGNORECASE | re.MULTILINE,
+	),
+	re.compile(
+		r"""(\b(?:proxy-)?authorization:[ \t]*)(?![ \t]|\*|(?:bearer|basic|token|key|apikey)\s)[^'"\r\n]+()()()""",
+		re.IGNORECASE,
+	),
 )
 
 # A literal shorter than this is never replaced: it would shred ordinary words

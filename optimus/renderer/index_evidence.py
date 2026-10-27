@@ -9,7 +9,7 @@ pure ``index_recipes`` and ``recipe_enrichment`` both import them without a cycl
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 @dataclass(frozen=True)
@@ -30,6 +30,9 @@ class IndexEvidence:
 	name: str
 	columns: tuple[str, ...]
 	unique: bool
+	eligible: bool = True
+	reason: str = ""
+	usable_prefix: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -48,3 +51,10 @@ class TableEvidence:
 	text_columns: frozenset[str]
 	unindexable_columns: frozenset[str]
 	indexes: tuple[IndexEvidence, ...]
+
+	@property
+	def usable_indexes(self):
+		# A partial usable prefix is evidence for coverage, never for uniqueness
+		# of that prefix or the unusable trailing part of the physical index.
+		return tuple(ix if ix.eligible else replace(ix, columns=ix.usable_prefix, unique=False, eligible=True)
+			for ix in self.indexes if ix.eligible or ix.usable_prefix)

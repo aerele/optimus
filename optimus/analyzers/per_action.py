@@ -29,7 +29,7 @@ def _build_action(recording: dict) -> dict:
 	# left out, as in the session totals, so the rows add up to them.
 	calls = [
 		c for c in recording.get("calls") or []
-		if not (isinstance(c, dict) and is_error_log_hook_query(c.get("stack")))
+		if isinstance(c, dict) and not is_error_log_hook_query(c.get("stack"))
 	]
 	durations = [c.get("duration", 0) for c in calls]
 	return {

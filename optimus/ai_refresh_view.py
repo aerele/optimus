@@ -57,19 +57,25 @@ def public_state(run, *, now):
 
 def refresh_plan(doc, *, now):
 	"""Count the same eligible rows the worker selects, without source or file I/O."""
-	from optimus import analyze
+	from optimus import ai_prompts, analyze
+	from optimus.analyzers.base import row_get
 	from optimus.settings import get_config
 
 	cfg = get_config()
 	fixes = bool(cfg.ai_enabled and cfg.ai_suggest_findings)
 	cutoff = datetime.fromtimestamp(now, timezone.utc)
 	rows = doc.get("findings") or []
-	pending = len(analyze.eligible_findings(rows, cfg, requested_at=cutoff)) if fixes else 0
+	pending_rows = analyze.eligible_findings(rows, cfg, requested_at=cutoff) if fixes else []
+	pending = len(pending_rows)
 	total = len(analyze.eligible_findings(rows, cfg, regenerate_all=True, requested_at=cutoff)) if fixes else 0
 	cap = cfg.ai_refresh_max_findings
 	return {
 		"pending": pending, "total": total, "cap": cap,
 		"selected": min(pending, cap) if cap else pending,
+		"selected_incomplete": sum(
+			ai_prompts.fix_state(row_get(row, "llm_fix_json"))[0] == ai_prompts.FIX_INCOMPLETE
+			for row in (pending_rows[:cap] if cap else pending_rows)
+		),
 		"selected_all": min(total, cap) if cap else total,
 		"steps": bool(cfg.ai_enabled and cfg.ai_humanize_steps and doc.get("actions")),
 	}
@@ -88,8 +94,9 @@ def admission_message(reason, *, queue=None):
 		"not_ready": _("The session must be Ready before AI suggestions can run."),
 		"permission": _("The requesting user can no longer update this session."),
 		"site_cap": _("The site already has the maximum number of active AI refreshes."),
+		"hourly_limit": _("You have reached the accepted AI refresh limit. Wait before starting another refresh."),
 		"user_cap": _("You already have the maximum number of active AI refreshes."),
 		"retry_limit": _("This refresh has reached its resume limit. Start a new refresh to try again."),
 		"already_resumed": _("This run has already been resumed. Reload its current progress."),
 		"not_resumable": _("This run cannot be resumed."),
-	}.get(reason, _("AI enrichment could not start. Search the Error Log for titles starting with optimus ai."))
+	}.get(reason, _("AI enrichment could not start. Ask your administrator to check AI errors for this session."))

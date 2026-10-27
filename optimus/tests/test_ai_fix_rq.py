@@ -24,6 +24,7 @@ def test_reask_rq_job_timeout_propagates_fresh(monkeypatch):
 	def fake_dispatch(provider, system, messages, **kw):
 		calls["n"] += 1
 		if calls["n"] == 1:
+			kw["meta_out"]["finish_reason"] = "stop"
 			kw["usage_out"].update({"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15})
 			return g._RAW
 		raise timeouts.JobTimeoutException("Task exceeded maximum timeout value (180 seconds)")

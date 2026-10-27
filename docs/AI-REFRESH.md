@@ -7,8 +7,8 @@ not roll back the saved profile. Regenerate Reports renders saved results
 without contacting a provider.
 
 The Desk form shows progress, cancellation, reported usage and uncertainty.
-Manual refresh selects missing and outdated suggestions by default. The
-confirmation shows the selected count; replacing current suggestions requires
+Manual refresh selects missing, incomplete and outdated suggestions by default. Cut-off answers stay eligible for a later manual retry, but never repeat within the same run or during an automatic missing-only refresh. The
+confirmation shows the selected count and how many are incomplete; replacing current suggestions requires
 an explicit checkbox. Refresh and an active Phase 2 pass exclude one another.
 Auto-armed Phase 2 therefore takes precedence over automatic AI, with an
 admission notice on the session. Normal Phase 2 completion attempts automatic missing-only AI admission after saving results and report work; manual Refresh AI remains available.
@@ -53,14 +53,13 @@ insert can wait until this short transaction ends.
 
 Admission locks the session row first. When another writer holds that row for
 a whole lock wait timeout, the admission answers `busy` instead of trying again.
-Only a user refresh (`scope` all, the only scope with caps) then takes the site
-mutex, with NOWAIT. When another admission holds the mutex, the answer is a
+Both user refresh (`scope` all) and analyze-time (`fixes_missing`) admissions then
+take the site mutex, with NOWAIT. When another admission holds the mutex, the answer is a
 `busy` refusal at once, never a wait or an error. An admission that waits on its
-own session therefore never holds the mutex, and analyze-time `fixes_missing`
-runs never take it. The capacity
+own session therefore never holds the mutex. The shared site capacity
 count is a plain read after those locks. It counts live runs only: a run whose
 lease or deadline has passed can no longer claim a slice or begin a call, so it
-holds no slot. Admissions with caps serialize on the
+holds no slot. Both admission scopes serialize on the
 mutex, and each accepted admission updates the mutex row. An older PostgreSQL REPEATABLE READ
 snapshot then fails on that row (40001) and is retried, so the caps stay exact
 on both databases. Admission takes no lock on a range of runs: such next-key
@@ -240,8 +239,8 @@ repeated automatically.
 
 AI and Phase 2 serialize through the Session row. Both admissions change the
 parent, including automatic AI with no refresh-count increment, so PostgreSQL
-rejects an older snapshot before it can miss an opposing admission. Manual AI
-also locks the site capacity row with NOWAIT after its Session. Phase 2 does not
+rejects an older snapshot before it can miss an opposing admission. Both AI scopes
+also lock the site capacity row with NOWAIT after their Session. Phase 2 does not
 hold the site mutex while waiting for a session.
 
 ## Selection, grounding and the Error Log
@@ -261,6 +260,8 @@ row has neither `docname` nor `run_id`. Search the Error Log for `optimus ai`.
 
 | Title | When |
 | --- | --- |
+| `optimus ai refresh admission followup` | Admission committed; a notification, dispatch or public status view failed. The SQL reservation remains authoritative. Poll status before retrying. |
+| `optimus ai refresh prepare` | One item could not be prepared. It is recorded as skipped/not_sent with zero tokens; later items continue. |
 | `optimus ai refresh worker` | A slice failed. Carries `tokens` and `outcome` when the outcome write gave up. |
 | `optimus ai refresh cleanup` | The cleanup of a failed slice failed, so its call stays for recovery. |
 | `optimus ai refresh item` | One item's provider call failed, or its reported token count exceeds 2147483647 (`outcome=clamped`, with `tokens`). Carries `attempt` and `item` (`fix` or `steps`); failures also carry `kind`. |
@@ -321,7 +322,7 @@ queue needs a listening worker.
 If a setting becomes invalid while a run is queued, the worker can fail before
 claiming it. The run stays queued and repeated deliveries fail the same way;
 it keeps its session reservation until its lease or deadline expires, and a
-manual run also keeps its capacity slot until then. Correct the named setting, then let the next click or recovery sweep
+run also keeps its site capacity slot until then. Correct the named setting, then let the next click or recovery sweep
 redeliver the pending slice. A queued lease lasts 1800 seconds unless the run's
 deadline comes first.
 
@@ -338,18 +339,18 @@ Sensitivity profiles do not change the manual cap. **AI model context window (to
 exposes the existing context-fit limit; zero selects the provider/model default.
 Settings cache failures during the seed print a fixed recovery instruction to
 clear the cache after restart.
-Manual runs additionally have a per-requester cap of two. Analyze-time
-`fixes_missing` runs reserve their own session but do not consume the manual
-site/user cap. The item cap applies even to Regenerate all, and across a resume
+Manual and analyze-time `fixes_missing` runs share the site-wide active-run cap.
+Manual runs additionally have a per-requester cap of two; automatic runs do not
+consume that manual allowance. Each run reserves its own session. The item cap applies even to Regenerate all, and across a resume
 chain; zero means unlimited within the run deadline and bounded history limit.
 
 Slices run on the `optimus_ai_queue` queue, `long` by default, which analysis
 shares. A run holds one worker until its slice yields; an in-flight call can
-outlast the slice budget. The default site cap allows two manual runs, so a site with one worker has its profiled-flow
+outlast the slice budget. The default site cap allows two runs across both scopes, so a site with one worker has its profiled-flow
 analyses wait behind a slice. Give the queue a worker of its own
 (`optimus_ai_queue`, with a worker started for it) on a site that refreshes
-often. Analyze-time `fixes_missing` runs are not capped per site; the wiring
-follow-up decides that.
+often. When the shared site cap is full, analyze-time AI is declined with an
+operator notice; the completed profile remains Ready.
 
 The default slice budget is 120 seconds. A slice processes at least one item
 when its remaining total budget permits, then queues a continuation. Each call
@@ -633,7 +634,9 @@ always precede queue/provider activity.
 
 A status-read failure is unknown, never proof of completion. Desk keeps Save
 held until state becomes known, polls again with backoff, and rejects late
-responses. It releases only the Save hold it acquired. Completion does not
+responses. Idle forms stop polling and wake on the committed refresh-admission
+event, explicit refresh or tab visibility. Hidden tabs defer status reads until
+visible. It releases only the Save hold it acquired. Completion does not
 reload over unsaved edits. Save or discard those edits before reloading to see
 new results; the server may reject an old form's save after background changes.
 
@@ -650,7 +653,10 @@ stale answer.
 
 Stopping or retrying Phase 2 queues analysis on `long`. The response reports
 `Analyzing` and `ran_inline: false`; a disabled scheduler never selects inline
-compute. Batch retry accepts at most five runs and uses each run's per-user
+compute. New analysis requires a worker listening on `long`; missing or unknown
+worker availability refuses admission. A stopped Recording run becomes Failed
+without spending an attempt and retains captured input for retry. Existing Failed
+diagnostics and exhausted retry limits are preserved. Batch retry accepts at most five runs and uses each run's per-user
 limit. A live generation is attached to, not restarted. Completed or Recording
 runs cannot be retried through the analysis retry endpoint.
 
@@ -748,3 +754,47 @@ guidance without decrypting credentials. Back up before deployment, migrate, the
 replace web, worker and scheduler processes together through normal operations.
 The migration does not repair historical snapshots, Versions or missing capture
 input. Re-record where validation rejects old or corrupt input.
+
+Completion status is distinct from prompt age. New missing/unknown stop reasons are retryable only through manual Refresh, like incomplete responses. Blocked responses and answers exceeding local validation limits are kept by default; the replacement checkbox explicitly includes them. Legacy successful answers without new status metadata remain current. Refresh generates a fresh answer; retained partial responses are not yet used for continuation.
+
+Saved suggestions that add, move or change raw SQL are now locally classified as outdated, even at prompt version 4. Manual Refresh selects these affected answers while preserving other current answers; automatic missing-only runs do not retry them. Regenerated reports label them “Frappe API update needed” and withhold the code. The original stored answer and token usage remain intact. This check never calls the provider.
+
+
+As of v0.12.80 the same local classification also catches reconstructable unbounded writes, ignored/new or behavior-changing permission checks, and lost literal query bounds/order in a paired SQL-to-ORM diff. These answers show “Safety review needed” and are eligible for manual Refresh only. Partial N+1 improvements receive an advisory and stay current. Classification and rendering preserve the original answer and usage, and never call a provider. See [AI-FIXING.md](AI-FIXING.md#visible-frappe-safety-checks-v01280) for the supported shapes and limits.
+
+
+## Upgrade to 0.12.82
+
+Run `bench migrate` before restarting web and queue workers. Two nullable fields
+are additive: Attempt `send_certainty` and Session `auto_notes_sha256`. Existing
+history is preserved. A failed timeout/transport attempt without certainty is
+conservatively treated as unknown; new unknown sends are stored as `uncertain`,
+which earlier pre-release workers already block. Do not run old pre-release
+workers alongside new workers: they cannot apply the legacy-failure predicate or
+the automatic consent/provenance rules. Stop old workers before upgrading and
+restart all processes together after migration. Generic Session create permission
+is removed from Optimus User; sites with a Custom DocPerm granting create must
+remove that customization separately. The managed creation guard also refuses it.
+
+`ai_auto_suggest` governs all automatic provider work. Its finding and Steps
+section settings select the work independently. Automatic Steps require the
+managed hash recorded after saving newly generated captured Steps. Every external
+Session save revokes that provenance, even if the note text is unchanged. Retry
+Analyze revokes it unless it generates a new captured note. Earlier humanized or
+user-edited notes are kept; manual refresh can replace them. The send and save
+transactions recheck current SQL consent. A toggle change can race the send check and leave one already admitted call
+per active run; its result is discarded when the
+save recheck fails, while reported tokens remain recorded.
+
+Send certainty distinguishes `not_sent`, `known_response` and `sent_unknown`.
+Read timeouts, broken reads and HTTP 502/504/520–524 may already have been billed.
+They become `uncertain` and count once toward the three-failure breaker; an
+interrupt alone does not increment it. Automatic follow-ups block unknown targets
+even when their input hash changed. Manual refresh uses input hashes. Retrying an
+unknown call requires the explicit duplicate-charge checkbox; the UI consults the
+same bounded historical predicate as the worker. Its session count is historical,
+not a claim about the current prompt selection.
+
+A report-rendering failure marks analysis Failed; Retry Analyze recovers it.
+Generated files are managed and private; see SECURITY.md for the sharing contract
+and the framework's late physical-deletion rollback limitation.

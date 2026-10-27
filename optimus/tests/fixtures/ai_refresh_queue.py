@@ -14,6 +14,7 @@ from optimus.tests.fixtures.ai_refresh_journal import journal as _journal_fixtur
 @pytest.fixture(name="queue")
 def queue(journal, monkeypatch):
 	jobs = import_module("optimus.ai_jobs")
+	monkeypatch.setattr("optimus.journal_schema.ready", lambda *a: True)
 	journal.run.update(lease_until=1800, dispatch_pending=1, dispatched_at_epoch=0)
 	callbacks, sent, logs = [], [], []
 

@@ -55,6 +55,14 @@ def _frappe_error(exc, name, framework):
 	return isinstance(cls, type) and isinstance(exc, cls)
 
 
+def is_database_error(exc, *, framework=None):
+	"""Infrastructure failures must not be attributed to one malformed finding."""
+	drivers = {"pymysql", "MySQLdb", "psycopg", "psycopg2", "sqlite3"}
+	return any(cls.__module__.split(".")[0] in drivers for cls in type(exc).__mro__) or any(
+		_frappe_error(exc, name, framework) for name in ("QueryDeadlockError", "QueryTimeoutError", "DuplicateEntryError")
+	)
+
+
 def is_retryable_conflict(exc, *, framework=None) -> bool:
 	"""True when a short journal transaction may be rolled back and tried again: a
 	deadlock, a lock wait, a snapshot or serialization conflict, raw or as Frappe wraps it.

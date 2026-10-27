@@ -8,6 +8,134 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## Unreleased — 0.12.83 / PR69 review fixes
+
+- Block legacy numeric metadata endpoints, bound frontend metric submissions,
+  require POST for PDF generation, hide batch retry exception text, and withhold
+  credential-bearing source from AI requests.
+- Preserve PostgreSQL schema names in redacted AI prompts, omit ambiguous SQL safely,
+  and keep capped duplicate grouping bounded.
+- Ignore completed analysis deliveries, fence late writes, and retain inputs until
+  the final status commits. Add direct guard and missing-input regression coverage.
+- Recover refresh controls after refused requests, explain Save holds, retain Cancel
+  focus, and count accepted manual admissions instead of refusals.
+- Check File source URLs before core reads or rewrites them; allow ordinary identical
+  uploads while guarding artifact mutation. Invalidate settings after commit with a
+  bounded cache, visible failure breadcrumbs, and isolated queue recovery.
+
+- Commit recording snapshots before deleting Recorder input; retain failed captures
+  for Retry Analyze, preserve reports when evidence is missing, and disclose bounded
+  reduced-detail snapshots. Failed snapshot input has a seven-day recovery window.
+- Accept ordinary Query Builder read updates while withholding ambiguous writes and
+  unparseable proposed Python. Check qualified Frappe policy APIs consistently.
+- Request bounded AI output budgets, support unknown Anthropic model IDs, validate
+  alternate completion metadata, and keep PostgreSQL sensitive examples private.
+- Skip server-expanded library picks before import, profile decorated source bodies,
+  permit shared readers to read refresh status, and show an actionable Phase2 error.
+- Preserve SQL sort order and semicolon handling in index advice, account for large
+  write statements, and retain rich notes on older v15 sanitizers. Add a pinned
+  Frappe15.83 integration leg and correct duplicate-start Redis assertions.
+
+### Develop fixes integrated into PR69
+
+- Attach SQL to the matching function in the same file when names repeat.
+- Attribute callee-dominated endpoint time to the slow callee, report hot own time
+  separately, and label otherwise-unattributed time as the function and its callees.
+
+
+- Slowest-queries table no longer clips SQL at 500 characters; the full normalized statement is shown (scrollable in the cell).
+
+### Internal
+
+- Removed unused imports from test modules and the dead numeric-coercion
+  helpers (`_to_float`, `_to_int`) in `analyzers/explain_flags.py`. EXPLAIN
+  numeric columns are coerced in the dbdialect layer (`dbdialect.base.to_float` /
+  `to_int`, used from `dbdialect/mariadb.py`).
+
+- The "after fix" projection for Low Filter Ratio findings now uses the
+  dialect-blind `selectivity_pct` instead of MariaDB's raw `filtered` key, so it
+  also works for Postgres plans.
+- Normalized EXPLAIN rows are coerced with `to_int` / `to_float`, so a string or
+  `Decimal` value no longer drops that row's findings. `to_int` / `to_float` also
+  treat `nan` / `inf` as missing instead of passing them to threshold checks.
+
+
+
+### Fixed
+
+- Index suggestions now cap each optimizer statement at 5 seconds on MariaDB. Frappe's optimizer checks column cardinality with a full-table `COUNT(DISTINCT)`, which ran with no limit on the live database. A query whose check times out is skipped, and the report says so.
+
+
+
+### Fixed
+
+- Secrets inside JSON string payloads are now redacted at capture, such as the `doc` that `savedocs` sends with a User's `new_password`. So is `set_value`'s `value` when `fieldname` names a sensitive field. Before, only dict keys were checked, so both reached Redis and the report.
+- The stale-recording sweep no longer clears a user's active session pointer after it has moved to a newer session. Before, it stopped the user's new recording.
+
+
+
+### Fixed
+
+- The daily orphan Redis sweep and the uninstall cleanup now delete keys. Both called `frappe.cache.get_redis_connection()`, which Frappe's cache wrapper doesn't have, so they silently returned without deleting anything.
+- Queries past Max Queries per Recording are no longer removed from the recording. Only the first N are fully enriched (formatting, EXPLAIN, index lookups); the rest are grouped by a cheap literal-free shape and still count in query totals, N+1 and Top Queries. Before, they were dropped while the report said they were still visible.
+
+
+
+## [0.12.82] - 2026-10-18
+
+### Security and correctness
+
+- Hide the floating widget for users without a profiler role, avoiding a
+  permission-error dialog on Desk load. Keep the API and boot role gate aligned.
+- Close qualified and aliased execution/deserialization gates; revalidate stored
+  raw index DDL, including inline code. Apply current sensitive SQL rules once
+  per payload build and omit queries on redaction failure. Mask rotated,
+  schemeless and oversized header secrets; withhold all unverified AI log fields.
+- Journal malformed finding preparation as unsent skips without starving later
+  fixes or Steps. Wake idle forms after committed AI admission; pause hidden-tab
+  polling and preserve unsaved notes. Keep Retry Analyze cleanup independent of
+  reconciliation logging failures.
+- Restore Server Script representative snippets and links, reject unusable JOIN
+  index recipes, and classify recovered filters before sort columns. Retain
+  unrelated File uploads while protecting aliases of profiling artifacts.
+- Preserve capture samples after safe teardown recovery; use atomic bounded
+  Redis appends and retry changed snapshots. Workerless Phase 2 refusals retain
+  input and retry diagnostics without using an analysis attempt.
+- Protect Session identities, profiling data, child rows and generated Files from
+  generic document writes, including attachment aliases. Remove generic Session
+  creation from Optimus User. Title and notes remain editable.
+- Restore lazy PDF generation for text File contents; bind source/cache/deletion
+  to the exact private Session attachment. Fence stale and competing renders,
+  remove pdfkit option metadata and prevent privileged private-image embedding.
+- Preserve visible source characters in safety checks; resolve Frappe aliases by
+  lexical scope and reject ambiguous/dynamic access or removed permission denials.
+  Bound alias depth, visits, identity count and string allocations; withhold
+  unchecked code instead of crashing. Normalize PDF styles and declarations
+  across framework reparses.
+- Retain Frappe identities for literal dynamic imports and skip enclosing class
+  namespaces when checking nested class bodies, preventing unsafe code from
+  being displayed as an unrelated object call.
+- Use eligible full b-tree keys and verified full leading key parts for index
+  coverage, preserving expression positions and excluding partial, ignored,
+  invalid and non-btree proofs. A trailing prefix never proves unique coverage.
+- Bound optional SQL parsing and formatting. Prevent Phase 1/2 capture overlap
+  with atomic Redis admission. Roll back each failed retention deletion separately.
+- Bound saved-answer validation per report to `RENDER_VALIDATION_CHARS = 262144`
+  characters and `RENDER_VALIDATION_ANSWERS = 128` distinct answers. Withhold code
+  beyond that budget for local review, without marking it outdated or retrying AI.
+
+### AI behavior and upgrade
+
+- Check new N+1 suggestions for repeated reads across for/while loops; request
+  a correction or withhold API-only rewrites and unsupported query-count claims.
+- Automatic finding fixes and captured Steps share the automatic-consent toggle.
+  Steps rewriting preserves user-written/edited notes and concurrent saves.
+- Record provider-send certainty; block unknown outcomes and legacy timeout rows
+  until explicit retry consent. Unknown sends count toward the failure breaker.
+- Run `bench migrate`, then restart all web and queue workers together. See
+  docs/AI-REFRESH.md for additive fields, pre-release worker overlap and Custom
+  DocPerm cleanup. Session read sharing includes raw artifact downloads.
+
 ## [0.12.72] - 2026-10-14
 
 ### Security
@@ -895,7 +1023,10 @@ asks `live_run`, below).
 
 ---
 
-## [0.12.64] - 2026-09-30
+## AI integration draft 0.12.64 - 2026-09-30
+
+These changes were staged on the AI integration branch and were not part of
+the published 0.12.64 release recorded below.
 
 ### Fixed
 
@@ -945,7 +1076,10 @@ asks `live_run`, below).
 
 ---
 
-## [0.12.63] - 2026-09-28
+## AI integration draft 0.12.63 - 2026-09-28
+
+These changes were staged on the AI integration branch and were not part of
+the published 0.12.63 release recorded below.
 
 ### Security
 
@@ -1378,6 +1512,39 @@ that line, including keys that have since been rotated.
   shows the Error Log hook, and a failed AI call leaves
   exactly one Error Log row whose text is an explicit message without a dump
   of local variables.
+
+---
+
+## [0.12.64] - 2026-10-01
+
+### Internal
+
+- Set the app publisher to "Aerele Technologies" and the support email to
+  hello@aerele.in in `hooks.py` (both were blank before), so the app's About
+  page and marketplace metadata show the right owner.
+- Added a `CODEOWNERS` file so pull requests are routed to the app maintainers
+  for review.
+
+---
+
+## [0.12.63] - 2026-09-29
+
+### Changed
+
+- Finding cards now render the Drill-down and Call chain as an indented tree of
+  nested function calls instead of a single-line arrow breadcrumb. The outer
+  frame sits at the top and each deeper call is indented one level under a corner
+  connector, with the deepest user frame shown as the terminal (red) node. Deep
+  or long chains that used to overflow the card now read top to bottom. This
+  applies to every finding card through one shared template block.
+- A finding that sits inside a nested function now always shows a drill-down. When
+  the finding is at a leaf user frame with nothing to drill into below it (an N+1
+  query, a redundant call, a framework call made from user code), the drill-down
+  shows the nested call path that leads to it, from the outermost user frame down
+  to the finding, instead of the bare "no deeper user-code frame" note. A finding
+  called straight from the framework (not nested under any user frame) keeps that
+  note. Grouped sub-findings (collapsed under a shared root cause) carry their own
+  drill-down as well, so every finding in a nested function shows its call path.
 
 ---
 

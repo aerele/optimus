@@ -13,6 +13,13 @@ pytestmark = pytest.mark.rq
 PRIVATE = "PRIVATE-CUSTOMER-CANARY"
 
 
+@pytest.fixture(autouse=True)
+def current_sensitive_rules(monkeypatch):
+	# A successful current SQL settings read; failure/refresh semantics are
+	# covered by test_production_review_fixes, independently of consent.
+	monkeypatch.setattr("optimus.ai_privacy._fresh_sensitive_columns", lambda: "")
+
+
 @pytest.fixture
 def privacy():
 	return importlib.import_module("optimus.ai_privacy")
@@ -39,7 +46,23 @@ def test_malformed_or_excessive_sql_is_omitted(privacy, query):
 def test_opt_in_keeps_business_literals_but_still_redacts_sensitive_columns(privacy):
 	query = f"SELECT * FROM `tabCustomer` WHERE name='{PRIVATE}' AND password='PASSWORD-CANARY'"
 	result = privacy.query_text(query, send_raw=True)
-	assert PRIVATE in result and "PASSWORD-CANARY" not in result
+	assert PRIVATE not in result and "PASSWORD-CANARY" not in result
+	assert "tabCustomer" in result
+
+
+@pytest.mark.parametrize("literal", ["$$PG-PRIVATE-CANARY$$", "$tag$PG-PRIVATE-CANARY$tag$", "E'PG-PRIVATE-CANARY'", "U&'PG-PRIVATE-CANARY'", "$tag$PG-PRIVATE-CANARY"])
+@pytest.mark.parametrize("send_raw", [True, False])
+def test_postgres_example_queries_never_send_sensitive_values(privacy, literal, send_raw):
+	finding = {"finding_type": "Slow Query", "technical_detail": {
+		"example_queries": [f'SELECT name FROM "tabUser" WHERE "password" = {literal}'],
+	}}
+	_, messages, _ = ai_fix._build_fix_request(finding, threshold_ms=1000, context_tokens=32768, send_raw=send_raw)
+	assert "PG-PRIVATE-CANARY" not in json.dumps(messages)
+
+
+@pytest.mark.parametrize("comparison", ["ILIKE '%PRIVATE-CANARY%'", "NOT LIKE 'PRIVATE-CANARY'", "!= 'PRIVATE-CANARY'", "<> 'PRIVATE-CANARY'", "= ANY(ARRAY['PRIVATE-CANARY'])", "= CAST('PRIVATE-CANARY' AS text)", "IS DISTINCT FROM 'PRIVATE-CANARY'"])
+def test_raw_sql_sensitive_expression_is_private(privacy, comparison):
+	assert "PRIVATE-CANARY" not in privacy.query_text(f'SELECT name FROM "tabUser" WHERE "api_key" {comparison}', send_raw=True)
 
 
 @pytest.mark.parametrize("value,expected", [(None, False), (False, False), ("0", False), ("false", False), (2, False), ({}, False),
@@ -232,3 +255,96 @@ def test_malformed_action_fields_do_not_fail_valid_actions():
 	actions = analyze.actions_for_humanizer(data, send_raw=False)
 	assert actions[-1]["label"] == "List Customer"
 	assert all(isinstance(action["duration_ms"], (int, float)) for action in actions)
+
+
+@pytest.mark.parametrize('line', [
+    'API_KEY = "SOURCE-CREDENTIAL-CANARY"',
+    'PASSWORD: str = "SOURCE-CREDENTIAL-CANARY"',
+    'PASSWORD = ("SOURCE-CREDENTIAL-CANARY")',
+    'PASSWORD = (\n    ("SOURCE-CREDENTIAL-CANARY")\n)',
+    'PASSWORD = ( # comment\n    "SOURCE-CREDENTIAL-CANARY"\n)',
+    'PASSWORD = \\\n    "SOURCE-CREDENTIAL-CANARY"',
+    'client = Client(password=("SOURCE-CREDENTIAL-CANARY"))',
+    'client = Client(password=( # comment\n    "SOURCE-CREDENTIAL-CANARY"\n))',
+    'headers["x-api-key"] = ("SOURCE-CREDENTIAL-CANARY")',
+    'settings = {"client_secret": ("SOURCE-CREDENTIAL-CANARY")}',
+    'settings = {"client_secret": ( # comment\n    "SOURCE-CREDENTIAL-CANARY"\n)}',
+    'if (token := ("SOURCE-CREDENTIAL-CANARY")): pass',
+    'headers["x-api-key"] = "SOURCE-CREDENTIAL-CANARY"',
+    'settings = {"client_secret": "SOURCE-CREDENTIAL-CANARY"}',
+    'if (token := "SOURCE-CREDENTIAL-CANARY"): pass',
+    'client = Client("sk-SOURCE-CREDENTIAL-CANARY")',
+    'url = "https://user:SOURCE-CREDENTIAL-CANARY@example.invalid"',
+])
+def test_credential_bearing_source_is_withheld_before_prompt_build(line, monkeypatch):
+    monkeypatch.setattr(ai_fix, '_current_key_or_empty', lambda: '')
+    finding = {'finding_type': 'Slow Query', 'source_window': [{'lineno': 1, 'content': line, 'is_target': True}]}
+    _, messages, shown = ai_fix._build_fix_request(finding, threshold_ms=1000, context_tokens=32768)
+    text = json.dumps(messages)
+    assert 'SOURCE-CREDENTIAL-CANARY' not in text and 'NOT AVAILABLE' in text
+    assert shown == []
+
+
+def test_configured_key_in_positional_source_is_withheld(monkeypatch):
+    monkeypatch.setattr(ai_fix, '_current_key_or_empty', lambda: 'opaque-configured-source-canary')
+    finding = {'source_window': [{'lineno': 1, 'content': 'client = Vendor("opaque-configured-source-canary")'}]}
+    _, messages, shown = ai_fix._build_fix_request(finding, threshold_ms=1000, context_tokens=32768)
+    assert 'opaque-configured-source-canary' not in json.dumps(messages) and shown == []
+
+
+@pytest.mark.parametrize('with_window', [False, True])
+@pytest.mark.parametrize('line,key,canary', [
+    ('password = "SOURCE-CREDENTIAL-CANARY"', '', 'SOURCE-CREDENTIAL-CANARY'),
+    ('client = Vendor("opaque-configured-source-canary")', 'opaque-configured-source-canary', 'opaque-configured-source-canary'),
+])
+def test_phase2_hotline_cannot_restore_withheld_source(monkeypatch, with_window, line, key, canary):
+    reads = []
+    monkeypatch.setattr(ai_fix, '_current_key_or_empty', lambda: reads.append('key') or key)
+    finding = {'phase2_hotline': {'lineno': 8, 'content': line, 'total_ms': 12, 'hits': 1}}
+    if with_window:
+        finding['source_window'] = [{'lineno': 8, 'content': line, 'is_target': True}]
+    _, messages, shown = ai_fix._build_fix_request(finding, threshold_ms=1000, context_tokens=32768)
+    text = json.dumps(messages)
+    assert canary not in text and 'NOT AVAILABLE' in text and 'Write no diff' in text
+    assert shown == [] and reads == ['key']
+
+
+def test_withheld_window_also_withholds_an_otherwise_ordinary_hotline(monkeypatch):
+    monkeypatch.setattr(ai_fix, '_current_key_or_empty', lambda: '')
+    finding = {
+        'source_window': [{'lineno': 7, 'content': 'password = "SOURCE-CREDENTIAL-CANARY"'}],
+        'phase2_hotline': {'lineno': 8, 'content': 'client.fetch()', 'total_ms': 12},
+    }
+    _, messages, shown = ai_fix._build_fix_request(finding, threshold_ms=1000, context_tokens=32768)
+    assert shown == [] and 'client.fetch()' not in json.dumps(messages)
+
+
+def test_ordinary_phase2_hotline_retains_verbatim_grounding(monkeypatch):
+    monkeypatch.setattr(ai_fix, '_current_key_or_empty', lambda: '')
+    finding = {'phase2_hotline': {'lineno': 8, 'content': 'client.fetch()', 'total_ms': 12}}
+    _, messages, shown = ai_fix._build_fix_request(finding, threshold_ms=1000, context_tokens=32768)
+    assert shown == ['client.fetch()'] and 'client.fetch()' in json.dumps(messages)
+
+
+def test_ordinary_source_remains_verbatim_for_grounding(monkeypatch):
+    monkeypatch.setattr(ai_fix, '_current_key_or_empty', lambda: '')
+    source = 'users = frappe.get_all("User", fields=["name", "email"], limit=20)'
+    finding = {'source_window': [{'lineno': 1, 'content': source, 'is_target': True}]}
+    _, messages, shown = ai_fix._build_fix_request(finding, threshold_ms=1000, context_tokens=32768)
+    assert shown == [source] and 'frappe.get_all' in json.dumps(messages)
+
+
+@pytest.mark.parametrize('channel', ['window', 'hotline', 'both'])
+def test_source_scrubber_error_withholds_source_without_sending_it(monkeypatch, channel):
+    from optimus import redaction
+    monkeypatch.setattr(ai_fix, '_current_key_or_empty', lambda: '')
+    def fail(*a, **kw):
+        raise RuntimeError('private scrubbing input')
+    monkeypatch.setattr(redaction, 'scrub_secrets', fail)
+    finding = {}
+    if channel != 'hotline':
+        finding['source_window'] = [{'lineno': 1, 'content': 'SOURCE-CREDENTIAL-CANARY'}]
+    if channel != 'window':
+        finding['phase2_hotline'] = {'lineno': 1, 'content': 'SOURCE-CREDENTIAL-CANARY', 'total_ms': 12}
+    _, messages, shown = ai_fix._build_fix_request(finding, threshold_ms=1000, context_tokens=32768)
+    assert 'SOURCE-CREDENTIAL-CANARY' not in json.dumps(messages) and shown == []

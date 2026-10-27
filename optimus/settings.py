@@ -438,7 +438,9 @@ def _read_doctype_row() -> dict | None:
 
 	if not _best_effort(lambda: frappe.db.exists("DocType", "Optimus Settings"), False):
 		return None
-	doc = _best_effort(lambda: frappe.get_cached_doc("Optimus Settings"))
+	# Redis owns the short-lived Optimus cache. A miss must read committed
+	# settings again, rather than refill it from Frappe's longer document cache.
+	doc = _best_effort(lambda: frappe.get_doc("Optimus Settings"))
 	if doc is None:
 		return None
 
@@ -586,12 +588,16 @@ def _site_conf_fallback(key: str) -> int | None:
 		return None
 
 
-def _resolve() -> OptimusConfig:
+_UNREAD_ROW = object()
+CONFIG_CACHE_SECONDS = 60
+
+
+def _resolve(*, row=_UNREAD_ROW) -> OptimusConfig:
 	"""Build a fresh config snapshot from DocType + site_config + defaults.
 
 	Precedence: DocType row > site_config.json > hardcoded default.
 	"""
-	row = _read_doctype_row() or {}
+	row = (_read_doctype_row() if row is _UNREAD_ROW else row) or {}
 
 	def _threshold(key: str) -> int:
 		# DocType wins if non-zero.
@@ -781,7 +787,7 @@ def get_config() -> OptimusConfig:
 	from optimus import redis_schema
 
 	def cached_config():
-		payload, _version = redis_schema.unwrap_value(frappe.cache.get_value(_CACHE_KEY))
+		payload, _version = redis_schema.unwrap_value(frappe.cache.get_value(_CACHE_KEY, expires=True))
 		if isinstance(payload, dict) and payload:
 			return OptimusConfig(**payload)
 		return None
@@ -789,8 +795,13 @@ def get_config() -> OptimusConfig:
 	cached = _best_effort(cached_config)
 	if cached is not None:
 		return cached
-	cfg = _best_effort(_resolve, OptimusConfig())
-	_best_effort(lambda: frappe.cache.set_value(_CACHE_KEY, redis_schema.wrap_value(cfg.__dict__)))
+	row = _best_effort(_read_doctype_row)
+	cfg = _best_effort(lambda: _resolve(row=row))
+	if cfg is None:
+		return OptimusConfig()
+	# A transient read failure must not turn defaults into durable site settings.
+	if row is not None and _best_effort(lambda: not getattr(frappe.db, "transaction_writes", 0), False):
+		_best_effort(lambda: frappe.cache.set_value(_CACHE_KEY, redis_schema.wrap_value(cfg.__dict__), expires_in_sec=CONFIG_CACHE_SECONDS))
 	return cfg
 
 

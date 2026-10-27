@@ -864,6 +864,31 @@ class TestScrubScanSize:
 
 
 class TestPurgeScope:
+	@pytest.mark.parametrize("v15_like", [False, True], ids=["v16", "v15"])
+	def test_like_candidates_require_an_exact_path_before_counting_or_deleting(self, fake, monkeypatch, v15_like):
+		# SQL LIKE treats '_' as a wildcard; common DB collations ignore case.
+		# False positives spanning multiple chunks must not hide later true hits.
+		like = _like
+		monkeypatch.setattr(sys.modules[__name__], "_like", lambda value, pattern: like((value or "").lower(), pattern.lower()))
+		monkeypatch.setattr(maintenance, "_BATCH", 2)
+		paths = [
+			"optimus/aiXfix.py", "frappeXprofiler/ai_fix.py",
+			"frappe_profiler/aiXfix.py", "optimus/AI_FIX.PY",
+			"optimus/ai_fix.py", "frappe_profiler/ai_fix.py",
+		]
+		logs = [(str(i), f'File "apps/{path}", line 3') for i, path in enumerate(paths)]
+		deleted = [(name, json.dumps({"error": text})) for name, text in logs]
+		f = fake(logs, deleted, v15_like=v15_like, has_metadata=not v15_like)
+		f.tables["Deleted Document"]["other-doctype"] = {
+			"name": "other-doctype", "deleted_doctype": "Note", "data": CLEAN_AI,
+		}
+		assert maintenance.purge_ai_error_logs(dry_run=True) == {"error_logs": 2, "deleted_documents": 2}
+		assert f.deletes == []
+		assert maintenance.purge_ai_error_logs(dry_run=False) == {"error_logs": 2, "deleted_documents": 2}
+		assert set(f.tables["Error Log"]) == {"0", "1", "2", "3"}
+		assert set(f.tables["Deleted Document"]) == {"0", "1", "2", "3", "other-doctype"}
+		assert all(names for _, names in f.deletes)
+
 	def test_other_apps_ai_fix_frames_are_not_purged(self, fake):
 		other = 'File "apps/acme/acme/openai_fix.py", line 3, in call\n    headers = {\'api_key\': \'x\'}\n'
 		f = fake([("a", LEAKY), ("o", other)], [("d1", LEAKY), ("d2", other)])

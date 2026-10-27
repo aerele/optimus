@@ -22,10 +22,6 @@ import secrets
 CHARS_PER_TOKEN_SAFE = 3.3
 CHARS_PER_TOKEN_CENTRAL = 4.0
 TEMPLATE_TOKENS = 64  # chat-template role markers and similar overhead
-MAX_OUTPUT_TOKENS = 1024  # stored answers measure 194 to 366 tokens
-# The longest reply the guardrails check: the largest completion budget at 16 characters a
-# token. Only a provider that ignores max_tokens sends more (cap_reply).
-MAX_REPLY_CHARS = MAX_OUTPUT_TOKENS * 16
 MIN_OUTPUT_TOKENS = 512
 REASK_MIN_OUTPUT_TOKENS = 400
 MIN_USER_CHARS = 1200
@@ -56,24 +52,23 @@ def clip(text: str, size: int) -> str:
 	return t[:lo]
 
 
-def cap_reply(text: str, finish_reason: str | None) -> tuple[str, str | None]:
-	"""``(text, finish_reason)`` for a reply the guardrails may check. A reply is capped
-	only by the max_tokens a provider honours, one that ignores it can send any size, and
-	the guardrails' Markdown checks are superlinear, so a reply past ``MAX_REPLY_CHARS``
-	is cut there and reported as cut off at the output limit (``"length"``): it is never
-	re-asked and its code is removed."""
-	if len(text) <= MAX_REPLY_CHARS:
-		return text, finish_reason
-	return text[:MAX_REPLY_CHARS], "length"
-
-
 def estimate_tokens(text: str) -> int:
 	return math.ceil(text_size(text) / CHARS_PER_TOKEN_SAFE)
 
 
-def output_tokens(context_tokens: int) -> int:
-	"""The completion budget: a fifth of the window, between 512 and 1024 tokens."""
-	return min(MAX_OUTPUT_TOKENS, max(MIN_OUTPUT_TOKENS, int(context_tokens) // 5))
+def output_tokens(context_tokens: int, *, input_tokens: int = 0, model_max: int | None = None) -> int:
+	"""Remaining context, with a conservative tokenizer margin, bounded by model capability.
+
+	This is a hard capacity estimate, not a desired answer length. Input assembly
+	reserves MIN_OUTPUT_TOKENS; only a fully assembled request gets this allowance.
+	"""
+	margin = max(256, math.ceil(input_tokens * 0.1))
+	remaining = max(0, int(context_tokens) - input_tokens - margin)
+	return min(remaining, int(model_max)) if model_max else remaining
+
+
+def input_tokens(system: str, messages) -> int:
+	return estimate_tokens(system) + sum(estimate_tokens(m.get("content") or "") + 8 for m in messages) + TEMPLATE_TOKENS
 
 
 def min_context_tokens(system: str) -> int:
@@ -84,7 +79,9 @@ def min_context_tokens(system: str) -> int:
 def user_char_budget(context_tokens: int, system: str, *, out_tokens: int) -> int:
 	"""``text_size`` units left for the user message once the system prompt, the
 	completion and the chat template are reserved, clamped to [1200, 18000]."""
-	free = int(context_tokens) - estimate_tokens(system) - int(out_tokens) - TEMPLATE_TOKENS
+	capacity = int(context_tokens) - int(out_tokens)
+	margin = max(256, math.ceil(capacity / 11))
+	free = capacity - margin - estimate_tokens(system) - TEMPLATE_TOKENS - 8
 	return max(MIN_USER_CHARS, min(MAX_USER_CHARS, int(free * CHARS_PER_TOKEN_SAFE)))
 
 
@@ -139,19 +136,12 @@ def trim_window(window: list[dict], *, max_lines: int) -> list[dict]:
 	return list(window[lo : lo + max_lines])
 
 
-def reask_output_tokens(out_tokens: int, first_completion: int) -> int:
-	"""A rewrite is about as long as the answer it repairs: twice that, at least 400."""
-	return min(int(out_tokens), max(REASK_MIN_OUTPUT_TOKENS, 2 * int(first_completion or 0)))
-
-
-def reask_fits(context_tokens: int, usage: dict, reask_text: str, *, out_tokens: int) -> bool:
-	"""Whether the re-ask (first prompt + first answer + re-ask text + rewrite) fits
-	the window. ``usage`` is the first call's usage; the caller fills estimates for
-	fields the provider did not report."""
+def reask_fits(context_tokens: int, usage: dict, reask_text: str, *, out_tokens: int = MIN_OUTPUT_TOKENS) -> bool:
+	"""Reserve a minimum answer after the complete reported conversation history."""
 	prompt = int(usage.get("prompt_tokens") or 0)
 	completion = int(usage.get("completion_tokens") or 0)
-	need = prompt + completion + estimate_tokens(reask_text) + reask_output_tokens(out_tokens, completion)
-	return need <= int(context_tokens)
+	need = prompt + completion + estimate_tokens(reask_text) + TEMPLATE_TOKENS
+	return output_tokens(context_tokens, input_tokens=need) >= MIN_OUTPUT_TOKENS
 
 
 def context_truncated(usage: dict, sent_size: int) -> bool:

@@ -46,6 +46,10 @@ _WRITE_VERBS = frozenset({"INSERT", "UPDATE", "DELETE", "REPLACE"})
 # First SQL keyword, skipping any leading /* ... */ comments.
 _LEADING_VERB_RE = re.compile(r"^\s*(?:/\*.*?\*/\s*)*(\w+)", re.S)
 _SOURCE_ORDER = {"WHERE": 0, "JOIN": 1, "ORDER BY": 2, "GROUP BY": 3}
+_TARGET_NAME = r'(?:`[^`]{1,140}`|"[^"]{1,140}"|[A-Za-z_][A-Za-z_0-9$]{0,139})'
+_BOUNDED_WRITE_TARGET = re.compile(
+	r"^\s*(?:/\*.*?\*/\s*)*(?:INSERT\s+(?:IGNORE\s+)?INTO|REPLACE(?:\s+INTO)?|UPDATE|DELETE\s+FROM)\s+"
+	r"(?:" + _TARGET_NAME + r"\s*\.\s*)?(?P<table>" + _TARGET_NAME + r")(?=\s|\()", re.I | re.S)
 
 
 def analyze(recordings: list[dict], context) -> AnalyzerResult:
@@ -69,18 +73,21 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 		# filtered on exactly that set drives the composite recommendation.
 		"combos": Counter(),
 	})
+	limited = omitted = 0
 
 	for recording in recordings:
 		for call in recording.get("calls") or []:
-			if is_error_log_hook_query(call.get("stack")):
+			if not isinstance(call, dict) or is_error_log_hook_query(call.get("stack")):
 				continue
 			query = call.get("normalized_query") or call.get("query") or ""
 			if not query:
 				continue
 			duration = float(call.get("duration", 0) or 0)
 			meta = _parse_query(query)
+			limited += bool(meta.get("limited"))
 			tables = meta["tables"]
 			if not tables:
+				omitted += bool(meta.get("limited"))
 				continue
 			verb = meta["verb"]
 			is_read = verb == "SELECT"
@@ -149,7 +156,13 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	)[:DEFAULT_WRITE_TOP_N]
 	combined = combined + extra_writes
 	combined.sort(key=lambda x: x["consolidated_time_ms"], reverse=True)
-	return AnalyzerResult(aggregate={"table_breakdown": combined})
+	warnings = []
+	if limited:
+		warnings.append(
+			f"{limited} SQL statement(s) exceeded the table-breakdown parser budget. "
+			"Recognized writes retain their leading target table, count and time; index hints are omitted. "
+			f"{omitted} statement(s) could not be assigned to a table.")
+	return AnalyzerResult(aggregate={"table_breakdown": combined}, warnings=warnings)
 
 
 def _build_recommended_index(table: str, s: dict) -> dict | None:
@@ -223,6 +236,14 @@ def _parse_query(query: str) -> dict:
 	query simply doesn't appear in the breakdown.
 	"""
 	verb = _leading_verb(query)
+	from optimus.sql_budget import within_budget
+
+	if not within_budget(query):
+		# Large VALUES lists do not require parsing to account for their target.
+		# Inspect a fixed prefix only; complex/unrecognized shapes are disclosed.
+		match = _BOUNDED_WRITE_TARGET.match(query[:1024]) if isinstance(query, str) else None
+		tables = [match.group("table").strip('`"')] if match else []
+		return {"tables": tables, "verb": verb, "index_cols": {}, "limited": True}
 	try:
 		from sql_metadata import Parser
 

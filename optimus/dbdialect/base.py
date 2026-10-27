@@ -13,7 +13,9 @@ in ``mariadb.py`` / ``postgres.py``.
 
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 
 # ---------------------------------------------------------------------------
@@ -32,30 +34,29 @@ def to_int(val) -> int:
 		return int(val)
 	if isinstance(val, int):
 		return val
-	if isinstance(val, float):
-		return int(val)
 	try:
-		return int(val)
-	except (TypeError, ValueError):
+		if isinstance(val, float):
+			return int(val)
 		try:
-			return int(float(val))
+			return int(val)
 		except (TypeError, ValueError):
-			return 0
+			return int(float(val))
+	except (TypeError, ValueError, OverflowError):
+		# OverflowError: float("inf"); ValueError: float("nan") or garbage.
+		return 0
 
 
 def to_float(val):
 	"""Coerce a plan float (MariaDB `filtered`, PG-derived selectivity) to
-	float. Returns None on failure so a threshold check can cleanly skip."""
+	float. Returns None on failure or a non-finite value (nan/inf) so a
+	threshold check can cleanly skip."""
 	if val is None:
 		return None
-	if isinstance(val, bool):
-		return float(val)
-	if isinstance(val, (int, float)):
-		return float(val)
 	try:
-		return float(val)
-	except (TypeError, ValueError):
+		out = float(val)
+	except (TypeError, ValueError, OverflowError):
 		return None
+	return out if math.isfinite(out) else None
 
 
 def to_int_or_none(val):
@@ -94,6 +95,26 @@ class NormalizedPlan:
 	tables: list = field(default_factory=list)   # list[PlanTable]
 	ok: bool = True                              # False → EXPLAIN failed/unsupported; analyzers skip
 	raw: object = None                           # full raw EXPLAIN output for the report
+	reason: str = ""                             # safe, query-free explanation when declined
+
+
+def prepare_explain_query(query: str) -> str:
+	"""Accept one recorded statement, with at most one trailing terminator.
+
+	EXPLAIN only prefixes the first statement in a compound query. Reject every
+	remaining semicolon, including those in strings/comments, rather than guess
+	at quoting rules that vary with the database's configuration. Missing these
+	advisory plans is preferable to replaying a recorded write.
+	"""
+	query = query.strip()
+	if query.endswith(";"):
+		query = query[:-1].rstrip()
+	if not query or ";" in query:
+		raise ValueError(
+			"EXPLAIN skipped: only one SQL statement is supported; semicolons inside "
+			"literals or comments are also declined."
+		)
+	return query
 
 
 @dataclass
@@ -102,6 +123,9 @@ class IndexInfo:
 	columns: list                  # ordered by sequence-in-index
 	unique: bool = False
 	leftmost: str | None = None    # columns[0] if any the col a b-tree accelerates a single-col filter on
+	eligible: bool = True
+	reason: str = ""
+	usable_prefix: tuple[str, ...] = ()  # Full leading key parts before a prefix/expression part.
 
 
 @dataclass
@@ -153,6 +177,14 @@ class Dialect(ABC):
 	@abstractmethod
 	def infra_snapshot(self) -> InfraSnapshot:
 		"""Live DB connection / load counters; any field may be ``None``."""
+
+	def statement_time_limit(self, seconds: float):
+		"""Cap each statement's run time on this connection while the block runs (no-op by default)."""
+		return nullcontext()
+
+	def is_statement_timeout(self, error: Exception) -> bool:
+		"""True when ``error`` came from a statement_time_limit cap."""
+		return False
 
 	# Shared, non-abstract type classification (overridable per dialect).
 	def prefix_required(self, data_type: str) -> bool:

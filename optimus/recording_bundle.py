@@ -11,13 +11,21 @@ from pathlib import Path
 
 MAX_COMPRESSED_BYTES = 16 * 1024 * 1024
 MAX_JSON_BYTES = 64 * 1024 * 1024
-MAX_JSON_NODES = 250_000
+# Recorder stacks contain many small scalar fields. Keep a finite work budget
+# large enough for ordinary multi-request captures, alongside the byte bounds.
+MAX_JSON_NODES = 4_000_000
 MAX_JSON_DEPTH = 64
 MAX_RECORDINGS = 20_000
+SNAPSHOT_FAILURE_WARNING = "Recording snapshot could not be saved. Redis input was retained for Retry Analyze (up to 7 days); do not clear Recorder data."
+DEGRADED_WARNING = "Recording snapshot exceeded full-detail limits: saved every query with up to 3 application stack frames and without EXPLAIN results."
 
 
 class InvalidBundle(ValueError):
 	"""Fixed reason code, never recording content or a filesystem path."""
+
+
+class SnapshotUnavailable(InvalidBundle):
+	"""A complete recording snapshot was not committed; retain transient input."""
 
 
 def _pairs(items):
@@ -60,6 +68,7 @@ def _check_structure(value):
 def encode(bundle: dict) -> bytes:
 	"""Do not save a new snapshot that the bounded reader would reject."""
 	_check_structure(bundle)
+	_validate_recordings(bundle)
 	if len(bundle.get("recordings", {})) > MAX_RECORDINGS:
 		raise InvalidBundle("invalid_recordings")
 	content = bytearray()
@@ -68,10 +77,37 @@ def encode(bundle: dict) -> bytes:
 		if len(content) + len(chunk) > MAX_JSON_BYTES:
 			raise InvalidBundle("json_size_limit")
 		content.extend(chunk)
-	compressed = gzip.compress(content)
+	compressed = gzip.compress(content, mtime=0)
 	if len(compressed) > MAX_COMPRESSED_BYTES:
 		raise InvalidBundle("compressed_size_limit")
 	return compressed
+
+
+def encode_snapshot(bundle: dict) -> tuple[bytes, bool]:
+	"""Prefer full detail; preserve all queries in one bounded degraded form.
+
+	Neither form mutates live Recorder data. If even the reduced form cannot fit,
+	the caller must retain Redis and fail analysis instead of erasing its input.
+	"""
+	try:
+		return encode(bundle), False
+	except InvalidBundle as exc:
+		if str(exc) not in {"json_structure_limit", "json_size_limit", "compressed_size_limit", "json_string_limit"}:
+			raise
+	reduced = {**bundle, "snapshot_detail": "reduced-stacks-without-explain", "recordings": {}}
+	for uuid, entry in bundle["recordings"].items():
+		rec = dict(entry["rec"])
+		calls = []
+		for original in rec.get("calls", []):
+			call = {k: v for k, v in original.items() if k not in {"stack", "explain", "explain_result", "explain_results"}}
+			frames = original.get("stack")
+			if isinstance(frames, list):
+				app = [frame for frame in frames if isinstance(frame, dict) and "/apps/" in "/" + str(frame.get("filename", "")) and "/apps/frappe/" not in "/" + str(frame.get("filename", ""))]
+				call["stack"] = (app or [f for f in frames if isinstance(f, dict)])[:3]
+			calls.append(call)
+		rec["calls"] = calls
+		reduced["recordings"][uuid] = {**entry, "rec": rec}
+	return encode(reduced), True
 
 
 def read(path: str, *, private_root: str, session_uuid: str) -> dict:
@@ -105,9 +141,22 @@ def read(path: str, *, private_root: str, session_uuid: str) -> dict:
 		raise InvalidBundle("json_size_limit")
 	bundle = json.loads(raw, object_pairs_hook=_pairs, parse_constant=_constant)
 	_check_structure(bundle)
+	_validate_recordings(bundle)
+	if not session_uuid or bundle.get("session_uuid") != session_uuid:
+		raise InvalidBundle("session_uuid_mismatch")
+	for entry in bundle["recordings"].values():
+		# Opaque trees and argument sidecars never reach a persisted consumer.
+		for key in ("tree_b64", "pyi_session", "sidecar"):
+			entry.pop(key, None)
+			entry["rec"].pop(key, None)
+	return bundle
+
+
+def _validate_recordings(bundle):
+	"""The writer and reader must accept the same recorder structure."""
 	if not isinstance(bundle, dict) or type(bundle.get("schema")) is not int or bundle["schema"] != 1:
 		raise InvalidBundle("unsupported_schema")
-	if not session_uuid or bundle.get("session_uuid") != session_uuid:
+	if not isinstance(bundle.get("session_uuid"), str) or not bundle["session_uuid"]:
 		raise InvalidBundle("session_uuid_mismatch")
 	recordings = bundle.get("recordings")
 	if not isinstance(recordings, dict) or len(recordings) > MAX_RECORDINGS:
@@ -120,9 +169,3 @@ def read(path: str, *, private_root: str, session_uuid: str) -> dict:
 			raise InvalidBundle("recording_uuid_mismatch")
 		if "calls" in rec and (not isinstance(rec["calls"], list) or any(not isinstance(call, dict) for call in rec["calls"])):
 			raise InvalidBundle("invalid_query_records")
-		# Old bundles remain useful, but opaque trees and argument sidecars
-		# are never exposed to a downstream consumer.
-		for key in ("tree_b64", "pyi_session", "sidecar"):
-			entry.pop(key, None)
-			rec.pop(key, None)
-	return bundle

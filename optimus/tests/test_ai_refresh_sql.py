@@ -434,6 +434,7 @@ class Facade:
 @pytest.fixture
 def sql(monkeypatch):
 	from datetime import datetime
+	monkeypatch.setattr("optimus.journal_schema.ready", lambda *a: True)
 
 	monkeypatch.setattr("frappe.utils.now_datetime", lambda: datetime(2026, 10, 14, 12))
 	if not BACKEND:
@@ -709,12 +710,14 @@ def test_the_database_runs_the_isolation_the_leg_claims(sql):
 		assert sql.primary.sql("SHOW transaction_isolation")[0]["transaction_isolation"] == "repeatable read"
 
 
-def test_an_older_snapshot_cannot_admit_beyond_site_capacity(sql):
+@pytest.mark.parametrize("first_scope", ["all", "fixes_missing"])
+@pytest.mark.parametrize("second_scope", ["all", "fixes_missing"])
+def test_an_older_snapshot_cannot_admit_beyond_site_capacity(sql, first_scope, second_scope):
 	older = sql.connect()
 	older.get_value("Optimus Session", "parent-b", "status")  # opens a read view
-	assert ai_jobs._retry_sql(lambda: admit(cap=1))["status"] == "queued"
+	assert ai_jobs._retry_sql(lambda: admit(cap=1, scope=first_scope))["status"] == "queued"
 	with sql.using(older):
-		assert ai_jobs._retry_sql(lambda: admit("run-b", "parent-b", cap=1)) == {
+		assert ai_jobs._retry_sql(lambda: admit("run-b", "parent-b", cap=1, scope=second_scope)) == {
 			"status": "refused",
 			"reason": "site_cap",
 		}
@@ -723,7 +726,8 @@ def test_an_older_snapshot_cannot_admit_beyond_site_capacity(sql):
 	assert older.conflicts == []
 
 
-def test_an_admission_waiting_on_its_session_still_counts_a_run_admitted_meanwhile(sql, monkeypatch):
+@pytest.mark.parametrize("first_scope,second_scope", [("all", "fixes_missing"), ("fixes_missing", "all"), ("fixes_missing", "fixes_missing"), ("all", "all")])
+def test_an_admission_waiting_on_its_session_still_counts_a_run_admitted_meanwhile(sql, monkeypatch, first_scope, second_scope):
 	"""B's transaction starts (its session lock), A admits and commits, then B counts: the
 	count is a plain read after B takes the site mutex, so it sees A. On Postgres B's
 	snapshot is older than A's commit: the mutex row A changed fails B with 40001, and the
@@ -741,10 +745,10 @@ def test_an_admission_waiting_on_its_session_still_counts_a_run_admitted_meanwhi
 
 	monkeypatch.setattr(store, "_read", read)
 	thread, b = in_thread(
-		sql, "admission-b", lambda: ai_jobs._retry_sql(lambda: admit("run-b", "parent-b", cap=1))
+		sql, "admission-b", lambda: ai_jobs._retry_sql(lambda: admit("run-b", "parent-b", cap=1, scope=second_scope))
 	)
 	assert paused.wait(10)
-	assert ai_jobs._retry_sql(lambda: admit("run-a", "parent-a", cap=1))["status"] == "queued"
+	assert ai_jobs._retry_sql(lambda: admit("run-a", "parent-a", cap=1, scope=first_scope))["status"] == "queued"
 	resume.set()
 	thread.join(30)
 	assert b["value"] == {"status": "refused", "reason": "site_cap"}
@@ -758,7 +762,7 @@ def test_phase2_commit_fences_an_older_ai_admission_snapshot(sql):
 	older = sql.connect()
 	older.get_value("Optimus Session", "parent-a", "status")
 	def reserve():
-		assert store.lock_phase2_parent("parent-a") is None
+		assert store.lock_phase2_parent("parent-a", now=50) is None
 		sql.primary.insert({"doctype": "Optimus Phase Two Run", "name": "phase2-a",
 			"parent": "parent-a", "status": "Recording"})
 		phase2._write({"name": "phase2-a", "parent": "parent-a"}, status="Recording")
@@ -773,7 +777,7 @@ def test_ai_admission_fences_an_older_phase2_snapshot(sql):
 	older.get_value("Optimus Session", "parent-a", "status")
 	assert ai_jobs._retry_sql(admit)["status"] == "queued"
 	with sql.using(older):
-		assert ai_jobs._retry_sql(lambda: store.lock_phase2_parent("parent-a")) == "ai_refresh"
+		assert ai_jobs._retry_sql(lambda: store.lock_phase2_parent("parent-a", now=50)) == "ai_refresh"
 
 
 @pytest.mark.parametrize("scope", ["all", "fixes_missing"])
@@ -783,7 +787,7 @@ def test_phase2_waiting_on_ai_admission_cannot_miss_its_reservation(sql, scope):
 	# it does not increment the manual refresh counter.
 	sql.primary.get_value("Optimus Session", "parent-a", "status", for_update=True)
 	thread, waiting = in_thread(
-		sql, "phase2-admission", lambda: ai_jobs._retry_sql(lambda: store.lock_phase2_parent("parent-a"))
+		sql, "phase2-admission", lambda: ai_jobs._retry_sql(lambda: store.lock_phase2_parent("parent-a", now=50))
 	)
 	wait_until_blocked(sql)
 	try:
@@ -799,7 +803,7 @@ def test_phase2_waiting_on_ai_admission_cannot_miss_its_reservation(sql, scope):
 
 @pytest.mark.parametrize("scope", ["all", "fixes_missing"])
 def test_ai_waiting_on_phase2_admission_cannot_start_a_provider_run(sql, scope):
-	assert store.lock_phase2_parent("parent-a") is None
+	assert store.lock_phase2_parent("parent-a", now=50) is None
 	thread, waiting = in_thread(sql, "ai-admission", lambda: ai_jobs._retry_sql(lambda: admit(scope=scope)))
 	wait_until_blocked(sql)
 	try:
@@ -938,7 +942,8 @@ def history(sql, count=40):
 
 
 @pytest.mark.parametrize("transition", ["finish", "continue_run", "cancel"])
-def test_admission_never_deadlocks_another_sessions_worker(sql, monkeypatch, transition):
+@pytest.mark.parametrize("scope", ["all", "fixes_missing"])
+def test_admission_never_deadlocks_another_sessions_worker(sql, monkeypatch, transition, scope):
 	"""The admission's FOR UPDATE reads (the reservation probe, the capacity scan)
 	locked index ranges that another session's worker needed to finish, continue or be
 	cancelled; the worker was the deadlock victim. The admission now reads other runs
@@ -969,7 +974,7 @@ def test_admission_never_deadlocks_another_sessions_worker(sql, monkeypatch, tra
 	}
 	worker, done = in_thread(sql, "worker-b", lambda: ai_jobs._retry_sql(operations[transition]))
 	assert locked.wait(10)
-	admission, admitted = in_thread(sql, "admission-a", lambda: ai_jobs._retry_sql(admit))
+	admission, admitted = in_thread(sql, "admission-a", lambda: ai_jobs._retry_sql(lambda: admit(scope=scope)))
 	finished_or_blocked(sql, admission)  # the admission ran while the worker holds its rows
 	release.set()
 	worker.join(30)
@@ -989,7 +994,8 @@ def test_admission_never_deadlocks_another_sessions_worker(sql, monkeypatch, tra
 
 
 @pytest.mark.parametrize("transition", ["finish", "cancel"])
-def test_an_admission_holds_no_lock_another_sessions_worker_needs(sql, monkeypatch, transition):
+@pytest.mark.parametrize("scope", ["all", "fixes_missing"])
+def test_an_admission_holds_no_lock_another_sessions_worker_needs(sql, monkeypatch, transition, scope):
 	"""The admission is paused after all its reads, holding every lock it took; another
 	session's worker must still end its run without waiting. A FOR UPDATE probe of the
 	reservation or a locking capacity scan held a gap or next-key lock the finishing
@@ -1008,7 +1014,7 @@ def test_an_admission_holds_no_lock_another_sessions_worker_needs(sql, monkeypat
 		return real_insert_new(table, name, **values)
 
 	monkeypatch.setattr(store, "_insert_new", pausing)
-	admission, admitted = in_thread(sql, "admission-a", lambda: ai_jobs._retry_sql(admit))
+	admission, admitted = in_thread(sql, "admission-a", lambda: ai_jobs._retry_sql(lambda: admit(scope=scope)))
 	assert paused.wait(10)
 	operations = {
 		"finish": lambda: store.finish(
@@ -1039,21 +1045,90 @@ def test_an_admission_waiting_on_its_session_never_holds_the_site_mutex(sql):
 	assert "error" not in waiting and waiting["value"]["status"] == "queued"
 
 
-def test_a_held_site_mutex_is_a_busy_refusal_without_retrying(sql):
-	"""Q4: NOWAIT contention answers busy at once, instead of raising or retrying, and an
-	analyze-time admission never takes the mutex at all."""
+@pytest.mark.parametrize("scope", ["all", "fixes_missing"])
+def test_a_held_site_mutex_is_a_busy_refusal_without_retrying(sql, scope):
+	"""Both scopes answer NOWAIT contention at once, without raising or retrying."""
 	sql.primary.get_value(store.CONTROL, "site", "name", for_update=True)
 	contender = sql.connect()
 	with sql.using(contender):
-		assert ai_jobs._retry_sql(admit) == {"status": "refused", "reason": "busy"}
+		assert ai_jobs._retry_sql(lambda: admit(scope=scope)) == {"status": "refused", "reason": "busy"}
 		assert contender.conflicts == ([1205] if BACKEND == "mariadb" else ["55P03"])
-		assert (
-			ai_jobs._retry_sql(lambda: admit("run-b", "parent-b", scope="fixes_missing"))["status"]
-			== "queued"
-		)
 	sql.primary.commit()
 	with sql.using(contender):
-		assert ai_jobs._retry_sql(admit)["status"] == "queued"
+		assert ai_jobs._retry_sql(lambda: admit(scope=scope))["status"] == "queued"
+
+
+def test_mixed_automatic_and_manual_admission_storm_obeys_global_capacity(sql):
+	"""Concurrent admissions share one capacity fence; busy attempts can be retried.
+
+	The test retries refusals as later independent submissions. Production automatic
+	admission records a notice and leaves Ready analysis intact instead of looping.
+	"""
+	capacity, contenders = 4, 12
+	assert ai_jobs._retry_sql(lambda: admit("seed-manual", "parent-a", cap=capacity))["status"] == "queued"
+	assert ai_jobs._retry_sql(lambda: admit("seed-auto", "parent-b", cap=capacity, scope="fixes_missing"))["status"] == "queued"
+	for i in range(contenders):
+		parent = f"storm-parent-{i}"
+		sql.primary.insert({"doctype": "Optimus Session", "name": parent,
+			"session_uuid": "fake-" + parent, "status": "Ready"})
+	sql.primary.commit()
+	barrier = threading.Barrier(contenders)
+
+	def compete(i):
+		barrier.wait(timeout=15)
+		for _ in range(30):
+			out = ai_jobs._retry_sql(lambda: admit(f"storm-run-{i}", f"storm-parent-{i}",
+				cap=capacity, user_cap=100, scope="all" if i % 2 else "fixes_missing"))
+			if out.get("reason") != "busy":
+				return out
+			time.sleep(0.005)
+		raise AssertionError("admission did not resolve contention")
+
+	workers = [in_thread(sql, f"storm-{i}", lambda i=i: compete(i)) for i in range(contenders)]
+	for thread, out in workers:
+		thread.join(30)
+		assert not thread.is_alive() and "error" not in out, repr(out.get("error"))
+		assert out["value"]["status"] == "queued" or out["value"] == {"status": "refused", "reason": "site_cap"}
+		assert not ({1213, "40P01"} & set(out["db"].conflicts))
+	assert sum(out["value"]["status"] == "queued" for _, out in workers) == capacity - 2
+	live = sql.primary.get_values(store.RUN, {"state": ["in", sorted(store.ACTIVE)]}, ["name"], as_dict=True)
+	assert len(live) == capacity
+	assert value(sql, store.CONTROL, "site", "generation") == capacity
+	for i in range(contenders):
+		assert value(sql, "Optimus Session", f"storm-parent-{i}", "status") == "Ready"
+
+	# Either scope releases a global slot; a manual run can consume the freed auto slot.
+	ai_jobs._retry_sql(lambda: store.cancel("seed-auto", docname="parent-b", now=11))
+	assert ai_jobs._retry_sql(lambda: admit("replacement-manual", "parent-b", cap=capacity))["status"] == "queued"
+	assert ai_jobs._retry_sql(lambda: admit("over-cap", "parent-c", cap=capacity, scope="fixes_missing")) == {
+		"status": "refused", "reason": "site_cap",
+	}
+	ai_jobs._retry_sql(lambda: store.cancel("seed-manual", docname="parent-a", now=11))
+	assert ai_jobs._retry_sql(lambda: admit("replacement-auto", "parent-a", cap=capacity, scope="fixes_missing"))["status"] == "queued"
+	assert value(sql, store.CONTROL, "site", "generation") == capacity + 2
+
+
+def test_manual_requester_limit_excludes_automatic_runs_but_global_cap_includes_them(sql):
+	assert ai_jobs._retry_sql(lambda: admit("auto-a", "parent-a", cap=10, user_cap=1, scope="fixes_missing"))["status"] == "queued"
+	assert ai_jobs._retry_sql(lambda: admit("manual-b", "parent-b", cap=10, user_cap=1))["status"] == "queued"
+	assert ai_jobs._retry_sql(lambda: admit("manual-c", "parent-c", cap=10, user_cap=1)) == {
+		"status": "refused", "reason": "user_cap",
+	}
+	assert ai_jobs._retry_sql(lambda: admit("auto-c", "parent-c", cap=10, user_cap=1, scope="fixes_missing"))["status"] == "queued"
+
+
+@pytest.mark.parametrize("scope", ["all", "fixes_missing"])
+def test_expired_automatic_run_releases_global_capacity_without_a_sweep(sql, scope):
+	assert ai_jobs._retry_sql(lambda: admit("auto-a", "parent-a", cap=1, scope="fixes_missing"))["status"] == "queued"
+	assert ai_jobs._retry_sql(lambda: admit("new-b", "parent-b", cap=1, scope=scope, now=1809)) == {
+		"status": "refused", "reason": "site_cap",
+	}
+	assert ai_jobs._retry_sql(lambda: admit("new-b", "parent-b", cap=1, scope=scope, now=1810))["status"] == "queued"
+	# The expired row can no longer send but stays reserved until its own recovery.
+	assert value(sql, store.RUN, "auto-a", "active_session") == "parent-a"
+	assert ai_jobs._retry_sql(lambda: admit("new-c", "parent-c", cap=1, scope="fixes_missing", now=1810)) == {
+		"status": "refused", "reason": "site_cap",
+	}
 
 
 def test_a_second_active_run_of_a_session_is_refused_by_the_unique_reservation(sql, monkeypatch):
@@ -2314,3 +2389,193 @@ def test_parent_deletion_and_journal_removal_roll_back_together_and_fence_late_r
 	assert not ai_jobs._retry_sql(lambda: store.settle_attempt("run-a", attempt["name"], docname="parent-a",
 		worker_token="worker-a", now=13, outcome="succeeded", tokens=100, usage_complete=True,
 		persist=lambda: pytest.fail("late result persisted")))
+
+
+@pytest.mark.parametrize("recovery", ["phase2", "report"])
+def test_expired_ai_recovery_preserves_late_usage_without_stale_answers(sql, recovery):
+	claimed()
+	attempt = begun()
+	def recover():
+		if recovery == "phase2":
+			assert store.lock_phase2_parent("parent-a", now=400) is None
+			sql.primary.insert({"doctype": phase2.TABLE, "name": "phase2-a", "parent": "parent-a", "status": "Recording"})
+			phase2._write({"name": "phase2-a", "parent": "parent-a"}, status="Recording")
+		else:
+			sql.primary.get_value("Optimus Session", "parent-a", "*", for_update=True)
+			assert store.release_expired_reservation("parent-a", now=400) is None
+			store.sql_work.touch_session(sql.primary, "parent-a", raw_report_file="/private/files/repaired.html")
+	ai_jobs._retry_sql(recover)
+	assert value(sql, store.RUN, "run-a", "active_session") is None
+	assert value(sql, store.ATTEMPT, attempt["name"], "state") == "uncertain"
+	def late():
+		return store.settle_attempt("run-a", attempt["name"], docname="parent-a", worker_token="worker-a",
+			outcome="succeeded", tokens=7, usage_complete=True, now=401,
+			persist=lambda: pytest.fail("expired worker replaced results after recovery"))
+	assert ai_jobs._retry_sql(late)
+	assert not ai_jobs._retry_sql(late)
+	assert value(sql, "Optimus Session", "parent-a", "ai_tokens_spent") == 7
+	assert value(sql, store.ATTEMPT, attempt["name"], "state") == "discarded"
+	assert value(sql, store.RUN, "run-a", "state") == "interrupted"
+
+
+def test_expired_release_rolls_back_with_recovery_failure(sql):
+	claimed()
+	attempt = begun()
+	def fail_recovery():
+		assert store.lock_phase2_parent("parent-a", now=400) is None
+		raise RuntimeError("fake recovery write failed")
+	with pytest.raises(RuntimeError, match="fake recovery write failed"):
+		ai_jobs._retry_sql(fail_recovery)
+	assert value(sql, store.RUN, "run-a", "active_session") == "parent-a"
+	assert value(sql, store.ATTEMPT, attempt["name"], "state") == "calling"
+
+
+@pytest.mark.parametrize("field", ["ai_send_raw_values", "sensitive_sql_columns"])
+def test_fresh_privacy_settings_read_current_commit_without_touching_caller_snapshot(sql, monkeypatch, field):
+	"""A real REPEATABLE READ view stays stale across the first HTTP call.
+
+	Only the table name and connection factory are adapted to the disposable
+	fixture. The production fresh-consent SQL executes on another connection.
+	"""
+	import frappe
+
+	from optimus import ai_privacy
+
+	table = sql.primary.quoted(sql.primary.tables["answer"] + "_consent")
+	sql.primary.sql(f"CREATE TABLE {table} (doctype varchar(140), field varchar(140), value varchar(140))")
+	before, after = ("1", "0") if field == "ai_send_raw_values" else ("private_marker", "another_marker")
+	sql.primary.sql(f"INSERT INTO {table} VALUES (%s, %s, %s)", ("Optimus Settings", field, before))
+	sql.primary.commit()
+	admin = sql.connect()
+	closed = []
+	class Cursor:
+		def __init__(self, cursor):
+			self.cursor = cursor
+		def execute(self, query, values):
+			self.cursor.execute(query.replace('`tabSingles`', table).replace('"tabSingles"', table), values)
+		def fetchone(self):
+			return self.cursor.fetchone()
+		def close(self):
+			self.cursor.close()
+	class Connection:
+		def __init__(self):
+			self.db = sql.connect()
+		def cursor(self):
+			return Cursor(self.db.connection.cursor())
+		def close(self):
+			# The fixture retains ownership of physical connections for teardown.
+			self.db.rollback()
+			closed.append(True)
+	try:
+		monkeypatch.setattr(frappe, "db", SimpleNamespace(db_type=BACKEND, db_schema="public", get_connection=Connection), raising=False)
+		read = ai_privacy._fresh_raw_values_enabled if field == "ai_send_raw_values" else ai_privacy._fresh_sensitive_columns
+		assert read() == (True if field == "ai_send_raw_values" else before)
+		assert sql.primary.sql(f"SELECT value FROM {table}")[0]["value"] == before
+		# A pending caller write must not be accidentally committed by the check.
+		sql.primary.sql(f"UPDATE {sql.primary.table('answer')} SET body='uncommitted' WHERE name='row-00'")
+		admin.sql(f"UPDATE {table} SET value=%s", (after,))
+		admin.commit()
+		assert sql.primary.sql(f"SELECT value FROM {table}")[0]["value"] == before
+		assert read() == (False if field == "ai_send_raw_values" else after)
+		assert closed == [True, True]
+		assert sql.primary.sql(f"SELECT value FROM {table}")[0]["value"] == before
+		assert admin.sql(f"SELECT body FROM {admin.table('answer')} WHERE name='row-00'")[0]["body"] == ""
+	finally:
+		sql.primary.rollback()
+		admin.rollback()
+		sql.primary.sql(f"DROP TABLE {table}")
+		sql.primary.commit()
+
+
+def test_unknown_send_certainty_is_durable_and_trips_the_breaker_once(sql):
+ claimed()
+ for i in range(3):
+  attempt=begun(target='unknown-'+str(i))
+  def finish():
+   return store.settle_attempt('run-a',attempt['name'],docname='parent-a',worker_token='worker-a',outcome='uncertain',tokens=0,usage_complete=False,now=13,error_kind='timeout',send_certainty='sent_unknown')
+  assert ai_jobs._retry_sql(finish)
+  assert not ai_jobs._retry_sql(finish)
+  assert value(sql,store.ATTEMPT,attempt['name'],'send_certainty')=='sent_unknown'
+  assert value(sql,store.RUN,'run-a','consecutive_failures')==i+1
+ assert value(sql,store.RUN,'run-a','breaker_kind')=='timeout'
+ assert value(sql,store.RUN,'run-a','uncertain')==3
+ assert begun(target='fourth') is None
+
+
+def test_preparation_skips_commit_without_visible_calling_intent_or_breaker(sql, monkeypatch):
+	run = claimed()
+	monkeypatch.setattr(ai_jobs, '_now', lambda: 20)
+	monkeypatch.setattr(ai_jobs, '_check_run', lambda *a, **kw: None)
+	monkeypatch.setattr(ai_jobs.ai_fix, 'log_ai_failure', lambda *a, **kw: None)
+	observer = sql.connect()
+	original = store.settle_attempt
+	observed = []
+	def settle_without_commit(*a, **kw):
+		observer.commit()
+		states = observer.sql(f"SELECT state FROM {observer.table(store.ATTEMPT)} WHERE run_id=%s", ('run-a',))
+		assert all(row['state'] != 'calling' for row in states)
+		observed.append(True)
+		return original(*a, **kw)
+	monkeypatch.setattr(store, 'settle_attempt', settle_without_commit)
+	def malformed():
+		raise AttributeError('synthetic malformed finding')
+	for n in range(3):
+		assert ai_jobs._prepare_item(run, kind='fix', target=f'bad-{n}', prepare=malformed) is None
+	assert len(observed) == 3
+	assert value(sql, store.RUN, 'run-a', 'skipped') == 3
+	assert value(sql, store.RUN, 'run-a', 'consecutive_failures') == 0
+	assert value(sql, store.RUN, 'run-a', 'tokens_reported') == 0
+	assert not value(sql, store.RUN, 'run-a', 'active_attempt')
+
+
+
+def test_manual_quota_serializes_accepted_runs_across_different_sessions(sql):
+	from datetime import timedelta
+
+	from frappe.utils import now_datetime
+	# A historical admission fills all but the final slot. Both requests read
+	# under the existing site mutex, so exactly one can take that last slot.
+	sql.primary.insert({"doctype": store.RUN, "name": "history", "run_id": "history", "session_name": "parent-c",
+		"session_uuid": "fake-parent-c", "requested_by": "fake-user", "scope": "all", "state": "complete"})
+	sql.primary.set_value(store.RUN, "history", {"creation": now_datetime() - timedelta(minutes=1)})
+	sql.primary.commit()
+	barrier = threading.Barrier(2, timeout=10)
+	def request(name, parent):
+		barrier.wait()
+		for _ in range(10):
+			out = ai_jobs._retry_sql(lambda: admit(name, parent, manual_quota=(2,3600)))
+			if out.get("reason") != "busy":
+				return out
+			time.sleep(.02)
+		raise AssertionError("Mutex never became available")
+	threads = [in_thread(sql, name, lambda n=name,p=parent: request(n,p)) for name,parent in (("rival-a","parent-a"),("rival-b","parent-b"))]
+	for thread, _ in threads:
+		thread.join(30)
+	for thread,out in threads:
+		assert not thread.is_alive() and "error" not in out, out
+	results = [out["value"] for _,out in threads]
+	assert sorted(out["status"] for out in results) == ["queued", "refused"]
+	assert next(out for out in results if out["status"] == "refused")["reason"] == "hourly_limit"
+
+
+def test_phase1_late_persistence_and_failure_cannot_overwrite_ready(sql):
+	writes = []
+	# Open an old REPEATABLE READ view in the losing worker before the winner commits Ready.
+	sql.primary.set_value("Optimus Session", "parent-a", {"status": "Analyzing"})
+	sql.primary.commit()
+	loser = sql.connect()
+	with sql.using(loser):
+		assert loser.get_value("Optimus Session", "parent-a", "status") == "Analyzing"
+	winner = sql.connect()
+	winner.set_value("Optimus Session", "parent-a", {"status": "Ready"})
+	winner.commit()
+	monkey_transaction = analyze.safe_commit
+	try:
+		analyze.safe_commit = lambda: sql.facade.db.commit()
+		with sql.using(loser):
+			assert not analyze._with_active_analysis("parent-a", lambda: writes.append("persist"))
+			assert not analyze._with_active_analysis("parent-a", lambda: writes.append("fail"), statuses=analyze._ANALYZE_PENDING)
+	finally:
+		analyze.safe_commit = monkey_transaction
+	assert not writes
+	assert sql.primary.get_value("Optimus Session", "parent-a", "status") == "Ready"

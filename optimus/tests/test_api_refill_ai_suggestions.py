@@ -1,11 +1,13 @@
 """The legacy refresh route now admits background work, preserving its session gates."""
 from importlib import import_module
 from types import SimpleNamespace
-from unittest.mock import DEFAULT, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
 from optimus import api
+from optimus.tests.fixtures.ai_refresh_journal import journal as _journal_fixture  # noqa: F401
+from optimus.tests.fixtures.ai_refresh_queue import queue as _queue_fixture  # noqa: F401
 from optimus.tests.gate_fakes import (
 	DOCNAME,
 	OWNER,
@@ -30,7 +32,8 @@ def env(monkeypatch):
 		monkeypatch.setattr(jobs, "frappe", fake)
 		h = SimpleNamespace(start=MagicMock(return_value={"status": "queued", "refresh": {"run_id": "fake-run", "state": "queued"}}),
 			active=MagicMock(return_value=None))
-		monkeypatch.setattr(jobs, "active_refresh", h.active, raising=False)
+		monkeypatch.setattr(jobs, "attach_refresh", h.active, raising=False)
+		monkeypatch.setattr(jobs, "active_refresh", h.active)
 		monkeypatch.setattr(jobs, "start_refresh", h.start)
 		monkeypatch.setattr("optimus.settings.get_config", lambda: cfg or SimpleNamespace(
 			ai_suggest_findings=True, ai_humanize_steps=True, ai_refresh_max_findings=20))
@@ -136,6 +139,26 @@ def test_status_checks_read_permission_before_touching_journal(env, monkeypatch)
 		api.ai_refresh_status(SESSION_UUID)
 
 
+def test_shared_viewer_without_profiler_role_can_poll_but_cannot_spend(env, monkeypatch):
+	user = "reader@example.com"
+	fake, h = env(user=user, perms={("read", DOCNAME, user): True})
+	monkeypatch.setattr(fake, "get_roles", lambda *a: [])
+	permission = fake.has_permission
+	monkeypatch.setattr(fake, "has_permission", lambda dt, ptype, doc, user=None:
+		permission(dt, ptype, doc, user=user or fake.session.user))
+	monkeypatch.setattr(fake, "get_doc", lambda *a: fake_session_doc(owner=OWNER, status="Ready"))
+	jobs = import_module("optimus.ai_jobs")
+	monkeypatch.setattr(jobs, "refresh_state", lambda *a: {"state": "complete", "seq": 1})
+	monkeypatch.setattr(jobs, "uncertain_attempts", lambda *a: [])
+	monkeypatch.setattr(jobs, "refresh_plan", lambda *a: pytest.fail("viewer must not prepare AI spend"))
+	out = api.ai_refresh_status(SESSION_UUID)
+	assert out["status"] == "ok" and out["refresh"]["state"] == "complete"
+	assert out["can_act"] is False and out["plan"] is None
+	with pytest.raises(FakePermissionError):
+		api.refill_ai_suggestions(SESSION_UUID)
+	h.start.assert_not_called()
+
+
 @pytest.mark.parametrize("owner", [True, False])
 def test_read_sharee_can_poll_but_only_actor_sees_refresh_plan(env, monkeypatch, owner):
 	user = OWNER if owner else "reader@example.com"
@@ -145,11 +168,13 @@ def test_read_sharee_can_poll_but_only_actor_sees_refresh_plan(env, monkeypatch,
 	monkeypatch.setattr(fake, "get_doc", lambda *a: fake_session_doc(owner=OWNER, status="Ready"))
 	jobs = import_module("optimus.ai_jobs")
 	monkeypatch.setattr(jobs, "refresh_state", lambda *a: {"state": "complete", "seq": 9})
+	monkeypatch.setattr(jobs, "uncertain_attempts", lambda *a: ["unknown-attempt"])
 	plan = MagicMock(return_value={"pending": 3})
 	monkeypatch.setattr(jobs, "refresh_plan", plan)
 	out = api.ai_refresh_status(SESSION_UUID)
 	assert out["status"] == "ok" and out["refresh"]["seq"] == 9
 	assert out["can_act"] is owner
+	assert out["session_uncertain_count"] == 1
 	assert bool(out["plan"]) is owner
 	assert plan.call_count == int(owner)
 	assert not fake.cache.calls
@@ -193,3 +218,34 @@ def test_render_only_action_refuses_active_refresh_before_consuming_rate_limit(e
 	with pytest.raises(FakeValidationError, match="AI refresh"):
 		api.regenerate_reports(SESSION_UUID)
 	assert not fake.cache.calls
+
+
+def test_public_refresh_redelivers_pending_intent_without_new_admission(queue, monkeypatch):
+	# Use the real endpoint, live SQL view and delivery path after a lost enqueue.
+	monkeypatch.setattr(api, "_session_action_gate", lambda *a, **kw: SimpleNamespace(
+		docname="fake-session-doc", session_uuid="fake-session"))
+	monkeypatch.setattr("optimus.settings.get_config", lambda: pytest.fail("attach read settings"))
+	monkeypatch.setattr(api.ratelimit, "enforce_user_rate_limit", lambda *a, **kw: pytest.fail("attach used rate limit"))
+	assert queue.jobs.active_refresh("fake-session-doc")["state"] == "queued"
+	assert queue.sent == [], "read-only progress must not dispatch"
+	out = api.refill_ai_suggestions("fake-session")
+	assert out["status"] == "already_running"
+	assert len(queue.sent) == 1
+	assert queue.sent[0][1]["run_id"] == "fake-run"
+	assert len(queue.journal.db.rows[queue.journal.mod.RUN]) == 1
+	# Dispatch interval prevents another click from immediately sending again.
+	api.refill_ai_suggestions("fake-session")
+	assert len(queue.sent) == 1
+
+
+def test_public_attach_keeps_sql_progress_when_redelivery_fails(queue, monkeypatch):
+	monkeypatch.setattr(api, "_session_action_gate", lambda *a, **kw: SimpleNamespace(
+		docname="fake-session-doc", session_uuid="fake-session"))
+	def fail(*a, **kw):
+		raise ConnectionError("fake Redis unavailable")
+	monkeypatch.setattr(queue.jobs.frappe, "enqueue", fail)
+	out = api.refill_ai_suggestions("fake-session")
+	assert out["ok"] and out["status"] == "already_running"
+	assert out["refresh"]["state"] == "queued"
+	assert queue.journal.db.rows[queue.journal.mod.RUN]["fake-run"]["dispatch_pending"] == 1
+	assert queue.sent == []
