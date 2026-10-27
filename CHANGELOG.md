@@ -8,39 +8,52 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.82] - 2026-10-26
+## [Unreleased]
 
-### Added
+### Internal
 
 - Test coverage is now configured for the unit suite (line and branch, tests, integration tests and data patches excluded). Run `python -m pytest optimus/tests/ --cov --cov-report=term-missing:skip-covered`.
 - New behaviour tests for the session start/stop/retry endpoints, the request and background-job hooks, install/uninstall, the report file permission gate, the AI settings warning, the janitor and the Redis schema sentinel.
-
-### Changed
-
 - Removed an unused test fixture (`sidecar_with_pii.json`).
 
 ---
 
-## [0.12.70] - 2026-10-22
+## Unreleased — 0.12.83 / PR69 review fixes
 
-### Fixed
+- Block legacy numeric metadata endpoints, bound frontend metric submissions,
+  require POST for PDF generation, hide batch retry exception text, and withhold
+  credential-bearing source from AI requests.
+- Preserve PostgreSQL schema names in redacted AI prompts, omit ambiguous SQL safely,
+  and keep capped duplicate grouping bounded.
+- Ignore completed analysis deliveries, fence late writes, and retain inputs until
+  the final status commits. Add direct guard and missing-input regression coverage.
+- Recover refresh controls after refused requests, explain Save holds, retain Cancel
+  focus, and count accepted manual admissions instead of refusals.
+- Check File source URLs before core reads or rewrites them; allow ordinary identical
+  uploads while guarding artifact mutation. Invalidate settings after commit with a
+  bounded cache, visible failure breadcrumbs, and isolated queue recovery.
 
-- SQL in the call tree is now attached to the function in the same file when two functions share a name, such as two `validate` methods. Before, it went under whichever came first.
-- A whitelisted endpoint whose time is really in a callee is no longer reported as a self-time hot path. The slow callee gets the finding, the function's own time is reported only when it is a hot path by itself, and otherwise the title says "and its callees".
+- Commit recording snapshots before deleting Recorder input; retain failed captures
+  for Retry Analyze, preserve reports when evidence is missing, and disclose bounded
+  reduced-detail snapshots. Failed snapshot input has a seven-day recovery window.
+- Accept ordinary Query Builder read updates while withholding ambiguous writes and
+  unparseable proposed Python. Check qualified Frappe policy APIs consistently.
+- Request bounded AI output budgets, support unknown Anthropic model IDs, validate
+  alternate completion metadata, and keep PostgreSQL sensitive examples private.
+- Skip server-expanded library picks before import, profile decorated source bodies,
+  permit shared readers to read refresh status, and show an actionable Phase2 error.
+- Preserve SQL sort order and semicolon handling in index advice, account for large
+  write statements, and retain rich notes on older v15 sanitizers. Add a pinned
+  Frappe15.83 integration leg and correct duplicate-start Redis assertions.
 
----
+### Develop fixes integrated into PR69
 
-## [0.12.69] - 2026-10-21
+- Attach SQL to the matching function in the same file when names repeat.
+- Attribute callee-dominated endpoint time to the slow callee, report hot own time
+  separately, and label otherwise-unattributed time as the function and its callees.
 
-### Fixed
 
 - Slowest-queries table no longer clips SQL at 500 characters; the full normalized statement is shown (scrollable in the cell).
-- The "after fix" projection for Low Filter Ratio findings now uses the
-  dialect-blind `selectivity_pct` instead of MariaDB's raw `filtered` key, so it
-  also works for Postgres plans.
-- Normalized EXPLAIN rows are coerced with `to_int` / `to_float`, so a string or
-  `Decimal` value no longer drops that row's findings. `to_int` / `to_float` also
-  treat `nan` / `inf` as missing instead of passing them to threshold checks.
 
 ### Internal
 
@@ -49,42 +62,1466 @@ versions may contain breaking changes see migration notes below).
   numeric columns are coerced in the dbdialect layer (`dbdialect.base.to_float` /
   `to_int`, used from `dbdialect/mariadb.py`).
 
----
+- The "after fix" projection for Low Filter Ratio findings now uses the
+  dialect-blind `selectivity_pct` instead of MariaDB's raw `filtered` key, so it
+  also works for Postgres plans.
+- Normalized EXPLAIN rows are coerced with `to_int` / `to_float`, so a string or
+  `Decimal` value no longer drops that row's findings. `to_int` / `to_float` also
+  treat `nan` / `inf` as missing instead of passing them to threshold checks.
 
-## [0.12.68] - 2026-10-21
+
 
 ### Fixed
 
 - Index suggestions now cap each optimizer statement at 5 seconds on MariaDB. Frappe's optimizer checks column cardinality with a full-table `COUNT(DISTINCT)`, which ran with no limit on the live database. A query whose check times out is skipped, and the report says so.
 
----
 
-## [0.12.67] - 2026-10-21
 
 ### Fixed
 
 - Secrets inside JSON string payloads are now redacted at capture, such as the `doc` that `savedocs` sends with a User's `new_password`. So is `set_value`'s `value` when `fieldname` names a sensitive field. Before, only dict keys were checked, so both reached Redis and the report.
 - The stale-recording sweep no longer clears a user's active session pointer after it has moved to a newer session. Before, it stopped the user's new recording.
 
----
 
-## [0.12.66] - 2026-10-19
 
 ### Fixed
 
 - The daily orphan Redis sweep and the uninstall cleanup now delete keys. Both called `frappe.cache.get_redis_connection()`, which Frappe's cache wrapper doesn't have, so they silently returned without deleting anything.
 - Queries past Max Queries per Recording are no longer removed from the recording. Only the first N are fully enriched (formatting, EXPLAIN, index lookups); the rest are grouped by a cheap literal-free shape and still count in query totals, N+1 and Top Queries. Before, they were dropped while the report said they were still visible.
 
----
 
-## [0.12.65] - 2026-10-18
+
+## [0.12.82] - 2026-10-18
+
+### Security and correctness
+
+- Hide the floating widget for users without a profiler role, avoiding a
+  permission-error dialog on Desk load. Keep the API and boot role gate aligned.
+- Close qualified and aliased execution/deserialization gates; revalidate stored
+  raw index DDL, including inline code. Apply current sensitive SQL rules once
+  per payload build and omit queries on redaction failure. Mask rotated,
+  schemeless and oversized header secrets; withhold all unverified AI log fields.
+- Journal malformed finding preparation as unsent skips without starving later
+  fixes or Steps. Wake idle forms after committed AI admission; pause hidden-tab
+  polling and preserve unsaved notes. Keep Retry Analyze cleanup independent of
+  reconciliation logging failures.
+- Restore Server Script representative snippets and links, reject unusable JOIN
+  index recipes, and classify recovered filters before sort columns. Retain
+  unrelated File uploads while protecting aliases of profiling artifacts.
+- Preserve capture samples after safe teardown recovery; use atomic bounded
+  Redis appends and retry changed snapshots. Workerless Phase 2 refusals retain
+  input and retry diagnostics without using an analysis attempt.
+- Protect Session identities, profiling data, child rows and generated Files from
+  generic document writes, including attachment aliases. Remove generic Session
+  creation from Optimus User. Title and notes remain editable.
+- Restore lazy PDF generation for text File contents; bind source/cache/deletion
+  to the exact private Session attachment. Fence stale and competing renders,
+  remove pdfkit option metadata and prevent privileged private-image embedding.
+- Preserve visible source characters in safety checks; resolve Frappe aliases by
+  lexical scope and reject ambiguous/dynamic access or removed permission denials.
+  Bound alias depth, visits, identity count and string allocations; withhold
+  unchecked code instead of crashing. Normalize PDF styles and declarations
+  across framework reparses.
+- Retain Frappe identities for literal dynamic imports and skip enclosing class
+  namespaces when checking nested class bodies, preventing unsafe code from
+  being displayed as an unrelated object call.
+- Use eligible full b-tree keys and verified full leading key parts for index
+  coverage, preserving expression positions and excluding partial, ignored,
+  invalid and non-btree proofs. A trailing prefix never proves unique coverage.
+- Bound optional SQL parsing and formatting. Prevent Phase 1/2 capture overlap
+  with atomic Redis admission. Roll back each failed retention deletion separately.
+- Bound saved-answer validation per report to `RENDER_VALIDATION_CHARS = 262144`
+  characters and `RENDER_VALIDATION_ANSWERS = 128` distinct answers. Withhold code
+  beyond that budget for local review, without marking it outdated or retrying AI.
+
+### AI behavior and upgrade
+
+- Check new N+1 suggestions for repeated reads across for/while loops; request
+  a correction or withhold API-only rewrites and unsupported query-count claims.
+- Automatic finding fixes and captured Steps share the automatic-consent toggle.
+  Steps rewriting preserves user-written/edited notes and concurrent saves.
+- Record provider-send certainty; block unknown outcomes and legacy timeout rows
+  until explicit retry consent. Unknown sends count toward the failure breaker.
+- Run `bench migrate`, then restart all web and queue workers together. See
+  docs/AI-REFRESH.md for additive fields, pre-release worker overlap and Custom
+  DocPerm cleanup. Session read sharing includes raw artifact downloads.
+
+## [0.12.72] - 2026-10-14
+
+### Security
+
+- Read persisted recordings as bounded, session-bound JSON from an exact
+  private File attachment. Never unpickle persisted trees or sidecars.
+  Live Redis trees require HMAC verification by default on signing-capable
+  sites; legacy unsigned input requires an explicit compatibility override.
+- Validate provider URLs and every redirect target. Withhold API keys over
+  non-loopback HTTP unless explicitly enabled by the operator. Bind the
+  provider settings and encrypted credential in one SQL snapshot before
+  dispatch, so a changed key cannot be paired with an old cached endpoint.
+- Keep provider replies and endpoint details out of public errors and AI logs.
+  Detach prompt, reply and URL frames from escaping AI exceptions. Preserve
+  worker interrupts and administrator-only scrubbed connection diagnostics.
+- Default raw-value consent off. Remove SQL literals/comments and Steps
+  document names/session title at the prompt boundary. Record Settings
+  changes, strip URL credentials before history, and clear unchanged stored
+  keys when the effective destination changes.
+- Restrict source reads to canonical app/library source, with bounded reads.
+  Check Server Script permission for both the principal and actor before
+  reading cached or saved snippets. Import dotted paths only from installed apps.
+- Prepare Phase 2 picks/source before SQL locks, record the capture actor, and
+  reserve complete input atomically. Stop only the expected generation.
+  Reject corrupt, evicted or over-budget input and retain interrupt behavior.
+- Delete private AI journals with their Session in one transaction; preserve
+  uncertain history while the Session exists. Reject document saves that
+  overwrite worker-maintained usage counters. Escape identifiers in errors.
+
+### Upgrade notes
+
+- Back up, migrate the new consent and capture-actor fields, then replace web,
+  workers and scheduler together. Do not mix old and new capture writers.
+  The endpoint-policy patch warns without decrypting keys or changing settings.
+- New Phase 2 input expires after 24 hours; missing/expired input requires a
+  new capture. Legacy input can lack TTLs. Old persisted JSON remains usable
+  within the new bounds, but its trees and sidecars are ignored.
+- Review raw-value consent, provider TLS/egress policy and source permissions.
+  The URL policy does not resolve DNS or prevent DNS rebinding. Settings
+  validation in developer mode can still snapshot submitted form data.
+- This does not close the accepted direct private-file download limitation or
+  rewrite historical reports/Versions. Final model evaluation and deployment
+  acceptance remain release gates. See [security boundaries](SECURITY.md) and
+  [refresh operations](docs/AI-REFRESH.md).
+
+## [0.12.71] - 2026-10-14
+
+### Changed
+
+- Save profiling findings and the first report before queuing optional AI
+  enrichment. Provider failures and timeouts no longer discard a completed
+  profile. Refresh AI suggestions now queues background work and shows SQL
+  progress, cancellation, reported usage and uncertain outcomes in Desk.
+- Select missing and outdated suggestions by default. Replacing current
+  answers or retrying an uncertain provider call requires explicit consent.
+  Keep unsaved form edits when background work finishes.
+- Queue Phase 2 analysis and retries, including when the scheduler is
+  disabled. Persist generation ownership, bounded attempts and delivery intent
+  so duplicate or stale workers cannot append findings twice. Saved Phase 2
+  results remain Ready if optional report rendering fails.
+- Replace reports transactionally, retaining the previous report on failure.
+  Regenerate Reports repairs pending output using saved results without AI.
+- Add an independent manual refresh cap of 20 and expose the existing model
+  context-window setting. An explicitly saved zero cap remains unlimited
+  within the refresh deadline.
+
+### Upgrade notes
+
+- Migrate the new Phase 2 queue fields and Settings defaults, then replace
+  web, worker and scheduler processes together. Keep a `long` worker for
+  Phase 2 and a worker on the configured AI queue. Minute recovery sweeps
+  require the scheduler. Old running workers do not acquire the new fences.
+- Refresh and Phase 2 stop/retry responses now acknowledge queued work;
+  integrations must poll saved progress instead of assuming inline completion.
+  See [refresh operations and compatibility](docs/AI-REFRESH.md).
+- This staged integration still requires recording/provider/source/privacy
+  hardening and final deployment and model acceptance before release.
+
+## [0.12.70] - 2026-10-12
+
+### Internal
+
+- Add the background AI refresh engine (`optimus/ai_jobs.py`, `optimus/ai_refresh_store.py`)
+  and its private SQL journal: three DocTypes (Optimus AI Refresh Run, Attempt
+  and Control) with no Desk or REST permissions. A send intent commits before
+  the provider call. The answer, the attempt's outcome and the run's counters
+  commit together, in the same short transaction that adds the reported usage
+  to the session through #72's log-and-continue counter; a failed increment is
+  logged and the run's `tokens_reported` keeps the count. Duplicate deliveries
+  cannot repeat a claimed slice, and cancelled or expired workers cannot
+  overwrite newer results. Nothing starts a refresh yet.
+- Handle SQL conflicts the way Frappe raises them. A deadlock, lock wait,
+  snapshot conflict (MariaDB 11.8's 1020) or serialization failure, raw or as
+  `frappe.QueryDeadlockError` / `QueryTimeoutError`, is retried as a whole short
+  transaction, at most three in all. Settlement follows `_write_ai_answer`: three
+  tries, a read-back of the attempt's settled bit (unknown when it cannot be
+  read), and an `outcome=` on every Error Log row; the rows say when the second
+  write recorded the tokens. That write keeps the outcome and its kind (only an
+  answer that could not be saved becomes a failure), so an uncertain call stays
+  uncertain and a fatal kind still stops the run. Every journal transaction locks the
+  session row first and takes its locks before its first plain read, except an
+  admission's takeover, which reads the active run and then locks it by key. A
+  duplicate attempt or reservation is caught by its unique key, and the
+  requester's User row is never locked. Admission avoids range locks on journal
+  runs, and a new attempt inserts without reading its missing key; other locking
+  reads of missing journal keys can still take gap locks on MariaDB. The recheck's
+  `FOR UPDATE` read of the session's Phase 2 rows can make
+  another session's Phase 2 insert wait. A user refresh takes the site mutex
+  (NOWAIT) only after its session; a busy mutex, or a session row held past one
+  lock wait timeout, answers `busy`. On PostgreSQL, which has no lock wait limit
+  unless one is set, an admission or a cancellation waits at most 30 seconds: it
+  sets that for its own transaction (`SET LOCAL lock_timeout`) unless a stricter
+  `lock_timeout` is already set, which it keeps. MariaDB keeps the server's
+  `innodb_lock_wait_timeout`. Analyze-time runs never take the mutex.
+- Keep interrupted calls with an unknown outcome as uncertain. Recovery
+  delivers queued work but never repeats an uncertain provider call. Explicit
+  resumes keep the original selection time, cap and sections, count the cap
+  over the whole chain, and are limited to three in a chain.
+- Recover without the scheduler. An admission takes over its session's run
+  whose lease or deadline has passed, in its own transaction, and progress shows
+  such a run as interrupted (`stalled`). A queued run past its lease cannot be
+  claimed by a late delivery. The recovery sweep isolates each row, skips a
+  session row another transaction holds (NOWAIT) and returns its counts. A
+  cancel, the sweep or a takeover releases a run whose journal rows are
+  inconsistent and writes one Error Log row for it.
+- Add durable progress, SQL cancellation, site and per-user admission limits,
+  bounded job slices and provider failure limits. Redis coordinates queue
+  delivery; progress and accounting stay in SQL. A slice is dispatched at once
+  when it continues; three slices in a row that begin no item, or a provider
+  switched off mid-run, stop the run. Settings stored as digit strings are
+  accepted, and every setting, the queue name included, is checked before
+  admission.
+- Distinguish known zero token usage (a refusal before any request, proven by
+  the call count) from missing or contradictory usage, keep reported usage on
+  processing failures, and keep RQ timeouts fresh, including when worker
+  cleanup fails. A timeout that cuts an outcome write leaves one row with the
+  reply's known tokens.
+- Follow #72's contracts. The refresh is counted once, when it is accepted (a
+  resume is a click), and no ending counts it. Only `ai_fix.AI_FATAL_KINDS` stop
+  a run at once; a rate limit joins the three-in-a-row streak; `context` and
+  `refused` are recorded under their own kind and never feed it; the skip kinds
+  are `ai_fix.AI_SKIP_KINDS`. The engine and #72's Refresh each refuse while the
+  other holds the session. The run keeps the selection's gated and excluded
+  counts, and background fix prompts get the Phase 2 and Slow Query evidence the
+  synchronous Refresh gets.
+- Write every engine Error Log row under a title that starts with
+  `optimus ai refresh` (worker, cleanup, item, result storage, enqueue, worker
+  availability, recovery, release, selection, evidence), carrying the session
+  and the run where known; a failed recovery candidate read has neither. A call that becomes uncertain (`optimus ai refresh uncertain`,
+  with the attempt and the reason) and a run that ends interrupted or stops for
+  `no_progress`, `history_limit`, `disabled`, `phase2` or `permission`
+  (`optimus ai refresh ended`) are one row each, written after the transaction
+  that decided it. Two release-blocking signals are one row each, written when they
+  happen: `optimus ai refresh discarded` (a paid answer was dropped because its
+  attempt is stale or fenced) and `optimus ai refresh duplicate blocked` (the
+  journal stopped a second send or delivery). A token count above 2147483647 (which
+  the session counter ignores) is logged as an `optimus ai refresh item` row before
+  the Steps display figure is clamped. The runbook in
+  [docs/AI-REFRESH.md](docs/AI-REFRESH.md) maps each title to a state and gives
+  a read-only query that compares a session's `ai_tokens_spent` with the
+  journal and candidate dropped increments from `optimus ai spend`; settlement
+  outcomes must be checked before treating a candidate as a missing charge.
+- A failure while reading the Phase 2 line data for the fix prompts
+  (`analyze._phase2_index_for`) is no longer silent: it writes one
+  `optimus ai phase 2 context` row with the session, and the prompts go
+  without that context.
+- Change the stored answer shape. A fix answer in `llm_fix_json`, written by
+  `suggest_fix` for the synchronous Refresh, analyze's auto-suggest and the
+  engine alike, now always has `usage_complete`, and has `tokens` when the usage
+  is complete even at zero tokens. `fix_state` ignores both keys, so stored
+  answers from before still read as they did.
+- Create a journal index on PostgreSQL that Frappe skipped. Frappe names an
+  index after its column and PostgreSQL index names are unique per schema, so
+  the second of the Run and Attempt tables never got its `session_name` index.
+  The seed patch now creates any missing journal index as
+  `<table>_<column>_index`. MariaDB is unchanged.
+
+### API
+
+The engine's functions are internal (module `optimus.ai_jobs`); no whitelisted
+endpoint starts, cancels or recovers a run yet (only `api.refill_ai_suggestions`
+asks `live_run`, below).
+
+- `start_refresh(...)` answers `{"status": "queued", "refresh": <progress>}` for
+  a new run, `{"status": "already_running", "refresh": <progress>}` when the
+  session has a live run, or `{"status": "refused", "reason": ...}`. The
+  reasons: `busy` (the session row or the site mutex is held), `site_cap`,
+  `user_cap` (counting live runs only: a run whose lease or deadline has passed
+  holds no slot), `refresh_running` (#72's Refresh holds the session; with a
+  `message`), `disabled`, `no_worker`, `queue_unavailable`, `not_ready` (the
+  session is not Ready), `permission` (the requester has no access), `phase2` (a
+  Phase 2 run is in progress), and for a resume `not_resumable`,
+  `already_resumed`, `retry_limit`. `not_ready`, `permission` and `phase2` are
+  answered before any progress is shown. An unusable site setting raises an
+  error naming it. A user refresh with no mutex row raises
+  `JournalUnavailable`, whose message names the repair command.
+- `cancel_refresh(run_id, *, docname, requested_by)` answers
+  `{"status": "cancelled", "refresh": <progress>}` or
+  `{"status": "refused", "reason": "busy" | "not_running"}`; a `run_id` that is
+  not a string of 1 to 140 characters names no run (`not_running`).
+- The progress dict (`public_state`) adds `stalled` (the lease or deadline has
+  passed; `state` then reads `interrupted`), `gated` and `excluded`, beside the
+  counts, `usage`, `end_reason` and `breaker_kind`.
+- `recover_pending()` returns `{"interrupted", "dispatched", "busy", "failed"}`.
+  `live_run(docname)` returns the session's live run or None.
+  `refresh_state(docname)` returns the progress dict of the session's newest run,
+  or None; it only reads, and the caller checks access to the session.
+- `suggest_fix(..., usage_out=)` is the one additive keyword on a #72 helper:
+  a `Usage` that becomes the call's usage, so the caller counts every attempted
+  call. Without it nothing changes.
+- `api.refill_ai_suggestions` (#72's Refresh) now answers
+  `{"ok": False, "busy": True, "message": ...}`, without counting or billing,
+  while the engine holds the session.
+
+### Upgrade notes
+
+- Nothing calls the engine yet: existing refresh behavior stays synchronous.
+  The wiring follow-up must land before release; profiling isolation is
+  completed there.
+- Normal deployment migration installs the three internal DocTypes. The seed
+  (`optimus.patches.v0_12_0.initialize_ai_refresh_store`, in `[post_model_sync]`)
+  adds the admission mutex and, on PostgreSQL, any missing journal index; install
+  runs it too, and every later `bench migrate` runs it again. A missing journal
+  table fails every admission; a missing mutex row fails a user refresh closed.
+  The repair is `bench --site <site> execute optimus.patches.v0_12_0.initialize_ai_refresh_store.execute`.
+- Do not run `bench trim-database` during a rollback you may undo: it drops the
+  journal tables, and with them the uncertain attempts that keep an unknown
+  provider call from being sent again.
+- Upgrading from 0.12.69 keeps `ai_steps_tokens` as a 32-bit Int (the engine
+  clamps what it stores), so this change requires no Optimus Session column-type
+  rebuild. A site that deployed the earlier draft with a nullable Long Int is
+  different: migration narrows that column and can rebuild the table. Back up
+  first and, before migrating, replace its NULLs with zero using the appropriate
+  statement below. Check any values outside the signed 32-bit range before
+  narrowing; the NULL update does not repair those values.
+
+  MariaDB: ``UPDATE `tabOptimus Session` SET ai_steps_tokens = 0 WHERE ai_steps_tokens IS NULL;``
+
+  PostgreSQL: `UPDATE "tabOptimus Session" SET ai_steps_tokens = 0 WHERE ai_steps_tokens IS NULL;`
+- Data retention: the journal is not pruned. Each run keeps `requested_by` (and
+  `cancelled_by`), user ids that outlive the session's own retention sweep, until
+  the privacy follow-up (#75) decides retention.
+- AI Quality runs the journal checks on MariaDB 10.6, MariaDB 11.8 and
+  PostgreSQL 16; the PostgreSQL role must be a superuser. See
+  [background engine details](docs/AI-REFRESH.md) for transactions, queue
+  requirements, the runbook and the remaining deployment work.
+
+## [0.12.69] - 2026-10-03
+
+### Changed
+
+- Classify AI provider errors consistently. Request-validation retries can
+  remove temperature or rename the output-token parameter, at most once each,
+  within a shared request budget. Network failures are not retried. Known
+  reasoning models keep the provider-aware output cap; inline thinking is
+  removed before an answer is processed.
+- A prompt that does not fit the model's context window is a `context`
+  failure, before sending or from the provider; it was `config`. A window too
+  small for any Optimus prompt stays `config`, and an unknown provider is now
+  `config` (it was `unknown`). `AiFixError.fatal` stays True for `auth`,
+  `quota`, `not_found` and `config` (`AI_FATAL_KINDS`) and is the one list of
+  failures that need the operator first; `context` is not fatal, so one
+  oversized prompt never stops the other findings.
+- A content-moderation refusal is a new, non-fatal `refused` kind: a 400 or
+  403 whose reply says the input was flagged (OpenRouter's moderation 403,
+  with `flagged_input`) or Azure's `content_filter`. A flagged prompt was
+  `auth` (fatal) on a 403; any other 401 or 403 stays `auth`.
+- AI failure messages are translated, say what happened and what to do next.
+  A context failure names the cause and, for a hosted provider, no longer
+  points at Ollama settings. A timeout names the request's whole budget in
+  whole seconds, not the fraction a retry or a guardrail re-ask had left. A
+  connect timeout that had the full 10 seconds to connect (as the first
+  request of a 10-second Request timeout does) is a reachability
+  (`transport`) failure, not a slow model; one that had less of the request's
+  budget left (a parameter retry, a redirect, a re-ask) is a `timeout`. A
+  rejected request names the Base URL only for a provider whose Base URL you
+  set, and a hosted provider's 404 names only the Model (its Base URL is
+  built in). A reply with no text, or an empty one, says to try again or
+  choose another Model. A timeout says where Request timeout (seconds) lives:
+  Optimus Settings > AI Fix Suggestions > Privacy & Operations. The provider's
+  reply follows as "The provider replied: ...", without the old ".:" join. An
+  unexpected error names only its type, and its Error Log row records where it
+  happened as plain `file:line:function` frames. A transport failure's row
+  keeps only the error types (`ConnectionError (NameResolutionError)`), never
+  the message, which can quote a URL that carries a key.
+- The guardrail re-ask reuses the parameter changes its first call needed
+  (temperature dropped, `max_completion_tokens`), so it no longer repeats a
+  rejected request. Nothing is kept from one suggestion to the next.
+- Regenerate Reports uses stored answers and does not call the model. Report
+  regeneration and step humanization read recording JSON without loading
+  Python trees or sidecars. Use Refresh AI suggestions for new answers. Its
+  confirmation now says so: it does not re-run the analyzer and does not call
+  the AI provider, saved AI suggestions are kept, and a Ready session is
+  pointed at AI > Refresh AI suggestions when AI is enabled (a Failed session,
+  or a site with AI off, is not, because the button is not shown there).
+  README and AI-FIXING say the same.
+- Phase 2 no longer asks the AI for fixes for the Hot Line findings it adds
+  (its report re-render used to fill missing suggestions when AI suggestions
+  were on by default). Run AI > Refresh AI suggestions on the Ready session to
+  fill them in; the background refresh will queue a missing-only refresh for
+  it.
+- The Error Log row of a failed AI call opens with `kind=`, `fatal=` and a
+  short fixed `hint=` for the kind and adds `tokens=` when the failed call was
+  billed. A provider failure's row (`optimus ai_fix`) also has the request's
+  `provider=`, `where=` and `status=`, and, for a call that went through the
+  parameter retries, `attempts=` and `dropped=` (the parameters changed); a
+  failure after the reply arrived is the step's row and has no request lines.
+  Every AI Error Log title now starts with `optimus ai`, so one search finds
+  them all: `optimus humanize_steps`, `optimus humanize_steps fetch`,
+  `optimus AI re-render`, `optimus regenerate_reports fetch`, `optimus
+  recording cache read`, `optimus load recordings bundle` and `phase 2
+  re-render failed` are now `optimus ai humanize_steps`, `optimus ai
+  humanize_steps fetch`, `optimus ai re-render`, `optimus ai
+  regenerate_reports fetch`, `optimus ai recording cache read`, `optimus ai
+  load recordings bundle` and `optimus ai phase 2 re-render`. The analyze
+  warning, the Refresh toast and AI-FIXING say to search for titles starting
+  with `optimus ai`, and AI-FIXING section 5.3 lists every title (a test keeps
+  that list equal to the titles the code writes). The runbook table in 6.5
+  gives every kind, its `fatal=` value as the row spells it (`True` or
+  `False`), the symptom and the action. The reply body is never in a row.
+- The analyze-time warning for findings that got no AI suggestion names the
+  first failure's kind and what to do (for example "The first failure was
+  quota: The provider account is out of credit or quota. Top it up, then
+  refresh."), instead of "provider error or timeout" for every failure.
+- The model-window figures in the AI-FIXING troubleshooting entry are
+  current: about 2,760 tokens for a fix suggestion and 2,168 for the Steps to
+  Reproduce rewrite.
+- Internal: the recording readers and Phase 2's re-render use the one
+  capture-then-log helper (`analyze._run_ai_step`) and the shared interrupt
+  guard (`safe_call.InterruptGuard`); an RQ job timeout in a recording read now
+  writes its Error Log row before it stops the job. The unused
+  `_backfill_ai_suggestions` is removed.
+- One selection of the findings an AI refresh asks about
+  (`analyze.eligible_findings`; `_run_ai_backfill` now uses it, so there is no
+  second copy). A stored answer is `missing` (nothing stored), `current` (an
+  answer with suggestion text made with this prompt version or a newer one,
+  the same rule as the report's "earlier version" footer; a newer answer is
+  not downgraded, and a float, boolean or string version is outdated) or
+  `outdated` (unparseable, an older version or no suggestion text). An answer
+  whose code the guardrail removed is a usable, current answer. The Refresh AI
+  suggestions button still regenerates every eligible finding
+  (`regenerate_all=True`, so it also overwrites current and newer answers);
+  skipping current answers applies to a selection made without
+  `regenerate_all`, which the background refresh will use. Order: missing,
+  then outdated, then current; inside each, High severity first (a blank
+  severity as Low, an unrecognised one last), then the larger impact, then the
+  older answer. It returns a list that also carries `gated` and `excluded`,
+  the counts `refill_ai_suggestions` reports. Corrupt stored text is now
+  outdated in both paths (a missing-only run leaves it, a full regenerate
+  redoes it).
+- The resume time of `eligible_findings(requested_at=)` is read the way Frappe
+  stores it: a naive datetime is in the site's System Settings timezone, an
+  aware one keeps its offset (it was read as UTC, which skewed the cutoff by
+  the site's UTC offset). A value of another type, or a string that is not a
+  date, raises instead of silently meaning "no cutoff". Stored `generated_at`
+  times are UTC.
+- Reading recordings for report regeneration and the Steps rewrite keeps only
+  the recordings in memory (about 78 MB for a 1 GB bundle on a real site, from
+  1.06 GB), reads the bundle once per Refresh across the Steps rewrite and the
+  re-render, and shares the bundle shape reader with the full loader, so the
+  older bare uuid map is read the same way in both.
+- Add explicit session
+  attribution (`session_uuid` / `docname` on `suggest_fix` and `humanize_steps`),
+  and portable atomic usage/counter helpers for background work. Refresh AI
+  suggestions now attributes its fix calls explicitly and records each call's
+  tokens with its answer (see Fixed); analyze and the Steps to Reproduce
+  rewrite are still charged to the session being analyzed or refreshed. A
+  counter increment runs in a savepoint inside the caller's transaction: a
+  failed increment is rolled back alone and logged, and the answer it paid for
+  is kept; that call's tokens are then missing and the Error Log row records
+  them. It is raised only when the whole transaction is already gone (a
+  MariaDB deadlock, 1213, or 1020 "Record has changed since last read", which
+  MariaDB 11.8 raises by default; Frappe raises both as
+  `frappe.QueryDeadlockError`), and only to a caller that records spend
+  itself, which tries its short write again: a per-call charge keeps the
+  reply. An explicitly attributed call's Error Log rows are filed under its
+  own session (a `docname` alone is enough), never under the session the
+  worker served last; only an unattributed call's rows use that one. A billed
+  call stopped by an RQ job timeout leaves `suggest_fix` / `humanize_steps`
+  with its `usage` on the fresh timeout, and only there: the caller reads it
+  from the exception it catches.
+- Count each AI call's tokens once, into one session. A call without explicit
+  attribution is charged to the session being analyzed or refreshed; a caller
+  that attributes a call explicitly records its tokens itself
+  (`analyze._add_ai_spend`), and that call is never charged to another session.
+  The Steps to Reproduce rewrite is charged whether or not its caller asks for
+  the usage (`humanize_steps(usage_out=None)` used to skip the charge), and a
+  failed rewrite reports only its own tokens.
 
 ### Fixed
 
-- The floating widget no longer mounts for users without a profiler role
-  (System Manager, Optimus User or Administrator). Before, it mounted for
-  everyone and its `api.status` call returned 403, which popped an error
-  modal on every Desk load for those users.
+- A Phase 2 run that was saved as Ready is never marked Failed afterwards. If
+  the report re-render that follows fails, or the job is interrupted during
+  it, the run stays Ready with the warning "The report re-render did not
+  finish. Use Regenerate Reports on this session to refresh it."; the job
+  timeout still stops the job, and the run's Redis state is dropped before the
+  re-render instead of after it. The same holds for an error that leaves the
+  save after its COMMIT (an `after_commit` callback that fails, a job timeout
+  in that instant): the run's status is read again from the database, and a
+  committed Ready run keeps its status and gets the warning. A session deleted while its Phase 2 run was
+  being analyzed leaves one line in the `optimus` log instead of nothing.
+- Keep reported token usage when a response is unusable or later validation
+  fails. Preserve fresh RQ timeouts and the existing failure-log marker.
+- Keep recording-read failure logs outside exception handlers, and propagate
+  RQ timeouts instead of swallowing them. A Redis read failure falls back to
+  the saved recording bundle.
+- Phase 2 report regeneration uses the internal render helper without a
+  second HTTP permission/rate-limit gate. The 24-hour analysis health metric
+  uses the session stop time, independent of later AI updates.
+- Keep the Steps to Reproduce tokens in a session's AI Tokens Spent. Analyze
+  added them, then saved the session with the count it had loaded earlier, so
+  every analyzed session lost them. Any save of a session now keeps the stored
+  AI Tokens Spent and AI Refresh Count.
+- Record AI token spend with portable SQL that also runs on Postgres. A failed
+  spend update writes an Error Log row (`optimus ai spend`) instead of being
+  dropped silently, and an RQ job timeout during it stops the job.
+- Count a Refresh AI suggestions run with one atomic increment, committed
+  before the refresh calls the provider, instead of a read-modify-write.
+- Refresh AI suggestions writes each answer and the tokens of the call that
+  made it in one short transaction, committed before it asks about the next
+  finding. On MariaDB 11.8 (`innodb_snapshot_isolation` is on by default), a
+  write to the session row by anything else during a refresh (a Phase 2 run
+  finishing, a Desk save) made the next spend charge fail with 1020 ("Record
+  has changed since last read"), which rolls back the whole transaction: every
+  answer of that refresh not yet committed was lost, and the toast still
+  counted it as added. The write now starts after the provider call's read
+  view is gone, is tried again from a rollback when the database ends the
+  whole transaction (`frappe.QueryDeadlockError`, at most three tries; the
+  provider is never asked again), and `added` counts only committed answers
+  (an error raised after the COMMIT, by an `after_commit` callback, is
+  checked by reading the answer back, so a saved answer still counts).
+  A billed reply that turned out unusable is charged at once. No transaction
+  stays open across a provider call, so the Steps to Reproduce call no longer
+  runs while the refresh holds the session row.
+- A failed Steps to Reproduce rewrite on Refresh AI suggestions now writes an
+  Error Log row (`optimus ai humanize_steps`, as at analyze) and the toast says
+  why ("Steps to Reproduce were not rewritten: ..."); it was silent. The
+  reason is shown as text, never as HTML. An unexpected error there no longer
+  fails the whole refresh after its answers were saved, and the tokens of a
+  billed but unusable reply are committed at once.
+- Only one Refresh AI suggestions runs per session at a time. A second click
+  while one runs is answered "A refresh is already running for this session"
+  at once, before the refresh is counted or the provider is called; two
+  overlapping refreshes billed every finding twice and overwrote each other's
+  answers. The flag is a Redis key (`optimus:ai_refresh:<session_uuid>`, taken
+  with `SET NX EX`) that only the refresh holding it releases; it expires on
+  its own after the longest a refresh can run, and a Redis failure lets the
+  refresh run without it.
+- Treat Moonshot/Kimi's HTTP 429 `exceeded_current_quota_error` (a spent
+  balance or a suspended account) as exhausted quota, not a rate limit to wait
+  out.
+- Recognise more context-limit replies: Anthropic's "prompt is too long" and
+  "input length and `max_tokens` exceed context limit", Moonshot's "exceeded
+  model token limit", and the `context_length_exceeded` and
+  `exceed_context_size_error` codes. They are no longer sent through the
+  parameter retries. `max_tokens` is renamed to `max_completion_tokens` only
+  when the reply says the parameter is not supported (or carries the
+  `unsupported_parameter` code and names `max_tokens`), not for a value error
+  such as "max_tokens is too large".
+
+### Upgrade notes
+
+- Background refresh jobs and persistence before optional AI work are still
+  pending follow-up changes. Refresh remains synchronous in this change.
+- Request read timeouts measure socket inactivity, not a strict wall-clock
+  deadline. Worker time limits remain necessary.
+- No migration. Steps to Reproduce tokens already lost on earlier sessions
+  are not restored.
+
+## [0.12.68] - 2026-10-02
+
+### Changed
+
+- Make index-advice and gate failures diagnosable. The `optimus: index advice failed` log
+  line now names `(finding type or table: error type)` pairs (deduped, at most 10) and, like
+  the new `optimus: hot-line gate failed: <type>` and `optimus: evidence read failed for
+  <table>: <type>` lines, is written at ERROR, the lowest level a production site keeps. A
+  table whose evidence read raised says Optimus could not read it, not that it has no
+  DocType. The auto-analyze warnings and the Refresh toasts say what happened and where to
+  look (Error Log titles `optimus ai auto-suggest` and `optimus ai backfill`), name the
+  setting "Excluded finding types", point at AI > Refresh AI suggestions, and no longer count
+  index findings as "not sent to the AI". AI-FIXING 6.5 has a runbook table for the new
+  signals.
+- Build index advice from analyzer evidence, without an AI call. One advisor serves
+  index findings and per-table cards, so they always agree. It reads each field's
+  Unique flag and type, the real column types, the table's existing indexes and the
+  finding's EXPLAIN key first, and never takes the Search Index flag as proof of an index
+  (on Postgres a Search Index is named after the bare field, schema-wide, so only one
+  table gets it). A finding recipe's equality columns are put in one fixed order (business
+  columns, Check fields, creation and modified, then a column that cannot lead, each by
+  name), so the same filter in any predicate order gives one recipe and one index name; a
+  table card keeps the analyzer's most-used-first order. A recipe of several columns gets
+  no code when an existing index starts with its equality columns in any order and then
+  its range or sort columns in order (ERPNext's GL Entry and Stock Ledger Entry composites
+  are no longer duplicated), when an equality column is unique on its own or a unique
+  index's columns are all among its equality columns, or when an existing index serves
+  every column but its Check fields (Frappe's creation index serves `creation > ? AND
+  is_return = ?`; the text says a Check field usually matches most rows and names the
+  index that helps a query for the rare value, since Optimus cannot see the values); a one-column recipe also when its column is unique on its own, leads an
+  index or is the index EXPLAIN names. A lookup by `name` (the primary key), or by
+  `parent` on a child table whose real index list has an index that `parent` leads
+  (MariaDB adds one to every child table, Postgres none), gets no code, but only when the
+  key is compared with a value (`?`, a literal, an IN list or subquery, or another table's
+  column the query fixes to a value): a join condition such as `pr_item.parent = pr.name`
+  is no lookup, since the database may read either table first. A recipe wider than four
+  columns keeps the columns of an existing index first, then by field type, Check fields
+  last, and names the rest; if that would leave out every column of an index the query
+  fixes that is unique, or whose lead column ranks by field type at least as well as the
+  weakest kept column (GL Entry's voucher_detail_no_index), there is no code, since a new
+  index cannot narrow the rows further (a Select index left out behind Link columns may
+  match many rows, so the recipe stays). `!=`, `<>`
+  and `NOT` never narrow an index. A sort column the index cannot return in order is left
+  out rather than appended, but a captured `IN (?)` (Frappe's recorder collapses every IN
+  list to one placeholder) may be one value, so it keeps the sort with a hedged lead. An
+  existing sort-serving index on a Filesort finding was rejected by the optimizer, so the
+  range recipe is given and names that index, unless the query has a LIMIT; that kept
+  verdict names the range recipe and needs an index that returns the rows in the order of
+  the whole ORDER BY. The capture-time EXPLAIN is no evidence: MariaDB's possible_keys
+  never lists an index that only serves ORDER BY, and a Postgres plan node names only the
+  index it used. A sort recipe that keeps only some sort columns (the cap left the rest
+  out) gives way to the recipe without the sort, and no lead says the rows come back
+  sorted unless every sort column is in the index or fixed by the filter. A Filesort
+  recipe of sort columns only, for a query with no LIMIT and no filter it narrows, gets no
+  code, since the database rarely walks a whole index instead of sorting. A column the table only feeds into a LEFT JOIN that
+  the WHERE keeps a LEFT JOIN is no index candidate. A missing column, a MariaDB reserved word on MariaDB (Postgres
+  quotes names; such an entry is Postgres-only), a JSON field (MariaDB reports it as
+  longtext, so the field type decides), a leading text column on Postgres, a first column
+  alone wider than the key limit (3072 bytes; 2704 on Postgres), a query over 4 KB (Missing
+  Index excepted), or a query shape an index cannot use (OR, a leading-wildcard LIKE, a
+  function, CASE or arithmetic around the column) gets an explanation and no code. A query
+  Optimus cannot read, a UNION that filters the table in more than one branch, a WHERE
+  column the SQL parser did not report (an unquoted `account`, `user`, `type`, `date` and
+  others, or an unqualified column of a query on several tables, when the filter shape lets
+  an index use it; the only table of the main FROM gets such a column advised instead, and
+  its ORDER BY or GROUP BY columns the parser left out too, in the clause's order),
+  and a table Optimus has
+  no information about (tabSessions, tabSeries, a removed DocType) say so, and
+  a card then opens with "Optimus cannot say whether this index would help." instead of
+  "Do not add this index.". For an existing index the text names only a filter shape the
+  query has, and a card or Missing Index finding is never told to rewrite a filter. A
+  trailing `creation` or `modified` column never makes a recipe "no code". Trailing columns of a wide key are left out until it fits, and the note names them.
+  Columns are ordered equality first, then either one range column or the sort/group
+  columns, not both; a Filesort or Temporary Table index serves the sort and says the
+  range filter cannot also use it, except a Filesort query with no LIMIT, which reads every
+  row it matches, so the range filter wins and the note says the sort stays. A single non-text column of a field you control on MariaDB
+  (an app in Tracked Apps, a Custom Field or a DocType created in the UI) gets "tick
+  Search Index"; a Custom Field your app creates in code gets `"search_index": 1` in its
+  `create_custom_fields()` dict. Every other index becomes one entry of a generated, idempotent
+  `ensure_indexes()` for your app, registered as the last item of `after_install`, `after_sync`
+  and `after_migrate` (a hook set as a string becomes a list that keeps the string first, since
+  a pasted list would replace it): a short, table-unique `index_name`, a `db` stamp on an entry
+  that is right on only one database,
+  `table_exists`, `has_column` and `has_index` guards, a commit per entry, an Error Log row
+  instead of a failed migrate, and "if the file exists, add only this entry" guidance. For
+  another app's single column on MariaDB the entry builds `<field>_index` itself, unless the
+  column already has a single-column index of its own, and only then writes the `search_index`
+  Property Setter. It never calls `updatedb`: a setter committed before a failed build made the
+  owner app's next DocType sync retry the build outside the guard and fail the migrate, and an
+  index Frappe had named `<field>` re-ran the sync on every migrate. A failed entry rolls back,
+  writes its Error Log row and commits it, then rolls back again, each step on its own, so a
+  failed log write never leaves a Postgres transaction aborted for the next `after_migrate`
+  hook. The row's title starts with the index (or field) name and the error type and ends
+  with the DocType, so the 140-character cut can shorten only the DocType. The once-only
+  "skipped on this database" row is looked up by Error Log's reference columns, which MariaDB
+  indexes, not by a scan of the unindexed title; on Postgres Frappe's Search Index names are
+  schema-wide, so Error Log may have no such index and the lookup can scan it. Index
+  builds wait at most 300 seconds for a table lock (an install has no cap), and the old
+  setting comes back afterwards. An entry without a `db` stamp carries the Postgres caveat
+  too.
+- Retire the index-only AI prompt, helpers and refresh step, and the system prompt's
+  own index rules. Slow Query prompts carry the deterministic advice as data. The
+  index-AI Settings field is read-only, has no effect and is labelled "retired".
+- Limit AI finding fixes to N+1 Query, Slow Query, Redundant Call and Hot Line. A Hot
+  Line goes to the AI unless it sits in framework code, Phase 1 named its callee, or
+  Phase 2 measured at least 1000 microseconds per hit on a line that calls a
+  non-builtin; a gate that raises fails closed. Framework N+1 and index findings do
+  not call the model, and the report says why.
+- Correct the Redundant Call walk: sidecar stack paths are cut to apps-relative form
+  (absolute bench paths no longer hide user code) at the bench's apps dir, the `/apps/`
+  followed by `<app>/<app>/`, so an `apps` package inside an app keeps its path. Each
+  finding is anchored on its most frequent callsite that loops on its own (reaches the
+  threshold within one action), else its most frequent callsite, a user one before a
+  framework one, so a per-request line that outnumbers a loop no longer hides it. Its
+  count, title and severity count only that callsite's calls, which must reach the
+  threshold within one action on their own: one user call beside an ERPNext loop no
+  longer reports the loop's 31 calls as its own, and the loop is suppressed as framework
+  code. When no callsite loops, nothing is blamed on framework code; a callsite whose
+  calls reach the threshold only across requests gets the per-request note.
+  Optimus's own calls are skipped (its settings read on every recorded query became
+  a false "Redundant cache lookup" on the user's query line). New findings are stamped.
+  Older unstamped findings keep a stored suggestion with a re-record note and are not
+  sent to the AI.
+- Ground finding prompts in the enclosing function when it fits within 80 lines,
+  otherwise 24 lines either side. Loop facts come from the whole file's AST (the loop
+  chain, comprehension and while shapes, subscript and formatted-SQL writes, a caller
+  hint for a line in no loop), cover only lines the trimmed prompt still shows and sit
+  inside a data block. Prompt version 4 marks older displayed suggestions as outdated.
+  A container changed in place by `update`, `append`, `setdefault` and the like counts
+  as a variable that changes in the loop when the call reads it (not a query-builder
+  receiver, and `doc.append("items", row)` changes only `doc.items`). The file is parsed
+  once per run and shared by its findings. Source lines split on `\n` only, as Python
+  numbers them, so a form feed or U+2028 in a file no longer shifts every later line.
+- Hot Line gate: the opener of a multi-line call (`total = sum(`, `if any(`) that
+  reaches the per-hit threshold counts as calling something unnamed, since its callee is
+  on a line the gate does not see, so it is gated instead of sent to the AI. A line
+  whose call runs once per item of its own comprehension or generator (in the element,
+  a filter or a later iterable, not the first iterable or an argument beside it) gets a
+  note that the line runs its own loop over its items and the time is that loop, with
+  no item count, instead of blaming the call inside it.
+- Refresh AI suggestions puts missing or outdated suggestions first, skips excluded
+  types and reports gated and excluded counts in its toast. Only a `not_eligible`
+  `AiFixError` is a skip; `config` and every other kind is a logged, counted failure.
+  The analyze-time AI step touches the single-flight flag before every call, only
+  while it holds it, and caps each call at 240 seconds (below the flag's lifetime).
+- Read the analyze single-flight flag from Redis on every check, not from the RQ job's
+  `frappe.local.cache`, which kept the first value read for the whole job. A run whose
+  flag lapsed no longer writes over or deletes the next session's flag, and on Frappe v15
+  a finished run frees the flag instead of making the next analyze wait up to 5 minutes.
+  The flag is taken with one atomic `SET NX EX`, so two analyses starting together no
+  longer both take it, and renewed with `EXPIRE`; a session that already held it goes on
+  only if the renewal confirms it still does. A heartbeat that fails or finds another
+  session's flag writes one `optimus` log line per run, and the janitor's note on a stuck
+  Analyzing session names a lapsed analyze heartbeat as a possible cause.
+- A finding or card whose index advice cannot be built shows a neutral note with a next
+  step (check the query with EXPLAIN; if it keeps happening, send the bench log line
+  "optimus: index advice failed" to the Optimus maintainers), and the failure is counted
+  in the bench log. The report and the export share one advice step, and one parser per
+  render or export memoises each query's alias map, so a query behind several findings is
+  parsed once (that second parse took 42 to 69 percent of the recipe stage).
+- An index finding's title, description and action-plan step follow its advice, at render
+  time and in the export, because the analyzers bake "Add index on ..." and "add this
+  index in a database migration" in before any advice exists: a Missing Index with no code
+  is "Index on <table>(<column>): no new index recommended" with the step "Check the query
+  with EXPLAIN", an EXPLAIN-family finding with no code drops "Adding an appropriate index
+  is usually the fix", and a Missing Index with code points at the steps under How to fix.
+  Stored findings keep the analyzer's text; advice that is no verdict gets a neutral
+  "cannot say" line instead. A Filesort or Temporary Table finding names why the sort or
+  temporary table stays: an aggregate ORDER BY, a GROUP BY and ORDER BY that differ, a
+  DISTINCT, a column of another table, no ORDER BY or GROUP BY on this table, a metadata
+  column. With Tracked Apps empty, a non-framework
+  app's Property Setter entry says "if <app> is your app, tick Search Index on the field
+  instead; set Tracked Apps" rather than "do not edit it".
+- Read index evidence and word index advice with more care. An index list that comes back
+  empty for a table with columns is a failed read (every DocType table has a primary key,
+  and the database adapters turned a failed `SHOW INDEX` into an empty list, so the advice
+  could give code for an index that already existed): the report says Optimus could not
+  read the table's details and the bench log gets `optimus: evidence read failed for
+  <table>: EmptyIndexList`. A job timeout in a column or index read is no longer read as an
+  empty list: it escapes the report render and the export (analyze's analyzer loop and its
+  report step, which Regenerate Reports also runs, still catch every exception, log it and
+  go on). On Postgres a table's whole evidence read runs under a savepoint, so a failed
+  statement no longer aborts the render's transaction. The FROM-clause reader no longer takes a
+  qualified ON column (`ON gl.voucher_no = p.name`) for a table name, which kept a joined
+  table out of the check for columns the SQL parser dropped and gave a false "already leads
+  an index" on joined GL Entry queries; they now say Optimus could not read the filter. A
+  list-view query on a Check field that sorts with a LIMIT (`is_return = ? ORDER BY
+  creation DESC LIMIT ?`) gets `(is_return, creation)` again, with a note when the field is
+  compared with `=`, instead of a false "already serves this filter and sort", and an index
+  that serves only the range or sort column is never said to serve a filter of Check
+  fields. A self-join (the table read more than once in the main FROM) gets no code and
+  says Optimus could not read how the query filters. A `!=`, `<>` or `NOT` filter on its
+  own, a bare `NOT col = ?` included (so `NOT name = ?` is no lookup by name), gets the
+  Check-style hedge ("if the rows this query looks for are rare, an index on (project) can
+  help") instead of "an index would not help". An anti-join (`LEFT JOIN ... WHERE c.name
+  IS NULL`) stays a LEFT JOIN, so its joining column is no index candidate, and with no
+  other filter left the finding says Optimus found no filter an index could use instead of
+  keeping the analyzer's "Add an index" hint. A sort or group recipe whose equality column
+  only a join binds (`si JOIN tabCustomer c ON c.name = si.customer WHERE c.territory = ?
+  ORDER BY si.posting_date`) gets no code and says Optimus could not read how the query
+  sorts, never that the rows come back sorted. The texts name only the filter shapes and
+  the sort cause the query has, with only their rewrites, never call one column a
+  composite, and on a card or a Missing Index finding speak of the slow queries; a card
+  whose no-code only hedges on Check fields opens with "Optimus cannot say whether this
+  index would help.". A Filesort or Temporary Table lead whose index keeps the sort or the
+  temporary table opens "This index narrows the filter, but", and the finding loses
+  "Adding an index that covers the ORDER BY clause usually fixes it" and its "Avoid the
+  filesort" step, with a note that the index does not remove the sort (or may not, when
+  the sort comes from elsewhere in the query). A Missing Index with no verdict is titled "Index on <table>(<column>):
+  Optimus cannot say".
+
+- Operability fixes for the index advice. The Hot Line gate note tells the reader to send
+  the `optimus: hot-line gate failed` log line. The generated `ensure_indexes()` writes one
+  line when the index fails and its Error Log row cannot be written either, and on Postgres
+  commits right after it restores the lock timeout, so a later hook's rollback cannot leave
+  the 300 s cap on. The runbook names the 300 s lock wait as a cause. Evidence-read
+  failures past the first 10 tables get one "and N more tables" line. A loop-facts or AI-path
+  index-advice crash leaves one deduplicated log line. The recipe-failure and analyze
+  heartbeat lines go through `safe_call.log_error_line`, and a run that never held the
+  single-flight flag says it "does not hold it". The Refresh AI suggestions toast no longer
+  says "Nothing to refresh." when calls failed. One shared `cut_at_bench_apps` helper in
+  `analyzers/base.py` replaces three path cuts. AI-FIXING section 9 lists the split modules.
+  A malformed hand-edited `INDEXES` entry (no `doctype`, a typo'd key, not a dict) no longer
+  fails `bench migrate` from inside the failure handler: the Error Log row falls back to a
+  title without the entry. A join column pinned only by an `IN` list or subquery counts as
+  join-bound for a sort recipe (no verdict instead of "the rows come back already sorted").
+
+### API
+
+- `optimus.api.refill_ai_suggestions` no longer returns an `indexes` result; its
+  `fixes` gains `gated`, `excluded` and `skipped_ineligible`.
+  `optimus.api.ai_capabilities` always reports `indexes: false`.
+- `optimus.api.export_session` no longer exports `suggested_ddl` or `ai_index`.
+  Index-family findings carry `index_advice` and, when advice exists, a `fix_hint`
+  taken from the report text (otherwise the stored hint stays and `index_advice` is null),
+  and the report's `title` and `customer_description` (a no-code Missing Index is not
+  titled "Add index on ..."); `index_advice` has an `unknown` flag (no verdict: Optimus
+  could not tell, or the advisor failed) and a `sort_stays` value (`"stays"` or `"may
+  stay"` when a Filesort or Temporary Table code leaves the sort or the temporary table in
+  place, or may, else `""`); a table's
+  `recommended_index` gains `requested_columns`.
+
+### Upgrade notes
+
+- Regenerate Reports rebuilds index advice and the older-suggestion notices without
+  changing stored suggestion JSON. Index-family, Framework N+1 and gated Hot Line AI
+  suggestions and the table index-AI advice of earlier versions are hidden; their
+  tokens still count in the report's AI token total.
+- To apply index advice, save the generated `optimus_indexes.py` in your app and add
+  its `ensure_indexes` as the last item of `after_install`, `after_sync` and
+  `after_migrate` in hooks.py, turning a hook set as a string into a list that keeps the
+  string first. If the file exists, add only the new entry to its `INDEXES` list. A
+  fixture-shipped Custom Field is indexed right after fixtures sync on install. To remove
+  an entry, delete it from `INDEXES`, drop its index, and for a Property Setter entry
+  delete the `<DocType>-<field>-search_index` Property Setter; `bench --site <site>
+  uninstall-app` (and later `bench remove-app`) removes neither, and a `before_uninstall`
+  hook can drop them (docs/AI-FIXING.md section 2.3).
+- On Postgres, Frappe's schema sync can drop a Search Index named after a column of a
+  new composite index on another table until that table syncs again (a Frappe issue);
+  check `pg_indexes` after `bench migrate`.
+- Re-record flows with older Redundant Call findings to obtain corrected callsites.
+- This change does not move AI work out of analysis or add a persistence
+  checkpoint before optional AI calls. Those changes remain follow-up work.
+
+## [0.12.67] - 2026-10-02
+
+### Changed
+
+- **AI finding suggestions validate proposed code before storing it.** One
+  bounded repair request handles fabricated diffs, unsafe code and checked
+  Frappe rule violations. Code that still fails is removed with a profiler
+  note; advisory rules retain the code. Set `optimus_ai_reask` to `false` in
+  site_config to disable the repair request.
+- **AI prompts fit the provider's context window.** Captured data is
+  delimited, optional context is dropped before source lines, and non-ASCII
+  text is budgeted conservatively. Output-limit stops remove incomplete
+  code. Anthropic requests use a static cacheable prefix and count cache
+  tokens in usage.
+- Session and Phase 2 starts now allow 10 requests per user per minute, their
+  stops allow 20, and Phase 2 retries allow 5. Retry batches accept at most
+  5 entries, deduplicate runs and stop on a rate-limit refusal. Recovery
+  cancellation remains unlimited. Override limits with `optimus_rate_limits`
+  in site_config, as described in 0.12.66 below.
+
+### Fixed
+
+- Guardrails inspect Python code regardless of its fence label and ground
+  diffs in every section. Existing SQL in context cannot authorize an
+  additional raw SQL call, and enqueueing with after-commit explicitly
+  disabled is flagged.
+- Index suggestions use the provider's output budget and reject prompts
+  that cannot fit. A reported zero prompt-token count triggers the silent
+  truncation note; missing usage does not.
+- Call-tree SQL totals exclude the Error Log hook's own reads, matching the
+  other query summaries.
+
+### Upgrade notes
+
+- Restart web and background workers together after deployment. Existing
+  stored AI suggestions continue to render; refresh them to apply the new
+  guardrails. Follow the security migration and restart runbook in 0.12.63
+  when deploying these changes with the preceding security fixes.
+
+---
+
+## [0.12.66] - 2026-10-01
+
+### Removed
+
+- **Four unused AI endpoints.** `optimus.api.suggest_fix`,
+  `optimus.api.backfill_ai_fixes`, `optimus.api.humanize_steps` and
+  `optimus.api.suggest_index` are gone. Nothing in Optimus called them since
+  the session form's single "Refresh AI suggestions" button
+  (`optimus.api.refill_ai_suggestions`) replaced the per-section buttons. A
+  script that still calls one now gets a "Failed to get method" error; call
+  `refill_ai_suggestions` (POST, `session_uuid`) instead. The AI library
+  functions behind them are unchanged.
+
+### Changed
+
+- **Optimus Users can run AI and session actions on their own sessions.** A
+  user with the Optimus User role can now run Refresh AI suggestions,
+  Regenerate Reports, Retry Analyze and the Phase 2 start, stop and retry
+  actions on sessions they recorded. Before, most of these failed for anyone
+  who was not a System Manager. A user the session is shared with for editing
+  can run them too; a read-only share still only lets the user view the
+  session. The Optimus Session permissions themselves are unchanged.
+- **Mutating API endpoints accept POST only.** `refill_ai_suggestions`,
+  `regenerate_reports`, `retry_analyze`, `test_ai_connection`, `start`,
+  `stop`, `mark_onboarding_seen`, `start_line_profile_pass`,
+  `stop_line_profile_pass`, `retry_phase2_analyze`,
+  `retry_phase2_analyzes_batch` and `force_stop_phase2` now reject GET, so a
+  link on another site can no longer trigger them. The Desk UI already used
+  POST; scripts that call these endpoints with GET must switch to POST.
+- **Rate limits are per user.** Limits used to be per IP and could be bypassed
+  by adding a form field. Defaults: `refill_ai_suggestions` 6 per hour;
+  `regenerate_reports` 30 per minute; `retry_analyze` 5 per minute;
+  `test_ai_connection` 10 per minute; `download_pdf` and `export_session` 20
+  per minute. Override any of them in site_config:
+  `"optimus_rate_limits": {"refill_ai_suggestions": [12, 3600]}`.
+- `retry_analyze` on a session that is not Failed now returns an error instead
+  of `{"retried": false}`.
+
+### Fixed
+
+- Refresh AI suggestions no longer fails with a permission error after the AI
+  calls already ran (and were billed): the final report re-render no longer
+  re-checks permissions. If that re-render fails, the AI results stay saved,
+  the error is logged and the response says `regenerated: false`.
+- The Phase 2 re-render after analysis now works for session owners.
+- The Optimus Settings "incomplete AI config" warning reads which providers need
+  an API key from the provider table instead of a hard-coded provider name.
+- The "No Optimus Session found" message no longer echoes the requested id
+  unescaped.
+
+### Internal
+
+- One permission gate (`permissions.may_act_on_session` plus
+  `api._session_action_gate`, `_ai_session_gate` and `_phase2_run_gate`)
+  replaces five copy-pasted owner checks. A structural test fails the build if a
+  session-scoped endpoint that writes skips its gate, is not POST-only or has an
+  unannotated parameter, and another if a whitelisted AI endpoint has no Desk
+  caller.
+- The AI endpoint tests call the endpoints instead of searching the source text.
+
+### Upgrade notes
+
+- No `bench migrate` is needed (no DocType or patch change), and no
+  `bench --site <site> clear-cache` (no form JS change; running it is
+  harmless). Open Desk tabs need no reload.
+- Restart web AND background workers together (`bench restart`, or your
+  process manager): the Phase 2 re-render runs `regenerate_reports` inside a
+  worker, which must run the same code as the web tier.
+- New optional site_config key: `optimus_rate_limits`
+  (`{"<endpoint name>": [limit, seconds]}`).
+- Scripts: switch calls to the four removed endpoints to
+  `optimus.api.refill_ai_suggestions`, and any GET call to a mutating endpoint
+  to POST.
+- Verify: as a user with only the Optimus User role, open one of your Ready
+  sessions and click Regenerate Reports (it now works); a GET to
+  `/api/method/optimus.api.regenerate_reports` returns 403.
+
+---
+
+## [0.12.65] - 2026-10-01
+
+### Fixed
+
+- AI-generated report content now uses a strict HTML allowlist. Remote images,
+  scripts, forms, frames, inline styles and IDs are removed. Links stay clickable
+  only for exact `http` or `https` URLs on `frappeframework.com`, `docs.frappe.io`,
+  `docs.erpnext.com`, or `github.com/frappe` paths. Userinfo, ports, look-alike
+  hosts, dot segments and ambiguous URL characters are rejected; other links
+  keep their text. This applies to fix suggestions, index suggestions and
+  AI-written steps to reproduce.
+- Markdown containing angle brackets, such as `List<int>` inside code, now
+  converts normally. HTML and Jinja inside code fences remain escaped and
+  readable, and diff highlighting is preserved. Conversion or sanitizer failures
+  fall back to escaped plain text without adding an error log.
+
+### Upgrade notes
+
+- Run `bench setup requirements` after pulling the update. Optimus now declares
+  `nh3>=0.2.22` and `markdown2>=2.5` directly. Frappe v16 already installs these
+  dependencies; Frappe v15 needs `nh3`. Without it, AI suggestions safely render
+  as escaped text in a `<pre>` block instead of formatted Markdown.
+- Restart web and background workers together to load the sanitizer in every
+  process. There is no schema change or migration patch.
+- Existing report files retain their old HTML. Use **Regenerate Reports**, a
+  new analysis, or **Refresh AI suggestions** to rebuild them. Previously
+  downloaded copies also retain their old content.
+- Verify a regenerated AI-fix card: documentation links remain clickable,
+  off-domain links lose their href, remote images disappear, and fenced code
+  remains readable. `AI_LINK_HOSTS` and `ai_link_allowed` provide the shared
+  renderer link policy for future AI checks.
+
+---
+
+## AI integration draft 0.12.64 - 2026-09-30
+
+These changes were staged on the AI integration branch and were not part of
+the published 0.12.64 release recorded below.
+
+### Fixed
+
+- **Advisory: every v16 site with Optimus installed had non-Administrator File
+  permission checks denied.** `optimus.permissions.file_has_permission` returned
+  `None` to mean "no objection, defer to the next check" for every File that
+  wasn't a gated profiler artifact (in practice, almost every File on the
+  site), but Frappe v16's `has_controller_permissions` treats any falsy hook
+  result, `False` or `None`, as an outright deny, and calls app hooks in
+  reversed install order, so this hook ran before Frappe core's own File
+  permission check in the same AND loop. Practical effect on any v16 site
+  with Optimus installed: form loads, deletes, library attaches and REST
+  calls against File records were denied for every non-Administrator user,
+  regardless of whether they owned the file or had a valid share.
+  Administrator was unaffected (it short-circuits earlier in Frappe's
+  permission pipeline). On Frappe 16 the fix returns `True` (no objection)
+  instead of `None` in every deferring branch; the profiler artifacts' own admin/owner
+  gate still returns `False` explicitly where it denies. The "no objection"
+  value is version-aware: Frappe v15 stops at the first hook that answers
+  non-`None` (a `True` there would skip Frappe's own File check), so on v15
+  the hook keeps returning `None` exactly as before. Verified live on a
+  Frappe 16 test site; v15 semantics are pinned by a replay test of v15's
+  loop.
+- **`recordings_file` now gated like the two report files.** The raw
+  recordings snapshot (a compressed JSON bundle of the whole flow, including
+  SQL parameters and Python call trees) was reachable by anyone with read
+  access to the parent Optimus Session, including a read-sharee who was only
+  ever meant to see the rendered report. It is now denied in Frappe's
+  permission checks (the File form, REST, `frappe.has_permission`) to
+  anyone other than a System Manager or the recording user, the same check
+  already applied to `raw_report_file` and `raw_report_pdf_file`. A direct
+  `/private/files` download bypasses this hook and still grants a parent
+  read-sharee access to the raw bundle and reports. `recordings_file` is
+  hidden but remains at permlevel 0, so reading the parent Session through
+  REST can reveal its URL. This release does not close that download gap;
+  the tests of the controller hook do not prove raw-artifact confidentiality.
+- No migration needed (both changes are in-memory Python, not schema or data).
+  **Upgrade:** restart the web and worker processes together after deploying
+  so they load the fixed `optimus/permissions.py` (a partial restart leaves
+  some workers still serving the pre-fix, over-denying behaviour until they
+  too are restarted; there is no under-denial window, since the pre-fix bug
+  only ever denies more than it should). No `bench clear-cache` is required
+  (no DocType JS or `client_cache` entry changes) and no new `site_config`
+  keys are introduced. Verify: as a non-Administrator user, open a public
+  File (e.g. a ToDo attachment) through the File form or the REST API; it
+  should succeed (200) instead of failing with a permission error (403).
+
+---
+
+## AI integration draft 0.12.63 - 2026-09-28
+
+These changes were staged on the AI integration branch and were not part of
+the published 0.12.63 release recorded below.
+
+### Security
+
+- **Advisory: the AI provider API key could be stored in plain text in the
+  Error Log.** Affects every earlier release with AI fix suggestions, on any
+  site where an AI call ever failed (network error, rejected key, timeout,
+  rate limit, unexpected reply). The failure was logged with Frappe's full
+  traceback, which prints the local variables of every frame. The provider
+  settings and the request headers were such locals, so the key, and the
+  prompt (your source code and SQL with literal values), were written to
+  `tabError Log`. The same traceback could reach Sentry when
+  `FRAPPE_SENTRY_DSN` was set, the snapshot Frappe stores for a server error
+  or for any error in developer mode, and the failed-job log of background
+  workers. A key containing a character outside latin-1 (a pasted smart
+  quote) leaked through the HTTP library's own frames, and a provider that
+  echoed the key in its error reply had it shown in the error message.
+- Fixed: the key now exists only in the encrypted Password field, in local
+  variables named `api_key` or `secret` (names Frappe's traceback sanitizer
+  and Sentry redact), for a moment in the `literals` parameter of
+  `redaction.scrub_secrets` (which moves the key into `secret` before it
+  scrubs anything), and in a masked `requests` auth object
+  (`ai_fix._ApiKeyAuth`). That object sets the header on the HTTP library's
+  own prepared request, whose headers hold the key while the request is
+  sent; the response keeps that request, and neither one's `repr` shows its
+  headers. Apart from those, it is never in a dict, a header dict, a request
+  body, an exception message or an exception chain. A call reads the stored
+  key once (one SELECT on `__Auth`). A provider's error reply is scrubbed
+  before it is shown, of the key the request was sent with (the only key the
+  provider received, so an echo is masked even when the key in Settings was
+  changed while the request ran), or of the key stored in Optimus Settings
+  when the request carried none, each in its raw and its JSON-escaped form.
+  A 404 message names the request URL with any credentials in it masked (a
+  `user:password@` typed into a custom Base URL, or the key), or only "(the
+  configured Base URL)" when the URL cannot be scrubbed. The HTTP library
+  never follows a redirect for Optimus: it drops only a header named
+  `Authorization` when it follows one to another host, so the `x-api-key`
+  header Anthropic uses would have been sent on to the redirect target.
+  Optimus itself follows at most three 307 or 308 redirects that stay on the
+  same host and port (the same scheme, or http to https on that host),
+  sending the same request, key included, again; it follows no other
+  redirect, and never logs or shows the address a redirect points to. Every
+  Error Log row the AI code writes goes through one
+  function, `ai_fix.log_ai_failure`, with an explicit, scrubbed message (no
+  frame locals) that links to the Optimus Session, written after the failure
+  has been handled, so Sentry never receives the frames of the failed
+  request, where the prepared headers are. A provider call cut off by the
+  web server's worker timeout (a `SystemExit` in the request) leaves without
+  the frames that held the request headers, and writes no Error Log row;
+  such an interrupt while the key is being decrypted leaves without the
+  decryption frames too, and one while a provider's reply is scrubbed or a
+  failure's log message is built leaves without the reply or the unscrubbed
+  message. A behavioural canary test pushes a fake key through
+  every AI entry point in each of the failure scenarios it models, and fails
+  if the key appears in any log, traceback, error-tracker payload or
+  response.
+- New: an Error Log `before_insert` hook (`optimus.error_log_mask`) masks the
+  AI key in Error Log rows as Frappe inserts them. Frappe runs it for every
+  Error Log row, before `validate`, the length check and the INSERT, whether
+  `frappe.log_error` inserts the row at once or Frappe inserts it later from
+  its deferred-insert queue in Redis (a server error's snapshot, or an error
+  logged while the site is read-only: bench migrate inserts those right after
+  the patches, and the scheduler every 15 minutes). It changes only a row from
+  Optimus's AI code (an `optimus/ai_fix.py` or `frappe_profiler/ai_fix.py`
+  frame in its error, title or metadata) or one holding the key stored in
+  Optimus Settings (raw, JSON-escaped or repr-escaped). In such a row it masks
+  the key, the key shapes `redaction.scrub_secrets` knows and the bare header value lines
+  of the HTTP library's frames in `error`, `method` (the title) and
+  `metadata`, and moves a title longer than its 140-character column in front
+  of the error, as Frappe v16 does, so on Frappe v15 such a row is no longer
+  dropped by the length check. Every other row, another app's included, is
+  stored exactly as it was. It normally reads the stored key once per Error Log insert
+  (one SELECT on `__Auth`, and a decrypt when a key is stored), never caches
+  it, and never raises, except an RQ job timeout, which still stops the job.
+  When the key cannot be read, only the AI frame check identifies a row
+  to mask. A row it would mask whose masking fails is withheld: its error text is
+  replaced by "Optimus withheld this error text: it could not be masked. See
+  logs/optimus.log for the reason.", its title and metadata too when they hold
+  an `ai_fix.py` frame or the key (a title holding neither is kept, cut to 140
+  characters). A row whose AI check itself fails is treated as an AI row. Each
+  failure, and each use of the fallback below, writes one line to the
+  `optimus` log (`logs/optimus.log`), naming at most an exception type: the
+  first time that outcome happens in a process, then every 1000th time, with
+  its count, so a storm of failing inserts cannot fill the log.
+
+  On an in-place upgrade (the new code on the filesystem the running processes
+  use), a process still running the previous release that reads the new hooks
+  resolves the hook without error, since its module imports only the standard
+  library. There its import of the rest of Optimus can fail (the old modules
+  are still loaded), and it then falls back to Frappe alone: it masks the
+  stored key, raw, JSON-escaped or repr-escaped, in `error`, `method` and
+  `metadata`, but not the other key shapes or the value lines; step 3 masks those in the
+  table. An image-based or rolling deployment is different: see the upgrade
+  notes.
+
+  Frappe caches every app's hooks in Redis, and a process still running the
+  previous release can cache the old hooks, without this one, during or after
+  the migrate (`bench update`'s asset build flushes the whole Redis cache,
+  every site's, after the migrate and before the restart); every process then
+  reads those until the cache is cleared, and a restart does not clear it. A
+  real run of the scrub clears and reloads that cache first, as the migrate
+  patch does when it skips or cannot run the scrub, and reads it back to check
+  that it holds the Error Log hook, so the hook reaches every process once the
+  scrub runs after the restart (step 3). In developer mode Frappe keeps the
+  hooks in each process instead of Redis, so there a restart is what gives
+  every process the new hooks.
+- **Do this, in this order:**
+  1. Now, before upgrading: rotate every AI provider key that was configured
+     on a site running an earlier release. Create a new key at the provider
+     and revoke the old one there. Backups and replicas already hold the
+     plain-text rows, and old processes keep running the old code until they
+     restart; only revoking the old key makes those copies harmless. Keep
+     the old key in Optimus Settings until step 3 is done: the scrub also
+     searches the Error Log for the key stored there.
+  2. Pull, run `bench --site <site> migrate`, then restart the web server and
+     the background workers together (`bench restart`, or your supervisor or
+     systemd units). On an image-based or rolling deployment (Docker,
+     Kubernetes, or blue-green benches sharing one `redis_cache`), stop or
+     replace every web and worker process of the old release before running
+     the migrate, and run step 3 once the rollout is done (see the upgrade
+     notes). The patch `v0_12_0.scrub_ai_keys_from_error_log` masks the keys in
+     existing Error Log rows and in Deleted Document copies of them, and
+     prints how many rows it masked, or that none needed it. It never reads or
+     changes the Error Log records waiting in Frappe's deferred-insert queue
+     in Redis: the Error Log hook masks the key in them when Frappe inserts
+     them, bench migrate right after the patches and the scheduler every 15
+     minutes, and the patch prints a line saying nothing needs doing for the
+     queue. Its last line says to run step 3 after restarting the web server
+     and the background workers, or, if you cannot,
+     `bench --site <site> clear-cache` after the restart; it first says that
+     Frappe's cached hooks were not refreshed during the migrate when that
+     refresh failed or could not be attempted. Rows the old processes insert
+     until the restart may be stored unmasked, or with only the stored key
+     masked: step 3 masks them in the table.
+  3. After the restart, run the scrub again, to catch rows the old processes
+     wrote during and after the migrate, until the restart, and so the Error
+     Log hook reaches every process (a real run clears and reloads Frappe's
+     cached hooks first), then check it:
+     `bench --site <site> execute optimus.maintenance.scrub_error_log_secrets --kwargs "{'dry_run': False}"`,
+     then, right after it, the same command with `'dry_run': True`, which must
+     report these values: `changed` 0, `deleted_docs_changed` 0, `residual` 0,
+     `failed` 0 and `key_unreadable` False. The result also holds
+     `hooks_refreshed`, which is not one of those values: True when the real
+     run refreshed Frappe's cached hooks, confirmed the Redis key exists and
+     found the Error Log hook in this process's hooks (only that check runs
+     in developer mode); always False on a dry run. A failed refresh is not
+     counted in `failed`; if the real run's `hooks_refreshed` is False, or you
+     cannot run this step, run `bench --site <site> clear-cache` after the restart.
+     To confirm that the hooks the site's processes read carry the Error Log
+     hook, check that this prints `optimus.error_log_mask.mask_error_log`
+     under `before_insert`:
+     `bench --site <site> execute frappe.get_doc_hooks | grep -o '"Error Log": {[^}]*}'`
+     (in developer mode it shows only its own process's hooks). If it does
+     not, a process of the previous release still runs or cached the old
+     hooks: restart or replace every such process, run
+     `bench --site <site> clear-cache`, and check again. Each run of the scrub
+     that completes writes one line with its counts to the `optimus` log
+     (`logs/optimus.log`). The scrub reads only the Error Log and Deleted
+     Document tables: it never reads or changes Frappe's deferred-insert
+     queue, and a dry run neither refreshes the cached hooks nor reads that
+     queue. `key_unreadable` is True when a key is stored in Optimus Settings
+     but cannot be decrypted (the site's `encryption_key` changed, for example
+     on a backup restored onto another site): the scrub can then neither
+     search for the key nor mask it by value, and it counts one in `failed`.
+     Restore the site's `encryption_key`, or enter the OLD key again in
+     Optimus Settings (the scrub searches for the key that leaked), then run
+     the scrub again. If Optimus Settings cannot be read for another reason,
+     `failed` counts one and `key_unreadable` stays False. The scrub locks the
+     Error Log while it scans it (the table is MyISAM on MariaDB), one window
+     of 1000 rows per statement, so on a site with a large Error Log run it
+     off-peak. Run it with `bench execute` or `bench --site <site> console`,
+     never as a background job: it refuses to run inside one, because a failed
+     job's log would store the unmasked rows it reads. Then clear the failed
+     background jobs from before the upgrade: their stored error text
+     (`rq:job:*` `exc_info`) may hold a provider reply that echoed the key
+     (Desk: RQ Job list, "Remove Failed Jobs", or
+     `bench --site <site> execute frappe.core.doctype.rq_job.rq_job.remove_failed_jobs`).
+  4. Enter the new key in Optimus Settings.
+  - Optional: delete the old AI error rows entirely, since they can also
+    hold prompt text. Check the counts first, then delete:
+    `bench --site <site> execute optimus.maintenance.purge_ai_error_logs --kwargs "{'dry_run': True}"`,
+    then the same command with `'dry_run': False`. It deletes the rows with
+    a frame in `optimus/ai_fix.py`, or in `frappe_profiler/ai_fix.py` from
+    releases before the app was renamed, and their Deleted Document copies.
+    On MariaDB it locks the Error Log while it scans it too, so on a busy
+    site run it off-peak.
+  - If the site sends errors to Sentry, delete the events whose stack
+    contains `ai_fix.py`. Treat database backups taken before this upgrade
+    as containing plain-text keys, and treat bench log files (`logs/`) and
+    binlogs from before the upgrade like backups.
+  - A site where Optimus was uninstalled and installed again never runs the
+    patch (a new install marks every patch as done): run step 3 by hand.
+    Nor does a site that ran `frappe_profiler` 0.6.x with AI fix suggestions
+    and then installed Optimus fresh: run step 3 by hand there too. The
+    scrub's passes that find rows by an `ai_fix.py` frame and a secret
+    marker also find the rows with a `frappe_profiler/ai_fix.py` frame. A
+    site that ran an earlier release and then uninstalled Optimus still
+    holds the rows, and there `bench execute optimus.maintenance...` fails
+    because the app is not installed on the site. With the app still on the
+    bench, run the scrub from `bench --site <site> console` instead:
+
+    ```python
+    from optimus.maintenance import scrub_error_log_secrets
+    scrub_error_log_secrets(dry_run=False)
+    scrub_error_log_secrets(dry_run=True)  # must report the values of step 3
+    ```
+
+    Or install Optimus on the site again and run step 3. If no key
+    is stored on the site any more, the scrub has no stored key to search
+    for; its passes that find rows by an `ai_fix.py` frame and a secret
+    marker still run, and `key_unreadable` is False there (no key is
+    stored). The Error Log hook does not run on such a site: Frappe runs
+    only the hooks of the apps installed on the site.
+  - If you downgrade to an earlier release, clear the site's cache after it
+    (`bench migrate` does, and after the restart run
+    `bench --site <site> clear-cache`): Frappe's cached hooks still name the
+    Error Log hook, which the earlier release does not have, and until they
+    are cleared every Error Log insert fails (`frappe.log_error` raises, and
+    a queued record is dropped). The earlier release can also write keys
+    into the Error Log again, and upgrading again does not re-run the patch:
+    repeat step 3 by hand after the re-upgrade.
+
+### Fixed
+
+- A failed AI call now writes one Error Log row instead of two.
+- An RQ job that times out during AI enrichment now stops. Each AI loop
+  catches failures with `except Exception`, which also caught the job
+  timeout, so the loop logged it and went on calling the provider past the
+  job's deadline. The timeout is now logged once and raised again, so the
+  job ends as a timed-out job and the rest of its AI work is skipped.
+- AI Error Log rows written by the HTTP layer now link to the Optimus
+  Session. For an HTTP error status the row names the provider's own error
+  code (`provider_error=`, for example `invalid_request_error` or
+  `insufficient_quota`) when the reply carries one made only of lowercase
+  words (letters joined by `_`, `.`, `:` or `-`, at most 64 characters). Any
+  other value is left out, so a key-shaped string is never logged there,
+  and the reply body itself is never logged, since it can echo the prompt.
+  That holds when the HTTP layer's row cannot be written and the caller
+  logs the error instead: the caller's row shows the status, the call site
+  and `provider_error=` in place of the error's message, which can quote
+  the reply. An unexpected error inside the HTTP layer is logged with its
+  type and plain `file:line:function` frames, without local variables or
+  its message.
+- The per-table `optimus refill_indexes <table>` titles are now one title,
+  `optimus refill_indexes`, with the table in the message, so the Error Log
+  groups them. An HTTP failure during that refill is logged once, by the
+  HTTP layer, as `optimus ai_fix` (with the provider, the call site, the
+  status and `provider_error=`), so its row does not name the table.
+- A provider reply that is JSON but not an object (a list or a string) is
+  reported as an unexpected response instead of failing the request with a
+  server error. A malformed token count in a reply no longer fails a
+  suggestion that was otherwise returned. An Anthropic reply whose text is not
+  a string is reported as an empty response instead of failing the request
+  with a server error. An OpenAI-compatible reply whose content is a list of
+  parts keeps the text of its parts when one of them has no text (`null`),
+  instead of being reported as a reply without text. A redirect that is not
+  followed (any HTTP 3xx reply but a 307 or 308 to the same host and port,
+  and a fourth redirect) is reported as an unexpected response that names
+  its status and says that a Base URL that redirects
+  must be set to the final URL it redirects to,
+  instead of being read as the reply; its Error Log row holds the status and
+  the call site (and `provider_error=` when the reply names a code), never
+  the body or the address the redirect points to.
+- An API key pasted with a trailing newline or spaces is trimmed. A key must
+  be plain printable ASCII: a key with any other character (a space inside
+  it, a pasted smart quote or no-break space, a control character such as a
+  newline or a tab) now fails before any request is made, with a message
+  that names the usual causes: a pasted smart quote, a stray space, a
+  no-break space, or a control character such as a newline or tab. That
+  holds for a provider that needs a key. The OpenAI-compatible provider needs
+  none (Ollama, LM Studio, vLLM): there such a key is neither sent nor
+  refused, and the request goes without a key; a key it can send is still
+  sent (a router such as OpenRouter needs one).
+- The masking (the scrub, the Error Log hook in the rows it changes, and
+  every AI Error Log row) now also recognises an `x-api-key` header line as
+  the HTTP library builds it (`x-api-key: <key>`) and a header value quoted in
+  an "Invalid header value" error of `http.client` or `requests`, without
+  needing the key itself, so a key no longer stored in Optimus Settings (a
+  rotated one) is masked there too. A web address with an e-mail address in
+  its query string or fragment (`?to=a@b.com`) is no longer masked as
+  credentials: only the `user:password@` part in front of the host is.
+- The scrub's `residual` count is driven by the known key first: it counts a
+  row still holding the stored key (raw, JSON-escaped or repr-escaped), then
+  adds provider key shapes at their real lengths, as whole tokens (`sk-` keys
+  of OpenAI, Anthropic, DeepSeek, Kimi and OpenRouter, Groq's `gsk_`,
+  Google's `AIza`), so an identifier, a file name or prose that only starts
+  with such a prefix is not counted. A residual of 0 means no current key
+  and no known provider-shaped key is left in the rows read, not that no key
+  of any provider is (a rotated Mistral or Cohere key has no shape it
+  knows).
+- An AI failure row is written to the Error Log immediately. On MariaDB the
+  Error Log table is MyISAM, so the row survives a rollback of the request
+  or background job that logged it. On Postgres, if the request or
+  background job then fails and its transaction is rolled back (for example,
+  the `optimus.api.suggest_fix` endpoint reporting the provider's error),
+  the same row is queued in Redis: the scheduler writes it at its next
+  deferred-insert run (every 15 minutes), or the next `bench migrate` does.
+  Before, that rollback lost the row on Postgres. When a row may be missing
+  (its write failed; after a rollback, its existence could not be checked
+  or it could not be queued again; or the rollback callback could not be
+  registered), or a hook that runs after the insert failed (a broken Error
+  Log notification, say: the row is then written, and a caller that logs
+  the same error again writes a second row), one line naming only the
+  error type goes to the `optimus` log (`logs/optimus.log`): "an AI Error
+  Log row may not have been written or re-queued, or a hook after the
+  insert failed". It is logged at error level, the lowest level Frappe's
+  loggers keep on a production site.
+
+- A second log of an AI failure that is already in the Error Log (the HTTP
+  layer logs its own failure, then the caller logs the same error with the
+  finding or step it was working on) no longer drops the caller's context:
+  its title and `k=v` lines, scrubbed like the message, are appended to the
+  row already written: there is still one row. A failed append leaves one line with
+  its error type in the `optimus` log.
+- The masking now also recognises a header entry whose value is bytes
+  (`'x-api-key': b'...'`), a lowercase or upper-case `bearer`, `basic` or
+  `token` followed by a token holding a digit, the `Key` and `ApiKey`
+  schemes of an `Authorization` header, and an `api-key` or `api_key` header
+  line holding a digit. Ordinary prose ("the bearer of", "token expired") is
+  left alone.
+- The Error Log hook reads the stored AI key only when one is stored: no key
+  is read on a site where none is stored (AI never enabled). It checks the
+  Password field's plain value (asterisks, never the key) first.
+- The Error Log hook is fail-closed for Optimus's own rows: a row from
+  Optimus's AI code is withheld whenever it cannot be masked, including in a
+  process still running the previous release and after an unexpected
+  failure of the hook. Another app's row is still stored exactly as it was.
+- The Error Log hook cuts each text field of a row it masks to 65536
+  characters (the last token before the cut is dropped, and `[...]` is
+  appended) and masks again only the lines around the join of a long title
+  and its error, so a huge row costs a bounded amount of work.
+- The report's per-action breakdown now leaves out the Error Log hook's own
+  key read too, so its rows add up to the session's query count and time.
+- A worker-timeout interrupt while a failure's message is scrubbed, or while
+  a redirect's address is read, now leaves without the key, the unscrubbed
+  text or the Base URL.
+
+An unexpected hook failure triggers one independent stored-key read with
+Frappe alone. A row holding that key, including its JSON-escaped or repr-escaped form, is withheld even without an AI frame. A row from the AI code is
+withheld whenever it cannot be masked; unrelated rows remain unchanged. Quoted
+header values cut off before their closing quote are masked through the end of
+that line, including keys that have since been rotated.
+
+- AI availability checks use the cached Password-field presence without
+  decrypting the key. Each AI request still reads and validates its key.
+- Token totals preserve the sum of valid input and output counts when that
+  sum exceeds the bound applied to individual provider fields.
+- AI steps return a boolean failure flag after logging, so callers retain no
+  caught exception or traceback.
+
+### Upgrade notes
+
+- `bench migrate` is required: it runs the scrub patch (batches of 200 rows, a
+  commit per batch) and clears the cache. The scrub never stops the migrate:
+  if the Error Log and the Deleted Document table together hold more than
+  200,000 rows, or their size cannot be read, or the scrub fails, the patch
+  rolls back its open transaction (on Postgres a failed statement would
+  otherwise block every later write of the migrate), clears and reloads
+  Frappe's cached hooks when `optimus.maintenance` imports (so the migrate's
+  own insert of the queued Error Log records, right after the patches, runs
+  the Error Log hook, unless a process still running the previous release
+  caches the old hooks again in between), prints the command to run the scrub
+  by hand after the restart, writes an Error Log row titled "Optimus: Error
+  Log key scrub did not run" with the reason (a row count or an error type
+  name; never row text) and that command, and carries on (step 3 above re-runs
+  it anyway). If the scrub ran but could not process every row, still found a
+  key-shaped value or could not read the stored key (`key_unreadable`), the
+  patch writes an Error Log row titled "Optimus: Error Log key scrub did not
+  finish" with its counts and the command. Every path then prints one line
+  saying that Optimus masks the Error Log entries still queued in Redis when
+  Frappe inserts them and nothing needs doing for the queue, or, when
+  `optimus.maintenance` cannot be imported, that only key shapes may stay
+  unmasked in rows, queued ones included, until it can. Every path ends
+  with a line saying to run the scrub (step 3) after restarting the web server and the background
+  workers, since it also refreshes Frappe's cached hooks, or, if you cannot,
+  `bench --site <site> clear-cache` after the restart; that line first says
+  the cached hooks were not refreshed during the migrate when the refresh
+  failed or was not attempted. Every outcome also writes one line to the
+  `optimus` log (`logs/optimus.log`), at error level, with the outcome and its
+  counts or error type only, and a scrub that ran writes its own line of
+  counts there too.
+- What the scrub sends to the database: its search sends at most an
+  8-character fragment of the stored key, never the whole key, and checks the
+  full key in Python, and its UPDATEs carry masked text. So the database's
+  query logs record at most that fragment of the stored key.
+  A ROW-format binlog still records each UPDATE's before-image, the row as it
+  was. Binlogs, replicas, bench `logs/` files and backups from before the
+  upgrade (including the backup `bench update` takes when it starts) still
+  hold the old text; rotating the key makes them harmless.
+- Restart the web server and the background workers together after the
+  migrate: until they restart, the old processes run the old code, and the
+  rows they insert may be stored unmasked (while they read the old hooks) or
+  with only the stored key masked (once they read the new hooks, the Error Log
+  hook's import of the rest of Optimus can fail there, and it then masks the
+  stored key with Frappe alone). That holds for an in-place upgrade, where the
+  old processes can import the hook's module from the same filesystem.
+- On an image-based or rolling deployment (Docker, Kubernetes, or blue-green
+  benches sharing one `redis_cache`), the processes still running the old
+  image do not have the Error Log hook's module. Once the new hooks are cached
+  they read them too, and Frappe resolves the hook outside any error handling,
+  so every Error Log insert in those processes fails, for every app
+  (`frappe.log_error` raises, and a queued record is dropped), until they are
+  replaced. Nothing in this release can prevent it, since the old code runs
+  there. Stop or replace every old web and worker process before running the
+  migrate, then run step 3 after the rollout.
+- Requests to the AI provider follow a redirect only when it is a 307 or 308
+  to the same host and port (http to https on that host included), at most
+  three in a row. A Base URL that answers any other redirect (a 301, 302 or
+  303, the usual way a server sends http to https, or a redirect to another
+  host or port, or through a proxy that rewrites the host) now fails with a
+  message naming the redirect's status. A Base URL that redirects (301, 302
+  or 303, or a 307 or 308 to another host) must be set to the final URL it
+  redirects to: change the Base URL in Optimus Settings to that final URL.
+- A stored AI key with a space inside it or a character that is not plain
+  printable ASCII (a pasted smart quote, a no-break space, a control
+  character) is now rejected with a clear message, both when a request is
+  made and when Optimus Settings is saved: such a key is refused when
+  Optimus Settings is saved, with the same message. Keyless providers
+  (OpenAI-compatible) are unaffected: there such a key is neither sent nor
+  refused.
+- Every Error Log insert on the site normally reads the stored AI key once
+  (the Error Log hook needs it to tell a row holding the key). While Optimus
+  profiles a flow, the per-table and per-action breakdowns, index suggestions,
+  the N+1 and slowest-query findings and the session's query count and query
+  time leave these reads out, as Optimus's own queries. A site where no key is
+  stored reads none.
+- No Desk form or JavaScript change (open tabs need no reload) and no new
+  `site_config.json` key.
+- Verify: the dry run in step 3 above reports the values listed there, the
+  check `bench --site <site> execute frappe.get_doc_hooks | grep -o '"Error Log": {[^}]*}'`
+  shows the Error Log hook, and a failed AI call leaves
+  exactly one Error Log row whose text is an explicit message without a dump
+  of local variables.
 
 ---
 

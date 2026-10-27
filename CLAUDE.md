@@ -13,9 +13,9 @@ python -m pytest optimus/tests/                                                 
 python -m pytest optimus/tests/test_ai_fix.py::TestOpenAiCall::test_extracts_choice_content   # single test
 ```
 
-Test-only deps are `pytest`, `hypothesis` and `jsonschema` (pip install them if a run errors on import). A few PDF-export tests write a cssutils log to `../logs/`, so create that directory if a run fails on a missing log file.
+Test-only deps are `pytest`, `hypothesis`, `Faker`, `pdfplumber`, `pypdf`, `sql_metadata` and `jsonschema`; the AI quality job also installs its pinned RQ and Semgrep dependencies. Use the CI dependency layout when reproducing failures. A few PDF-export tests write a cssutils log to `../logs/`, so create that directory if a run fails on a missing log file.
 
-Integration tests need a real Frappe v16 bench and site:
+Integration tests need a disposable real Frappe v15 or v16 bench and site:
 
 ```
 bench --site <site> run-tests --app optimus
@@ -35,7 +35,13 @@ The flow is capture then analyze then render.
 
 - **Render** (`renderer/`, `templates/report.html`): `report.html` is the single source of truth for BOTH the Safe (redacted) and Raw report modes; there is no second template. `renderer/_internal.py` is the orchestrator and per-concern submodules (`line_drilldown.py`, `source.py`, `syntax.py` and others) build the sections. `tests/test_renderer_structure_snapshot.py` locks the DOM structure (ids, class tokens, tag counts) as a template-contract canary; on a deliberate template change regenerate it with `REGENERATE_RENDERER_SNAPSHOT=1 python -m pytest optimus/tests/test_renderer_structure_snapshot.py`.
 
-- **AI fix suggestions** (`ai_fix.py`): an optional LLM client behind the "Suggest a fix" action, kept fully data-driven. `_PROVIDER_DEFAULTS` maps each provider display name to its protocol, base_url and model; `_resolve_provider` reads the `ai_provider` Select from Optimus Settings and uses that string directly as the dict key; `_call_openai_chat` and `_call_anthropic` are the only two protocol handlers. Everything else is generic, so adding a provider is data only.
+- **AI fix suggestions** (`ai_fix.py`, `ai_jobs.py`, `ai_refresh_store.py`): optional queued work after analysis or a manual refresh. SQL owns admission, claims, progress, attempts and usage; RQ delivers committed intents. Unknown provider outcomes are retained as uncertain and are not automatically repeated. Code is never auto-applied; Steps notes can be rewritten while user edits are protected. `_PROVIDER_DEFAULTS` contains provider data and reviewed model limits; unknown model IDs use a bounded fallback, not a model allowlist. `_call_openai_chat` and `_call_anthropic` implement wire-protocol differences. Adding a provider is data only; budget, privacy and orchestration policies must remain generic.
+
+The AI quality workflow already runs real database concurrency tests on MariaDB
+10.6, MariaDB 11.8 and PostgreSQL 16. Local SQL tests require a dedicated fake
+`optimus_test` service; select it with `OPTIMUS_TEST_SQL` and
+`OPTIMUS_TEST_SQL_PORT`, then run `optimus/tests/test_ai_refresh_sql.py`.
+Never point these tests at an application database.
 
 For the deeper data-flow and hook-ordering detail read the docstrings in `analyze.py` and `renderer/README.md`.
 
