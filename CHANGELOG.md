@@ -8,12 +8,20 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.92] - 2026-10-27
+## [0.12.100] - 2026-10-27
 
 ### Changed
 
 - The "Phase 2" feature is now called "Line profiling" everywhere you see it: the Optimus Session form buttons and dialog (Line Profiling > Run Line-Profile Pass, Stop Line Profiling Run, Retry), the floating widget status text, notifications and error messages, the Optimus Settings section and field labels, and the line profiling wording in reports. Existing data, runs and settings are unaffected.
 - Reports now say "in the normal profile" instead of "in phase 1" in the line profiling fallback hint.
+
+## [0.12.91] - 2026-10-27
+
+### Fixed
+
+- Optimus's own queries (such as the server-resource snapshots) no longer appear anywhere in the report. They are removed when a recording is loaded, so the query counts, DB time, table breakdown, slowest queries and findings never include them.
+- "Queries per action" now respects Optimus Settings. When Tracked Apps is set, it lists only queries issued from those apps and says how many queries from other apps were left out. When it is empty, every non-Optimus query is listed as before. The callsite shown is now the app code that issued the query, not the innermost Frappe frame.
+- Apps whose name merely ends in "optimus" are no longer mistaken for the profiler.
 
 ---
 
