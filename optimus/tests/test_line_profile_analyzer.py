@@ -386,24 +386,30 @@ class TestLeafPickAndChain:
 
 
 # ---------------------------------------------------------------------------
-# Realtime targeting phase-2 events must reach the session OWNER's Desk tab.
-# run_analyze runs in an RQ worker with no browser socket, so publish_realtime
-# needs an explicit user (a None target won't reach the form). This pins that
-# _publish forwards the payload's "user" as the target.
+# Phase 2 targets the recording user, shared forms, and the authorized actor.
 # ---------------------------------------------------------------------------
 
 
-def test_publish_targets_user_from_payload(monkeypatch):
+def test_publish_targets_recording_user_and_shared_form(monkeypatch):
+	from types import SimpleNamespace
+
 	import frappe
 
 	calls = []
+	monkeypatch.setattr(frappe, "db", SimpleNamespace(get_value=lambda *a, **k: {
+		"name": "session-doc", "user": "recorder@example.com",
+	}), raising=False)
 	monkeypatch.setattr(
 		frappe, "publish_realtime",
-		lambda event, payload=None, user=None, **k: calls.append((event, user)),
+		lambda event, payload=None, **k: calls.append((event, k)),
 		raising=False,
 	)
 	analyzer._publish("phase_2_run_ready", {"session_uuid": "s", "user": "alice@example.com"})
-	assert calls == [("phase_2_run_ready", "alice@example.com")]
+	assert calls == [
+		("phase_2_run_ready", {"room": "user:recorder@example.com"}),
+		("phase_2_run_ready", {"room": "doc:Optimus Session/session-doc"}),
+		("phase_2_run_ready", {"room": "user:alice@example.com"}),
+	]
 
 
 def test_publish_swallows_errors(monkeypatch):
