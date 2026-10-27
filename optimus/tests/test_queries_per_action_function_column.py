@@ -23,6 +23,7 @@ def _render_section(calls):
 	with open(path) as f:
 		tpl = f.read()
 	m = re.search(r"\{# -+ QUERY BREAKDOWN PER ACTION -+ #\}.*?</section>\s*\{% endif %\}", tpl, re.S)
+	assert m, "QUERY BREAKDOWN PER ACTION section not found in report.html"
 	template = _get_jinja_env().from_string(m.group(0))
 	return template.render(
 		recordings_by_uuid={"u1": {"calls": calls}},
