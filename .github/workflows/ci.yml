@@ -111,10 +111,12 @@ jobs:
         # installed the conftest baseline stub satisfies module-top frappe
         # imports at collection time. uv provides build isolation, so no
         # separate pip/wheel/setuptools bootstrap step is needed for the
-        # line_profiler C-extension build.
+        # line_profiler C-extension build. sql_metadata is pinned to the
+        # version Frappe v16 ships (~=2.19.0): the index advisor reads queries
+        # through it, and the 3.x line parses some WHERE clauses differently.
         run: |
           uv pip install --system -e .
-          uv pip install --system pytest pytest-github-actions-annotate-failures hypothesis Faker pdfplumber pypdf sql_metadata jsonschema
+          uv pip install --system pytest pytest-github-actions-annotate-failures hypothesis Faker pdfplumber pypdf 'sql_metadata~=2.19.0' jsonschema
 
       - name: Run pytest
         # ``set -eo pipefail`` is required: without it, the ``| tee`` at the
@@ -178,7 +180,7 @@ jobs:
         # the intended CI layout.
         run: |
           uv pip install --system -e .
-          uv pip install --system pytest pytest-cov pytest-github-actions-annotate-failures hypothesis Faker pdfplumber pypdf sql_metadata jsonschema
+          uv pip install --system pytest pytest-cov pytest-github-actions-annotate-failures hypothesis Faker pdfplumber pypdf 'sql_metadata~=2.19.0' jsonschema
 
       - name: Run pytest with coverage
         # INFORMATIONAL coverage: no ``--cov-fail-under``, so this job goes red

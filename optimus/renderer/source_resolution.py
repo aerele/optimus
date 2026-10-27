@@ -29,7 +29,12 @@ from __future__ import annotations
 import os
 import re
 
-from optimus.renderer.source import _read_source_snippet, _resolve_source_path, _source_lines
+from optimus.renderer.source import (
+	_read_source_snippet,
+	_resolve_source_path,
+	_source_lines,
+	split_source_lines,
+)
 
 
 def _action_dotted_entry(action) -> str | None:
@@ -85,7 +90,7 @@ def _skip_decorators_to_def(
 		# never content so read an out-of-bench app's source directly.
 		try:
 			with open(abs_filename, encoding="utf-8") as _fh:
-				lines = _fh.read().splitlines()
+				lines = split_source_lines(_fh.read())
 		except Exception:
 			lines = None
 		# Repopulate the shared per-render cache (``_source_lines`` stored None for

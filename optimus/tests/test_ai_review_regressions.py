@@ -97,23 +97,8 @@ def test_completion_distinguishes_zero_usage_from_missing_usage(monkeypatch, usa
     assert ("context-truncated" in result["guardrail"]["violations"]) is expected
 
 
-@pytest.mark.parametrize("context,output", [(4096, None), (8192, 700)])
-def test_index_request_uses_provider_output_budget(monkeypatch, context, output):
-    fake = _post_sequence(Replies._resp("Use the existing index."))
-    monkeypatch.setattr(requests, "post", fake)
-    provider = dict(Replies._PROVIDER, context_tokens=context, max_output_tokens=output)
-    with _provider(provider):
-        ai_fix.suggest_index({"table": "tabItem"})
-    assert fake.calls[0].body["max_tokens"] == ai_fix._output_tokens(provider)
 
 
-def test_index_request_rejects_prompt_that_cannot_fit_before_http(monkeypatch):
-    sent = []
-    monkeypatch.setattr(requests, "post", lambda *a, **kw: sent.append(True))
-    with _provider(dict(Replies._PROVIDER, context_tokens=2048, max_output_tokens=1900)):
-        with pytest.raises(ai_fix.AiFixError, match="context"):
-            ai_fix.suggest_index({"table": "tabItem", "sample_queries": ["x" * 5000]})
-    assert sent == []
 
 
 @pytest.mark.parametrize("usage,expected", [

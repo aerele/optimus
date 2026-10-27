@@ -522,7 +522,7 @@ class TestAnthropicCall:
 		        "model": "claude-sonnet-4-6", "needs_key": True, "has_key": True}
 		with _provider(prov):
 			with pytest.raises(ai_fix.AiFixError, match="empty response"):
-				ai_fix.suggest_fix({"finding_type": "Missing Index", "title": "x", "technical_detail": {}})
+				ai_fix.suggest_fix({"finding_type": "Slow Query", "title": "x", "technical_detail": {}})
 
 
 class TestHttpErrorMapping:
@@ -749,7 +749,7 @@ class TestSuggestFix:
 		prov = {"name": "Anthropic", "protocol": "anthropic", "base_url": "https://api.anthropic.com",
 		        "model": "claude-sonnet-4-6", "needs_key": True, "has_key": True}
 		with _provider(prov):
-			out = ai_fix.suggest_fix({"finding_type": "Missing Index", "title": "x", "technical_detail": {}})
+			out = ai_fix.suggest_fix({"finding_type": "Slow Query", "title": "x", "technical_detail": {}})
 		assert out["suggestion"] == "**Fix**\n\nadd an index"
 		assert out["provider"] == "Anthropic"
 
@@ -803,7 +803,7 @@ class TestSourceAvailableFlag:
 
 	def test_false_when_only_title_and_numbers(self, monkeypatch):
 		out = self._suggest(monkeypatch, {
-			"finding_type": "Slow Hot Path", "title": "x", "technical_detail": {},
+			"finding_type": "Slow Query", "title": "x", "technical_detail": {},
 		})
 		assert out["source_available"] is False
 
@@ -812,26 +812,12 @@ class TestSourceAvailableFlag:
 		# line-profiled it has the per-line numbers, so don't show the
 		# "no source" caveat.
 		out = self._suggest(monkeypatch, {
-			"finding_type": "Slow Hot Path", "title": "x", "technical_detail": {},
+			"finding_type": "Slow Query", "title": "x", "technical_detail": {},
 			"phase2_hotline": {"lineno": 7, "content": "_run_validations(doc)", "total_ms": 387, "hits": 2},
 		})
 		assert out["source_available"] is True
 
 
-class TestSuggestIndex:
-	_PROVIDER = {"name": "OpenAI", "protocol": "openai", "base_url": "https://api.openai.com/v1",
-	             "model": "gpt-4.1-mini", "needs_key": True, "has_key": True}
-
-	def test_includes_tokens_when_usage_present(self, monkeypatch):
-		resp = {"choices": [{"message": {"content": "**Index**\n\nadd a composite index"}}],
-		        "usage": {"prompt_tokens": 90, "completion_tokens": 30, "total_tokens": 120}}
-		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, resp)))
-		monkeypatch.setattr(ai_fix, "_build_index_messages",
-		                    lambda payload: ("sys", [{"role": "user", "content": "x"}]))
-		with _provider(dict(self._PROVIDER)):
-			out = ai_fix.suggest_index({"table": "tabUser"})
-		assert out["tokens"] == {"prompt_tokens": 90, "completion_tokens": 30, "total_tokens": 120}
-		assert out["suggestion"].startswith("**Index**")
 
 
 class TestHumanizeSteps:
@@ -890,230 +876,21 @@ class TestHumanizeSteps:
 				ai_fix.humanize_steps(self._ACTIONS)
 
 
-class TestMetadataIndexGuardrail:
-	def test_flags_alter_table_on_metadata_column(self):
-		out = ai_fix._flag_metadata_column_index_advice("ALTER TABLE `tabFoo` ADD INDEX (`modified`);")
-		assert "Profiler note" in out
-		assert "`modified`" in out.split("Profiler note", 1)[1]
+class TestGuardrailNotesThroughSuggestFix:
+	"""The notes ai_guardrails appends to a finding fix (the old ai_fix helpers were the
+	retired index path's copy)."""
 
-	def test_flags_search_index_on_metadata_column(self):
-		out = ai_fix._flag_metadata_column_index_advice("Add a Search Index on the `creation` field.")
-		assert "Profiler note" in out and "creation" in out
-
-	def test_flags_plain_index_on_phrase(self):
-		out = ai_fix._flag_metadata_column_index_advice("add index on parent")
-		assert "Profiler note" in out and "parent" in out
-
-	def test_does_not_flag_business_columns(self):
-		txt = "Add an index on `customer` and `posting_date`."
-		assert ai_fix._flag_metadata_column_index_advice(txt) == txt
-
-	def test_does_not_flag_negated_mention(self):
-		txt = "Do NOT index `modified`: Frappe writes it on every save."
-		assert ai_fix._flag_metadata_column_index_advice(txt) == txt
-
-	def test_no_index_advice_is_unchanged(self):
-		txt = "**Diagnosis**: N+1.\n**Fix**: batch with frappe.get_all."
-		assert ai_fix._flag_metadata_column_index_advice(txt) == txt
-
-	def test_suggest_fix_applies_the_guardrail(self, monkeypatch):
+	def test_metadata_column_index_advice_gets_a_note(self, monkeypatch):
 		bad = {"choices": [{"message": {"content": "**Fix**\n\nALTER TABLE `tabX` ADD INDEX (`docstatus`);"}}]}
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, bad)))
 		prov = {"name": "OpenAI", "protocol": "openai", "base_url": "https://api.openai.com/v1",
 		        "model": "gpt-4.1-mini", "needs_key": True, "has_key": True}
 		with _provider(prov):
-			out = ai_fix.suggest_fix({"finding_type": "Missing Index", "title": "x", "technical_detail": {}})
+			out = ai_fix.suggest_fix({"finding_type": "Slow Query", "title": "x", "technical_detail": {}})
 		assert "Profiler note" in out["suggestion"]
 		assert "docstatus" in out["suggestion"]
 
-
-# ---------------------------------------------------------------------------
-# Raw `frappe.db.sql` guardrail the model is told via system prompt to
-# "never hand-built SQL strings" and use the Document API or frappe.qb
-# instead. This guardrail backstops that instruction: detect raw SQL in
-# the LLM's proposed fix and append an advisory profiler note. Append-
-# only, never rewrites same posture as the metadata-column guardrail.
-# ---------------------------------------------------------------------------
-
-
-class TestRawSqlGuardrail:
-	# --- Clean inputs that must NOT trip the guardrail --------------------
-
-	def test_clean_qb_suggestion_returns_unchanged(self):
-		txt = (
-			"**Fix**\n\n"
-			"```python\n"
-			"User = frappe.qb.DocType('User')\n"
-			"rows = frappe.qb.from_(User).select(User.name).run(as_dict=True)\n"
-			"```"
-		)
-		assert ai_fix._flag_raw_sql_in_fix(txt) == txt
-
-	def test_clean_get_all_suggestion_returns_unchanged(self):
-		txt = (
-			"**Fix**\n\n"
-			"```python\n"
-			"rows = frappe.get_all('User', fields=['name', 'email'])\n"
-			"```"
-		)
-		assert ai_fix._flag_raw_sql_in_fix(txt) == txt
-
-	def test_empty_input_returns_unchanged(self):
-		assert ai_fix._flag_raw_sql_in_fix("") == ""
-
-	def test_text_with_no_code_blocks_returns_unchanged(self):
-		# No code fences anywhere the guardrail must not fire on prose
-		# alone. (Real LLM output almost always has a code block, but a
-		# diagnosis-only response with no fix block is valid.)
-		txt = "**Diagnosis**: N+1 in the loop.\n**Fix**: batch the lookup."
-		assert ai_fix._flag_raw_sql_in_fix(txt) == txt
-
-	# --- Inputs that SHOULD trip the guardrail ----------------------------
-
-	def test_raw_sql_select_in_addition_line_flagged(self):
-		txt = (
-			"**Fix**\n\n"
-			"```diff\n"
-			"-rows = frappe.get_all('User', fields=['name'])\n"
-			"+rows = frappe.db.sql(\"SELECT name FROM `tabUser`\", as_dict=True)\n"
-			"```"
-		)
-		out = ai_fix._flag_raw_sql_in_fix(txt)
-		assert out != txt
-		assert "Profiler note" in out
-		assert "`frappe.qb`" in out and "`frappe.get_all`" in out
-
-	def test_raw_sql_update_in_addition_line_flagged(self):
-		txt = (
-			"```diff\n"
-			"+frappe.db.sql(\"UPDATE `tabUser` SET enabled = 1 WHERE name = %s\", (n,))\n"
-			"```"
-		)
-		out = ai_fix._flag_raw_sql_in_fix(txt)
-		assert "Profiler note" in out
-
-	def test_raw_sql_insert_in_addition_line_flagged(self):
-		txt = (
-			"```diff\n"
-			"+frappe.db.sql(\"INSERT INTO `tabLog` (msg) VALUES (%s)\", (m,))\n"
-			"```"
-		)
-		assert "Profiler note" in ai_fix._flag_raw_sql_in_fix(txt)
-
-	def test_raw_sql_delete_in_addition_line_flagged(self):
-		txt = (
-			"```diff\n"
-			"+frappe.db.sql(\"DELETE FROM `tabLog` WHERE name = %s\", (n,))\n"
-			"```"
-		)
-		assert "Profiler note" in ai_fix._flag_raw_sql_in_fix(txt)
-
-	def test_raw_sql_case_insensitive_verb(self):
-		# Models often produce mixed-case keywords. The detector regex is
-		# case-insensitive on the verb pin that.
-		txt = (
-			"```diff\n"
-			"+frappe.db.sql(\"select email from `tabUser` where name=%s\")\n"
-			"```"
-		)
-		assert "Profiler note" in ai_fix._flag_raw_sql_in_fix(txt)
-
-	def test_raw_sql_triple_quoted_is_flagged(self):
-		# The most common multi-line "fix" shape previously slipped through
-		# because the regex only matched a single opening quote.
-		txt = (
-			'```python\n'
-			'rows = frappe.db.sql("""\n'
-			'    SELECT name FROM `tabUser` WHERE enabled = 1\n'
-			'""", as_dict=True)\n'
-			'```'
-		)
-		assert "Profiler note" in ai_fix._flag_raw_sql_in_fix(txt)
-
-	def test_raw_sql_cte_with_is_flagged(self):
-		# CTE-led SELECT (WITH ... SELECT) previously not in the verb list.
-		txt = (
-			'```python\n'
-			'frappe.db.sql("WITH t AS (SELECT 1) SELECT * FROM t")\n'
-			'```'
-		)
-		assert "Profiler note" in ai_fix._flag_raw_sql_in_fix(txt)
-
-	def test_raw_sql_byte_string_prefix_is_flagged(self):
-		txt = '```python\nfrappe.db.sql(rb"SELECT 1")\n```'
-		assert "Profiler note" in ai_fix._flag_raw_sql_in_fix(txt)
-
-	def test_raw_sql_in_plain_python_code_block_flagged(self):
-		# Non-diff code block every line is "proposed code".
-		txt = (
-			"```python\n"
-			"def replace_old_call():\n"
-			"    return frappe.db.sql(\"SELECT name FROM `tabUser`\")\n"
-			"```"
-		)
-		assert "Profiler note" in ai_fix._flag_raw_sql_in_fix(txt)
-
-	def test_raw_sql_in_untagged_code_block_flagged(self):
-		# Fence with no info string still treated as code.
-		txt = (
-			"```\n"
-			"frappe.db.sql(\"SELECT * FROM `tabUser`\")\n"
-			"```"
-		)
-		assert "Profiler note" in ai_fix._flag_raw_sql_in_fix(txt)
-
-	# --- Tricky cases: must NOT trip ---------------------------------------
-
-	def test_raw_sql_in_removal_line_NOT_flagged(self):
-		# The "-" lines are the BEFORE code being replaced. Flagging them
-		# would invert the guardrail (the model is rightly REMOVING the
-		# bad pattern).
-		txt = (
-			"```diff\n"
-			"-rows = frappe.db.sql(\"SELECT name FROM `tabUser`\", as_dict=True)\n"
-			"+rows = frappe.get_all('User', fields=['name'])\n"
-			"```"
-		)
-		assert ai_fix._flag_raw_sql_in_fix(txt) == txt
-
-	def test_raw_sql_in_prose_NOT_flagged(self):
-		# Inline-code mention in a paragraph the model is talking ABOUT
-		# the anti-pattern, not proposing it. Guardrail must stay silent.
-		txt = (
-			"**Diagnosis**: the code uses `frappe.db.sql(\"SELECT ...\")` "
-			"inside a loop. **Fix**: batch via `frappe.get_all`."
-		)
-		assert ai_fix._flag_raw_sql_in_fix(txt) == txt
-
-	def test_diff_file_header_NOT_flagged(self):
-		# ``+++ filename`` is the unified-diff file header, not an
-		# addition line. Even if a fake header somehow contained the
-		# raw-SQL token, it must not trip.
-		txt = (
-			"```diff\n"
-			"+++ b/path/to/file.py\n"
-			"@@ -1,3 +1,3 @@\n"
-			" def x():\n"
-			"-    return None\n"
-			"+    return frappe.get_all('User', fields=['name'])\n"
-			"```"
-		)
-		assert ai_fix._flag_raw_sql_in_fix(txt) == txt
-
-	def test_ddl_verb_NOT_flagged(self):
-		# CREATE / ALTER / DROP are intentionally outside scope
-		# legit administrative use (e.g. ADD INDEX when Customize Form
-		# isn't an option).
-		txt = (
-			"```diff\n"
-			"+frappe.db.sql(\"ALTER TABLE `tabUser` ADD INDEX (`email`)\")\n"
-			"```"
-		)
-		assert ai_fix._flag_raw_sql_in_fix(txt) == txt
-
-	# --- End-to-end via suggest_fix --------------------------------------
-
-	def test_suggest_fix_appends_correction_note(self, monkeypatch):
+	def test_raw_sql_in_a_fix_gets_a_note(self, monkeypatch):
 		bad = {"choices": [{"message": {"content":
 			"**Fix**\n\n"
 			"```diff\n"
@@ -1123,15 +900,11 @@ class TestRawSqlGuardrail:
 			"```"
 		}}]}
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, bad)))
-		prov = {"name": "OpenAI", "protocol": "openai",
-		        "base_url": "https://api.openai.com/v1",
+		prov = {"name": "OpenAI", "protocol": "openai", "base_url": "https://api.openai.com/v1",
 		        "model": "gpt-4.1-mini", "needs_key": True, "has_key": True}
 		with _provider(prov):
-			out = ai_fix.suggest_fix({
-				"finding_type": "N+1 Query", "title": "x", "technical_detail": {},
-			})
+			out = ai_fix.suggest_fix({"finding_type": "N+1 Query", "title": "x", "technical_detail": {}})
 		assert "Profiler note" in out["suggestion"]
-		# The note carries the alternative-API hint.
 		assert "frappe.get_all" in out["suggestion"]
 
 
@@ -1164,9 +937,9 @@ class TestTemperature:
 def test_eligible_finding_types_is_a_frozenset_of_known_types():
 	assert isinstance(ai_fix.AI_ELIGIBLE_FINDING_TYPES, frozenset)
 	# Spot-check: the high-context types are in, the infra ones are out.
-	for t in ("N+1 Query", "Slow Query", "Missing Index", "Hot Line", "Redundant Call"):
+	for t in ("N+1 Query", "Slow Query", "Hot Line", "Redundant Call"):
 		assert t in ai_fix.AI_ELIGIBLE_FINDING_TYPES
-	for t in ("Memory Pressure", "Background Queue Backlog", "Slow Frontend Render", "Function Not Invoked"):
+	for t in ("Memory Pressure", "Background Queue Backlog", "Slow Frontend Render", "Function Not Invoked", "Missing Index", "Framework N+1", "Full Table Scan", "Filesort", "Temporary Table", "Low Filter Ratio"):
 		assert t not in ai_fix.AI_ELIGIBLE_FINDING_TYPES
 
 
@@ -1196,7 +969,6 @@ class TestIsAvailableSection:
 		     patch.object(ai_fix, "_resolve_provider", return_value=_PROVIDER_OK):
 			assert ai_fix.is_available() is True
 			assert ai_fix.is_available(section="findings") is True
-			assert ai_fix.is_available(section="indexes") is True
 			assert ai_fix.is_available(section="humanize") is True
 
 	def test_findings_section_off_blocks_only_findings(self):
@@ -1204,28 +976,20 @@ class TestIsAvailableSection:
 		     patch.object(ai_fix, "_resolve_provider", return_value=_PROVIDER_OK):
 			assert ai_fix.is_available() is True
 			assert ai_fix.is_available(section="findings") is False
-			assert ai_fix.is_available(section="indexes") is True
 			assert ai_fix.is_available(section="humanize") is True
 
-	def test_indexes_section_off_blocks_only_indexes(self):
-		with patch("optimus.settings.get_config", return_value=_cfg_ai_on(ai_suggest_indexes=False)), \
-		     patch.object(ai_fix, "_resolve_provider", return_value=_PROVIDER_OK):
-			assert ai_fix.is_available(section="findings") is True
-			assert ai_fix.is_available(section="indexes") is False
-			assert ai_fix.is_available(section="humanize") is True
 
 	def test_humanize_section_off_blocks_only_humanize(self):
 		with patch("optimus.settings.get_config", return_value=_cfg_ai_on(ai_humanize_steps=False)), \
 		     patch.object(ai_fix, "_resolve_provider", return_value=_PROVIDER_OK):
 			assert ai_fix.is_available(section="findings") is True
-			assert ai_fix.is_available(section="indexes") is True
 			assert ai_fix.is_available(section="humanize") is False
 
 	def test_master_switch_off_blocks_everything(self):
 		with patch("optimus.settings.get_config", return_value=_cfg_ai_on(ai_enabled=False)), \
 		     patch.object(ai_fix, "_resolve_provider", return_value=_PROVIDER_OK):
 			assert ai_fix.is_available() is False
-			for s in ("findings", "indexes", "humanize"):
+			for s in ("findings", "humanize"):
 				assert ai_fix.is_available(section=s) is False
 
 	def test_unknown_section_does_not_block(self):
@@ -1407,7 +1171,7 @@ class TestGuardedCompletion:
 		assert set(out) == {"suggestion", "model", "provider", "generated_at", "source_available",
 		                    "prompt_version", "guardrail", "finish_reason"}
 		assert out["suggestion"] == self._GOOD
-		assert out["prompt_version"] == ai_prompts.PROMPT_VERSION == 3
+		assert out["prompt_version"] == ai_prompts.PROMPT_VERSION == 4
 		assert out["guardrail"] == {"violations": [], "reasked": False, "fallback": False}
 		assert out["finish_reason"] == "stop"
 
@@ -1878,20 +1642,15 @@ class TestBuildFixRequest:
 		_, _, shown = ai_fix._build_fix_request(f, threshold_ms=1000.0, context_tokens=200000)
 		assert shown == ["total += compute(row)"]
 
-	def test_suggested_ddl_is_sent_as_prose_not_ddl(self):
+	def test_suggested_ddl_and_candidate_are_not_sent(self):
 		f = {"finding_type": "Missing Index", "title": "Add index on tabSales Invoice(customer)",
 		     "technical_detail": {"table": "tabSales Invoice", "column": "customer",
 		                          "suggested_ddl": "ALTER TABLE `tabSales Invoice` ADD INDEX IF NOT EXISTS `customer_index` (`customer`);"}}
 		_, messages, _ = ai_fix._build_fix_request(f, threshold_ms=1000.0, context_tokens=200000)
 		c = messages[0]["content"]
-		assert "Profiler's index candidate: column `customer` of DocType `Sales Invoice`." in c
+		assert "Profiler's index candidate" not in c
 		assert "ALTER TABLE" not in c
 
-	def test_suggested_ddl_without_table_fields_is_parsed(self):
-		assert ai_fix._index_candidate_prose(
-			{"suggested_ddl": "ALTER TABLE `tabBOM Item` ADD INDEX IF NOT EXISTS `item_code_index` (`item_code`(255));"}
-		) == "Profiler's index candidate: column `item_code` of DocType `BOM Item`."
-		assert ai_fix._index_candidate_prose({"suggested_ddl": "garbage"}) == ""
 
 	def test_small_window_drops_optional_parts_before_the_source(self):
 		f = TestBuildMessages()._finding()
@@ -2072,7 +1831,7 @@ class TestPromptBlocksWired:
 
 	def test_blocks_are_in_the_system_prompt(self):
 		system, _ = ai_fix._build_messages({"finding_type": "Slow Query", "title": "x"})
-		for block in (ai_prompts.FRAPPE_REVIEW_RULES, ai_prompts.FRAPPE_DEV_IDIOMS, ai_prompts.INDEX_RULES):
+		for block in (ai_prompts.FRAPPE_REVIEW_RULES, ai_prompts.FRAPPE_DEV_IDIOMS):
 			assert block in system
 
 	def test_system_prompt_within_char_budget(self):
@@ -2118,7 +1877,7 @@ class TestGuardrailBoundaries:
         assert all(line in content for line in shown)
         assert content.count("<data-") == content.count("</data-")
 
-    def test_captured_index_and_validation_text_are_data(self):
+    def test_validation_text_is_data_and_index_candidate_is_absent(self):
         detail = {"table": "tabA", "column": "col", "suggested_ddl": "anything",
                   "validation_note": "captured note"}
         _, messages, _ = ai_fix._build_fix_request(
@@ -2127,7 +1886,7 @@ class TestGuardrailBoundaries:
         text = messages[0]["content"]
         blocks = re.findall(r'<data-[0-9a-f]{6} kind="[a-z-]+">(.*?)</data-[0-9a-f]{6}>', text, re.S)
         assert any("captured note" in b for b in blocks)
-        assert any("column `col`" in b for b in blocks)
+        assert "column `col`" not in text
 
 
 @pytest.mark.parametrize("entry", ["fix", "steps"])

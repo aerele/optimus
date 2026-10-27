@@ -3,8 +3,7 @@
 
 """Tests for ``optimus.api.refill_ai_suggestions``.
 
-The endpoint chains three helpers (``_run_ai_backfill``, ``_humanize_steps_core``,
-``_refill_indexes_for_doc``) and re-renders once at the end through ``_render_session_report``
+The endpoint chains two helpers (``_run_ai_backfill``, ``_humanize_steps_core``) and re-renders once at the end through ``_render_session_report``
 (never the whitelisted ``regenerate_reports``). Covers the happy path for a plain Optimus User
 owner, toggle-off sections and gate failures (provider missing, non-Ready, non-owner): each
 raises before any helper runs.
@@ -53,12 +52,10 @@ def env(monkeypatch):
 		helpers = SimpleNamespace(
 			backfill=MagicMock(return_value={"added": 3, "failed": 0, "skipped_time": 1, "total_pending": 4}),
 			humanize=MagicMock(return_value={"updated": True, "reason": None}),
-			indexes=MagicMock(return_value={"added": 2, "failed": 0, "skipped": 0}),
 			render=MagicMock(return_value={"regenerated": True, "recordings_available": 0, "actions_total": 0}),
 		)
 		monkeypatch.setattr("optimus.analyze._run_ai_backfill", helpers.backfill)
 		monkeypatch.setattr(api, "_humanize_steps_core", helpers.humanize)
-		monkeypatch.setattr(api, "_refill_indexes_for_doc", helpers.indexes)
 		monkeypatch.setattr(api, "_render_session_report", helpers.render)
 		monkeypatch.setattr(api, "regenerate_reports", _must_not_be_called)
 		return fake, helpers
@@ -66,16 +63,16 @@ def env(monkeypatch):
 	return _make
 
 
-def test_refill_runs_all_three_steps_for_a_plain_owner(env):
+def test_refill_runs_both_ai_steps_for_a_plain_owner(env):
 	fake, h = env()
 	out = api.refill_ai_suggestions(session_uuid=SESSION_UUID)
 	assert out["ok"] is True and out["session_uuid"] == SESSION_UUID
 	assert out["fixes"]["added"] == 3 and out["fixes"]["skipped_time"] == 1
-	assert out["steps"]["updated"] is True and out["indexes"]["added"] == 2
+	assert out["steps"]["updated"] is True
+	assert "indexes" not in out
 	assert out["regenerated"] is True
 	assert h.backfill.call_args.kwargs == {"cap": 0, "regenerate_all": True}
 	assert h.humanize.call_args.kwargs == {"title": "Checkout flow"}
-	assert h.indexes.call_count == 1
 	h.render.assert_called_once_with(DOCNAME)
 	assert fake.spies.set_value[0][0][:3] == ("Optimus Session", DOCNAME, "ai_refresh_count")
 
@@ -84,9 +81,8 @@ def test_refill_skips_sections_whose_toggle_is_off(env):
 	_, h = env(cfg=_cfg(ai_humanize_steps=False, ai_suggest_indexes=False))
 	out = api.refill_ai_suggestions(session_uuid=SESSION_UUID)
 	assert h.backfill.call_count == 1
-	assert h.humanize.call_count == 0 and h.indexes.call_count == 0
+	assert h.humanize.call_count == 0
 	assert out["steps"]["reason"] == "toggle_off"
-	assert out["indexes"]["skipped_reason"] == "toggle_off"
 	assert h.render.call_count == 1
 
 
@@ -95,7 +91,7 @@ def test_refill_fails_fast_when_provider_missing(env):
 	with pytest.raises(FakeValidationError) as exc:
 		api.refill_ai_suggestions(session_uuid=SESSION_UUID)
 	assert "aren't configured" in str(exc.value)
-	assert h.backfill.call_count == h.humanize.call_count == h.indexes.call_count == h.render.call_count == 0
+	assert h.backfill.call_count == h.humanize.call_count == h.render.call_count == 0
 	assert fake.spies.set_value == []
 
 
@@ -118,3 +114,14 @@ def test_refill_allows_a_write_sharee(env):
 	sharee = "sharee@example.com"
 	_, h = env(user=sharee, perms={("read", DOCNAME, sharee): True, ("write", DOCNAME, sharee): True})
 	assert api.refill_ai_suggestions(session_uuid=SESSION_UUID)["ok"] is True
+
+
+def test_refill_reports_gated_and_excluded_counts(env):
+	_, h = env()
+	h.backfill.return_value = {
+		"added": 1, "failed": 0, "skipped_time": 0, "total_pending": 1,
+		"gated": 2, "excluded": 1, "skipped_ineligible": 3,
+	}
+	out = api.refill_ai_suggestions(session_uuid=SESSION_UUID)
+	assert (out["fixes"]["gated"], out["fixes"]["excluded"], out["fixes"]["skipped_ineligible"]) == (2, 1, 3)
+	assert "indexes" not in out
