@@ -18,6 +18,7 @@ import frappe
 import pytest
 
 pytest.importorskip("rq")
+pytestmark = pytest.mark.rq  # selected by ai-quality.yml, which installs rq
 
 
 # ---------------------------------------------------------------------------

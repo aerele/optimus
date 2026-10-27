@@ -20,6 +20,7 @@ def mock_frappe(monkeypatch):
     interface (rpush/lrange/ltrim/llen/expire_key) used by the atomic write path.
     """
     import frappe
+    monkeypatch.setattr("optimus.ratelimit.enforce_user_rate_limit", lambda *a, **kw: None)
 
     cache_store = {}  # key -> plain value
     list_store = {}   # key -> list
@@ -359,3 +360,49 @@ def test_submit_enforces_soft_cap_tail_prefer(mock_frappe):
     # no-op because the list is already at cap.)
     last = json.loads(xhr_list[-1])
     assert last["timestamp"] == 1499
+
+
+def test_metrics_size_is_checked_before_json_parse(mock_frappe, monkeypatch):
+    from optimus import api
+    monkeypatch.setattr(api.frappe, 'parse_json', lambda *a: pytest.fail('oversized JSON was parsed'))
+    result = api.submit_frontend_metrics('x' * (api.MAX_FRONTEND_PAYLOAD_BYTES + 1))
+    assert result == {'accepted': False, 'reason': 'payload too large'}
+    assert not mock_frappe['list_store']
+
+
+def test_metrics_unicode_byte_limit_precedes_parse(mock_frappe, monkeypatch):
+    from optimus import api
+    monkeypatch.setattr(api.frappe, 'parse_json', lambda *a: pytest.fail('oversized UTF-8 JSON was parsed'))
+    assert not api.submit_frontend_metrics('ü' * (api.MAX_FRONTEND_PAYLOAD_BYTES // 2 + 1))['accepted']
+    assert not mock_frappe['list_store']
+
+
+def test_metrics_rate_limit_precedes_parse_and_redis_appends(mock_frappe, monkeypatch):
+    from optimus import api
+    class Limited(Exception):
+        pass
+    calls = []
+    def limit(action, **limits):
+        calls.append((action, limits))
+        raise Limited()
+    monkeypatch.setattr(api.ratelimit, 'enforce_user_rate_limit', limit)
+    monkeypatch.setattr(api.frappe, 'parse_json', lambda *a: pytest.fail('rate refusal reached parser'))
+    with pytest.raises(Limited):
+        api.submit_frontend_metrics('{}')
+    assert calls == [('submit_frontend_metrics', {'limit': 120, 'seconds': 60})]
+    assert not mock_frappe['list_store']
+
+
+@pytest.mark.parametrize('xhr', [{'wrong': 'container'}, ['not an entry']])
+def test_invalid_metrics_shapes_never_append(mock_frappe, xhr):
+    from optimus import api
+    assert not api.submit_frontend_metrics({'session_uuid': 's', 'xhr': xhr})['accepted']
+    assert not mock_frappe['list_store']
+
+
+def test_cyclic_internal_metrics_are_bounded(mock_frappe):
+    from optimus import api
+    data = {'session_uuid': 's'}
+    data['cycle'] = data
+    assert not api.submit_frontend_metrics(data)['accepted']
+    assert not mock_frappe['list_store']
