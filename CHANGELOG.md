@@ -8,12 +8,21 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.86] - 2026-10-27
+## [0.12.94] - 2026-10-27
 
 ### Added
 
 - When a profiling session finishes, a popup now shows the Optimus Session ID with an "Open Session" button that takes you to the record. It appears once per session even with several tabs open, wherever you are in Desk, and waits if you are typing in a field.
 - A session that ends with no recorded requests, or whose analysis fails, shows its own message instead of a "ready" claim.
+- The pill and alert for a session with no recorded requests now say "No data" instead of "Report ready". The popup opens even if a checkbox, button or search box has focus, and after about 30 seconds even if you are still typing. If the popup fails to open, it can still show on the next attempt or in another tab.
+
+## [0.12.91] - 2026-10-27
+
+### Fixed
+
+- Optimus's own queries (such as the server-resource snapshots) no longer appear anywhere in the report. They are removed when a recording is loaded, so the query counts, DB time, table breakdown, slowest queries and findings never include them.
+- "Queries per action" now respects Optimus Settings. When Tracked Apps is set, it lists only queries issued from those apps and says how many queries from other apps were left out. When it is empty, every non-Optimus query is listed as before. The callsite shown is now the app code that issued the query, not the innermost Frappe frame.
+- Apps whose name merely ends in "optimus" are no longer mistaken for the profiler.
 
 ---
 
