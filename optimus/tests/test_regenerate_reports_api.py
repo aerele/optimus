@@ -1,181 +1,207 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for the regenerate_reports API.
+"""regenerate_reports and the internal render helpers (PR-1).
 
-The endpoint re-invokes renderer.render_raw against an existing Optimus Session
-without re-running the analyzer pipeline (e.g. to apply an upgraded template, or
-recover from a render crash that was later fixed).
-
-Contract checked via source-inspection plus behavior under stubbed frappe (the
-endpoint itself needs a live bench for integration tests).
+API rendering delegates to the transactional report helper. Report regeneration
+never calls the model. Failure logs are pinned outside any ``except`` block: the fake
+``log_ai_failure`` records ``sys.exc_info()[0]``, which is None only outside a handler.
 """
 
-import os
-import re
+import sys
+from types import SimpleNamespace
 
-_API_PATH = os.path.join(
-	os.path.dirname(__file__), "..", "api.py"
+import pytest
+
+from optimus import ai_fix, api, safe_call
+from optimus import analyze as _analyze
+from optimus.tests.gate_fakes import (
+	DOCNAME,
+	OWNER,
+	SESSION_UUID,
+	FakePermissionError,
+	FakeRateLimitExceededError,
+	FakeValidationError,
+	fake_session_doc,
+	install,
+	install_module,
+	make_fake_frappe,
+	owner_perms,
+	session_row,
 )
 
 
-def _read_api_source() -> str:
-	with open(_API_PATH) as f:
-		return f.read()
+def _must_not_run(*args, **kwargs):
+	raise AssertionError("regenerate_reports must not re-run analyze")
 
 
-def _regenerate_reports_body() -> str:
-	"""Return just the function body of regenerate_reports."""
-	src = _read_api_source()
-	# Grab from `def regenerate_reports(` to the next top-level def.
-	start = src.index("def regenerate_reports(")
-	# Find the next unindented `def ` after start + 1 line.
-	search_from = src.find("\n", start) + 1
-	next_def = re.search(r"\n(?:def |@frappe\.whitelist)", src[search_from:])
-	end = search_from + (next_def.start() if next_def else len(src) - search_from)
-	return src[start:end]
+def _env(monkeypatch, *, status="Ready", user=OWNER, perms=None, conf=None):
+	fake = make_fake_frappe(user=user, sessions={SESSION_UUID: session_row(status=status)},
+		perms=owner_perms() if perms is None else perms, conf=conf)
+	install(monkeypatch, fake)
+	from optimus import ai_jobs, report_refresh
+	seen = SimpleNamespace(rendered=[], logged=[])
+	monkeypatch.setattr(ai_jobs, "active_refresh", lambda *a: None)
+	def render(docname):
+		seen.rendered.append((docname, 1))
+		return {"regenerated": True, "recordings_available": 1, "actions_total": 2}
+	monkeypatch.setattr(report_refresh, "render_report", render)
+	monkeypatch.setattr(ai_fix, "suggest_fix", _must_not_run)
+	monkeypatch.setattr(ai_fix, "humanize_steps", _must_not_run)
+	def log_failure(title, exc=None, **kw):
+		seen.logged.append((title, type(exc).__name__, sys.exc_info()[0]))
+		guard = ai_fix._InterruptGuard()
+		guard.note(exc)
+		if guard.pending():
+			raise guard.interrupt()
+	monkeypatch.setattr(ai_fix, "log_ai_failure", log_failure)
+	monkeypatch.setattr(api, "_enqueue_analyze", _must_not_run)
+	return fake, seen
 
 
-class TestSurface:
-	def test_regenerate_reports_is_whitelisted(self):
-		"""The endpoint must carry @frappe.whitelist() otherwise
-		the front-end can't call it."""
-		src = _read_api_source()
-		# Allow optional intermediate decorators (e.g. @rate_limit) between
-		# @frappe.whitelist() and the def line.
-		match = re.search(
-			r"@frappe\.whitelist\(\)\s*\n(?:@\w+(?:\.\w+)*\([^)]*\)\s*\n)*def regenerate_reports",
-			src,
-		)
-		assert match is not None, (
-			"regenerate_reports must be decorated with "
-			"@frappe.whitelist() so the Optimus Session JS can call it"
-		)
-
-	def test_signature_takes_session_uuid(self):
-		src = _read_api_source()
-		assert "def regenerate_reports(session_uuid:" in src, (
-			"regenerate_reports must take session_uuid as its primary arg"
-		)
-
-	def test_does_not_re_enqueue_analyze(self):
-		"""Guardrail: regenerate_reports must NOT call
-		_enqueue_analyze. If it does, it's just a slower
-		retry_analyze the whole point is to skip the analyzer."""
-		body = _regenerate_reports_body()
-		assert "_enqueue_analyze" not in body, (
-			"regenerate_reports must NOT enqueue analyze that would "
-			"defeat the purpose of having a separate endpoint"
-		)
-		# Positive check: it does call _render_and_attach_reports.
-		assert "_render_and_attach_reports" in body, (
-			"regenerate_reports must invoke _render_and_attach_reports "
-			"directly"
-		)
-
-	def test_clears_cached_pdf(self):
-		"""After regenerating the safe HTML, the cached PDF is
-		stale must be invalidated so the next download_pdf call
-		regenerates from fresh HTML."""
-		body = _regenerate_reports_body()
-		assert "clear_cached_pdf" in body, (
-			"regenerate_reports must clear the cached PDF otherwise "
-			"the download_pdf endpoint would serve a stale PDF rendered "
-			"from the old HTML"
-		)
-
-	def test_permission_gate_matches_retry_analyze(self):
-		"""Must gate on recording user OR System Manager, same as
-		retry_analyze. A user shouldn't be able to regenerate
-		someone else's session report."""
-		body = _regenerate_reports_body()
-		assert '"System Manager"' in body or "'System Manager'" in body
-		assert "PermissionError" in body
-
-	def test_best_effort_recording_fetch(self):
-		"""When recordings have expired from Redis, the endpoint
-		must still succeed with empty recordings the important
-		stuff is stored in the DocType."""
-		body = _regenerate_reports_body()
-		# try/except around the fetch falls back to [].
-		assert "try:" in body and "recordings = []" in body, (
-			"regenerate_reports must degrade to empty recordings on "
-			"fetch failure the safe renderer still produces a useful "
-			"report without them"
-		)
-
-	def test_status_gate_rejects_non_terminal_sessions(self):
-		"""regenerate_reports must refuse Recording / Stopping / Analyzing
-		sessions: re-rendering an in-flight session would attach an incomplete
-		report that the running analyze pipeline then overwrites. Only Ready or
-		Failed sessions are allowed."""
-		body = _regenerate_reports_body()
-		# Match the actual code, allowing any quote style and
-		# whitespace inside the membership tuple.
-		assert re.search(
-			r'row\[["\']status["\']\]\s+not in\s+\(\s*["\']Ready["\']\s*,\s*["\']Failed["\']\s*\)',
-			body,
-		), (
-			"regenerate_reports must gate on row['status'] not in "
-			"('Ready', 'Failed') pre-v0.12.9 the endpoint accepted "
-			"any status and re-rendered mid-analyze sessions"
-		)
-		# The error message must mention 'retry_analyze' as the
-		# operator's recourse for a stuck pipeline.
-		assert "retry_analyze" in body, (
-			"the status-rejection error message must point operators at "
-			"retry_analyze as the recourse for stuck pipelines"
-		)
+def test_render_session_report_only_delegates_to_transactional_report_helper(monkeypatch):
+	_, seen = _env(monkeypatch)
+	assert api._render_session_report(DOCNAME) == {"regenerated": True, "recordings_available": 1, "actions_total": 2}
+	assert seen.rendered == [(DOCNAME, 1)]
 
 
-class TestButtonWired:
-	"""The server endpoint is useless without a UI trigger. This test
-	confirms the Optimus Session form JS actually wires the button
-	to the endpoint."""
+def test_render_helper_rejects_the_removed_ai_side_effect_option(monkeypatch):
+	_, seen = _env(monkeypatch)
+	with pytest.raises(TypeError):
+		api._render_session_report(DOCNAME, ai_backfill=True)
+	assert not seen.rendered
 
-	def test_button_calls_regenerate_reports_endpoint(self):
-		import os
-		js_path = os.path.join(
-			os.path.dirname(__file__),
-			"..", "optimus", "doctype", "optimus_session",
-			"optimus_session.js",
-		)
-		with open(js_path) as f:
-			js = f.read()
 
-		# Button added in refresh.
-		assert "render_regenerate_report_button" in js, (
-			"refresh() must call render_regenerate_report_button"
-		)
-		# That function calls the right endpoint.
-		assert "optimus.api.regenerate_reports" in js, (
-			"Button must invoke optimus.api.regenerate_reports"
-		)
-		# User-facing label.
-		assert "Regenerate Reports" in js
+def test_report_failure_is_logged_outside_except_and_returns_a_fixed_user_message(monkeypatch):
+	_, seen = _env(monkeypatch)
+	from optimus import report_refresh
+	def fail(*a):
+		raise OSError("fake rendering failure")
+	monkeypatch.setattr(report_refresh, "render_report", fail)
+	with pytest.raises(FakeValidationError, match="could not be confirmed"):
+		api._render_session_report(DOCNAME)
+	assert seen.logged == [("optimus ai regenerate report", "OSError", None)]
 
-	def test_button_visible_on_ready_and_failed(self):
-		"""Regeneration is useful for Ready sessions (apply new
-		template) AND Failed sessions (recover from a render crash
-		that got fixed). Guard check in the button helper must
-		include both."""
-		import os
-		js_path = os.path.join(
-			os.path.dirname(__file__),
-			"..", "optimus", "doctype", "optimus_session",
-			"optimus_session.js",
-		)
-		with open(js_path) as f:
-			js = f.read()
 
-		# Extract the helper function body.
-		m = re.search(
-			r"function render_regenerate_report_button\(frm\)\s*\{(.*?)\n\}",
-			js,
-			re.DOTALL,
-		)
-		assert m is not None, "render_regenerate_report_button not found"
-		body = m.group(1)
-		# Guard mentions BOTH states.
-		assert '"Ready"' in body
-		assert '"Failed"' in body
+def test_regenerate_reports_never_spends_tokens(monkeypatch):
+	fake, seen = _env(monkeypatch)
+	assert api.regenerate_reports(SESSION_UUID) == {
+		"regenerated": True, "session_uuid": SESSION_UUID, "docname": DOCNAME,
+		"recordings_available": 1, "actions_total": 2,
+	}
+	assert seen.rendered == [(DOCNAME, 1)] and not fake.spies.enqueue
+
+
+def _provider_trap(monkeypatch):
+	"""Make every way to reach the AI provider raise: the two suggestion entry points, the
+	refresh engine, and the HTTP post itself."""
+	import requests
+
+	from optimus import analyze as analyze_module
+
+	def trap(*args, **kwargs):
+		raise AssertionError("regenerate reports must not reach the AI provider")
+
+	for owner, name in (
+		(ai_fix, "suggest_fix"), (ai_fix, "humanize_steps"), (ai_fix, "_http_post"), (requests, "post"),
+		(analyze_module, "_run_ai_backfill"), (api, "_humanize_steps_core"),
+	):
+		monkeypatch.setattr(owner, name, trap, raising=False)
+
+
+@pytest.mark.parametrize("status", ["Ready", "Failed"])
+def test_regenerate_reports_never_reaches_the_ai_provider(monkeypatch, status):
+	_, seen = _env(monkeypatch, status=status)
+	_provider_trap(monkeypatch)
+	out = api.regenerate_reports(session_uuid=SESSION_UUID)
+	assert out["regenerated"] is True and seen.rendered == [(DOCNAME, 1)]
+
+
+
+
+def test_the_provider_trap_is_armed(monkeypatch):
+	"""Guards the trap itself: a call to any trapped entry point raises."""
+	import requests
+
+	_provider_trap(monkeypatch)
+	for call in (ai_fix.suggest_fix, ai_fix.humanize_steps, requests.post, ai_fix._http_post):
+		with pytest.raises(AssertionError):
+			call()
+
+
+def test_regenerate_reports_allows_failed_sessions(monkeypatch):
+	_, seen = _env(monkeypatch, status="Failed")
+	api.regenerate_reports(SESSION_UUID)
+	assert seen.rendered == [(DOCNAME, 1)]
+
+
+@pytest.mark.parametrize("status", ["Recording", "Stopping", "Capturing Background Jobs", "Analyzing"])
+def test_regenerate_rejects_in_flight_sessions(monkeypatch, status):
+	fake, seen = _env(monkeypatch, status=status)
+	with pytest.raises(FakeValidationError):
+		api.regenerate_reports(session_uuid=SESSION_UUID)
+	assert seen.rendered == [] and fake.cache.calls == []
+	assert fake.spies.throws[-1]["title"] == "Optimus"
+
+
+def test_regenerate_refusal_keeps_develops_wording(monkeypatch):
+	"""The frozen real-bench test tests_integration/test_regenerate_reports_idempotent.py
+	(test_regenerate_refuses_non_terminal_status) asserts "terminal" (or "ready") and
+	"retry_analyze" in this message; the gate must not replace it with its generic text."""
+	_env(monkeypatch, status="Analyzing")
+	with pytest.raises(FakeValidationError) as exc:
+		api.regenerate_reports(session_uuid=SESSION_UUID)
+	assert str(exc.value) == (
+		"regenerate_reports requires the session to be in a terminal state (Ready or Failed); "
+		"this one is 'Analyzing'. Wait for analyze to finish, or use retry_analyze to restart a "
+		"stuck pipeline."
+	)
+
+
+def test_regenerate_reports_read_sharee_is_denied(monkeypatch):
+	sharee = "sharee@example.com"
+	_, seen = _env(monkeypatch, user=sharee, perms={("read", DOCNAME, sharee): True})
+	with pytest.raises(FakePermissionError):
+		api.regenerate_reports(session_uuid=SESSION_UUID)
+	assert seen.rendered == []
+
+
+def test_regenerate_reports_rate_limited_per_user(monkeypatch):
+	_env(monkeypatch, conf={"optimus_rate_limits": {"regenerate_reports": [1, 60]}})
+	api.regenerate_reports(session_uuid=SESSION_UUID)
+	with pytest.raises(FakeRateLimitExceededError):
+		api.regenerate_reports(session_uuid=SESSION_UUID)
+
+
+def test_phase2_worker_rerender_does_not_call_http_endpoint(monkeypatch):
+	"""Trusted worker re-renders already-authorized work without a second rate limit."""
+	_, seen = _env(monkeypatch)
+	from optimus.line_profile import jobs
+
+	monkeypatch.setattr(api, "regenerate_reports", _must_not_run)
+	jobs._render({"parent": DOCNAME})
+	assert seen.rendered == [(DOCNAME, 1)]
+
+
+
+class _JobTimeout(Exception):
+	pass
+
+
+def test_report_api_propagates_job_timeouts_without_the_failed_frames(monkeypatch):
+	_, seen = _env(monkeypatch)
+	monkeypatch.setattr(ai_fix, "_job_timeout_types", lambda: (_JobTimeout,))
+	original = _JobTimeout("fake job expired")
+	def interrupted(*a):
+		raise original
+	from optimus import report_refresh
+	monkeypatch.setattr(report_refresh, "render_report", interrupted)
+	with pytest.raises(_JobTimeout) as caught:
+		api._render_session_report(DOCNAME)
+	assert caught.value is not original
+	assert caught.value.__context__ is None and caught.value.__cause__ is None
+	tb = caught.value.__traceback__
+	while tb:
+		assert tb.tb_frame.f_code is not interrupted.__code__
+		tb = tb.tb_next
+	assert seen.logged == [("optimus ai regenerate report", "_JobTimeout", None)]
