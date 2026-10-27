@@ -993,6 +993,7 @@ def _emit_per_action_findings(
 						"cumulative_ms": cumulative,
 						"action_wall_time_ms": action_wall_time_ms,
 						"is_bg_job_fallback": True,
+						"job_method": short_label,
 					}, default=str),
 					"estimated_impact_ms": round(impact_ms, 2),
 					"affected_count": 1,

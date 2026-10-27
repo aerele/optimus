@@ -279,6 +279,10 @@ FINDING_TYPE_HINTS = {
 	"them in place, including when the loop is empty.",
 	"Hot Line": "One line dominates its function. Hoist invariant work out of the loop, use a "
 	"dict or set for lookups, and avoid a DB or cache call per iteration.",
+	"Slow Background Job": "A background job is slow and no single subtree crossed the hot path threshold. "
+	"The deepest hot frame, its source and the job's slowest queries are the only evidence. Reduce the "
+	"work inside that frame: batch or hoist repeated reads, avoid per-row writes and commits, or process in "
+	"chunks. Do not claim a speedup you cannot see in the code shown.",
 }
 
 LOOP_FIX_FALLBACK = (

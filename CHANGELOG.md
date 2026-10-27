@@ -8,6 +8,14 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.107] - 2026-10-27
+
+### Fixed
+
+- A "Slow Background Job" finding in the Findings section now gets an AI fix suggestion like the other findings. It used to be skipped as "not eligible", so slow background jobs never showed a suggestion. The prompt carries the job method, the deepest hot frame with its share of the job's time, the source around it and the job's slowest queries. A job whose hot frame is framework code, or that names no source line, is still skipped and the card says why.
+
+---
+
 ## [0.12.92] - 2026-10-27
 
 ### Internal
