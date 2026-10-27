@@ -34,6 +34,7 @@ from optimus.analyzers.base import (
 	installed_apps_allowlist,
 	is_error_log_hook_query,
 	is_framework_callsite,
+	is_optimus_path,
 	short_filename,
 )
 
@@ -1460,7 +1461,7 @@ def _strip_profiler_frames(node: dict) -> dict:
 		_strip_profiler_frames(child)
 
 		filename = (child.get("filename") or "").replace("\\", "/")
-		if "optimus/" in filename:
+		if is_optimus_path(filename):
 			# Drop this node; promote its (already-rewritten) children
 			# up to the current parent.
 			new_children.extend(child.get("children") or [])
