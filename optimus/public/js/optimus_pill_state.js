@@ -42,6 +42,17 @@
 		return TRANSIENT.indexOf(display) !== -1;
 	}
 
+	// What a poll timer tick should do: stop, wait (tab hidden), expire or fetch.
+	function pollAction(display, elapsedMs, hidden) {
+		if (!isTransient(display)) {
+			return "stop";
+		}
+		if (hidden) {
+			return "wait";
+		}
+		return pollExpired(elapsedMs) ? "expire" : "fetch";
+	}
+
 	function terminalKey(data, state) {
 		return (data && data.run_uuid) || (data && data.session_uuid) || state.run_uuid || state.session_uuid;
 	}
@@ -145,7 +156,8 @@
 					active: true, display: "recording", session_uuid: srv.session_uuid,
 					docname: srv.docname, label: srv.label, started_at: srv.started_at,
 				}),
-				ui: { display: "recording", label: "Recording", elapsed: "" },
+				// Already recording: keep the running elapsed text.
+				ui: display === "recording" ? null : { display: "recording", label: "Recording", elapsed: "" },
 				alert: null,
 			};
 		}
@@ -221,7 +233,7 @@
 
 	return {
 		POLL: POLL, STALE_EVENT_WINDOW_MS: STALE_EVENT_WINDOW_MS, EVENT_NAMES: Object.keys(EVENTS),
-		initialState: initialState, nextDelay: nextDelay, pollExpired: pollExpired,
+		initialState: initialState, nextDelay: nextDelay, pollExpired: pollExpired, pollAction: pollAction,
 		isTransient: isTransient, reduceEvent: reduceEvent, reduceServer: reduceServer,
 		reduceHardStop: reduceHardStop,
 	};

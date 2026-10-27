@@ -293,14 +293,16 @@
 
 	function pollTick() {
 		fallbackTimer = null;
-		if (!Pill.isTransient(currentState.display)) return;
-		if (document.hidden) {
+		const action = Pill.pollAction(currentState.display, Date.now() - pollStartedAt, document.hidden);
+		if (action === "stop") return;
+		if (action === "wait") {
 			// No request while hidden; the visibility handler resyncs.
 			schedulePoll();
 			return;
 		}
-		if (Pill.pollExpired(Date.now() - pollStartedAt)) {
-			applyResult(Pill.reduceHardStop(currentState));
+		if (action === "expire") {
+			// One last server check before giving up.
+			refreshStatus(() => applyResult(Pill.reduceHardStop(currentState)));
 			return;
 		}
 		pollAttempt += 1;
@@ -365,6 +367,7 @@
 		if (!run_uuid) return;
 		// Optimistic UI: the realtime phase_2_run_analyzing event will
 		// arrive within ~1s and confirm the transition.
+		currentState.display = "stopping";
 		setDisplay("stopping", "Stopping phase 2…", "");
 		frappe.call({
 			method: "optimus.api.stop_line_profile_pass",
@@ -379,6 +382,7 @@
 			},
 			error: () => {
 				// Server rejected: surface the error and revert state.
+				currentState.display = "recording";
 				setDisplay("recording", "Phase 2 recording…", "click form to stop");
 			},
 		});
