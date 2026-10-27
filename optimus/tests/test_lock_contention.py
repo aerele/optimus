@@ -560,11 +560,13 @@ def test_failed_query_is_in_example_queries():
 	assert json.loads(f["technical_detail_json"])["example_queries"] == ["UPDATE `tabUser` SET x = ? WHERE name = ?"]
 
 
-def test_lock_contention_is_ai_eligible():
+def test_lock_contention_skips_the_llm_and_keeps_its_fix_hint():
 	from optimus import ai_fix
 
-	assert "Lock Contention" in ai_fix.AI_ELIGIBLE_FINDING_TYPES
-	assert "Lock Contention" in ai_fix._FINDING_TYPE_HINTS
+	f = lock_contention.analyze([{"lock_events": [_event()]}], _ctx()).findings[0]
+	assert "Lock Contention" not in ai_fix.AI_ELIGIBLE_FINDING_TYPES
+	assert ai_fix.llm_gate_note(f) is not None
+	assert json.loads(f["technical_detail_json"])["fix_hint"]
 
 
 # ----- query normalization (privacy) --------------------------------------
@@ -771,14 +773,6 @@ def test_reliability_finding_outranks_timed_one_in_a_root_cause_group():
 	assert len(grouped) == 1
 	assert grouped[0]["finding_type"] == "Lock Contention"
 	assert grouped[0]["sub_findings"][0]["finding_type"] == "Slow Query"
-
-
-def test_ai_hint_does_not_claim_every_timeout_rolls_back():
-	from optimus import ai_fix
-
-	hint = ai_fix._FINDING_TYPE_HINTS["Lock Contention"]
-	assert "its transaction was rolled back" not in hint
-	assert "transaction may still be open" in hint
 
 
 def _render_single(finding_dict):
