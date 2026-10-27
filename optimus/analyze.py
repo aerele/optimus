@@ -55,6 +55,7 @@ from optimus.analyzers.base import (
 	dur,
 	is_error_log_hook_query,
 	row_get,
+	strip_profiler_own_calls,
 )
 from optimus.dbdialect import get_dialect
 
@@ -1329,6 +1330,7 @@ def _fetch_recordings(recording_uuids: list[str]):
 		rec["pyi_session"] = pyi_session
 		rec["sidecar"] = sidecar
 		rec["lock_events"] = lock_events
+		strip_profiler_own_calls(rec)
 		yield rec
 
 
@@ -2929,7 +2931,9 @@ def load_recordings_light(doc, uuids=None, *, memo=None) -> list[dict]:
 				memo[memo_key] = _light_recording_map(doc)
 			rec = memo[memo_key].get(uuid)
 		if isinstance(rec, dict) and rec:
-			result.append({key: value for key, value in rec.items() if key not in {"pyi_session", "sidecar", "tree_b64"}})
+			light = {key: value for key, value in rec.items() if key not in {"pyi_session", "sidecar", "tree_b64"}}
+			strip_profiler_own_calls(light)
+			result.append(light)
 	return result
 
 

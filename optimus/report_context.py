@@ -1045,6 +1045,7 @@ def build_report_context(session_doc: Any, ctx: dict) -> dict:
 		"slow_queries": _build_slow_queries(ctx.get("top_queries", []), _fmt_ms),
 		# J.2.5 non-contract addition for framework split.
 		"slow_queries_framework": _build_slow_queries(ctx.get("top_queries_framework", []), _fmt_ms),
+		"queries_per_action": ctx.get("queries_per_action"),
 		# B.DI4 how many user-app slow queries the analyzer truncated
 		# out of the findings list (5-cap). 0 when nothing was suppressed.
 		"top_queries_suppressed_count": int(ctx.get("top_queries_suppressed_count") or 0),
