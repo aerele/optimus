@@ -8,13 +8,13 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [Unreleased]
+## [0.12.91] - 2026-10-27
 
-### Internal
+### Fixed
 
-- Test coverage is now configured for the unit suite (line and branch, tests, integration tests and data patches excluded). Run `python -m pytest optimus/tests/ --cov --cov-report=term-missing:skip-covered`.
-- New behaviour tests for the session start/stop/retry endpoints, the request and background-job hooks, install/uninstall, the AI settings warning, the janitor and the Redis schema sentinel.
-- Removed an unused test fixture (`sidecar_with_pii.json`).
+- Optimus's own queries (such as the server-resource snapshots) no longer appear anywhere in the report. They are removed when a recording is loaded, so the query counts, DB time, table breakdown, slowest queries and findings never include them.
+- "Queries per action" now respects Optimus Settings. When Tracked Apps is set, it lists only queries issued from those apps and says how many queries from other apps were left out. When it is empty, every non-Optimus query is listed as before. The callsite shown is now the app code that issued the query, not the innermost Frappe frame.
+- Apps whose name merely ends in "optimus" are no longer mistaken for the profiler.
 
 ---
 
@@ -68,6 +68,9 @@ versions may contain breaking changes see migration notes below).
 - Normalized EXPLAIN rows are coerced with `to_int` / `to_float`, so a string or
   `Decimal` value no longer drops that row's findings. `to_int` / `to_float` also
   treat `nan` / `inf` as missing instead of passing them to threshold checks.
+- Test coverage is now configured for the unit suite (line and branch; tests, integration tests and data patches excluded). Run `python -m pytest optimus/tests/ --cov --cov-report=term-missing:skip-covered`.
+- New behaviour tests for the session start/stop/retry endpoints, the request and background-job hooks, install/uninstall, the AI settings warning, the janitor and the Redis schema sentinel.
+- Removed an unused test fixture (`sidecar_with_pii.json`).
 
 
 
