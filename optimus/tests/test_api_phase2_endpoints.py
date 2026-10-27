@@ -1,0 +1,286 @@
+# Copyright (c) 2026, Optimus contributors
+# For license information, please see license.txt
+
+"""Phase 2 endpoints behind the session gate (PR-1): a run_uuid is resolved to its parent
+session and gated there; the run instruments the caller's own requests."""
+
+import datetime
+import sys
+import types
+from contextlib import nullcontext
+from types import SimpleNamespace
+
+import pytest
+
+from optimus import api
+from optimus.tests.gate_fakes import (
+	DOCNAME,
+	OWNER,
+	SESSION_UUID,
+	FakePermissionError,
+	FakeValidationError,
+	fake_session_doc,
+	install,
+	install_module,
+	make_fake_frappe,
+	owner_perms,
+	session_row,
+)
+
+PICKS = '[{"dotted_path": "app.mod.fn", "source": "freeform"}]'
+MANAGER = "manager@example.com"
+pytestmark = pytest.mark.rq
+
+
+def _env(monkeypatch, *, user=OWNER, roles=("Optimus User",), perms=None, run_status="Recording", session_status="Ready"):
+	doc = fake_session_doc(phase_2_runs=[SimpleNamespace(run_uuid="run-1", status=run_status, ended_at=None)])
+	fake = make_fake_frappe(
+		user=user, roles=roles, sessions={SESSION_UUID: session_row(status=session_status)},
+		runs={"run-1": {"name": "RUN-1", "parent": DOCNAME, "status": run_status}},
+		perms=owner_perms() if perms is None else perms, docs={DOCNAME: doc},
+	)
+	install(monkeypatch, fake)
+	seen = SimpleNamespace(saved=[], capture=[], analyzed=[], queued=[], prepared=[], cleaned=[])
+	monkeypatch.setattr(api, "_lock_phase2_for_write", lambda *a, **kw: None)
+	monkeypatch.setattr(api, "_save_parent_bypassing_perms", lambda parent: seen.saved.append(parent.name))
+	install_module(monkeypatch, "optimus.line_profile.capture", SimpleNamespace(
+		is_active=lambda u, **kw: None,
+		validate_picks=lambda picks: None,
+		prepare_line_profile_picks=lambda picks: seen.prepared.append(picks) or picks,
+		start_line_profile_pass=lambda **kw: seen.capture.append(("start", kw))
+		or [{"dotted_path": "app.mod.fn", "source": "freeform", "eligible": True}],
+		stop_line_profile_pass=lambda run_uuid, u: seen.capture.append(("stop", run_uuid, u)),
+		cleanup_run=lambda run_uuid: seen.cleaned.append(run_uuid),
+		CaptureError=type("CaptureError", (Exception,), {}),
+	))
+	install_module(monkeypatch, "optimus.line_profile.picker", SimpleNamespace(expand_hot_chain=lambda *a, **k: []))
+	install_module(monkeypatch, "optimus.line_profile.analyzer", SimpleNamespace(run_analyze=lambda s, r: seen.analyzed.append((s, r))))
+	def request(docname, session_uuid, run_uuid, requested_by, **kw):
+		seen.queued.append((docname, session_uuid, run_uuid, requested_by, kw))
+		return {"run_uuid": run_uuid, "session_uuid": session_uuid, "status": "Analyzing", "ran_inline": False, "reason": None}
+	install_module(monkeypatch, "optimus.line_profile.jobs", SimpleNamespace(request=request,
+		capture_creation=lambda *args: nullcontext()))
+	scheduler = types.ModuleType("frappe.utils.scheduler")
+	scheduler.is_scheduler_disabled = lambda: False
+	monkeypatch.setitem(sys.modules, "frappe.utils.scheduler", scheduler)
+	monkeypatch.setattr(api, "session", SimpleNamespace(get_active_session_for=lambda u: None))
+	# api.py binds frappe.utils.now_datetime at import; the real one reads the site timezone.
+	monkeypatch.setattr(api, "now_datetime", lambda: datetime.datetime(2026, 9, 24, 12, 0, 0))
+	return fake, doc, seen
+
+
+def test_start_accepts_json_picks_and_string_flag(monkeypatch):
+	_, doc, seen = _env(monkeypatch)
+	out = api.start_line_profile_pass(session_uuid=SESSION_UUID, picks=PICKS, auto_expand="0")
+	assert out["session_uuid"] == SESSION_UUID and out["docname"] == DOCNAME
+	assert out["auto_expanded"] is False
+	((kind, kw),) = seen.capture
+	assert kind == "start" and kw["user"] == OWNER
+	assert kw["prepared"] == [{"dotted_path": "app.mod.fn", "source": "freeform"}]
+	assert seen.saved == [DOCNAME] and len(doc.phase_2_runs) == 2
+
+
+def test_api_marks_only_server_derived_descendants_as_expanded(monkeypatch):
+	_, _, seen = _env(monkeypatch)
+	monkeypatch.setattr(sys.modules["optimus.line_profile.picker"], "expand_hot_chain", lambda *a, **k: [
+		{"dotted_path": "app.mod.fn", "depth": 0}, {"dotted_path": "json.loads", "depth": 1}])
+	def prepare(picks, *, server_expanded):
+		assert server_expanded == {"json.loads"}
+		assert [p["dotted_path"] for p in picks] == ["app.mod.fn", "json.loads"]
+		return [{**p, "eligible": p["dotted_path"] not in server_expanded} for p in picks]
+	monkeypatch.setattr(sys.modules["optimus.line_profile.capture"], "prepare_line_profile_picks", prepare)
+	api.start_line_profile_pass(SESSION_UUID, '[{"dotted_path":"app.mod.fn","source":"curated"}]', auto_expand=True)
+	assert seen.capture[0][1]["prepared"][1]["eligible"] is False
+
+
+def test_start_runs_as_the_caller_not_the_owner(monkeypatch):
+	perms = {("read", DOCNAME, MANAGER): True, ("write", DOCNAME, MANAGER): True}
+	_, _, seen = _env(monkeypatch, user=MANAGER, roles=("System Manager",), perms=perms)
+	api.start_line_profile_pass(session_uuid=SESSION_UUID, picks=PICKS, auto_expand=False)
+	((_, kw),) = seen.capture
+	assert kw["user"] == MANAGER
+
+
+def test_start_needs_a_ready_session(monkeypatch):
+	_, _, seen = _env(monkeypatch, session_status="Failed")
+	with pytest.raises(FakeValidationError):
+		api.start_line_profile_pass(session_uuid=SESSION_UUID, picks=PICKS)
+	assert seen.capture == []
+
+
+def test_start_rejects_a_bad_picks_payload_with_a_title(monkeypatch):
+	fake, _, seen = _env(monkeypatch)
+	with pytest.raises(FakeValidationError):
+		api.start_line_profile_pass(session_uuid=SESSION_UUID, picks="not json")
+	assert fake.spies.throws[-1]["title"] == "Optimus" and seen.capture == []
+
+
+def test_stop_by_the_owner(monkeypatch):
+	fake, doc, seen = _env(monkeypatch)
+	out = api.stop_line_profile_pass(run_uuid="run-1")
+	assert out == {"run_uuid": "run-1", "session_uuid": SESSION_UUID, "status": "Analyzing", "ran_inline": False, "reason": None}
+	assert seen.capture == [("stop", "run-1", OWNER)]
+	assert seen.queued == [(DOCNAME, SESSION_UUID, "run-1", OWNER, {"from_recording": True})]
+	assert not seen.analyzed and not seen.saved
+
+
+def test_stop_rejects_run_not_recording_without_writes(monkeypatch):
+	fake, _, seen = _env(monkeypatch, run_status="Analyzing")
+	with pytest.raises(FakeValidationError):
+		api.stop_line_profile_pass(run_uuid="run-1")
+	assert seen.capture == [] and seen.saved == [] and fake.spies.enqueue == []
+
+
+def test_stop_denies_a_stranger_before_the_run_status(monkeypatch):
+	_, _, seen = _env(monkeypatch, user="stranger@example.com", perms={}, run_status="Ready")
+	with pytest.raises(FakePermissionError):
+		api.stop_line_profile_pass(run_uuid="run-1")
+	assert seen.capture == []
+
+
+def test_retry_phase2_analyze_by_the_owner(monkeypatch):
+	_, _, seen = _env(monkeypatch, run_status="Failed")
+	assert api.retry_phase2_analyze(run_uuid="run-1")["status"] == "Analyzing"
+	assert not seen.analyzed and not seen.saved
+	assert seen.queued == [(DOCNAME, SESSION_UUID, "run-1", OWNER, {})]
+
+
+def test_batch_isolates_a_foreign_run(monkeypatch):
+	other = "other@example.com"
+	doc = fake_session_doc(phase_2_runs=[SimpleNamespace(run_uuid="run-1", status="Failed", ended_at=None)])
+	fake = make_fake_frappe(
+		sessions={SESSION_UUID: session_row(), "uuid-2": session_row(name="SESS-2", owner=other)},
+		runs={
+			"run-1": {"name": "RUN-1", "parent": DOCNAME, "status": "Failed"},
+			"run-2": {"name": "RUN-2", "parent": "SESS-2", "status": "Failed"},
+		},
+		perms=owner_perms(), docs={DOCNAME: doc},
+	)
+	install(monkeypatch, fake)
+	saved, analyzed = [], []
+	monkeypatch.setattr(api, "_save_parent_bypassing_perms", lambda parent: saved.append(parent.name))
+	install_module(monkeypatch, "optimus.line_profile.analyzer", SimpleNamespace(run_analyze=lambda s, r: analyzed.append((s, r))))
+	queued = []
+	def request(docname, session_uuid, run_uuid, requested_by):
+		queued.append(run_uuid)
+		return {"run_uuid": run_uuid, "session_uuid": session_uuid, "status": "Analyzing", "ran_inline": False}
+	install_module(monkeypatch, "optimus.line_profile.jobs", SimpleNamespace(request=request))
+	out = api.retry_phase2_analyzes_batch(run_uuids='["run-1", "run-2"]')
+	assert queued == ["run-1"] and not analyzed
+	assert out["tallies"] == {"Ready": 0, "Failed": 1, "Analyzing": 1, "Skipped": 0}
+	assert out["results"][0] == {"run_uuid": "run-1", "session_uuid": SESSION_UUID, "status": "Analyzing", "ran_inline": False}
+	assert out["results"][1]["run_uuid"] == "run-2" and out["results"][1]["status"] == "Failed"
+	assert not saved
+
+
+@pytest.mark.rq
+@pytest.mark.parametrize("kind", ["rq", "exit"])
+def test_batch_interrupt_stops_further_admissions_and_detaches_context(monkeypatch, kind):
+	_env(monkeypatch, run_status="Failed")
+	Timeout = pytest.importorskip("rq.timeouts", exc_type=ImportError).JobTimeoutException
+	interrupt = Timeout("fake timeout") if kind == "rq" else SystemExit("fake exit")
+	called = []
+	def fail(run):
+		called.append(run)
+		try:
+			raise ValueError("private inner detail")
+		except ValueError:
+			raise interrupt
+	monkeypatch.setattr(api, "retry_phase2_analyze", fail)
+	with pytest.raises(type(interrupt)) as caught:
+		api.retry_phase2_analyzes_batch(["run-1", "run-2"])
+	assert called == ["run-1"]
+	assert caught.value.__context__ is None
+	assert (caught.value is interrupt) == (kind == "exit")
+
+
+@pytest.mark.parametrize("status", ["Recording", "Ready"])
+def test_retry_refuses_non_retryable_run_before_queue(monkeypatch, status):
+	_, _, seen = _env(monkeypatch, run_status=status)
+	with pytest.raises(FakeValidationError):
+		api.retry_phase2_analyze(run_uuid="run-1")
+	assert not seen.queued and not seen.analyzed
+
+
+def test_stop_never_falls_back_inline_when_scheduler_is_disabled(monkeypatch):
+	_, _, seen = _env(monkeypatch)
+	sys.modules["frappe.utils.scheduler"].is_scheduler_disabled = lambda: True
+	out = api.stop_line_profile_pass(run_uuid="run-1")
+	assert out["status"] == "Analyzing" and out["ran_inline"] is False
+	assert seen.queued and not seen.analyzed
+
+
+def test_manual_start_obeys_the_configured_run_cap_before_capture(monkeypatch):
+	_, _, seen = _env(monkeypatch)
+	monkeypatch.setattr("optimus.settings.get_config", lambda: SimpleNamespace(phase2_max_runs_per_session=1))
+	with pytest.raises(FakeValidationError, match="run limit"):
+		api.start_line_profile_pass(SESSION_UUID, PICKS, auto_expand=False)
+	assert not seen.capture and not seen.saved
+
+
+def test_start_prepares_picks_before_sql_lock(monkeypatch):
+	_, _, seen = _env(monkeypatch)
+	def lock(*args, **kwargs):
+		assert seen.prepared == [[{"dotted_path": "app.mod.fn", "source": "freeform"}]]
+	monkeypatch.setattr(api, "_lock_phase2_for_write", lock)
+	api.start_line_profile_pass(SESSION_UUID, PICKS, auto_expand=False)
+	assert seen.capture[0][1]["prepared"] == seen.prepared[0]
+	assert "picks" not in seen.capture[0][1]
+
+
+def test_start_persists_the_recording_actor(monkeypatch):
+	perms = {("read", DOCNAME, MANAGER): True, ("write", DOCNAME, MANAGER): True}
+	_, doc, _ = _env(monkeypatch, user=MANAGER, roles=("System Manager",), perms=perms)
+	api.start_line_profile_pass(SESSION_UUID, PICKS, auto_expand=False)
+	assert doc.phase_2_runs[-1].recording_user == MANAGER
+
+
+def test_failed_admission_cleans_only_its_own_capture(monkeypatch):
+	_, _, seen = _env(monkeypatch)
+	def fail(parent):
+		raise RuntimeError("simulated save failure")
+	monkeypatch.setattr(api, "_save_parent_bypassing_perms", fail)
+	with pytest.raises(RuntimeError, match="simulated save failure"):
+		api.start_line_profile_pass(SESSION_UUID, PICKS, auto_expand=False)
+	run_uuid = seen.capture[0][1]["run_uuid"]
+	assert seen.capture[1:] == [("stop", run_uuid, OWNER)]
+	assert seen.cleaned == [run_uuid]
+
+
+def test_admission_rechecks_permission_after_sql_lock(monkeypatch):
+	fake, _, seen = _env(monkeypatch)
+	def lock(*args, **kwargs):
+		fake.has_permission = lambda *a, **kw: False
+	monkeypatch.setattr(api, "_lock_phase2_for_write", lock)
+	with pytest.raises(FakePermissionError):
+		api.start_line_profile_pass(SESSION_UUID, PICKS, auto_expand=False)
+	assert not seen.capture and not seen.saved
+
+
+def test_stop_uses_recording_actor_and_current_requester(monkeypatch):
+	perms = {("read", DOCNAME, MANAGER): True, ("write", DOCNAME, MANAGER): True}
+	fake, _, seen = _env(monkeypatch, user=MANAGER, roles=("System Manager",), perms=perms)
+	get_value = fake.db.get_value
+	def get(doctype, filters, fieldname, **kw):
+		out = get_value(doctype, filters, fieldname, **kw)
+		if doctype == "Optimus Phase Two Run" and isinstance(out, dict):
+			out["recording_user"] = "capture-user@example.com"
+		return out
+	fake.db = SimpleNamespace(**{**vars(fake.db), "get_value": get})
+	api.stop_line_profile_pass("run-1")
+	assert seen.capture == [("stop", "run-1", "capture-user@example.com")]
+	assert seen.queued[0][3] == MANAGER
+
+
+def test_retry_uses_current_requester(monkeypatch):
+	perms = {("read", DOCNAME, MANAGER): True, ("write", DOCNAME, MANAGER): True}
+	_, _, seen = _env(monkeypatch, user=MANAGER, roles=("System Manager",), perms=perms, run_status="Failed")
+	api.retry_phase2_analyze("run-1")
+	assert seen.queued[0][3] == MANAGER
+
+
+def test_oversized_picks_json_is_rejected_before_parsing(monkeypatch):
+	_, _, seen = _env(monkeypatch)
+	with pytest.raises(FakeValidationError):
+		api.start_line_profile_pass(SESSION_UUID, '[{"dotted_path":"app.fn","source":"' + "x" * 64000 + '"}]', auto_expand=False)
+	assert not seen.prepared and not seen.capture
