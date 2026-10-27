@@ -1309,6 +1309,41 @@ def _redacted_module_key(function: str, filename: str = "") -> str | None:
 	return function
 
 
+def _frame_identity(function: str, filename: str) -> tuple[str, str] | None:
+	"""Aggregation key: full normalised path plus function; None for synthetic nodes."""
+	if _redacted_module_key(function, filename) is None:
+		return None
+	return ((filename or "").replace("\\", "/"), function)
+
+
+def _identity_label(identity: tuple[str, str], depth: int = 2) -> str:
+	"""Display label for an identity, keeping the last ``depth`` path segments."""
+	path, function = identity
+	parts = [p for p in path.split("/") if p]
+	short = "/".join(parts[-depth:]) if depth else "/".join(parts)
+	return f"{short}::{function}" if short else function
+
+
+def _row_labels(identities) -> dict:
+	"""Map each identity to a display label, lengthening only labels that collide."""
+	labels = {i: _identity_label(i) for i in identities}
+	by_label: dict = defaultdict(list)
+	for ident, label in labels.items():
+		by_label[label].append(ident)
+	for group in by_label.values():
+		if len(group) < 2:
+			continue
+		max_depth = max(len([p for p in i[0].split("/") if p]) for i in group)
+		for depth in range(3, max_depth + 1):
+			candidate = {i: _identity_label(i, depth) for i in group}
+			if len(set(candidate.values())) == len(group):
+				labels.update(candidate)
+				break
+		else:
+			labels.update({i: _identity_label(i, 0) for i in group})
+	return labels
+
+
 def _aggregate_hot_frames(
 	per_action_trees: list,
 	tracked_apps: tuple[str, ...] | None = None,
@@ -1321,9 +1356,9 @@ def _aggregate_hot_frames(
 	               no action_ref)
 	  leaderboard list of top-N dicts for hot_frames_json
 	"""
-	# {function_key: [(action_idx, self_ms, cumulative_ms), ...]}
+	# {(full_path, function): [(action_idx, self_ms, cumulative_ms), ...]}
 	occurrences: dict = defaultdict(list)
-	# {function_key: is_framework}; the key drops the app root, so classify from the full path
+	# {(full_path, function): is_framework}
 	frame_class: dict = {}
 
 	for action_idx, tree in enumerate(per_action_trees):
@@ -1342,7 +1377,9 @@ def _aggregate_hot_frames(
 	findings = []
 	leaderboard_rows = []
 
-	for key, occs in occurrences.items():
+	labels = _row_labels(occurrences)
+	for ident, occs in occurrences.items():
+		key = labels[ident]
 		distinct_actions = {idx for idx, _, _ in occs}
 		total_self_ms = sum(self_ms for _, self_ms, _ in occs)
 		total_cum_ms = sum(cum_ms for _, _, cum_ms in occs)
@@ -1358,7 +1395,7 @@ def _aggregate_hot_frames(
 			"occurrences": len(occs),
 			"distinct_actions": len(distinct_actions),
 			"action_refs": sorted(distinct_actions),
-			"is_framework": frame_class.get(key, False),
+			"is_framework": frame_class.get(ident, False),
 		}
 		leaderboard_rows.append(row)
 		total_ms = total_self_ms  # alias for downstream Repeated Hot Frame logic
@@ -1426,17 +1463,12 @@ def _walk_for_aggregation(
 		# and blinded the analyzer to real application-layer bottlenecks
 		# inside Frappe that users could act on.
 		if not _is_pure_helper_frame(node, tracked_apps, installed_apps):
-			key = _redacted_module_key(
-				node.get("function", ""),
-				node.get("filename", ""),
-			)
+			key = _frame_identity(node.get("function", ""), node.get("filename", ""))
 			if key:
-				if frame_class is not None:
-					# Files can share a shortened key; framework only if every file is.
-					is_fw = _is_framework_frame_file(
+				if frame_class is not None and key not in frame_class:
+					frame_class[key] = _is_framework_frame_file(
 						node.get("filename", ""), tracked_apps, installed_apps
 					)
-					frame_class[key] = frame_class.get(key, True) and is_fw
 				# v0.7.x A.AE1: track self_ms (immune to recursion
 				# double-counting) for the user-app variant that's
 				# the exact "time in this function's body across the

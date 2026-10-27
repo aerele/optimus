@@ -149,10 +149,46 @@ class TestRenderedGroups:
 
 
 class TestKeyCollision:
-	def test_shared_short_key_is_framework_only_if_all_files_are(self):
-		fw = _n("fmt", "/bench/apps/frappe/frappe/core/doctype/user/user.py", 100)
-		app = _n("fmt", "/bench/apps/myapp/myapp/user/user.py", 100)
-		for order in ([fw, app], [app, fw]):
-			tree = _n("<root>", "", 0, order)
-			_, board = call_tree._aggregate_hot_frames([tree], None, frozenset({"myapp", "frappe"}))
-			assert [r["is_framework"] for r in board] == [False]
+	FW = "/bench/apps/frappe/frappe/core/doctype/user/user.py"
+	APP = "/bench/apps/myapp/myapp/user/user.py"
+
+	def _rows(self, fw_ms=900, app_ms=10, order=("fw", "app")):
+		nodes = {"fw": _n("fmt", self.FW, fw_ms), "app": _n("fmt", self.APP, app_ms)}
+		tree = _n("<root>", "", 0, [nodes[k] for k in order])
+		_, board = call_tree._aggregate_hot_frames([tree], None, frozenset({"myapp", "frappe"}))
+		return board
+
+	def test_same_short_key_stays_two_rows_with_own_times(self):
+		for order in (("fw", "app"), ("app", "fw")):
+			board = self._rows(order=order)
+			assert len(board) == 2
+			by_fw = {r["is_framework"]: r for r in board}
+			assert by_fw[True]["total_ms"] == 900
+			assert by_fw[False]["total_ms"] == 10
+
+	def test_colliding_labels_are_disambiguated(self):
+		labels = [r["function"] for r in self._rows()]
+		assert len(set(labels)) == 2
+
+	def test_app_row_lands_in_app_group(self):
+		board = self._rows()
+		custom, framework = renderer._split_hot_frames(board, ())
+		assert [r["total_ms"] for r in custom] == [10]
+		assert [r["total_ms"] for r in framework] == [900]
+
+	def test_unique_labels_keep_short_form(self):
+		tree = _n("<root>", "", 0, [_n("a", self.APP, 5)])
+		_, board = call_tree._aggregate_hot_frames([tree], None, None)
+		assert board[0]["function"] == "user/user.py::a"
+
+	def test_identical_tail_paths_fall_back_to_full_path(self):
+		a, b = "/x/a/user/user.py", "/y/a/user/user.py"
+		tree = _n("<root>", "", 0, [_n("fmt", a, 5), _n("fmt", b, 6)])
+		_, board = call_tree._aggregate_hot_frames([tree], None, None)
+		assert len({r["function"] for r in board}) == 2
+
+	def test_per_group_cap_still_applies(self):
+		files = [f"/bench/apps/myapp/myapp/m{i}.py" for i in range(25)]
+		tree = _n("<root>", "", 0, [_n("f", f, 100 + i) for i, f in enumerate(files)])
+		_, board = call_tree._aggregate_hot_frames([tree], None, frozenset({"myapp"}))
+		assert len(board) == call_tree.HOT_FRAMES_LEADERBOARD_SIZE
