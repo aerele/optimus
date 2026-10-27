@@ -256,7 +256,7 @@ function _ai_status_banner(frm, state, text, cancel, color) {
 	const html = '<span role="status" class="optimus-ai-status-text">' + frappe.utils.escape_html(text) + '</span>' +
 		' <button type="button" class="btn btn-xs btn-default optimus-ai-cancel"' + (cancel ? '' : ' style="display:none"') + '>' +
 		frappe.utils.escape_html(__("Cancel AI refresh")) + '</button>';
-	const banner = _single_banner(frm, "optimus-ai-progress", "form-message " + color, html, null, ($b) => {
+	const banner = _single_banner(frm, "optimus-ai-progress", "form-message " + color, html, ($b) => {
 		$b.find(".optimus-ai-status-text").text(text);
 		$b.find(".optimus-ai-cancel").toggle(!!cancel).prop("disabled", !!state.cancelling);
 	});
@@ -319,11 +319,11 @@ function _ai_end_message(run) {
 // single element found and removed by `idClass` (which must be unique to this
 // banner) and rewrites its contents in place, returning it so the caller can tag
 // it. Pass html=null to remove it. `extraClasses` update on reuse so a new state
-// receives the current theme classes; `styler` runs once on a freshly created
-// element whose classes do not carry its colours. The element is prepended to
+// receives the current theme classes; `update($b)` patches a reused element in
+// place instead of rewriting its HTML. The element is prepended to
 // .form-layout, outside .form-message-container, so Frappe's own show_message()
 // clearing on each refresh never removes it.
-function _single_banner(frm, idClass, extraClasses, html, styler, update) {
+function _single_banner(frm, idClass, extraClasses, html, update) {
 	const root = frm.$wrapper;
 	if (!root || !root.length) return null;
 	if (html == null) {
@@ -334,8 +334,7 @@ function _single_banner(frm, idClass, extraClasses, html, styler, update) {
 	const existing = !!$b.length;
 	if (!$b.length) {
 		const cls = extraClasses ? idClass + " " + extraClasses : idClass;
-		$b = $('<div class="' + cls + '" role="status"></div>');
-		if (styler) styler($b);
+		$b = $('<div class="' + cls + '"></div>');
 		const $host = root.find(".form-layout").first();
 		($host.length ? $host : root).prepend($b);
 	}
@@ -346,9 +345,31 @@ function _single_banner(frm, idClass, extraClasses, html, styler, update) {
 }
 
 // Analyze "preparing report" banner, tagged with its session. Pass html=null to remove it.
-function _progress_banner(frm, html) {
-	const $b = _single_banner(frm, "optimus-analyze-banner", "optimus-status", html);
+function _progress_banner(frm, html, update) {
+	const $b = _single_banner(frm, "optimus-analyze-banner", "optimus-status", html, update);
 	if ($b) $b.attr("data-optimus-session", frm.doc.session_uuid || "");
+}
+
+// Slim progress strip: the percent is clamped to 0-100 and the bar width is updated in
+// place so its CSS transition animates between ticks.
+function _analyze_progress_strip(frm, percent, description) {
+	const pct = Number.isFinite(percent) ? Math.max(0, Math.min(100, Math.round(percent))) : null;
+	const desc = description || __("Analyzing…");
+	const text = pct !== null ? __("Preparing report {0}% · {1}", [pct, desc]) : desc;
+	const lead = '<i class="fa fa-spinner fa-spin" aria-hidden="true"></i> ' + frappe.utils.escape_html(text);
+	const bar = pct !== null
+		? '<span class="optimus-status-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"' +
+			' aria-label="' + frappe.utils.escape_html(text) + '" aria-valuenow="' + pct + '">' +
+			'<span style="width:' + pct + '%"></span></span>'
+		: "";
+	const html = '<span class="optimus-status-text">' + lead + "</span>" + bar;
+	_progress_banner(frm, html, ($b) => {
+		const $bar = $b.find(".optimus-status-bar");
+		if (!!$bar.length !== (pct !== null)) return $b.html(html);
+		$b.find(".optimus-status-text").html(lead);
+		if (pct === null) return;
+		$bar.attr({"aria-valuenow": pct, "aria-label": text}).children().css("width", pct + "%");
+	});
 }
 
 // Clear a stale analyze banner on refresh / navigation. The banner is prepended
@@ -405,24 +426,7 @@ function subscribe_session_progress(frm) {
 
 	frappe.realtime.on("optimus_progress", (p) => {
 		if (!mine(p)) return;
-		const pct = Number.isFinite(p.percent) ? Math.round(p.percent) : null;
-		const desc = frappe.utils.escape_html(p.description || __("Analyzing…"));
-		const width = pct === null ? 0 : Math.max(0, Math.min(100, pct));
-		_progress_banner(
-			frm,
-			'<span class="optimus-status-text">' +
-				'<i class="fa fa-spinner fa-spin" aria-hidden="true"></i> ' +
-				(pct !== null ? __("Preparing report {0}% · {1}", [pct, desc]) : desc) +
-				"</span>" +
-				(pct !== null
-					? '<span class="optimus-status-bar" role="progressbar" aria-valuemin="0"' +
-						' aria-valuemax="100" aria-valuenow="' +
-						width +
-						'"><span style="width:' +
-						width +
-						'%"></span></span>'
-					: "")
-		);
+		_analyze_progress_strip(frm, p.percent, p.description);
 	});
 	frappe.realtime.on("optimus_session_ready", (p) => {
 		if (!mine(p)) return;
@@ -1239,7 +1243,8 @@ function _drain_banner(frm, html) {
 		frm,
 		"optimus-drain-banner",
 		"optimus-status optimus-status-warn",
-		html === null ? null : '<span class="optimus-status-text">' + html + "</span>"
+		html === null ? null : '<span class="optimus-status-text">' + html + "</span>",
+		($b) => $b.find(".optimus-status-text").html(html)
 	);
 }
 
