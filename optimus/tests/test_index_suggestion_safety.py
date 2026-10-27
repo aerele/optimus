@@ -20,8 +20,16 @@ TABLE = "tabT"
 COLUMNS = ("a", "b", "c", "x", "y")
 
 
-def ix(name, cols, index_type="BTREE", unique=False):
-	return IndexInfo(name=name, columns=list(cols), unique=unique, leftmost=cols[0], index_type=index_type)
+def ix(name, cols, unique=False, eligible=True, usable_prefix=()):
+	return IndexInfo(
+		name=name, columns=list(cols), unique=unique, leftmost=cols[0], eligible=eligible,
+		usable_prefix=tuple(usable_prefix),
+	)
+
+
+def unusable(name, cols, usable_prefix=()):
+	"""An index the optimizer can't use for lookups (FULLTEXT, HASH, ignored, prefix part)."""
+	return ix(name, cols, eligible=False, usable_prefix=usable_prefix)
 
 
 class _Suggested:
@@ -114,9 +122,9 @@ COVERAGE_SCENARIOS = [
 	("composite_with_suggested_column_leading", "b", [ix("bc", ["b", "c"])], "b = 'y'", False),
 	("unique_composite_counts_like_btree", "b", [ix("uq", ["a", "b"], unique=True)], "a = 1 AND b = 2", False),
 	("primary_key_composite_counts_like_btree", "b", [ix("PRIMARY", ["a", "b"], unique=True)], "a = 1 AND b = 2", False),
-	("fulltext_index_on_column_does_not_serve_equality", "b", [ix("ft_b", ["b"], index_type="FULLTEXT")], "b = 'y'", True),
-	("fulltext_leading_composite_does_not_serve", "b", [ix("ft", ["a", "b"], index_type="FULLTEXT")], "a = 1 AND b = 2", True),
-	("hash_index_is_not_trusted", "b", [ix("h", ["b"], index_type="HASH")], "b = 'y'", True),
+	("fulltext_index_on_column_does_not_serve_equality", "b", [unusable("ft_b", ["b"])], "b = 'y'", True),
+	("fulltext_leading_composite_does_not_serve", "b", [unusable("ft", ["a", "b"])], "a = 1 AND b = 2", True),
+	("hash_index_is_not_trusted", "b", [unusable("h", ["b"])], "b = 'y'", True),
 	("or_between_leading_and_suggested_column", "b", [ix("ab", ["a", "b"])], "a = 'x' OR b = 'y'", True),
 	("or_group_elsewhere_does_not_block_equality", "b", [ix("ab", ["a", "b"])], "a = 'x' AND b = 'y' AND (x = 1 OR y = 2)", False),
 	("or_group_on_the_leading_column_blocks_composite", "b", [ix("ab", ["a", "b"])], "(a = 'x' OR a = 'z') AND b = 'y'", True),
@@ -335,6 +343,95 @@ def test_is_served_on_empty_index_list_and_empty_column():
 	assert not is_served("", parse_where("SELECT 1 FROM tabT WHERE a = 1", "tabT"), [ix("a", ["a"])])
 
 
+SI = "tabSales Invoice"
+
+
+def test_multi_word_doctype_qualified_columns_are_classified():
+	sql = f"SELECT * FROM `{SI}` WHERE `{SI}`.`status` = 'x' AND `{SI}`.`customer` = 'c'"
+	shape = parse_where(sql, SI)
+	assert shape.equality == {"status", "customer"}
+	assert is_served("customer", shape, [ix("sc", ["status", "customer"])])
+
+
+def test_multi_word_doctype_with_backticked_alias_map():
+	sql = f"SELECT * FROM `{SI}` si WHERE si.status = 'x' AND si.customer = 'c'"
+	shape = parse_where(sql, f"`{SI}`", {"si": f"`{SI}`"})
+	assert shape.equality == {"status", "customer"}
+
+
+def test_multi_word_doctype_ignores_other_doctype_columns():
+	sql = f"SELECT * FROM `{SI}` JOIN `tabSales Invoice Item` ON 1 WHERE `tabSales Invoice Item`.`item_code` = 'x'"
+	assert parse_where(sql, SI).equality == set()
+
+
+def test_multi_word_doctype_function_wrapped_column():
+	shape = parse_where(f"SELECT * FROM `{SI}` WHERE DATE(`{SI}`.`posting_date`) = '2026-01-01'", SI)
+	assert shape.wrapped == {"posting_date"}
+
+
+def test_exists_subquery_does_not_mark_child_column_as_wrapped():
+	sql = "SELECT * FROM `tabT` WHERE EXISTS (SELECT 1 FROM `tabChild` WHERE parent = tabT.name)"
+	assert parse_where(sql, "tabChild").wrapped == set()
+	assert parse_where(sql, "tabT").wrapped == set()
+
+
+def test_exists_subquery_keeps_the_child_index_suggestion(monkeypatch, empty_context):
+	_install(monkeypatch, "parent", [])
+	where = "EXISTS (SELECT 1 FROM `tabChild` WHERE parent = tabT.name)"
+	result = _analyze(empty_context, _select(where, n=3))
+	assert not any("only used inside a function" in w for w in result.warnings)
+
+
+@pytest.mark.parametrize(
+	"where, wrapped",
+	[
+		("IFNULL(a, 0) = b", {"a"}),
+		("DATE(a) = b", {"a"}),
+		("LOWER(a) = LOWER(b)", {"a"}),
+		("a = DATE(b)", set()),
+	],
+)
+def test_only_the_function_argument_is_wrapped(where, wrapped):
+	assert parse_where(f"SELECT * FROM tabT WHERE {where}", "tabT").wrapped == wrapped
+
+
+def test_self_join_aliases_keep_the_suggestion():
+	sql = "SELECT * FROM tabT a JOIN tabT b ON a.name = b.parent WHERE a.x = 1 AND b.y = 2"
+	shape = parse_where(sql, "tabT", {"a": "tabT", "b": "tabT"})
+	assert shape.ambiguous
+	assert not is_served("y", shape, [ix("xy", ["x", "y"])])
+
+
+def test_unqualified_column_in_a_join_keeps_the_suggestion():
+	sql = "SELECT * FROM tabT JOIN tabU ON tabU.parent = tabT.name WHERE status = 'a'"
+	shape = parse_where(sql, "tabT")
+	assert shape.ambiguous
+	assert not is_served("status", shape, [ix("s", ["status"])])
+
+
+def test_qualified_columns_in_a_join_stay_attributed():
+	sql = "SELECT * FROM tabT JOIN tabU ON tabU.parent = tabT.name WHERE tabT.x = 1 AND tabT.y = 2"
+	shape = parse_where(sql, "tabT")
+	assert not shape.ambiguous
+	assert is_served("y", shape, [ix("xy", ["x", "y"])])
+
+
+@pytest.mark.parametrize(
+	"where, served",
+	[("name LIKE '%abc'", False), ("name LIKE 'abc%'", True), ("name NOT LIKE '%abc'", False)],
+)
+def test_leading_wildcard_like_is_not_served(where, served):
+	shape = parse_where(f"SELECT * FROM tabT WHERE {where}", "tabT")
+	assert is_served("name", shape, [ix("n", ["name"])]) is served
+
+
+def test_unusable_index_with_usable_prefix_covers_only_the_prefix():
+	shape = parse_where("SELECT * FROM tabT WHERE a = 1 AND b = 2 AND c = 3", "tabT")
+	prefixed = unusable("abc", ["a", "b", "c"], usable_prefix=["a", "b"])
+	assert is_served("b", shape, [prefixed])
+	assert not is_served("c", shape, [prefixed])
+
+
 def test_assess_harm_is_deterministic_and_pure():
 	writes = {"tabT": index_harm.TableWrites(inserts=60)}
 	first = index_harm.assess_harm("tabT", "b", 5, writes)
@@ -347,12 +444,19 @@ def test_assess_harm_is_deterministic_and_pure():
 # ---------------------------------------------------------------------------
 
 
-def test_mariadb_existing_indexes_reports_index_type(monkeypatch):
+def test_mariadb_existing_indexes_reports_usability(monkeypatch):
+	def row(key, seq, col, kind="BTREE", sub=None, non_unique=1):
+		return {
+			"Key_name": key, "Non_unique": non_unique, "Seq_in_index": seq, "Column_name": col,
+			"Index_type": kind, "Sub_part": sub, "Ignored": "NO",
+		}
+
 	rows = [
-		{"Key_name": "PRIMARY", "Non_unique": 0, "Seq_in_index": 1, "Column_name": "name", "Index_type": "BTREE", "Sub_part": None},
-		{"Key_name": "ft", "Non_unique": 1, "Seq_in_index": 1, "Column_name": "title", "Index_type": "FULLTEXT", "Sub_part": None},
-		{"Key_name": "ab", "Non_unique": 1, "Seq_in_index": 1, "Column_name": "a", "Index_type": "BTREE", "Sub_part": None},
-		{"Key_name": "ab", "Non_unique": 1, "Seq_in_index": 2, "Column_name": "b", "Index_type": "BTREE", "Sub_part": 20},
+		row("PRIMARY", 1, "name", non_unique=0),
+		row("ft", 1, "title", "FULLTEXT"),
+		row("ab", 1, "a"),
+		row("ab", 2, "b", sub=20),
+		{**row("ig", 1, "c"), "Ignored": "YES"},
 	]
 
 	class _DB:
@@ -363,6 +467,8 @@ def test_mariadb_existing_indexes_reports_index_type(monkeypatch):
 	monkeypatch.setitem(sys.modules, "frappe", frappe)
 	monkeypatch.setattr(frappe, "db", _DB(), raising=False)
 	by_name = {i.name: i for i in MariaDBDialect().existing_indexes("tabT")}
-	assert by_name["ft"].index_type == "FULLTEXT"
-	assert by_name["PRIMARY"].unique and by_name["PRIMARY"].index_type == "BTREE"
+	assert by_name["PRIMARY"].unique and by_name["PRIMARY"].eligible
+	assert not by_name["ft"].eligible and not by_name["ft"].usable_prefix
+	assert not by_name["ig"].eligible
 	assert by_name["ab"].columns == ["a", "b"]
+	assert not by_name["ab"].eligible and by_name["ab"].usable_prefix == ("a",)

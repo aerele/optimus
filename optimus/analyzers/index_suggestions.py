@@ -17,12 +17,14 @@ from collections import Counter, defaultdict
 from optimus.analyzers.base import (
 	FRAPPE_METADATA_COLUMNS,
 	SEVERITY_ORDER,
+	TAB_TABLE_RE,
 	AnalyzerResult,
 	dur,
+	is_error_log_hook_query,
 	is_frappe_meta_table,
 )
 from optimus.analyzers.index_harm import assess_harm, collect_writes
-from optimus.analyzers.index_where import USABLE_INDEX_TYPES, is_served, parse_where
+from optimus.analyzers.index_where import covered_columns, is_served, parse_where
 from optimus.dbdialect import get_dialect
 
 
@@ -173,13 +175,12 @@ _NEVER_SUGGEST_COLUMNS = FRAPPE_METADATA_COLUMNS
 #      legitimately introspects.
 # Anything else is rejected outright and the index-introspection helper
 # returns an empty set (its "I couldn't read indexes" fall-through).
-_SAFE_TAB_TABLE_RE = re.compile(r"^tab[A-Za-z0-9 _\-]+$")
 _SAFE_INFOSCHEMA_RE = re.compile(r"^information_schema\.[A-Za-z0-9_]+$")
 
 
 def _is_safe_table_name(name) -> bool:
 	"""True iff ``name`` is a table-name shape the indexer may inspect via raw
-	SQL (see ``_SAFE_TAB_TABLE_RE`` / ``_SAFE_INFOSCHEMA_RE``). Any other shape
+	SQL (see ``TAB_TABLE_RE`` / ``_SAFE_INFOSCHEMA_RE``). Any other shape
 	(SQL-injection attempt, stray space, backtick, semicolon, …) returns False
 	so the caller falls back to its empty set."""
 	if not isinstance(name, str) or not name:
@@ -188,7 +189,7 @@ def _is_safe_table_name(name) -> bool:
 	# the regexes wouldn't match them make the intent obvious to readers.
 	if any(c in name for c in ("`", "'", '"', ";", "\\", "\n", "\r", "\x00")):
 		return False
-	return bool(_SAFE_TAB_TABLE_RE.match(name) or _SAFE_INFOSCHEMA_RE.match(name))
+	return bool(TAB_TABLE_RE.fullmatch(name) or _SAFE_INFOSCHEMA_RE.match(name))
 
 
 def _get_indexed_columns(table: str) -> set[str]:
@@ -197,9 +198,7 @@ def _get_indexed_columns(table: str) -> set[str]:
 
 
 def _usable_leftmost(indexes: list) -> set[str]:
-	return {
-		ix.leftmost for ix in indexes if ix.leftmost and str(ix.index_type or "").upper() in USABLE_INDEX_TYPES
-	}
+	return {ix.leftmost for ix in indexes if ix.leftmost and (ix.eligible or ix.usable_prefix)}
 
 
 def _query_aliases(sql: str) -> dict:
@@ -230,8 +229,8 @@ def _composite_hint(column: str, indexes: list) -> str | None:
 	"""Describe an existing index holding ``column`` at a non-leading position, if any."""
 	col = column.lower()
 	for ix in indexes:
-		cols = [c.lower() for c in ix.columns if c]
-		if col in cols[1:] and str(ix.index_type or "").upper() in USABLE_INDEX_TYPES:
+		cols = covered_columns(ix)
+		if col in cols[1:]:
 			return f"`{ix.name}` ({', '.join(ix.columns)})"
 	return None
 
@@ -366,6 +365,8 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 
 	for recording in recordings:
 		for call in recording.get("calls") or []:
+			if not isinstance(call, dict) or is_error_log_hook_query(call.get("stack")):
+				continue
 			normalized = call.get("normalized_query")
 			if not normalized:
 				continue
@@ -405,6 +406,10 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	timed_out = 0
 	dialect = get_dialect()
 	for normalized, info in unique_queries.items():
+		from optimus.sql_budget import within_budget
+		if not within_budget(info["raw"]):
+			parser_limit_failures["ParseBudgetExceeded"] += 1
+			continue
 		try:
 			# DBOptimizer parses with sql_metadata which doesn't care about
 			# literal values, so passing the normalized query is fine.

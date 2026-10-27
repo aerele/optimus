@@ -95,6 +95,26 @@ class NormalizedPlan:
 	tables: list = field(default_factory=list)   # list[PlanTable]
 	ok: bool = True                              # False → EXPLAIN failed/unsupported; analyzers skip
 	raw: object = None                           # full raw EXPLAIN output for the report
+	reason: str = ""                             # safe, query-free explanation when declined
+
+
+def prepare_explain_query(query: str) -> str:
+	"""Accept one recorded statement, with at most one trailing terminator.
+
+	EXPLAIN only prefixes the first statement in a compound query. Reject every
+	remaining semicolon, including those in strings/comments, rather than guess
+	at quoting rules that vary with the database's configuration. Missing these
+	advisory plans is preferable to replaying a recorded write.
+	"""
+	query = query.strip()
+	if query.endswith(";"):
+		query = query[:-1].rstrip()
+	if not query or ";" in query:
+		raise ValueError(
+			"EXPLAIN skipped: only one SQL statement is supported; semicolons inside "
+			"literals or comments are also declined."
+		)
+	return query
 
 
 @dataclass
@@ -103,7 +123,9 @@ class IndexInfo:
 	columns: list                  # ordered by sequence-in-index
 	unique: bool = False
 	leftmost: str | None = None    # columns[0] if any the col a b-tree accelerates a single-col filter on
-	index_type: str = "BTREE"      # BTREE / FULLTEXT / SPATIAL / HASH
+	eligible: bool = True
+	reason: str = ""
+	usable_prefix: tuple[str, ...] = ()  # Full leading key parts before a prefix/expression part.
 
 
 @dataclass
@@ -174,3 +196,8 @@ class Dialect(ABC):
 		"""True when a plain b-tree index can't be suggested for this type
 		(json / geometry and friends)."""
 		return False
+
+	def is_text_type(self, data_type: str) -> bool:
+		"""True for a column the index advice treats as text: MariaDB indexes it only
+		with a key-length prefix, Postgres stores the whole value in the index."""
+		return self.prefix_required(data_type)

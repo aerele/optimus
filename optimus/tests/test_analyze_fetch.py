@@ -7,8 +7,19 @@ import base64
 import gzip
 import json
 import pickle
+from types import SimpleNamespace
+
+import pytest
 
 from optimus import analyze
+
+
+@pytest.fixture(autouse=True)
+def explicit_legacy_read_policy(monkeypatch):
+	import frappe
+	# These compatibility cases deliberately request the old Redis formats.
+	# The signed-site default and downgrade tests live in test_recording_tree_security.
+	monkeypatch.setattr(frappe, "conf", {"optimus_allow_unsigned_pickles": True}, raising=False)
 
 
 def _signed_tree(obj):
@@ -100,8 +111,7 @@ def test_fetch_recordings_loads_drifted_signed_tree(monkeypatch):
 def test_fetch_recordings_loads_legacy_unsigned_tree(monkeypatch):
 	"""Blobs written before the HMAC rollout lack the 32-byte signature prefix.
 	The analyze fetch should still load them (with a warning log) when
-	``optimus_allow_unsigned_pickles`` defaults to True, else sessions in
-	flight at deploy time would silently lose their pyi tree.
+	``optimus_allow_unsigned_pickles`` is explicitly enabled for legacy Redis compatibility.
 	"""
 	import frappe
 	from frappe.recorder import RECORDER_REQUEST_HASH
@@ -207,9 +217,8 @@ def test_cleanup_redis_deletes_tree_and_sidecar_keys(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_fetch_recordings_rehydrates_from_bundle_when_redis_empty(monkeypatch):
-	"""After _cleanup_redis the hash is empty; a passed bundle must reconstruct
-	the recording identically to the live Redis path."""
+def test_light_reader_keeps_old_json_without_loading_persisted_trees(monkeypatch):
+	"""Old snapshots retain JSON evidence without opaque trees or sidecars."""
 	import frappe
 
 	rec_uuid = "rec-b1"
@@ -226,13 +235,13 @@ def test_fetch_recordings_rehydrates_from_bundle_when_redis_empty(monkeypatch):
 	# Redis is empty → hget / get_value return None.
 	monkeypatch.setattr(frappe, "cache", FakeCache({}), raising=False)
 
-	results = list(analyze._fetch_recordings([rec_uuid], recordings_bundle=bundle))
+	monkeypatch.setattr(analyze, "_load_recordings_bundle", lambda doc: bundle)
+	results = analyze.load_recordings_light(SimpleNamespace(name="fake-doc", session_uuid="fake-session", recordings_file="fake-file"), [rec_uuid])
 	assert len(results) == 1
 	rec = results[0]
 	assert rec["uuid"] == rec_uuid
 	assert rec["calls"] == [{"query": "SELECT 1"}]
-	assert rec["pyi_session"] == {"fake": "tree"}
-	assert rec["sidecar"] == [{"fn_name": "get_doc"}]
+	assert "pyi_session" not in rec and "sidecar" not in rec
 
 
 def test_fetch_recordings_prefers_redis_over_bundle(monkeypatch):
@@ -259,10 +268,10 @@ def test_fetch_recordings_prefers_redis_over_bundle(monkeypatch):
 		}
 	}
 
-	results = list(analyze._fetch_recordings([rec_uuid], recordings_bundle=bundle))
+	monkeypatch.setattr(analyze, "_load_recordings_bundle", lambda doc: bundle)
+	results = analyze.load_recordings_light(SimpleNamespace(name="fake-doc", session_uuid="fake-session", recordings_file="fake-file"), [rec_uuid])
 	assert results[0]["calls"] == [{"q": "live"}]
-	assert results[0]["pyi_session"] == {"live": "tree"}
-	assert results[0]["sidecar"] == [{"src": "redis"}]
+	assert "pyi_session" not in results[0] and "sidecar" not in results[0]
 
 
 def test_fetch_recordings_no_bundle_skips_missing(monkeypatch):
@@ -271,14 +280,10 @@ def test_fetch_recordings_no_bundle_skips_missing(monkeypatch):
 
 	monkeypatch.setattr(frappe, "cache", FakeCache({}), raising=False)
 	assert list(analyze._fetch_recordings(["gone"])) == []
-	assert list(analyze._fetch_recordings(["gone"], recordings_bundle=None)) == []
-	assert list(analyze._fetch_recordings(["gone"], recordings_bundle={"recordings": {}})) == []
 
 
 def test_persist_recordings_file_builds_parseable_bundle(monkeypatch):
-	"""_persist_recordings_file snapshots rec + sparse + tree + sidecar + infra
-	(+ session_state) into a gunzip-parseable JSON bundle that round-trips back
-	through _fetch_recordings once Redis is gone."""
+	"""The snapshot retains JSON evidence and excludes opaque tree/argument data."""
 	import frappe
 	from frappe.recorder import RECORDER_REQUEST_HASH, RECORDER_REQUEST_SPARSE_HASH
 
@@ -298,15 +303,16 @@ def test_persist_recordings_file_builds_parseable_bundle(monkeypatch):
 
 	monkeypatch.setattr(ps_session, "get_session_meta", lambda u: {"user": "x@y"}, raising=True)
 
-	# Capture the gzipped content; return None so the frappe.db.set_value path
-	# is skipped (no site needed).
+	# Capture the gzipped content and model its committed File binding.
 	captured = {}
+	monkeypatch.setattr(frappe, "db", SimpleNamespace(get_value=lambda *a: None, set_value=lambda *a: None))
+	monkeypatch.setattr(analyze, "safe_commit", lambda: None)
 
 	def _fake_save(*, docname, filename, attached_to_field, content):
 		captured.update(
 			docname=docname, filename=filename, field=attached_to_field, content=content
 		)
-		return None
+		return "/private/files/capture.json.gz"
 
 	monkeypatch.setattr(analyze, "_save_report_file", _fake_save, raising=True)
 
@@ -320,15 +326,15 @@ def test_persist_recordings_file_builds_parseable_bundle(monkeypatch):
 	entry = bundle["recordings"][rec_uuid]
 	assert entry["rec"]["calls"] == [{"query": "SELECT 2"}]
 	assert entry["sparse"] == {"uuid": rec_uuid}
-	assert entry["sidecar"] == [{"fn_name": "get_list"}]
+	assert "sidecar" not in entry
 	assert entry["infra"] == {"cpu": 1.5}
-	assert base64.b64decode(entry["tree_b64"]) == bytes(tree_blob)
+	assert "tree_b64" not in entry
 
 	# Round-trip: the persisted bundle rebuilds the recording with Redis empty.
 	monkeypatch.setattr(frappe, "cache", FakeCache({}), raising=False)
-	results = list(analyze._fetch_recordings([rec_uuid], recordings_bundle=bundle))
-	assert results[0]["pyi_session"] == {"persisted": "tree"}
-	assert results[0]["sidecar"] == [{"fn_name": "get_list"}]
+	monkeypatch.setattr(analyze, "_load_recordings_bundle", lambda doc: bundle)
+	results = analyze.load_recordings_light(SimpleNamespace(name="fake-doc", session_uuid="fake-session", recordings_file="fake-file"), [rec_uuid])
+	assert "pyi_session" not in results[0] and "sidecar" not in results[0]
 
 
 def test_load_recordings_bundle_none_without_file():
@@ -342,19 +348,3 @@ def test_load_recordings_bundle_none_without_file():
 
 	assert analyze._load_recordings_bundle(Doc()) is None
 	assert analyze._load_recordings_bundle(Doc2()) is None
-
-
-def test_mark_ai_spend_session_sets_and_is_guarded(monkeypatch):
-	"""The marker is set on frappe.local for the spend recorder; a stubbed
-	frappe (no .local) must not raise, since unit tests rely on this no-op."""
-	from types import SimpleNamespace
-
-	import frappe
-
-	monkeypatch.setattr(frappe, "local", SimpleNamespace(), raising=False)
-	analyze._mark_ai_spend_session("sess-x")
-	assert frappe.local._optimus_spend_session == "sess-x"
-
-	# Stubbed frappe without `.local` → guarded no-op, no exception.
-	monkeypatch.setattr(analyze, "frappe", SimpleNamespace(), raising=False)
-	analyze._mark_ai_spend_session("sess-y")

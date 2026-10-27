@@ -8,12 +8,15 @@ from __future__ import annotations
 import re
 from contextlib import contextmanager
 
+from optimus import safe_call
+from optimus.analyzers.base import TAB_TABLE_RE
 from optimus.dbdialect.base import (
 	Dialect,
 	IndexInfo,
 	InfraSnapshot,
 	NormalizedPlan,
 	PlanTable,
+	prepare_explain_query,
 	to_float,
 	to_int,
 	to_int_or_none,
@@ -31,8 +34,7 @@ _TEXT_INDEX_PREFIX_LENGTH = 255  # index_suggestions.TEXT_INDEX_PREFIX_LENGTH
 
 # MariaDB can't parameterise an identifier in ``SHOW INDEX FROM ?``: the table
 # name is interpolated, so it must pass this whitelist first (index_suggestions
-# ._SAFE_TAB_TABLE_RE / _SAFE_INFOSCHEMA_RE / _is_safe_table_name).
-_SAFE_TAB_TABLE_RE = re.compile(r"^tab[A-Za-z0-9 _\-]+$")
+# .TAB_TABLE_RE / _SAFE_INFOSCHEMA_RE / _is_safe_table_name).
 _SAFE_INFOSCHEMA_RE = re.compile(r"^information_schema\.[A-Za-z0-9_]+$")
 
 
@@ -41,7 +43,7 @@ def _is_safe_table_name(name) -> bool:
 		return False
 	if any(c in name for c in ("`", "'", '"', ";", "\\", "\n", "\r", "\x00")):
 		return False
-	return bool(_SAFE_TAB_TABLE_RE.match(name) or _SAFE_INFOSCHEMA_RE.match(name))
+	return bool(TAB_TABLE_RE.fullmatch(name) or _SAFE_INFOSCHEMA_RE.match(name))
 
 
 class MariaDBDialect(Dialect):
@@ -83,6 +85,12 @@ class MariaDBDialect(Dialect):
 		import frappe
 
 		try:
+			query = prepare_explain_query(query)
+		except ValueError as exc:
+			return NormalizedPlan(ok=False, reason=str(exc))
+		try:
+			# Recorded SQL, guarded above against compound statements; EXPLAIN cannot bind SQL as a value.
+			# nosemgrep: frappe-sql-format-injection
 			rows = frappe.db.sql(f"EXPLAIN {query}", as_dict=True) or []
 		except Exception:
 			return NormalizedPlan(ok=False, tables=[], raw=[])
@@ -108,14 +116,18 @@ class MariaDBDialect(Dialect):
 	# -- Index introspection --------------------------------------------
 
 	def existing_indexes(self, table: str) -> list:
-		"""``SHOW INDEX FROM `table`` → ``[IndexInfo(...)]``. Empty on any error or unsafe name."""
+		"""``SHOW INDEX FROM `table`` → ``[IndexInfo(...)]``. Empty on an ordinary error or an
+		unsafe name; an RQ job timeout is raised again for the caller (a report render or an
+		export lets it stop the job; analyze's analyzer loop catches every exception)."""
 		if not _is_safe_table_name(table):
 			return []
 		import frappe
 
 		try:
 			rows = frappe.db.sql(f"SHOW INDEX FROM `{table}`", as_dict=True) or []
-		except Exception:
+		except Exception as exc:
+			if isinstance(exc, safe_call.job_timeout_types()):
+				raise
 			return []
 
 		by_name: dict[str, dict] = {}
@@ -124,35 +136,47 @@ class MariaDBDialect(Dialect):
 			if not key_name:
 				continue
 			entry = by_name.setdefault(
-				key_name,
-				{
-					"_cols": [],
-					"unique": not r.get("Non_unique"),
-					"type": str(r.get("Index_type") or "BTREE").upper(),
-				},
+				key_name, {"_cols": [], "unique": not r.get("Non_unique"), "usable": True}
 			)
+			# Every key part must be an ordinary, full-column, enabled b-tree.
+			# Missing visibility/type metadata is not proof that an index is usable.
+			usable = (
+				str(r.get("Index_type", "")).upper() == "BTREE"
+				and str(r.get("Ignored", "")).upper() == "NO"
+				and "Sub_part" in r and r["Sub_part"] is None
+				and bool(r.get("Column_name") or r.get("column_name"))
+			)
+			entry["usable"] &= usable
 			try:
 				seq = int(r.get("Seq_in_index") or r.get("seq_in_index") or 0)
 			except (TypeError, ValueError):
 				seq = 0
-			entry["_cols"].append((seq, r.get("Column_name") or r.get("column_name")))
+			entry["_cols"].append((seq, r.get("Column_name") or r.get("column_name"), usable))
 
 		out: list = []
 		for key_name, e in by_name.items():
-			cols = [c for _seq, c in sorted(e["_cols"]) if c]
+			parts = sorted(e["_cols"], key=lambda part: part[0])
+			cols = [c for _seq, c, _usable in parts if c]
+			prefix = []
+			for seq, col, usable in parts:
+				if not usable or seq != len(prefix) + 1:
+					break
+				prefix.append(col)
 			out.append(
 				IndexInfo(
 					name=key_name,
 					columns=cols,
 					unique=bool(e["unique"]),
-					leftmost=(cols[0] if cols else None),
-					index_type=e["type"],
+					leftmost=(prefix[0] if prefix else None),
+					eligible=e["usable"], reason="" if e["usable"] else "not_full_btree",
+					usable_prefix=tuple(prefix),
 				)
 			)
 		return out
 
 	def column_types(self, table: str) -> dict:
-		"""``{column: data_type_lower}`` for the table's columns."""
+		"""``{column: data_type_lower}`` for the table's columns. Empty on an ordinary error; an
+		RQ job timeout is raised again for the caller."""
 		import frappe
 
 		try:
@@ -165,7 +189,9 @@ class MariaDBDialect(Dialect):
 				(table,),
 				as_dict=True,
 			) or []
-		except Exception:
+		except Exception as exc:
+			if isinstance(exc, safe_call.job_timeout_types()):
+				raise
 			return {}
 
 		out: dict = {}

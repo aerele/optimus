@@ -335,7 +335,7 @@ def _install_fake_frappe_db(monkeypatch, indexed_columns_by_table, column_types_
             # seq-1 column of its own single-column index. Real MariaDB always
             # returns Key_name / Non_unique the dialect groups on them.
             return [
-                {"Key_name": f"idx_{c}", "Column_name": c, "Seq_in_index": 1, "Non_unique": 1}
+                {"Key_name": f"idx_{c}", "Column_name": c, "Seq_in_index": 1, "Non_unique": 1, "Index_type": "BTREE", "Ignored": "NO", "Sub_part": None}
                 for c in cols
             ]
 

@@ -6,11 +6,10 @@
 import re
 from dataclasses import dataclass, field
 
-# FULLTEXT / SPATIAL / HASH cannot serve `col = ?`.
-USABLE_INDEX_TYPES = frozenset({"BTREE", ""})
-
 _COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 STRING_RE = re.compile(r"'(?:[^'\\]|\\.|'')*'|\"(?:[^\"\\]|\\.)*\"")
+_BACKTICKED_RE = re.compile(r"`([^`]*)`")
+_TABLE_REF_RE = re.compile(r"\b(?:FROM|JOIN)\s+([\w.]+)", re.IGNORECASE)
 _BETWEEN_RE = re.compile(
 	r"\bBETWEEN\s+(?:[^\s()]+|\w+\([^()]*\))\s+AND\s+(?:[^\s()]+|\w+\([^()]*\))", re.IGNORECASE
 )
@@ -20,7 +19,9 @@ _WHERE_END_RE = re.compile(
 )
 _EQ_RE = re.compile(r"^([\w.]+)\s*(?:=|<=>|IN\b|IS\s+NULL\b)", re.IGNORECASE)
 _PLAIN_RE = re.compile(r"^([\w.]+)\s*(?:[<>!]|BETWEEN\b|NOT\b|LIKE\b|IS\b|REGEXP\b|RLIKE\b)", re.IGNORECASE)
+_LEADING_WILDCARD_RE = re.compile(r"^([\w.]+)\s*(?:NOT\s+)?LIKE\s+'%", re.IGNORECASE)
 _FUNC_LEAF_RE = re.compile(r"^\w+\s*\(")
+_SUBQUERY_RE = re.compile(r"\bSELECT\b", re.IGNORECASE)
 _IDENT_RE = re.compile(r"(?<![\w.])([A-Za-z_]\w*(?:\.\w+)?)(?!\s*\(|\w)")
 _NOT_COLUMNS = frozenset({"null", "true", "false", "as", "and", "or", "not", "unsigned", "signed", "char"})
 
@@ -33,7 +34,10 @@ class WhereShape:
 	equality: set = field(default_factory=set)
 	plain: set = field(default_factory=set)  # col used bare in any comparison
 	wrapped: set = field(default_factory=set)  # col inside a function call, e.g. DATE(col)
+	scan: set = field(default_factory=set)  # col filtered by LIKE '%...', which an index can't narrow
 	has_or: bool = False
+	# Repeated table or unqualified columns in a join: the columns can't be attributed safely.
+	ambiguous: bool = False
 
 
 def parse_where(sql: str, table: str, aliases: dict | None = None) -> WhereShape:
@@ -42,21 +46,24 @@ def parse_where(sql: str, table: str, aliases: dict | None = None) -> WhereShape
 	text = _where_text(_clean(sql or ""))
 	if not text:
 		return shape
-	aliases = {k.lower(): _bare_table(v) for k, v in (aliases or {}).items()}
+	aliases = {_bare_table(k): _bare_table(v) for k, v in (aliases or {}).items()}
 	own = _bare_table(table)
+	targets = [_bare_table(t) for t in _TABLE_REF_RE.findall(_clean(sql))]
+	shape.ambiguous = targets.count(own) > 1
+	multi = len(set(targets)) > 1
 	for leaf, under_or in _leaves(text, False):
 		shape.has_or = shape.has_or or under_or
-		_classify_leaf(leaf, under_or, own, aliases, shape)
+		_classify_leaf(leaf, under_or, own, aliases, shape, multi)
 	return shape
 
 
 def is_served(column: str, shape: WhereShape, indexes: list) -> bool:
 	"""True if a b-tree index serves ``column``: it leads, or every earlier column is an equality."""
 	col = (column or "").lower()
+	if shape.ambiguous or (col in shape.scan and col not in shape.equality):
+		return False
 	for ix in indexes:
-		if str(getattr(ix, "index_type", "BTREE") or "").upper() not in USABLE_INDEX_TYPES:
-			continue
-		cols = [c.lower() for c in ix.columns if c]
+		cols = covered_columns(ix)
 		if col not in cols:
 			continue
 		if all(c in shape.equality for c in cols[: cols.index(col)]):
@@ -64,9 +71,20 @@ def is_served(column: str, shape: WhereShape, indexes: list) -> bool:
 	return False
 
 
+def covered_columns(ix) -> list[str]:
+	"""Lowercase key columns a b-tree lookup can use: all of them, or the usable leading part."""
+	cols = ix.columns if getattr(ix, "eligible", True) else getattr(ix, "usable_prefix", ())
+	return [c.lower() for c in cols if c]
+
+
+def _mask_string(match: re.Match) -> str:
+	return "'%?'" if match.group(0)[1:2] == "%" else "'?'"
+
+
 def _clean(sql: str) -> str:
 	sql = _COMMENT_RE.sub(" ", sql)
-	sql = STRING_RE.sub("'?'", sql).replace("`", "")
+	sql = STRING_RE.sub(_mask_string, sql)
+	sql = _BACKTICKED_RE.sub(lambda m: m.group(1).replace(" ", "_"), sql)
 	return re.sub(r"\s+", " ", sql).strip()
 
 
@@ -133,9 +151,10 @@ def _leaves(text: str, under_or: bool) -> list[tuple[str, bool]]:
 	return [(text, under_or)]
 
 
-def _resolve(ref: str, own: str, aliases: dict) -> str | None:
+def _resolve(ref: str, own: str, aliases: dict, shape: WhereShape, multi: bool) -> str | None:
 	"""Column name if ``ref`` belongs to table ``own`` (unqualified refs do), else None."""
 	if "." not in ref:
+		shape.ambiguous = shape.ambiguous or multi
 		return ref.lower()
 	qualifier, col = ref.lower().rsplit(".", 1)
 	if _bare_table(qualifier) == own or aliases.get(qualifier) == own:
@@ -144,22 +163,40 @@ def _resolve(ref: str, own: str, aliases: dict) -> str | None:
 
 
 def _bare_table(name: str) -> str:
-	return (name or "").strip().strip("`").lower()
+	return (name or "").strip().strip("`").replace(" ", "_").lower()
 
 
-def _classify_leaf(leaf: str, under_or: bool, own: str, aliases: dict, shape: WhereShape) -> None:
+def _wrapped_refs(leaf: str) -> list[str]:
+	"""Identifiers inside the function call that opens ``leaf``; its right-hand side is not scanned."""
+	depth = 0
+	for i, ch in enumerate(leaf):
+		depth += (ch == "(") - (ch == ")")
+		if depth == 0 and ch == ")":
+			return _IDENT_RE.findall(leaf[: i + 1])
+	return []
+
+
+def _classify_leaf(
+	leaf: str, under_or: bool, own: str, aliases: dict, shape: WhereShape, multi: bool = False
+) -> None:
 	if _FUNC_LEAF_RE.match(leaf):
-		for ref in _IDENT_RE.findall(leaf):
-			col = _resolve(ref, own, aliases)
+		if _SUBQUERY_RE.search(leaf):
+			return
+		for ref in _wrapped_refs(leaf):
+			col = _resolve(ref, own, aliases, shape, multi)
 			if col and col not in _NOT_COLUMNS:
 				shape.wrapped.add(col)
 		return
-	if m := _EQ_RE.match(leaf):
-		col = _resolve(m.group(1), own, aliases)
+	if m := _LEADING_WILDCARD_RE.match(leaf):
+		if col := _resolve(m.group(1), own, aliases, shape, multi):
+			shape.scan.add(col)
+			shape.plain.add(col)
+	elif m := _EQ_RE.match(leaf):
+		col = _resolve(m.group(1), own, aliases, shape, multi)
 		if col:
 			shape.plain.add(col)
 			if not under_or:
 				shape.equality.add(col)
 	elif m := _PLAIN_RE.match(leaf):
-		if col := _resolve(m.group(1), own, aliases):
+		if col := _resolve(m.group(1), own, aliases, shape, multi):
 			shape.plain.add(col)

@@ -52,6 +52,8 @@ def collect_writes(recordings: list[dict]) -> dict[str, TableWrites]:
 	for rec in recordings:
 		flow = str(rec.get("cmd") or rec.get("path") or rec.get("uuid") or "unknown")[:80]
 		for call in rec.get("calls") or []:
+			if not isinstance(call, dict):
+				continue
 			sql = call.get("query") or call.get("normalized_query") or ""
 			_record_statement(sql, flow, out)
 	return dict(out)
