@@ -14,6 +14,7 @@ JS_DIR = os.path.join(APP_DIR, "public", "js")
 PILL_JS = os.path.join(JS_DIR, "optimus_pill_state.js")
 WIDGET_JS = os.path.join(JS_DIR, "floating_widget.js")
 HARNESS = os.path.join(APP_DIR, "tests", "js", "pill_state_harness.js")
+WIDGET_HARNESS = os.path.join(APP_DIR, "tests", "js", "widget_poll_harness.js")
 
 
 def _read(path):
@@ -36,6 +37,12 @@ def test_pill_state_js_syntax():
 def test_pill_state_logic_in_node():
 	_need_node()
 	result = subprocess.run(["node", HARNESS], capture_output=True, text=True, timeout=60)
+	assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_widget_polling_and_resync_in_node():
+	_need_node()
+	result = subprocess.run(["node", WIDGET_HARNESS], capture_output=True, text=True, timeout=60)
 	assert result.returncode == 0, result.stdout + result.stderr
 
 

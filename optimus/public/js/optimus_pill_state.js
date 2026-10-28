@@ -104,7 +104,7 @@
 			ui: { display: "ready", label: terminalLabel(kind, phase2), elapsed: "click to view" },
 			alert: already ? null : {
 				message: failed
-					? (phase2 ? "Phase 2 analyze failed: " + (data.error || "unknown") : "Profiler analyze failed check Error Log")
+					? (phase2 ? "Phase 2 analyze failed" + (data.error ? ": " + data.error : ", open the session for details") : "Profiler analyze failed check Error Log")
 					: (phase2 ? "Phase 2 line-profile report ready" : "Profiler report ready"),
 				indicator: failed ? "red" : "blue",
 			},
@@ -165,7 +165,7 @@
 			return serverAnalyzing(state, srv);
 		}
 		if (srv.phase === "ready" || srv.phase === "failed") {
-			const data = { session_uuid: srv.session_uuid, docname: srv.docname, run_uuid: srv.run_uuid, error: "see session" };
+			const data = { session_uuid: srv.session_uuid, docname: srv.docname, run_uuid: srv.run_uuid };
 			return finish(state, srv.phase, srv.scope === "phase2", data, now);
 		}
 		return serverIdle(state);
@@ -235,6 +235,6 @@
 		POLL: POLL, STALE_EVENT_WINDOW_MS: STALE_EVENT_WINDOW_MS, EVENT_NAMES: Object.keys(EVENTS),
 		initialState: initialState, nextDelay: nextDelay, pollExpired: pollExpired, pollAction: pollAction,
 		isTransient: isTransient, reduceEvent: reduceEvent, reduceServer: reduceServer,
-		reduceHardStop: reduceHardStop,
+		reduceHardStop: reduceHardStop, resetState: resetState,
 	};
 });

@@ -10,10 +10,9 @@
 //   recording →  click → stop API → stopping → analyzing → ready
 //   ready     →  click → navigate to the Optimus Session detail view
 //
-// Polls /api/method/optimus.api.status every 5 seconds to reflect
-// server-side state changes (auto-stop after 10 minutes, analyze completion).
-// Also subscribes to the `optimus_session_ready` realtime event so the user
-// is notified the moment their session report is ready.
+// State is driven by realtime events, plus optimus.api.pill_state on load, on
+// tab focus, on socket reconnect and a backed-off fallback poll while a session
+// is stopping or analyzing.
 
 (function () {
 	"use strict";
@@ -59,14 +58,8 @@
 	}
 	_diag("[optimus] proceeding for user:", frappe.session.user);
 
-	// v0.5.1: HTTP polling of optimus.api.status is GONE. The
-	// widget now drives its state from realtime events pushed by the
-	// server (optimus_session_stopping / analyzing / ready / failed)
-	// plus a one-shot rehydrate fetch on page load and on tab visibility
-	// change. This eliminates the continuous /api/method/optimus
-	// .api.status traffic that was showing up as the top-QPS endpoint
-	// on busy sites. POLL_INTERVAL_MS is kept as a legacy constant (some
-	// external integrations may reference it) but no timer uses it.
+	// There is no fixed-interval poll; the fallback poll below only runs while
+	// analyzing. POLL_INTERVAL_MS is kept as a legacy constant.
 	const POLL_INTERVAL_MS = 0;
 
 	let widget = null;
@@ -81,6 +74,10 @@
 	let fallbackTimer = null;
 	let pollStartedAt = 0;
 	let pollAttempt = 0;
+	// True from entering a waiting state until it ends; replies must not restart the clock.
+	let pollActive = false;
+	// Bumped by user actions so an older in-flight resync reply is dropped.
+	let resyncEpoch = 0;
 
 	function init() {
 		// v0.5.2 round 4: hide widget entirely when Optimus Settings ▸
@@ -255,6 +252,7 @@
 		widget.classList.add(`fp-state-${display}`);
 		widget.querySelector(".fp-label").textContent = label;
 		widget.querySelector(".fp-elapsed").textContent = elapsed || "";
+		if (display !== "recording") stopElapsedTimer();
 		syncPoll(display);
 	}
 
@@ -272,10 +270,12 @@
 	}
 
 	// Fallback poll for missed realtime events, with backoff and a hard stop.
+	// The clock starts when a waiting state begins, not on every reply.
 	function syncPoll(display) {
 		if (!Pill.isTransient(display)) {
 			stopPoll();
-		} else if (!fallbackTimer) {
+		} else if (!pollActive) {
+			pollActive = true;
 			pollStartedAt = Date.now();
 			pollAttempt = 0;
 			schedulePoll();
@@ -289,12 +289,16 @@
 	function stopPoll() {
 		if (fallbackTimer) clearTimeout(fallbackTimer);
 		fallbackTimer = null;
+		pollActive = false;
 	}
 
 	function pollTick() {
 		fallbackTimer = null;
 		const action = Pill.pollAction(currentState.display, Date.now() - pollStartedAt, document.hidden);
-		if (action === "stop") return;
+		if (action === "stop") {
+			stopPoll();
+			return;
+		}
 		if (action === "wait") {
 			// No request while hidden; the visibility handler resyncs.
 			schedulePoll();
@@ -313,13 +317,21 @@
 
 	function refreshStatus(done) {
 		// Resync the pill from api.pill_state.
+		const epoch = resyncEpoch;
 		frappe.call({
 			method: "optimus.api.pill_state",
+			// Background resyncs must not pop an error dialog.
+			silent: true,
 			args: {
 				session_uuid: currentState.session_uuid || undefined,
 				run_uuid: currentState.run_uuid || undefined,
 			},
 			callback: (r) => {
+				// A click since the request was sent makes the reply obsolete.
+				if (epoch !== resyncEpoch) {
+					if (done) done();
+					return;
+				}
 				const prev = currentState.display;
 				applyResult(Pill.reduceServer(currentState, (r && r.message) || {}, Date.now()));
 				if (currentState.display === "recording" && prev !== "recording") {
@@ -352,10 +364,8 @@
 				frappe.set_route("Form", "Optimus Session", currentState.docname);
 			}
 			// Drop the finished session so a resync cannot revive the pill.
-			currentState.display = "inactive";
-			currentState.session_uuid = null;
-			currentState.run_uuid = null;
-			currentState.phase2 = false;
+			resyncEpoch += 1;
+			currentState = Pill.resetState(currentState);
 			if (widget) widget.removeAttribute("data-session-uuid");
 			setDisplay("inactive", "Profiler", "");
 		}
@@ -381,9 +391,10 @@
 				});
 			},
 			error: () => {
-				// Server rejected: surface the error and revert state.
+				// The stop may have landed server-side; resync after reverting.
 				currentState.display = "recording";
 				setDisplay("recording", "Phase 2 recording…", "click form to stop");
+				refreshStatus();
 			},
 		});
 	}
@@ -519,6 +530,7 @@
 					callback: (r) => {
 						const data = (r && r.message) || {};
 						if (data.session_uuid) {
+							resyncEpoch += 1;
 							currentState.active = true;
 							currentState.session_uuid = data.session_uuid;
 							currentState.docname = data.docname;
@@ -579,7 +591,7 @@
 	function confirmAndStop() {
 		// No confirmation modal keep it one-click. Just fire stop().
 		// Update currentState.display BEFORE the API call so refreshStatus()'s
-		// transient-state guard (line ~241) kicks in otherwise the 5s poll
+		// transient-state guard in the reducers kicks in; otherwise a resync
 		// can race the stop API and flip the widget back to "Recording".
 		//
 		// v0.5.0: also flush any buffered frontend metrics before the stop

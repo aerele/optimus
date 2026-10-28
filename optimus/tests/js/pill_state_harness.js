@@ -117,6 +117,32 @@ test("poll backoff grows, caps, and hard stop is bounded", () => {
 	assert.ok(n < 60, "too many polls: " + n);
 });
 
+test("pollAction: stop, wait, expire and fetch", () => {
+	const hs = Pill.POLL.hardStopMs;
+	assert.strictEqual(Pill.pollAction("ready", 0, false), "stop");
+	assert.strictEqual(Pill.pollAction("inactive", hs, true), "stop");
+	assert.strictEqual(Pill.pollAction("analyzing", 0, true), "wait");
+	assert.strictEqual(Pill.pollAction("analyzing", hs + 1, true), "wait");
+	assert.strictEqual(Pill.pollAction("analyzing", hs, false), "expire");
+	assert.strictEqual(Pill.pollAction("analyzing", hs - 1, false), "fetch");
+	assert.strictEqual(Pill.pollAction("stopping", 0, false), "fetch");
+	assert.strictEqual(Pill.pollAction("stopping", hs, false), "expire");
+});
+
+test("a resynced phase 2 failure has no placeholder text", () => {
+	const r = Pill.reduceServer(analyzing({ phase2: true }), { phase: "failed", scope: "phase2", session_uuid: "s1", run_uuid: "r1" }, T0);
+	assert.ok(!r.alert.message.includes("see session"));
+	assert.ok(!r.alert.message.includes("undefined"));
+});
+
+test("resetState drops the session but keeps the finished-uuid memory", () => {
+	const done = ev(analyzing(), "optimus_session_ready").state;
+	const r = Pill.resetState(done);
+	assert.strictEqual(r.display, "inactive");
+	assert.strictEqual(r.session_uuid, null);
+	assert.deepStrictEqual(r.terminal, done.terminal);
+});
+
 test("reducers never mutate their input", () => {
 	const s = analyzing();
 	const frozen = JSON.stringify(s);
