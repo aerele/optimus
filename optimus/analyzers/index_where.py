@@ -1,28 +1,39 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""WHERE-clause parsing and existing-index coverage checks. Pure: no Frappe, no DB."""
+"""WHERE-clause parsing and existing-index coverage checks. Pure: no Frappe, no DB.
+
+Not shared with ``renderer.where_scan``: that module answers "which columns does this one query filter,
+for a recipe", while this one answers "does an existing index serve this column", so it also needs
+per-table attribution through aliases, function-wrapped and negated columns, and the OR-aware
+equality set (``is_served`` only trusts equalities outside an OR). Where they overlap, ``where_scan``
+is the more lenient of the two, so a column can be suggested by one and judged served by the other.
+"""
 
 import re
 from dataclasses import dataclass, field
 
-_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
-STRING_RE = re.compile(r"'(?:[^'\\]|\\.|'')*'|\"(?:[^\"\\]|\\.)*\"")
+_QUOTE_RE = re.compile(r"['\"]")
+_SQUOTED_RE = re.compile(r"'(?:[^'\\]|\\.|'')*'")
+_DQUOTED_RE = re.compile(r'"(?:[^"\\]|\\.)*"')
 _BACKTICKED_RE = re.compile(r"`([^`]*)`")
 _TABLE_REF_RE = re.compile(r"\b(?:FROM|JOIN)\s+([\w.]+)", re.IGNORECASE)
 _BETWEEN_RE = re.compile(
 	r"\bBETWEEN\s+(?:[^\s()]+|\w+\([^()]*\))\s+AND\s+(?:[^\s()]+|\w+\([^()]*\))", re.IGNORECASE
 )
+# Deeper WHERE nesting is not parsed (it would recurse and rescan quadratically); the shape is ambiguous.
+MAX_PAREN_DEPTH = 32
+_UNION_RE = re.compile(r"\bUNION\b", re.IGNORECASE)
 _WHERE_RE = re.compile(r"\bWHERE\b", re.IGNORECASE)
 _WHERE_END_RE = re.compile(
 	r"\b(?:GROUP\s+BY|ORDER\s+BY|HAVING|LIMIT|UNION|FOR\s+UPDATE|LOCK\s+IN)\b", re.IGNORECASE
 )
 _EQ_RE = re.compile(r"^([\w.]+)\s*(?:=|<=>|IN\b|IS\s+NULL\b)", re.IGNORECASE)
 _PLAIN_RE = re.compile(r"^([\w.]+)\s*(?:[<>!]|BETWEEN\b|NOT\b|LIKE\b|IS\b|REGEXP\b|RLIKE\b)", re.IGNORECASE)
-_LEADING_WILDCARD_RE = re.compile(r"^([\w.]+)\s*(?:NOT\s+)?LIKE\s+'%", re.IGNORECASE)
+_UNSCANNABLE_LIKE_RE = re.compile(r"^([\w.]+)\s*(?:NOT\s+)?LIKE\s+(?!(?:'\?'|\?|%s)(?:\s|$|\)))", re.IGNORECASE)
 _FUNC_LEAF_RE = re.compile(r"^(?!(?:NOT|EXISTS|ANY|ALL|SOME|IN)\b)\w+\s*\(", re.IGNORECASE)
 _NOT_PREFIX_RE = re.compile(r"^NOT\s*(?=\()|^NOT\s+(?=EXISTS\b)", re.IGNORECASE)
-_WEAK_RE = re.compile(r"^[\w.]+\s*(?:!=|<>|NOT\s+(?:IN|LIKE|BETWEEN|REGEXP|RLIKE)\b|IS\s+NOT\b)", re.IGNORECASE)
+_WEAK_RE = re.compile(r"^[\w.]+\s*(?:!=|<>|NOT\s+(?:IN|LIKE|BETWEEN|REGEXP|RLIKE)\b)", re.IGNORECASE)
 _SUBQUERY_RE = re.compile(r"\bSELECT\b", re.IGNORECASE)
 _IDENT_RE = re.compile(r"(?<![\w.])([A-Za-z_]\w*(?:\.\w+)?)(?!\s*\(|\w)")
 _NOT_COLUMNS = frozenset({"null", "true", "false", "as", "and", "or", "not", "unsigned", "signed", "char"})
@@ -39,7 +50,6 @@ class WhereShape:
 	scan: set = field(default_factory=set)  # col filtered by LIKE '%...', which an index can't narrow
 	weak: set = field(default_factory=set)  # col under !=, NOT IN, NOT LIKE or NOT (...)
 	narrow: set = field(default_factory=set)  # col under a predicate an index can narrow
-	has_or: bool = False
 	# Repeated table or unqualified columns in a join: the columns can't be attributed safely.
 	ambiguous: bool = False
 
@@ -47,16 +57,19 @@ class WhereShape:
 def parse_where(sql: str, table: str, aliases: dict | None = None) -> WhereShape:
 	"""Classify the WHERE columns of ``sql`` that belong to ``table``."""
 	shape = WhereShape()
-	text = _where_text(_clean(sql or ""))
+	cleaned = _clean(sql or "")
+	text = _where_text(cleaned)
 	if not text:
+		return shape
+	if max(_depths(text)) > MAX_PAREN_DEPTH:
+		shape.ambiguous = True
 		return shape
 	aliases = {_bare_table(k): _bare_table(v) for k, v in (aliases or {}).items()}
 	own = _bare_table(table)
-	targets = [_bare_table(t) for t in _TABLE_REF_RE.findall(_clean(sql))]
-	shape.ambiguous = targets.count(own) > 1
+	targets = [_bare_table(t) for t in _TABLE_REF_RE.findall(cleaned)]
+	shape.ambiguous = targets.count(own) > 1 or _find_top(cleaned, _UNION_RE) is not None
 	multi = len(set(targets)) > 1
 	for leaf, under_or in _leaves(text, False):
-		shape.has_or = shape.has_or or under_or
 		_classify_leaf(leaf, under_or, own, aliases, shape, multi)
 	return shape
 
@@ -87,13 +100,52 @@ def covered_columns(ix) -> list[str]:
 	return [c.lower() for c in cols if c]
 
 
-def _mask_string(match: re.Match) -> str:
-	return "'%?'" if match.group(0)[1:2] == "%" else "'?'"
+def mask_strings(sql: str, mask) -> str:
+	"""Replace each quoted literal by ``mask(literal)``; an unterminated one ends the scan (linear)."""
+	parts, i = [], 0
+	while m := _QUOTE_RE.search(sql, i):
+		quoted = (_SQUOTED_RE if m.group() == "'" else _DQUOTED_RE).match(sql, m.start())
+		if not quoted:
+			break
+		parts.append(sql[i : m.start()])
+		parts.append(mask(quoted.group()))
+		i = quoted.end()
+	parts.append(sql[i:])
+	return "".join(parts)
+
+
+def _mask_literal(literal: str) -> str:
+	return "'%?'" if literal[1:2] == "%" else "'?'"
+
+
+def strip_leading_comments(sql: str) -> str:
+	"""``sql`` without leading whitespace and ``/* ... */`` comments, in one linear pass."""
+	i, n = 0, len(sql)
+	while True:
+		while i < n and sql[i].isspace():
+			i += 1
+		if not sql.startswith("/*", i):
+			return sql[i:]
+		end = sql.find("*/", i + 2)
+		if end < 0:
+			return sql[i:]
+		i = end + 2
+
+
+def _blank_comments(sql: str) -> str:
+	"""Replace every closed ``/* ... */`` comment with a space; linear, unlike a lazy regex."""
+	parts, i = [], 0
+	while (start := sql.find("/*", i)) >= 0 and (end := sql.find("*/", start + 2)) >= 0:
+		parts.append(sql[i:start])
+		parts.append(" ")
+		i = end + 2
+	parts.append(sql[i:])
+	return "".join(parts)
 
 
 def _clean(sql: str) -> str:
-	sql = _COMMENT_RE.sub(" ", sql)
-	sql = STRING_RE.sub(_mask_string, sql)
+	sql = _blank_comments(sql)
+	sql = mask_strings(sql, _mask_literal)
 	sql = _BACKTICKED_RE.sub(lambda m: m.group(1).replace(" ", "_"), sql)
 	return re.sub(r"\s+", " ", sql).strip()
 
@@ -200,7 +252,7 @@ def _classify_leaf(
 			if col and col not in _NOT_COLUMNS:
 				shape.wrapped.add(col)
 		return
-	if m := _LEADING_WILDCARD_RE.match(leaf):
+	if m := _UNSCANNABLE_LIKE_RE.match(leaf):
 		if col := _resolve(m.group(1), own, aliases, shape, multi):
 			shape.scan.add(col)
 			shape.plain.add(col)

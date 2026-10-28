@@ -8,6 +8,23 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.99] - 2026-10-28
+
+### Fixed
+
+- Missing-index suggestions no longer propose an index that an existing index already serves for the same query. A composite index such as (a, b) counts for a query that filters `a` and `b` by equality, a FULLTEXT index no longer hides a real missing index, and a column used only inside a function (such as `DATE(col)` or Frappe's `ifnull(col, '')`) gets no suggestion because a plain index cannot serve it. The warning for that case lists the real options: a range rewrite, a functional index, or avoiding the code path that wraps the column.
+- `NOT (col = ...)`, `NOT EXISTS (...)`, `ANY`, `ALL` and `IN (...)` are no longer mistaken for function calls. `LIKE` with anything but a plain prefix literal, such as `LIKE CONCAT('%', x)`, counts as a scan, `IS NOT NULL` is not treated as a weak negation, and a top-level `UNION` is treated as ambiguous so a real suggestion is kept.
+- When a column leads an existing index but the only filter on it is `!=`, `NOT IN` or `NOT LIKE`, the warning says the index exists but may not be able to serve that filter.
+- Many leading `/* ... */` comments, deep parenthesis nesting or unterminated quotes in a recorded statement can no longer stall the analyze worker; the statement and write parsers now run in linear time.
+- The savings floor and the example queries are computed from the queries that still need the index, the first known column cardinality is kept (numeric strings and Decimal values count), and a non-string query or a parser error fails open instead of dropping every index finding. An RQ job timeout is no longer swallowed while reading table aliases.
+
+### Changed
+
+- Before suggesting an index, Optimus checks the other queries in the same session. It drops the suggestion when the column is updated, or the table is written, far more often than the index would help reads (`HOT_COLUMN_MIN_UPDATES` 5, `WRITE_HEAVY_MIN_WRITES` 50, ratio 10), and says why in the warning. Otherwise it adds a "Before adding, check:" note with the write counts and the flows that write, a table with at least `CAUTION_MIN_WRITES` (10) writes, a column with at most `LOW_CARDINALITY_MAX` (10) distinct values, and an existing composite index that already holds the column. The finding's JSON gains `cautions` and `write_impact`.
+- Write detection also reads aliased UPDATE statements and double-quoted table names; `UPDATE ... JOIN` is still not counted.
+
+---
+
 ## [0.12.92] - 2026-10-27
 
 ### Internal

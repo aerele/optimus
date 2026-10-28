@@ -7,7 +7,9 @@ Runs frappe's recorder ``_optimize_query`` (DBOptimizer heuristic) over the
 union of unique normalized queries, then dedupes and aggregates by
 (table, column) so each missing index is reported once with the cumulative
 time it would save and the queries that benefit. This is the per-session view
-the per-request optimizer doesn't provide.
+the per-request optimizer doesn't provide. A suggestion is dropped when an existing
+index already serves the query (``index_where``) or when the session's writes outweigh
+the read gain (``index_harm``).
 """
 
 import json
@@ -24,8 +26,15 @@ from optimus.analyzers.base import (
 	is_frappe_meta_table,
 )
 from optimus.analyzers.index_harm import assess_harm, collect_writes
-from optimus.analyzers.index_where import covered_columns, is_served, is_weak_only, parse_where
+from optimus.analyzers.index_where import (
+	covered_columns,
+	is_served,
+	is_weak_only,
+	parse_where,
+	strip_leading_comments,
+)
 from optimus.dbdialect import get_dialect
+from optimus.safe_call import job_timeout_types
 
 
 def _scrub_literals(text: str) -> str:
@@ -115,13 +124,9 @@ _PARSER_LIMITATION_EXCEPTIONS = (ValueError, TypeError)
 # and connection-state statements, noise the user couldn't act on.
 _OPTIMIZABLE_QUERY_TYPES = frozenset({"SELECT"})
 
-# Leading-keyword regex tolerant of whitespace and C-style /* ... */
-# comments at the start of the statement (Frappe prepends comments in
-# some paths). DOTALL handles multi-line comments.
-_SQL_LEADING_KEYWORD_RE = re.compile(
-	r"^\s*(?:/\*.*?\*/\s*)*(\w+)",
-	re.IGNORECASE | re.DOTALL,
-)
+# Leading keyword after whitespace and C-style /* ... */ comments, which are
+# stripped linearly (a lazy regex backtracks exponentially on many comments).
+_SQL_LEADING_KEYWORD_RE = re.compile(r"^(\w+)")
 
 
 def _get_query_type(sql: str) -> str:
@@ -129,7 +134,7 @@ def _get_query_type(sql: str) -> str:
 	the statement doesn't start with a parseable keyword."""
 	if not sql:
 		return ""
-	m = _SQL_LEADING_KEYWORD_RE.match(sql)
+	m = _SQL_LEADING_KEYWORD_RE.match(strip_leading_comments(sql))
 	if not m:
 		return ""
 	return m.group(1).upper()
@@ -207,8 +212,17 @@ def _query_aliases(sql: str) -> dict:
 		from sql_metadata import Parser
 
 		return dict(Parser(sql).tables_aliases)
+	except job_timeout_types():
+		raise
 	except Exception:
 		return {}
+
+
+def _entry_aliases(entry: dict) -> dict:
+	"""``_query_aliases`` of an entry's raw query, parsed once."""
+	if "aliases" not in entry:
+		entry["aliases"] = _query_aliases(entry["raw"])
+	return entry["aliases"]
 
 
 def _partition_queries(
@@ -217,13 +231,20 @@ def _partition_queries(
 	"""Split queries into ``(kept, served, function_wrapped, weakly_served)``; the last is a subset of served."""
 	kept, served, wrapped, weak = [], [], [], []
 	for entry in entries:
-		shape = parse_where(entry["raw"], table, _query_aliases(entry["raw"]))
-		if is_served(column, shape, indexes):
+		try:
+			shape = parse_where(entry["raw"], table, _entry_aliases(entry))
+		except job_timeout_types():
+			raise
+		except Exception:
+			kept.append(entry)
+			continue
+		col = column.lower()
+		if col in shape.wrapped and col not in shape.plain and not shape.ambiguous:
+			wrapped.append(entry)
+		elif is_served(column, shape, indexes):
 			served.append(entry)
 			if is_weak_only(column, shape):
 				weak.append(entry)
-		elif column.lower() in shape.wrapped and column.lower() not in shape.plain:
-			wrapped.append(entry)
 		else:
 			kept.append(entry)
 	return kept, served, wrapped, weak
@@ -384,7 +405,9 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 			if call.get("past_enrich_cap"):
 				continue
 
-			raw = call.get("query") or normalized
+			raw = call.get("query")
+			if not isinstance(raw, str) or not raw:
+				raw = str(normalized)
 			qtype = _get_query_type(raw) or _get_query_type(normalized)
 			if qtype not in _OPTIMIZABLE_QUERY_TYPES:
 				skipped_by_type += 1
@@ -392,7 +415,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 
 			entry = unique_queries.setdefault(
 				normalized,
-				{"duration": 0.0, "count": 0, "raw": raw},
+				{"duration": 0.0, "count": 0, "raw": raw, "normalized": normalized},
 			)
 			entry["duration"] += call.get("duration", 0)
 			entry["count"] += 1
@@ -403,7 +426,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	# customer reads "no index suggestions" as "no missing indexes"
 	# when the real answer might be "we couldn't analyze your queries".
 	suggestion_buckets: dict[tuple, dict] = defaultdict(
-		lambda: {"duration": 0.0, "count": 0, "queries": [], "entries": [], "cardinality": None}
+		lambda: {"duration": 0.0, "count": 0, "entries": [], "cardinality": None}
 	)
 	parser_limit_failures: Counter = Counter()
 	real_failures: Counter = Counter()
@@ -465,9 +488,8 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 		bucket["duration"] += info["duration"]
 		bucket["count"] += info["count"]
 		bucket["entries"].append(info)
-		bucket["cardinality"] = getattr(index, "cardinality", bucket["cardinality"])
-		if len(bucket["queries"]) < MAX_EXAMPLE_QUERIES:
-			bucket["queries"].append(normalized[:300])
+		if bucket["cardinality"] is None:
+			bucket["cardinality"] = getattr(index, "cardinality", None)
 
 	# v0.5.1: verify each suggested (table, column) against
 	# information_schema before emitting a finding. Pre-v0.5.1 the
@@ -492,11 +514,11 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	never_suggest_columns: list[str] = []
 	unindexable_reasons: list[str] = []
 	index_cache: dict[str, list] = {}
-	writes = collect_writes(recordings)
+	writes = None
 	covered_targets: list[str] = []
 	wrapped_targets: list[str] = []
 	weak_targets: list[str] = []
-	harm_targets: list[str] = []
+	harm_reasons: dict[str, str] = {}
 
 	findings = []
 	for (table, column), bucket in suggestion_buckets.items():
@@ -551,19 +573,24 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 			else:
 				covered_targets.append(f"{table}.{column}")
 			continue
-		bucket["count"] = sum(e["count"] for e in kept)
-		bucket["duration"] = sum(e["duration"] for e in kept)
+		kept_count = sum(e["count"] for e in kept)
+		kept_ms = sum(e["duration"] for e in kept)
+		if kept_count and kept_ms / kept_count < MIN_AVG_SAVINGS_PER_QUERY_MS:
+			drop_low_per_query += 1
+			continue
 
-		harm = assess_harm(table, column, bucket["count"], writes, bucket["cardinality"])
+		if writes is None:
+			writes = _safe_collect_writes(recordings)
+		harm = assess_harm(table, column, kept_count, writes, bucket["cardinality"])
 		if harm.suppress_reason:
-			harm_targets.append(f"{table}.{column}")
+			harm_reasons[f"{table}.{column}"] = harm.suppress_reason
 			continue
 		cautions = list(harm.cautions)
 		if hint := _composite_hint(column, indexes):
 			cautions.append(
-				f"existing index {hint} already contains `{column}` but these queries do not filter "
-				"by its leading column(s) with equality; check whether changing that index serves "
-				"them better than a new single-column index."
+				f"existing index {hint} already contains `{column}`, but these queries do not filter "
+				"by its leading column(s) with equality; changing that index may serve them better "
+				"than a new single-column index."
 			)
 
 		# status is "actionable" or "unknown" both keep the
@@ -571,7 +598,8 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 		# matching pre-v0.5.1 behavior for environments without a
 		# live DB connection.
 		suggested_ddl = ddl_or_reason
-		impact_ms = bucket["duration"]
+		impact_ms = kept_ms
+		examples = [e["normalized"][:300] for e in kept[:MAX_EXAMPLE_QUERIES]]
 		findings.append(
 			{
 				"finding_type": "Missing Index",
@@ -579,20 +607,24 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 				"title": f"Add index on {table}({column})",
 				"customer_description": (
 					f"Adding an index to the **{column}** column of the "
-					f"**{table}** table would speed up {bucket['count']} "
+					f"**{table}** table would speed up {kept_count} "
 					f"queries in this session, saving roughly "
 					f"{dur(impact_ms)} total. Ask your developer to add this "
 					"index in a database migration."
-					+ "".join(f" Consider: {c}" for c in cautions)
+					+ (
+						" Before adding, check: " + "; ".join(c.rstrip(".") for c in cautions) + "."
+						if cautions
+						else ""
+					)
 				),
 				"technical_detail_json": json.dumps(
 					{
 						"table": table,
 						"column": column,
 						"suggested_ddl": suggested_ddl,
-						"affected_query_count": bucket["count"],
+						"affected_query_count": kept_count,
 						"estimated_savings_ms": round(impact_ms, 2),
-						"example_queries": bucket["queries"],
+						"example_queries": examples,
 						"verified_not_indexed": status == "actionable",
 						"cautions": cautions,
 						"write_impact": harm.stats,
@@ -607,7 +639,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 					default=str,
 				),
 				"estimated_impact_ms": round(impact_ms, 2),
-				"affected_count": bucket["count"],
+				"affected_count": kept_count,
 				"action_ref": "",
 			}
 		)
@@ -698,26 +730,31 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 		warnings.append(
 			f"Suppressed index suggestion(s) already served by an existing index "
 			f"({_sample(covered_targets)}): a single or composite index covers the column "
-			"for every query that triggered the suggestion."
+			"for the queries that filter it directly (any other query uses it only inside a function)."
 		)
 	if wrapped_targets:
 		warnings.append(
 			f"Suppressed index suggestion(s) where the column is only used inside a function "
 			f"({_sample(wrapped_targets)}), e.g. DATE(col) or Frappe's ifnull(col, ''); a plain index "
-			"cannot serve that filter. Remove the function (for example ifnull) from the filter so "
-			"an index can be used."
+			"cannot serve that filter. To make it indexable, rewrite the filter as a range on the bare "
+			"column (for example col >= x AND col < x + 1), add a functional index on the expression, "
+			"or avoid the code path that wraps the column. Do not just drop ifnull: that changes how "
+			"NULLs match."
 		)
 	if weak_targets:
 		warnings.append(
-			f"Index suggestion(s) not made because an index on the column already exists "
+			f"Index suggestion(s) not made because an existing index contains the column "
 			f"({_sample(weak_targets)}), but the only filter on it is !=, NOT IN, NOT LIKE or NOT (...), "
-			"so the existing index may not be able to serve it."
+			"which that index may not be able to serve. Check with EXPLAIN whether those queries use "
+			"it, or rewrite them with a positive filter."
 		)
-	if harm_targets:
+	if harm_reasons:
+		shown = list(harm_reasons.values())[:3]
+		more = f" (+{len(harm_reasons) - 3} more)" if len(harm_reasons) > 3 else ""
 		warnings.append(
-			f"Suppressed index suggestion(s) whose write cost in this session outweighs the read "
-			f"gain ({_sample(harm_targets)}): the column or table is written more often than the "
-			"index would help reads."
+			"Suppressed index suggestion(s) whose write cost in this session outweighs the read gain: "
+			+ " ".join(shown)
+			+ more
 		)
 	if drop_already_indexed:
 		warnings.append(
@@ -745,6 +782,16 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 			pass
 
 	return AnalyzerResult(findings=findings, warnings=warnings)
+
+
+def _safe_collect_writes(recordings: list[dict]) -> dict:
+	"""``collect_writes`` that fails open (no write data) except for an RQ job timeout."""
+	try:
+		return collect_writes(recordings)
+	except job_timeout_types():
+		raise
+	except Exception:
+		return {}
 
 
 def _sample(targets: list[str]) -> str:

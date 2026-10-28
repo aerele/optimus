@@ -6,8 +6,10 @@
 import contextlib
 import json
 import sys
+import time
 import types
 from collections import Counter
+from decimal import Decimal
 
 import pytest
 
@@ -165,7 +167,7 @@ def test_mixed_queries_keep_only_the_unserved_ones(monkeypatch, empty_context):
 def test_composite_holding_the_column_at_a_later_position_is_named_in_a_caution(monkeypatch, empty_context):
 	_install(monkeypatch, "b", [ix("ab_idx", ["a", "b"])])
 	(finding,) = _missing(_analyze(empty_context, _select("b = 'y'", n=3)))
-	assert "Consider:" in finding["customer_description"]
+	assert "Before adding, check:" in finding["customer_description"]
 	assert "ab_idx" in finding["customer_description"]
 
 
@@ -221,7 +223,7 @@ def test_postgres_skips_index_suggestions(monkeypatch, empty_context):
 # (scenario id, writes, helped reads, cardinality, outcome, text expected in the caution/warning)
 HARM_SCENARIOS = [
 	("read_only_session", {}, 10, None, "clean", None),
-	("column_updated_once_is_a_caution", {"update_b": 1}, 10, None, "caution", "UPDATE `b`"),
+	("column_updated_once_is_a_caution", {"update_b": 1}, 10, None, "caution", "update `b`"),
 	("column_updated_often_but_reads_dominate", {"update_b": 5}, 20, None, "caution", "5 statement(s)"),
 	("column_updated_as_often_as_it_would_help", {"update_b": 5}, 5, None, "suppress", None),
 	("column_updated_more_than_it_would_help", {"update_b": 12}, 3, None, "suppress", None),
@@ -235,6 +237,11 @@ HARM_SCENARIOS = [
 	("fewer_than_fifty_writes_never_suppresses_on_table_rule", {"inserts": 49}, 1, None, "caution", "49 time"),
 	("low_cardinality_column_is_a_caution", {}, 10, 3, "caution", "3 distinct value"),
 	("cardinality_of_eleven_is_not_low", {}, 10, 11, "clean", None),
+	("cardinality_of_ten_is_low", {}, 10, 10, "caution", "10 distinct value"),
+	("cardinality_of_zero_is_not_a_caution", {}, 10, 0, "clean", None),
+	("decimal_cardinality_is_low", {}, 10, Decimal("3"), "caution", "3 distinct value"),
+	("exactly_fifty_writes_at_ten_times_reads_suppresses", {"inserts": 50}, 5, None, "suppress", None),
+	("fifty_writes_just_under_ten_times_reads_is_a_caution", {"inserts": 50}, 6, None, "caution", "50 time"),
 	("unknown_cardinality_is_not_a_caution", {}, 10, None, "clean", None),
 ]
 
@@ -250,10 +257,10 @@ def test_cross_flow_harm_matrix(monkeypatch, empty_context, writes, reads, cardi
 	findings = _missing(result)
 	if outcome == "suppress":
 		assert findings == []
-		assert any("write cost" in w and "tabT.b" in w for w in result.warnings)
+		assert any("write cost" in w and "tabT" in w for w in result.warnings)
 		return
 	(finding,) = findings
-	has_caution = "Consider:" in finding["customer_description"]
+	has_caution = "Before adding, check:" in finding["customer_description"]
 	assert has_caution is (outcome == "caution")
 	if expected_text:
 		assert expected_text in finding["customer_description"]
@@ -266,7 +273,7 @@ def test_writes_to_another_table_are_ignored(monkeypatch, empty_context):
 		{"query": "UPDATE `tabOther` SET b = ? WHERE a = ?", "normalized_query": "x", "duration": 1.0, "stack": []}
 	] * 40
 	(finding,) = _missing(_analyze(empty_context, _select("b = 'y'", n=3), other))
-	assert "Consider:" not in finding["customer_description"]
+	assert "Before adding, check:" not in finding["customer_description"]
 
 
 def test_caution_names_the_other_flows_that_write(monkeypatch, empty_context):
@@ -275,7 +282,7 @@ def test_caution_names_the_other_flows_that_write(monkeypatch, empty_context):
 	reader = {"uuid": "r", "path": "/api/method/list", "cmd": None, "calls": _select("b = 'y'", n=30)}
 	result = index_suggestions.analyze([reader, writer], empty_context)
 	(finding,) = _missing(result)
-	assert "save_invoice x2" in finding["customer_description"]
+	assert "save_invoice (2)" in finding["customer_description"]
 
 
 def test_write_impact_stats_are_exposed_in_technical_detail(monkeypatch, empty_context):
@@ -290,7 +297,7 @@ def test_harm_check_runs_even_when_the_column_is_served_nowhere_else(monkeypatch
 	"""The composite hint and the write caution can both appear."""
 	_install(monkeypatch, "b", [ix("ab", ["a", "b"])])
 	(finding,) = _missing(_analyze(empty_context, _select("b = 'y'", n=40), _writes(update_b=1)))
-	assert finding["customer_description"].count("Consider:") == 2
+	assert finding["customer_description"].count("Before adding, check:") == 1
 
 
 # ---------------------------------------------------------------------------
@@ -536,7 +543,7 @@ def test_negation_on_an_indexed_column_stays_served_with_its_own_warning(monkeyp
 	_install(monkeypatch, "c", [ix("s", ["c"])])
 	result = _analyze(empty_context, _select(where, n=3))
 	assert not _missing(result)
-	assert any("may not be able to serve it" in w and "tabT.c" in w for w in result.warnings)
+	assert any("may not be able to serve" in w and "tabT.c" in w for w in result.warnings)
 	assert not any("already served by an existing index" in w for w in result.warnings)
 
 
@@ -544,18 +551,215 @@ def test_equality_on_an_indexed_column_keeps_the_already_indexed_warning(monkeyp
 	_install(monkeypatch, "c", [ix("s", ["c"])])
 	result = _analyze(empty_context, _select("c = 'x'", n=3))
 	assert any("already indexed" in w for w in result.warnings)
-	assert not any("may not be able to serve it" in w for w in result.warnings)
+	assert not any("may not be able to serve" in w for w in result.warnings)
 
 
 def test_function_warning_mentions_ifnull_and_the_fix(monkeypatch, empty_context):
 	_install(monkeypatch, "b", [])
 	result = _analyze(empty_context, _select("ifnull(b, '') = 'x'", n=3))
 	warning = next(w for w in result.warnings if "only used inside a function" in w)
-	assert "ifnull" in warning and "Remove the function" in warning
+	assert "ifnull" in warning and "functional index" in warning and "range" in warning
 
 
 def test_negation_after_an_equality_prefix_of_a_composite_gets_the_weak_warning(monkeypatch, empty_context):
 	_install(monkeypatch, "b", [ix("ab", ["a", "b"])])
 	result = _analyze(empty_context, _select("a = 'x' AND b != 'y'", n=3))
 	assert not _missing(result)
-	assert any("may not be able to serve it" in w and "tabT.b" in w for w in result.warnings)
+	assert any("may not be able to serve" in w and "tabT.b" in w for w in result.warnings)
+
+
+# ---------------------------------------------------------------------------
+# 5. Linear-time parsing, fail-open guards and review follow-ups
+# ---------------------------------------------------------------------------
+
+MANY = 5000
+ADVERSARIAL_SQL = [
+	"/**/ " * MANY + "SELECT 1",
+	"/**/ " * MANY,
+	"/* " * MANY,
+	"/*" * MANY + "*/",
+	"SELECT * FROM tabT WHERE a = " + "'" * MANY,
+	"SELECT * FROM tabT WHERE a = '" + "\\'" * MANY,
+	"SELECT * FROM tabT WHERE " + "(" * MANY + "a = 1" + ")" * MANY,
+	"SELECT * FROM tabT WHERE " + "a = 1 AND " * MANY + "b = 2",
+	"SELECT * FROM tabT WHERE " + "a = 1 OR " * MANY + "b = 2",
+	"SELECT * FROM tabT WHERE a BETWEEN " + "x " * MANY,
+	"SELECT * FROM tabT WHERE " + "`a` " * MANY,
+	"UPDATE `tabT` SET " + "a = ?, " * MANY + "b = ? WHERE x = 1",
+	"UPDATE `tabT` SET " + "(" * MANY,
+	"UPDATE " + "LOW_PRIORITY " * MANY + "`tabT` SET a = 1",
+	"INSERT " + "IGNORE " * MANY + "INTO",
+	" " * 100000 + "DELETE FROM tabT",
+	"SELECT * FROM tabT WHERE a LIKE " + "'%x' " * MANY,
+	"SELECT * FROM tabT WHERE " + "a = 1 AND (" * 3000 + "b = 1" + ")" * 3000,
+	"SELECT * FROM tabT WHERE " + "NOT (" * 3000 + "b = 1" + ")" * 3000,
+]
+
+
+@pytest.mark.parametrize("sql", ADVERSARIAL_SQL, ids=[f"case{i}" for i in range(len(ADVERSARIAL_SQL))])
+def test_adversarial_sql_is_parsed_in_linear_time(sql):
+	started = time.perf_counter()
+	index_harm.collect_writes([{"uuid": "u", "calls": [{"query": sql}]}])
+	index_suggestions._get_query_type(sql)
+	parse_where(sql, TABLE)
+	assert time.perf_counter() - started < 1.0
+
+
+def test_thousands_of_leading_comments_still_find_the_write():
+	sql = "/**/ " * MANY + f"UPDATE `{TABLE}` SET b = ? WHERE a = ?"
+	writes = index_harm.collect_writes([{"uuid": "u", "calls": [{"query": sql}]}])
+	assert writes[TABLE].updated_columns == Counter({"b": 1})
+	assert index_suggestions._get_query_type("/**/ " * MANY + "select 1") == "SELECT"
+
+
+def test_strip_leading_comments():
+	strip = index_suggestions.strip_leading_comments
+	assert strip("  /* a */ /* b */\n SELECT 1") == "SELECT 1"
+	assert strip("/* open SELECT 1") == "/* open SELECT 1"
+	assert strip("SELECT /* c */ 1") == "SELECT /* c */ 1"
+
+
+def test_non_string_query_text_does_not_drop_findings(monkeypatch, empty_context):
+	_install(monkeypatch, "b", [])
+	bad = [{"query": b"UPDATE x", "normalized_query": "x", "duration": 1.0, "stack": []}]
+	assert index_harm.collect_writes([{"uuid": "u", "calls": bad}]) == {}
+	assert _missing(_analyze(empty_context, _select("b = 'y'", n=3), bad))
+
+
+def test_collect_writes_failure_fails_open(monkeypatch, empty_context):
+	_install(monkeypatch, "b", [])
+
+	def boom(recordings):
+		raise RuntimeError("boom")
+
+	monkeypatch.setattr(index_suggestions, "collect_writes", boom)
+	assert _missing(_analyze(empty_context, _select("b = 'y'", n=3)))
+
+
+def test_job_timeout_is_not_swallowed_by_alias_parsing(monkeypatch):
+	class JobTimeout(Exception):
+		pass
+
+	class Boom:
+		def __init__(self, sql):
+			raise JobTimeout()
+
+	monkeypatch.setitem(sys.modules, "sql_metadata", types.SimpleNamespace(Parser=Boom))
+	monkeypatch.setattr(index_suggestions, "job_timeout_types", lambda: (JobTimeout,))
+	with pytest.raises(JobTimeout):
+		index_suggestions._query_aliases("SELECT 1")
+
+
+def test_aliases_are_parsed_once_per_entry(monkeypatch):
+	calls = []
+	monkeypatch.setattr(index_suggestions, "_query_aliases", lambda sql: calls.append(sql) or {})
+	entries = [{"raw": f"SELECT * FROM `{TABLE}` WHERE b = 'y'", "duration": 1.0, "count": 1}]
+	index_suggestions._partition_queries(TABLE, "b", entries, [])
+	index_suggestions._partition_queries(TABLE, "b", entries, [])
+	assert len(calls) == 1
+
+
+def test_wrapped_column_after_an_equality_prefix_is_not_reported_as_served(monkeypatch, empty_context):
+	_install(monkeypatch, "b", [ix("ab", ["a", "b"])])
+	result = _analyze(empty_context, _select("a = 'x' AND DATE(b) = '2026-01-01'", n=3))
+	assert not _missing(result)
+	assert any("only used inside a function" in w for w in result.warnings)
+	assert not any("already served" in w for w in result.warnings)
+
+
+def test_ambiguous_join_is_not_treated_as_wrapped():
+	shape = parse_where(
+		"SELECT * FROM `tabT` JOIN `tabT` x ON x.name = `tabT`.name WHERE ifnull(b, '') = 'y'", TABLE
+	)
+	assert shape.ambiguous
+
+
+def test_union_is_ambiguous():
+	sql = "SELECT name FROM `tabT` WHERE a = 'x' UNION SELECT name FROM `tabOther` WHERE b = 'y'"
+	assert parse_where(sql, TABLE).ambiguous
+	assert not is_served("a", parse_where(sql, TABLE), [ix("a", ["a"])])
+
+
+@pytest.mark.parametrize(
+	"where, scan",
+	[
+		("b LIKE '%x'", True),
+		("b LIKE CONCAT('%', c)", True),
+		("b LIKE c", True),
+		("b LIKE 'x%'", False),
+		("b LIKE %s", False),
+	],
+)
+def test_like_is_a_scan_unless_it_is_a_plain_prefix_literal(where, scan):
+	shape = parse_where(f"SELECT * FROM `{TABLE}` WHERE {where}", TABLE)
+	assert ("b" in shape.scan) is scan
+
+
+def test_is_not_null_is_not_a_weak_negation():
+	shape = parse_where(f"SELECT * FROM `{TABLE}` WHERE b IS NOT NULL", TABLE)
+	assert not is_weak_only("b", shape)
+	assert "b" in shape.narrow
+
+
+def test_savings_floor_and_examples_use_only_the_kept_queries(monkeypatch, empty_context):
+	_install(monkeypatch, "b", [ix("ab", ["a", "b"])])
+	served = "SELECT * FROM `tabT` WHERE a = 'x' AND b = 'y'"
+	kept = "SELECT * FROM `tabT` WHERE b = 'y'"
+	calls = [{"query": served, "normalized_query": served, "duration": 90.0, "stack": []} for _ in range(5)]
+	calls += [{"query": kept, "normalized_query": kept, "duration": 1.0, "stack": []} for _ in range(5)]
+	result = _analyze(empty_context, calls)
+	assert not _missing(result)
+	assert any("average savings below" in w for w in result.warnings)
+	calls[-1]["duration"] = 50.0
+	(finding,) = _missing(_analyze(empty_context, calls))
+	assert _detail(finding)["example_queries"] == [kept]
+	assert finding["affected_count"] == 5
+
+
+def test_first_cardinality_is_kept(monkeypatch, empty_context):
+	_install(monkeypatch, "b", [])
+	seen = iter([3, None])
+	recorder = sys.modules["frappe.core.doctype.recorder.recorder"]
+	monkeypatch.setattr(
+		recorder, "_optimize_query", lambda q: _Suggested(TABLE, "b", next(seen, None)), raising=False
+	)
+	calls = _select("b = 'x'", n=3) + _select("b = 'y' AND c = 'z'", n=3)
+	(finding,) = _missing(_analyze(empty_context, calls))
+	assert _detail(finding)["write_impact"]["cardinality"] == 3
+
+
+@pytest.mark.parametrize(
+	"sql, column",
+	[
+		('UPDATE "tabT" SET b = %s WHERE a = 1', "b"),
+		("UPDATE `tabT` t SET t.b = ? WHERE t.a = 1", "b"),
+		("UPDATE `tabT` AS t SET t.b = ? WHERE t.a = 1", "b"),
+		("UPDATE `tabT` SET b = (SELECT MAX(x) FROM y WHERE y.a = 1), c = 2 WHERE a = 1", "c"),
+	],
+)
+def test_write_detection_covers_aliases_quoting_and_subselects(sql, column):
+	writes = index_harm.collect_writes([{"uuid": "u", "calls": [{"query": sql}]}])
+	assert writes[TABLE].updates == 1
+	assert column in writes[TABLE].updated_columns
+
+
+def test_write_cost_warning_keeps_the_counts(monkeypatch, empty_context):
+	_install(monkeypatch, "b", [])
+	result = _analyze(empty_context, _select("b = 'y'", n=5), _writes(update_b=7))
+	assert not _missing(result)
+	assert any("7 statement(s)" in w and "tabT" in w for w in result.warnings)
+
+
+def test_very_deep_nesting_is_ambiguous_not_a_crash():
+	shape = parse_where("SELECT * FROM tabT WHERE " + "(" * 500 + "b = 1" + ")" * 500, TABLE)
+	assert shape.ambiguous
+
+
+def test_a_parser_failure_keeps_the_suggestion(monkeypatch, empty_context):
+	_install(monkeypatch, "b", [])
+
+	def boom(*args, **kwargs):
+		raise RecursionError
+
+	monkeypatch.setattr(index_suggestions, "parse_where", boom)
+	assert _missing(_analyze(empty_context, _select("b = 'y'", n=3)))

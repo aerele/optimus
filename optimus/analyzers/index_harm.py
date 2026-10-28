@@ -7,7 +7,7 @@ import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
-from optimus.analyzers.index_where import STRING_RE
+from optimus.analyzers.index_where import mask_strings, strip_leading_comments
 
 HOT_COLUMN_MIN_UPDATES = 5
 WRITE_HEAVY_MIN_WRITES = 50
@@ -16,11 +16,10 @@ CAUTION_MIN_WRITES = 10
 LOW_CARDINALITY_MAX = 10
 MAX_FLOWS_NAMED = 3
 
-_TABLE = r"(?:`([^`]+)`|(tab\w+))"
-_LEAD = r"^\s*(?:/\*.*?\*/\s*)*"
-_UPDATE_RE = re.compile(_LEAD + r"UPDATE\s+(?:LOW_PRIORITY\s+|IGNORE\s+)*" + _TABLE + r"\s+SET\s+(.*)", re.I | re.S)
-_INSERT_RE = re.compile(_LEAD + r"(?:INSERT|REPLACE)\s+(?:IGNORE\s+)?INTO\s+" + _TABLE, re.I | re.S)
-_DELETE_RE = re.compile(_LEAD + r"DELETE\s+FROM\s+" + _TABLE, re.I | re.S)
+_TABLE = r"(?:`([^`]+)`|\"([^\"]+)\"|(tab\w+))"
+_UPDATE_RE = re.compile(r"^UPDATE\s+(?:LOW_PRIORITY\s+|IGNORE\s+)*" + _TABLE + r"(?:\s+(?:AS\s+)?(?!SET\b)\w+)?\s+SET\s+(.*)", re.I | re.S)
+_INSERT_RE = re.compile(r"^(?:INSERT|REPLACE)\s+(?:IGNORE\s+)?INTO\s+" + _TABLE, re.I | re.S)
+_DELETE_RE = re.compile(r"^DELETE\s+FROM\s+" + _TABLE, re.I | re.S)
 _SET_END_RE = re.compile(r"\bWHERE\b|\bORDER\s+BY\b|\bLIMIT\b", re.I)
 _SET_COL_RE = re.compile(r"^\s*(?:`?\w+`?\.)?`?(\w+)`?\s*=")
 
@@ -55,7 +54,8 @@ def collect_writes(recordings: list[dict]) -> dict[str, TableWrites]:
 			if not isinstance(call, dict):
 				continue
 			sql = call.get("query") or call.get("normalized_query") or ""
-			_record_statement(sql, flow, out)
+			if isinstance(sql, str):
+				_record_statement(strip_leading_comments(sql), flow, out)
 	return dict(out)
 
 
@@ -77,7 +77,7 @@ def assess_harm(table: str, column: str, benefit_count: int, writes: dict, cardi
 	)
 	if col_updates >= HOT_COLUMN_MIN_UPDATES and col_updates >= benefit_count:
 		result.suppress_reason = (
-			f"`{column}` on `{table}` is UPDATEd by {col_updates} statement(s) in this session "
+			f"`{column}` on `{table}` is updated by {col_updates} statement(s) in this session "
 			f"({_flows(tw.column_flows.get(col))}) versus {benefit_count} read(s) the index would "
 			"speed up. Every one of those updates would also maintain the index."
 		)
@@ -96,8 +96,8 @@ def _cautions(table, column, tw: TableWrites, col_updates: int, cardinality) -> 
 	cautions = []
 	if col_updates:
 		cautions.append(
-			f"{col_updates} statement(s) in this session UPDATE `{column}` "
-			f"({_flows(tw.column_flows.get(column.lower()))}); each would also maintain this index."
+			f"{col_updates} statement(s) in this session update `{column}` "
+			f"({_flows(tw.column_flows.get(column.lower()))}); each would also have to maintain this index."
 		)
 	if tw.total >= CAUTION_MIN_WRITES:
 		cautions.append(
@@ -105,42 +105,54 @@ def _cautions(table, column, tw: TableWrites, col_updates: int, cardinality) -> 
 			f"({tw.inserts} insert, {tw.updates} update, {tw.deletes} delete; {_flows(tw.flows)}); "
 			"each insert and delete would also maintain this index."
 		)
-	if isinstance(cardinality, int) and 0 < cardinality <= LOW_CARDINALITY_MAX:
+	distinct = _as_number(cardinality)
+	if distinct is not None and 0 < distinct <= LOW_CARDINALITY_MAX:
 		cautions.append(
-			f"`{column}` has only {cardinality} distinct value(s), so the index may not narrow rows "
+			f"`{column}` has only {int(distinct)} distinct value(s), so the index may not narrow rows "
 			"much; check the value distribution before adding it."
 		)
 	return cautions
 
 
+def _as_number(value) -> float | None:
+	"""``value`` as a float if it is numeric (int, float, Decimal or numeric string), else None."""
+	try:
+		return None if value is None else float(value)
+	except (TypeError, ValueError):
+		return None
+
+
 def _flows(counter) -> str:
 	if not counter:
 		return "no named flow"
-	return "flows: " + ", ".join(f"{name} x{n}" for name, n in counter.most_common(MAX_FLOWS_NAMED))
+	return "flows: " + ", ".join(f"{name} ({n})" for name, n in counter.most_common(MAX_FLOWS_NAMED))
+
+
+def _table_of(m: re.Match) -> str:
+	return m.group(1) or m.group(2) or m.group(3)
 
 
 def _record_statement(sql: str, flow: str, out: dict) -> None:
 	if m := _UPDATE_RE.match(sql):
-		tw = out[(m.group(1) or m.group(2))]
+		tw = out[_table_of(m)]
 		tw.updates += 1
 		tw.flows[flow] += 1
-		for col in _set_columns(m.group(3)):
+		for col in _set_columns(m.group(4)):
 			tw.updated_columns[col] += 1
 			tw.column_flows[col][flow] += 1
 	elif m := _INSERT_RE.match(sql):
-		tw = out[(m.group(1) or m.group(2))]
+		tw = out[_table_of(m)]
 		tw.inserts += 1
 		tw.flows[flow] += 1
 	elif m := _DELETE_RE.match(sql):
-		tw = out[(m.group(1) or m.group(2))]
+		tw = out[_table_of(m)]
 		tw.deletes += 1
 		tw.flows[flow] += 1
 
 
 def _set_columns(set_clause: str) -> list[str]:
-	set_clause = STRING_RE.sub("'?'", set_clause)
-	end = _SET_END_RE.search(set_clause)
-	clause = set_clause[: end.start()] if end else set_clause
+	set_clause = mask_strings(set_clause, lambda _: "'?'")
+	clause = set_clause[: _set_end(set_clause)]
 	cols, depth, start = [], 0, 0
 	for i, ch in enumerate(clause + ","):
 		depth += (ch == "(") - (ch == ")")
@@ -149,3 +161,16 @@ def _set_columns(set_clause: str) -> list[str]:
 				cols.append(m.group(1).lower())
 			start = i + 1
 	return cols
+
+
+def _set_end(text: str) -> int:
+	"""Index where the SET list ends: the first WHERE/ORDER BY/LIMIT outside any parentheses."""
+	depth, depths = 0, []
+	for ch in text:
+		depth -= ch == ")"
+		depths.append(depth)
+		depth += ch == "("
+	for m in _SET_END_RE.finditer(text):
+		if depths[m.start()] == 0:
+			return m.start()
+	return len(text)
