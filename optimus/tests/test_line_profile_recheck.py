@@ -7,7 +7,7 @@ import json
 from types import SimpleNamespace
 
 from optimus.analyzers.base import AnalyzerResult
-from optimus.line_profile import persist, recheck
+from optimus.line_profile import function_index, persist, recheck
 
 
 def _fn(dotted, total_ms, hits=3, file="/app/mod.py"):
@@ -17,7 +17,7 @@ def _fn(dotted, total_ms, hits=3, file="/app/mod.py"):
 	return {"dotted_path": dotted, "qualname": dotted.rsplit(".", 1)[-1], "file": file, "lines": lines}
 
 
-def _finding(function="work", impact=1000.0, severity="High", filename="/other/path/mod.py", ftype="Slow Hot Path"):
+def _finding(function="work", impact=1000.0, severity="High", filename="/x/app/mod.py", ftype="Slow Hot Path"):
 	detail = {"callsite": {"filename": filename, "function": function, "lineno": 5}}
 	return {
 		"finding_type": ftype,
@@ -31,9 +31,9 @@ def _rc(finding):
 	return json.loads(finding["technical_detail_json"])["phase2_recheck"]
 
 
-def _run(findings, functions, chains=None):
-	index = recheck.build_function_index([functions])
-	return recheck.recheck_findings(findings, index, chains)
+def _run(findings, functions, chains=None, truncated=frozenset()):
+	index = function_index.build_function_index([("r1", functions)])
+	return recheck.recheck_findings(findings, index, chains, truncated)
 
 
 class TestRule:
@@ -51,17 +51,38 @@ class TestRule:
 		_run([f], [_fn("app.mod.work", 5000.0)])
 		assert f["severity"] == "Low" and f["estimated_impact_ms"] == 100.0
 
-	def test_contradicted_downgrades_one_step_and_sets_measured_impact(self):
+	def test_contradicted_downgrades_one_step_and_keeps_phase1_estimate(self):
 		f = _finding(impact=1000.0, severity="High")
 		stats = _run([f], [_fn("app.mod.work", 50.0)])
 		assert stats["downgraded"] == 1
-		assert f["severity"] == "Medium" and f["estimated_impact_ms"] == 50.0
-		assert _rc(f)["phase1_severity"] == "High"
+		assert f["severity"] == "Medium" and f["estimated_impact_ms"] == 1000.0
+		assert _rc(f)["phase1_severity"] == "High" and _rc(f)["function_total_ms"] == 50.0
 
-	def test_low_stays_low_on_downgrade(self):
+	def test_low_cannot_step_down_so_is_confirmed(self):
 		f = _finding(impact=1000.0, severity="Low")
 		_run([f], [_fn("app.mod.work", 1.0)])
-		assert f["severity"] == "Low"
+		assert f["severity"] == "Low" and _rc(f)["status"] == "confirmed"
+
+	def test_estimate_summed_over_many_calls_is_measured_only(self):
+		f = _finding(impact=8000.0, severity="High")
+		detail = json.loads(f["technical_detail_json"])
+		detail["occurrences"] = 40
+		f["technical_detail_json"] = json.dumps(detail)
+		_run([f], [_fn("app.mod.work", 900.0)])
+		assert f["severity"] == "High" and _rc(f)["status"] == "measured"
+
+	def test_time_budgeted_run_is_measured_only(self):
+		f = _finding(impact=1000.0, severity="High")
+		_run([f], [_fn("app.mod.work", 5.0)], truncated=frozenset({"r1"}))
+		assert f["severity"] == "High" and _rc(f)["status"] == "measured"
+
+	def test_malformed_prior_value_does_not_break_the_recheck(self):
+		f = _finding(impact=1000.0)
+		detail = json.loads(f["technical_detail_json"])
+		detail["phase2_recheck"] = {"phase1_impact_ms": "abc", "phase1_severity": "High"}
+		f["technical_detail_json"] = json.dumps(detail)
+		_run([f], [_fn("app.mod.work", 5.0)])
+		assert _rc(f)["status"] == "measured"
 
 	def test_boundary_ratio_is_confirmed(self):
 		f = _finding(impact=1000.0)
@@ -107,6 +128,16 @@ class TestNotRechecked:
 		_run([f], fns)
 		assert _rc(f)["reason"] == "ambiguous" and f["severity"] == "High"
 
+	def test_same_function_name_in_another_package_dir_is_not_matched(self):
+		f = _finding(function="work", filename="/x/app_a/mod.py")
+		_run([f], [_fn("app_b.mod.work", 5.0, file="/x/app_b/mod.py")])
+		assert _rc(f)["reason"] == "not_profiled" and f["severity"] == "High"
+
+	def test_other_class_with_same_method_in_same_file_is_not_matched(self):
+		f = _finding(function="Bar.process")
+		_run([f], [dict(_fn("app.mod.Foo.process", 5.0), qualname="Foo.process")])
+		assert _rc(f)["reason"] == "not_profiled" and f["severity"] == "High"
+
 	def test_corrupt_legacy_payload_left_untouched(self):
 		f = {"finding_type": "Slow Query", "severity": "High", "estimated_impact_ms": 5,
 			"technical_detail_json": "not json{"}
@@ -122,8 +153,8 @@ class TestNotRechecked:
 		monkeypatch.setattr(recheck, "MAX_RECHECKED_FINDINGS", 2)
 		fs = [_finding(impact=i) for i in (1, 500, 300)]
 		stats = _run(fs, [_fn("app.mod.work", 900.0)])
-		assert stats["skipped_cap"] == 1
-		assert "phase2_recheck" not in json.loads(fs[0]["technical_detail_json"])
+		assert stats["not_rechecked"] == 1
+		assert _rc(fs[0])["reason"] == "cap"
 
 
 class TestIdempotence:
@@ -142,25 +173,35 @@ class TestIdempotence:
 		assert f["severity"] == "High" and f["estimated_impact_ms"] == 1000.0
 		assert _rc(f)["status"] == "not_rechecked"
 
-	def test_larger_measurement_in_later_run_re_confirms(self):
+	def test_newer_larger_run_re_confirms(self):
 		f = _finding(impact=1000.0, severity="High")
 		_run([f], [_fn("app.mod.work", 50.0)])
-		index = recheck.build_function_index([[_fn("app.mod.work", 50.0)], [_fn("app.mod.work", 700.0)]])
+		index = function_index.build_function_index(
+			[("r1", [_fn("app.mod.work", 50.0)]), ("r2", [_fn("app.mod.work", 700.0)])]
+		)
 		recheck.recheck_findings([f], index)
 		assert f["severity"] == "High" and _rc(f)["status"] == "confirmed"
+
+	def test_newest_run_wins_even_when_an_older_run_was_heavier(self):
+		f = _finding(impact=1000.0, severity="High")
+		index = function_index.build_function_index(
+			[("r1", [_fn("app.mod.work", 800.0)]), ("r2", [_fn("app.mod.work", 20.0)])]
+		)
+		recheck.recheck_findings([f], index)
+		assert f["severity"] == "Medium" and _rc(f)["function_total_ms"] == 20.0
 
 
 class TestHotLineMergePlan:
 	def test_first_run_appends(self):
-		plan = recheck.plan_hot_line_merge([], ["a", "b"], {"a", "b"})
+		plan = persist.plan_hot_line_merge([], ["a", "b"], {"a", "b"})
 		assert plan == {"update": {}, "append": [0, 1], "remove": []}
 
 	def test_rerun_updates_in_place_and_removes_legacy_duplicates(self):
-		plan = recheck.plan_hot_line_merge(["a", "a", "b"], ["a"], {"a"})
+		plan = persist.plan_hot_line_merge(["a", "a", "b"], ["a"], {"a"})
 		assert plan["update"] == {0: 0} and plan["append"] == [] and plan["remove"] == [1]
 
 	def test_profiled_without_new_finding_is_removed_unprofiled_kept(self):
-		plan = recheck.plan_hot_line_merge(["a", "b"], [], {"a"})
+		plan = persist.plan_hot_line_merge(["a", "b"], [], {"a"})
 		assert plan["remove"] == [0]
 
 
@@ -196,8 +237,11 @@ def _result(findings, summaries):
 	return AnalyzerResult(findings=findings, aggregate={"phase2_functions": summaries}, warnings=[])
 
 
-def _run_row(functions, status="Ready"):
-	return SimpleNamespace(status=status, results_json=json.dumps(functions))
+def _run_row(functions, status="Ready", run_uuid="r1", ended_at=None, warnings=None):
+	return SimpleNamespace(
+		status=status, results_json=json.dumps(functions), run_uuid=run_uuid, ended_at=ended_at,
+		warnings_json=json.dumps(warnings or []),
+	)
 
 
 class TestPersist:
@@ -233,6 +277,70 @@ class TestPersist:
 		persist.merge_phase2_findings(parent, _result([], []))
 		assert parent.findings[0]["severity"] == "High"
 
+	def test_long_hot_line_title_is_clamped_to_the_field_length(self):
+		hot = dict(_hot(), title="x" * 300)
+		parent = _Parent([], [_run_row([])])
+		persist.merge_phase2_findings(parent, _result([hot], [{"dotted_path": "app.mod.work", "hot_lines": [1]}]))
+		title = parent.findings[0]["title"]
+		assert len(title) <= 140 and title.endswith("...")
+
+	def test_legacy_duplicate_hot_line_rows_collapse_to_one(self):
+		parent = _Parent([_hot(), _hot(), _finding()], [_run_row([])])
+		persist.merge_phase2_findings(parent, _result([_hot(lineno=12)], [{"dotted_path": "app.mod.work", "hot_lines": [1]}]))
+		hots = [r for r in parent.findings if r["finding_type"] == "Hot Line"]
+		assert len(hots) == 1 and json.loads(hots[0]["technical_detail_json"])["lineno"] == 12
+		assert len(parent.findings) == 2
+
+	def test_profiled_function_without_a_new_finding_loses_its_hot_line(self):
+		parent = _Parent([_hot()], [_run_row([])])
+		persist.merge_phase2_findings(parent, _result([], [{"dotted_path": "app.mod.work", "hot_lines": [1]}]))
+		assert parent.findings == []
+
+	def test_function_with_empty_hot_lines_keeps_its_row(self):
+		parent = _Parent([_hot()], [_run_row([])])
+		persist.merge_phase2_findings(parent, _result([], [{"dotted_path": "app.mod.work", "hot_lines": []}]))
+		assert len(parent.findings) == 1
+
+	def test_newest_ready_run_decides_regardless_of_row_order(self):
+		runs = [
+			_run_row([_fn("app.mod.work", 20.0)], run_uuid="new", ended_at=2),
+			_run_row([_fn("app.mod.work", 800.0)], run_uuid="old", ended_at=1),
+		]
+		parent = _Parent([_finding(impact=1000.0)], runs)
+		persist.merge_phase2_findings(parent, _result([], []))
+		assert parent.findings[0]["severity"] == "Medium"
+
+	def test_time_budgeted_run_does_not_downgrade(self):
+		warn = [persist.BUDGET_WARNING_PREFIX + " to avoid freezing the flow"]
+		parent = _Parent([_finding(impact=1000.0)], [_run_row([_fn("app.mod.work", 5.0)], warnings=warn)])
+		persist.merge_phase2_findings(parent, _result([], []))
+		assert parent.findings[0]["severity"] == "High"
+
+	def test_recheck_failure_does_not_abort_the_persist(self, monkeypatch):
+		def boom(*a, **kw):
+			raise ValueError("bad payload")
+
+		monkeypatch.setattr(recheck, "recheck_findings", boom)
+		parent = _Parent([], [_run_row([])])
+		persist.merge_phase2_findings(parent, _result([_hot()], [{"dotted_path": "app.mod.work", "hot_lines": [1]}]))
+		assert len(parent.findings) == 1
+
+
+class TestDrilldownSharesTheIndex:
+	def test_callout_and_recheck_agree_on_the_hottest_line_of_the_newest_run(self):
+		from optimus import renderer
+
+		def fn(total):
+			return {"dotted_path": "app.mod.work", "qualname": "work", "file": "/x/app/mod.py",
+				"lines": [{"lineno": 12 if total > 100 else 40, "content": "c", "hits": 1, "total_ms": total}]}
+
+		runs = [SimpleNamespace(run_uuid="a", results_json=json.dumps([fn(800.0)])),
+			SimpleNamespace(run_uuid="b", results_json=json.dumps([fn(20.0)]))]
+		drill = renderer._build_line_drilldown_callsite_index(SimpleNamespace(phase_2_runs=runs))
+		f = _finding()
+		recheck.recheck_findings([f], drill)
+		assert drill[("mod.py", "work")]["lineno"] == 40 == _rc(f)["hot_line"]["lineno"]
+
 
 class TestRender:
 	def _html(self, recheck_blob):
@@ -259,13 +367,30 @@ class TestRender:
 		return renderer.render(doc, recordings=[])
 
 	def test_not_rechecked_label_rendered(self):
-		assert "not rechecked" in self._html({"status": "not_rechecked", "reason": "not_profiled"})
+		html = self._html({"status": "not_rechecked", "reason": "not_profiled"})
+		assert "not rechecked, this function was not line-profiled." in html
+
+	def test_not_rechecked_reason_specific_label(self):
+		assert "several profiled functions share this name" in self._html(
+			{"status": "not_rechecked", "reason": "ambiguous"})
+
+	def test_hot_line_without_lineno_is_not_rendered_as_none(self):
+		html = self._html({"status": "confirmed", "function_total_ms": 50.0, "phase1_impact_ms": 60.0,
+			"hot_line": {"lineno": None, "total_ms": 40.0, "hits": 2}})
+		assert "Hottest line None" not in html and "Hottest line" not in html
+
+	def test_confirmed_and_measured_wording(self):
+		base = {"function_total_ms": 50.0, "phase1_impact_ms": 60.0, "hot_line": {"lineno": 3, "content": "y()", "total_ms": 4.0, "hits": 1}}
+		confirmed = self._html(dict(base, status="confirmed"))
+		assert "confirmed (" in confirmed and "measured vs" in confirmed
+		assert "Hottest line 3" in confirmed and "<code>y()</code>" in confirmed
+		assert "not comparable with the estimate" in self._html(dict(base, status="measured"))
 
 	def test_downgrade_rendered_with_measured_values(self):
 		html = self._html({
-			"status": "downgraded", "function_total_ms": 50.0, "phase1_impact_ms": 1000.0,
+			"status": "downgraded", "phase1_severity": "High", "function_total_ms": 50.0, "phase1_impact_ms": 1000.0,
 			"hot_line": {"lineno": 10, "total_ms": 40.0, "hits": 2},
 		})
-		assert "Line-level recheck" in html
-		assert "downgraded to Medium" in html
-		assert "hottest line 10" in html
+		assert "Line-Level Recheck" in html
+		assert "downgraded from High to Medium" in html
+		assert "Hottest line 10" in html

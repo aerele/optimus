@@ -551,7 +551,7 @@ def _compute_run(parent_docname: str, run_uuid: str):
 	result = analyze(results_json, call_trees=call_trees or None)
 	if capture.budget_was_hit(run_uuid):
 		result.warnings.append(
-			"Line profiling was time-budgeted to avoid freezing the flow, so "
+			persist.BUDGET_WARNING_PREFIX + " to avoid freezing the flow, so "
 			"results are partial for the longest-running call(s). Tune "
 			"optimus_phase2_overhead_budget_seconds in site_config "
 			"(lower = snappier flow, higher = fuller data; 0 = unlimited)."
