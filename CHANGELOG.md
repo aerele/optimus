@@ -8,11 +8,19 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.104] - 2026-10-27
+## [0.12.105] - 2026-10-28
 
 ### Fixed
 
-- A session with no recordings is now marked Ready only after its (empty) report is rendered and attached, like every other session. If the report cannot be produced, the session is marked Failed instead of showing Ready with no report.
+- A session with no recordings is now marked Ready only after its (empty) report is rendered and attached, like every other session. If the report cannot be produced, the session is marked Failed instead of showing Ready with no report. The Ready notification is now also sent for such sessions.
+
+---
+
+## [0.12.92] - 2026-10-27
+
+### Internal
+
+- The MariaDB optimizer time limit (`SET SESSION max_statement_time`) is now passed as a bound value instead of being formatted into the SQL text. The value was already coerced with `float()`, so behavior is unchanged. This clears the pinned `frappe-sql-format-injection` semgrep rule, which failed the release PR's diff scan against main.
 
 ---
 
