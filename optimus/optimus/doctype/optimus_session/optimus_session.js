@@ -424,7 +424,9 @@ function subscribe_session_progress(frm) {
 	frappe.realtime.on("optimus_session_ready", (p) => {
 		if (!mine(p)) return;
 		_progress_banner(frm, null);
-		frappe.show_alert({ message: __("Report ready"), indicator: "green" });
+		frappe.show_alert(p.empty
+			? { message: __("No requests were recorded"), indicator: "orange" }
+			: { message: __("Report ready"), indicator: "green" });
 		reload();
 	});
 	frappe.realtime.on("optimus_session_failed", (p) => {

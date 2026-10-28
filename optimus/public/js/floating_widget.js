@@ -698,20 +698,24 @@
 		});
 	}
 
-	// Completion popups: one claim per run (localStorage) across tabs, queued, shown when not typing.
+	// Completion popups: one claim per run (localStorage) across tabs, queued, shown in a visible tab when not typing.
 	const popupQueue = [];
 	const popupClaimed = new Set();
+	const POPUP_TAB_ID = Math.random().toString(36).slice(2);
 	let popupBusy = false;
 	let popupTimer = null;
 	let popupDeferrals = 0;
 	const POPUP_MAX_DEFERRALS = 30;
 	const TEXT_INPUT_TYPES = /^(text|search|email|url|tel|password|number)?$/i;
 
+	// Write our id, then read it back: the last writer wins, so only one tab proceeds.
 	function claimPopup(key, token) {
+		const mine = token + "|" + POPUP_TAB_ID;
 		try {
-			if (localStorage.getItem(key) === token) return false;
-			localStorage.setItem(key, token);
-			return true;
+			const current = localStorage.getItem(key);
+			if (current && current.split("|")[0] === token) return false;
+			localStorage.setItem(key, mine);
+			return localStorage.getItem(key) === mine;
 		} catch (e) {
 			if (popupClaimed.has(key + token)) return false;
 			popupClaimed.add(key + token);
@@ -721,7 +725,7 @@
 
 	function releasePopup(key, token) {
 		try {
-			localStorage.removeItem(key);
+			if (localStorage.getItem(key) === token + "|" + POPUP_TAB_ID) localStorage.removeItem(key);
 		} catch (e) { /* storage unavailable */ }
 		popupClaimed.delete(key + token);
 	}
@@ -733,11 +737,17 @@
 		return el.tagName === "INPUT" && TEXT_INPUT_TYPES.test(el.type || "");
 	}
 
+	function isOtherDialogOpen() {
+		const open = frappe.ui && frappe.ui.open_dialogs;
+		if (open && open.length) return true;
+		return !!(document.querySelector && document.querySelector(".modal.show"));
+	}
+
 	function openPopup(item) {
 		const messages = {
 			ready: __("Profiling is complete. Your Optimus Session is ready."),
 			empty: __("Profiling finished, but no requests were recorded in this session."),
-			failed: __("Analysis failed for this session. Open it to see the status and retry."),
+			failed: __("Analysis failed for this session. Open it to review the error and retry."),
 		};
 		const titles = {
 			ready: __("Optimus Session ready"),
@@ -750,10 +760,9 @@
 				fieldtype: "HTML",
 				fieldname: "body",
 				options: "<p>" + frappe.utils.escape_html(messages[item.kind]) + "</p>"
-					+ "<p><b>" + frappe.utils.escape_html(__("Session ID")) + ":</b> "
-					+ frappe.utils.escape_html(item.docname) + "</p>",
+					+ "<p><b>" + frappe.utils.escape_html(__("Session ID: {0}", [item.docname])) + "</b></p>",
 			}],
-			primary_action_label: __("Open Session"),
+			primary_action_label: item.kind === "failed" ? __("Review and Retry") : __("Open Session"),
 			primary_action: () => {
 				d.hide();
 				frappe.set_route("Form", "Optimus Session", item.docname);
@@ -770,27 +779,38 @@
 		clearTimeout(popupTimer);
 		popupTimer = null;
 		if (popupBusy || !popupQueue.length) return;
-		// Don't steal focus from a field being typed in; re-check, then open anyway after the cap.
-		if (isTyping() && popupDeferrals < POPUP_MAX_DEFERRALS) {
+		// A hidden tab must not win the claim; it flushes again on visibilitychange.
+		if (document.visibilityState !== "visible") return;
+		// Don't steal focus or stack on another dialog; re-check, then open anyway after the cap.
+		if ((isTyping() || isOtherDialogOpen()) && popupDeferrals < POPUP_MAX_DEFERRALS) {
 			popupDeferrals += 1;
 			popupTimer = setTimeout(flushPopups, 1000);
 			return;
 		}
+		popupDeferrals = 0;
 		const item = popupQueue.shift();
 		if (!claimPopup(item.key, item.token)) {
 			flushPopups();
 			return;
 		}
-		popupDeferrals = 0;
 		popupBusy = true;
 		try {
 			openPopup(item);
 		} catch (e) {
 			popupBusy = false;
 			releasePopup(item.key, item.token);
-			_diag("popup failed", e);
+			console.warn("[optimus] session popup failed", e);
 			flushPopups();
 		}
+	}
+
+	if (typeof document !== "undefined" && document.addEventListener) {
+		document.addEventListener("visibilitychange", flushPopups);
+	}
+
+	function isOnSessionForm(docname) {
+		const route = frappe.get_route ? frappe.get_route() : [];
+		return !!route && route[0] === "Form" && route[1] === "Optimus Session" && route[2] === docname;
 	}
 
 	// Never throws: a popup problem must not break the widget's own state handling.
@@ -799,12 +819,13 @@
 			const docname = data && data.docname;
 			if (!docname || !frappe.ui || !frappe.ui.Dialog) return;
 			if (data.recording_user && data.recording_user !== frappe.session.user) return;
+			if (isOnSessionForm(docname)) return;
 			const key = "optimus_popup_shown:" + docname + ":" + kind;
 			const token = String(data.event_id || data.session_uuid || "");
 			popupQueue.push({ docname, kind, key, token });
 			flushPopups();
 		} catch (e) {
-			_diag("popup failed", e);
+			console.warn("[optimus] session popup failed", e);
 		}
 	}
 

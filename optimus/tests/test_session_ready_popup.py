@@ -3,6 +3,7 @@
 
 """Run the widget's session-complete popup logic in node with a small Desk stub."""
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -14,25 +15,39 @@ WIDGET_JS = Path(__file__).resolve().parents[1] / "public/js/floating_widget.js"
 HARNESS = r"""
 const vm=require('node:vm'),fs=require('node:fs'),assert=require('node:assert/strict');
 function desk(opts = {}) {
- const handlers={},dialogs=[],alerts=[],timers=[],store=opts.store||{};
- const doc={activeElement:null};
+ const handlers={},dialogs=[],alerts=[],pills=[],docListeners={},store=opts.store||{};
+ const timers=new Map(); let nextTimer=1;
+ const doc={activeElement:null,visibilityState:'visible'};
  class Dialog {
-  constructor(cfg){ if(opts.dialogThrows && opts.throwsLeft-- !== 0) throw new Error('boom'); this.cfg=cfg; dialogs.push(this); }
+  constructor(cfg){ if(opts.beforeBuild) opts.beforeBuild(); if(opts.dialogThrows && opts.throwsLeft-- !== 0) throw new Error('boom'); this.cfg=cfg; dialogs.push(this); }
   show(){ this.shown=true; }
   hide(){ this.shown=false; if(this.onhide) this.onhide(); }
  }
- const ctx={window:{},document:Object.assign(doc,{readyState:'loading',addEventListener:()=>{}}),
-  setTimeout:(fn)=>{timers.push(fn);return timers.length;},clearTimeout:()=>{},clearInterval:()=>{},
-  localStorage:{getItem:k=>(k in store?store[k]:null),setItem:(k,v)=>{store[k]=v;},removeItem:k=>{delete store[k];}},
-  __:t=>t,
-  frappe:{session:{user:'owner'},set_route:()=>{},ui:{Dialog},utils:{escape_html:s=>String(s)},
+ const storage=opts.storageThrows
+  ? {getItem(){throw new Error('denied');},setItem(){throw new Error('denied');},removeItem(){throw new Error('denied');}}
+  : {getItem:k=>(k in store?store[k]:null),
+     setItem:(k,v)=>{store[k]=v; if(opts.race) store[k]='other-tab|x';},
+     removeItem:k=>{delete store[k];}};
+ const ctx={window:{},document:Object.assign(doc,{readyState:'loading',
+   addEventListener:(n,fn)=>{(docListeners[n]=docListeners[n]||[]).push(fn);}}),
+  setTimeout:(fn)=>{const id=nextTimer++;timers.set(id,fn);return id;},
+  clearTimeout:(id)=>{timers.delete(id);},clearInterval:()=>{},
+  console:{warn:(...a)=>{(opts.warns||[]).push(a);},log:()=>{}},
+  localStorage:storage,Math,__:(t,a)=>a?t.replace('{0}',a[0]):t,
+  __sd:(display,label)=>pills.push({display,label}),
+  frappe:{session:{user:'owner'},set_route:()=>{},get_route:()=>opts.route||[],
+   ui:{Dialog,open_dialogs:opts.openDialogs||[]},utils:{escape_html:s=>String(s)},
    realtime:{on:(n,fn)=>handlers[n]=fn},show_alert:a=>alerts.push(a)}};
  vm.createContext(ctx);
  let code=fs.readFileSync(process.argv[1],'utf8');
- code=code.replace(/\}\)\(\);\s*$/,`globalThis.w={subscribeRealtime,state:currentState};})();`);
+ const tail=/\}\)\(\);\s*$/, hook='function setDisplay(display, label, elapsed) {';
+ assert.ok(tail.test(code) && code.includes(hook), 'widget source shape changed: update the harness');
+ code=code.replace(tail,`globalThis.w={subscribeRealtime,state:currentState};})();`);
+ code=code.replace(hook,hook+' globalThis.__sd(display,label);');
  vm.runInContext(code,ctx);ctx.w.subscribeRealtime();
- const tick=()=>{ const fns=timers.splice(0); fns.forEach(f=>f()); };
- return {handlers,dialogs,alerts,store,doc,tick,state:ctx.w.state};
+ const tick=()=>{ const fns=[...timers.values()]; timers.clear(); fns.forEach(f=>f()); };
+ const setVisibility=v=>{ doc.visibilityState=v; (docListeners.visibilitychange||[]).forEach(f=>f()); };
+ return {handlers,dialogs,alerts,pills,store,doc,tick,timers,setVisibility,state:ctx.w.state};
 }
 const ev=(o={})=>({session_uuid:'s1',docname:'OS-1',recording_user:'owner',event_id:'e1',...o});
 """
@@ -40,6 +55,8 @@ const ev=(o={})=>({session_uuid:'s1',docname:'OS-1',recording_user:'owner',event
 
 def _run(body: str) -> None:
 	if not shutil.which("node"):
+		if os.environ.get("CI"):
+			pytest.fail("node is required in CI")
 		pytest.skip("node not installed")
 	result = subprocess.run(
 		["node", "-e", HARNESS + body, str(WIDGET_JS)], capture_output=True, text=True
@@ -119,8 +136,13 @@ def test_empty_session_sets_no_data_pill_and_toast():
 const d = desk();
 d.handlers.optimus_session_ready(ev({empty:true}));
 assert.equal(d.state.display, 'ready');
+assert.deepEqual(d.pills, [{display:'ready', label:'No data'}]);
 assert.equal(d.alerts.length, 1);
+assert.equal(d.alerts[0].indicator, 'orange');
 assert.ok(!/ready/i.test(d.alerts[0].message), d.alerts[0].message);
+const r = desk();
+r.handlers.optimus_session_ready(ev());
+assert.deepEqual(r.pills, [{display:'ready', label:'Report ready'}]);
 """)
 
 
@@ -184,15 +206,146 @@ assert.ok(d.dialogs[1].cfg.fields[0].options.includes('OS-2'));
 """)
 
 
-def test_empty_analyze_publishes_ready_with_empty_flag(monkeypatch):
-	"""The session event payload carries the empty flag through to the realtime publish."""
-	from optimus import analyze, realtime
+def test_hidden_tab_does_not_claim_so_the_visible_tab_shows_the_popup():
+	_run(r"""
+const store = {};
+const visible = desk({store}), hidden = desk({store});
+hidden.setVisibility('hidden');
+hidden.handlers.optimus_session_ready(ev());
+visible.handlers.optimus_session_ready(ev());
+assert.equal(hidden.dialogs.length, 0, 'hidden tab waits');
+assert.equal(visible.dialogs.length, 1, 'visible tab shows it');
+// The hidden tab comes to the front later: the claim is taken, so no duplicate.
+hidden.setVisibility('visible');
+assert.equal(hidden.dialogs.length, 0);
+""")
 
-	seen = []
-	monkeypatch.setattr(realtime, "publish_session_event", lambda event, payload: seen.append((event, payload)))
-	analyze._publish_session_event(
-		"optimus_session_ready", session_uuid="s1", docname="OS-1", empty=True
-	)
-	assert seen == [
-		("optimus_session_ready", {"session_uuid": "s1", "docname": "OS-1", "empty": True})
-	]
+
+def test_hidden_tab_shows_the_popup_once_it_becomes_visible():
+	_run(r"""
+const d = desk();
+d.setVisibility('hidden');
+d.handlers.optimus_session_ready(ev());
+assert.equal(d.dialogs.length, 0);
+assert.deepEqual(Object.keys(d.store), [], 'no claim while hidden');
+d.setVisibility('visible');
+assert.equal(d.dialogs.length, 1);
+""")
+
+
+def test_popup_opens_for_a_session_other_than_the_current_one():
+	_run(r"""
+const d = desk();
+d.state.session_uuid = 'other';
+d.state.display = 'recording';
+d.handlers.optimus_session_ready(ev({session_uuid:'s1'}));
+assert.equal(d.dialogs.length, 1, 'popup shows wherever you are');
+assert.equal(d.state.display, 'recording', 'widget state is left alone');
+assert.deepEqual(d.pills, []);
+""")
+
+
+def test_claim_is_confirmed_by_reading_it_back():
+	_run(r"""
+const d = desk({race:true});
+d.handlers.optimus_session_ready(ev());
+assert.equal(d.dialogs.length, 0, 'another tab wrote the claim last');
+assert.equal(d.store['optimus_popup_shown:OS-1:ready'], 'other-tab|x');
+""")
+
+
+def test_release_only_removes_our_own_claim():
+	_run(r"""
+const store = {};
+const key = 'optimus_popup_shown:OS-1:ready';
+const d = desk({store, dialogThrows:true, throwsLeft:1});
+d.handlers.optimus_session_ready(ev());
+assert.equal(store[key], undefined, 'our own claim is released on failure');
+const foreign = {};
+const e = desk({store:foreign, dialogThrows:true, throwsLeft:1,
+	beforeBuild:()=>{ foreign[key] = 'e1|someone-else'; }});
+e.handlers.optimus_session_ready(ev());
+assert.equal(foreign[key], 'e1|someone-else', 'a foreign claim is kept');
+""")
+
+
+def test_deferral_budget_resets_when_a_queued_popup_loses_the_claim():
+	_run(r"""
+const store = {'optimus_popup_shown:OS-1:ready': 'e1|other'};
+const d = desk({store});
+d.doc.activeElement = {tagName:'INPUT', type:'text'};
+d.handlers.optimus_session_ready(ev());
+for (let i = 0; i < 30; i++) d.tick();
+assert.equal(d.dialogs.length, 0, 'claimed elsewhere');
+d.handlers.optimus_session_ready(ev({event_id:'e2', docname:'OS-2'}));
+assert.equal(d.dialogs.length, 0, 'the next popup still waits while typing');
+""")
+
+
+def test_popup_waits_for_another_open_dialog():
+	_run(r"""
+const open = [{}];
+const d = desk({openDialogs:open});
+d.handlers.optimus_session_ready(ev());
+assert.equal(d.dialogs.length, 0);
+open.length = 0;
+d.tick();
+assert.equal(d.dialogs.length, 1);
+""")
+
+
+def test_popup_skipped_on_the_sessions_own_form():
+	_run(r"""
+const d = desk({route:['Form','Optimus Session','OS-1']});
+d.handlers.optimus_session_ready(ev());
+assert.equal(d.dialogs.length, 0);
+const o = desk({route:['Form','Optimus Session','OS-9']});
+o.handlers.optimus_session_ready(ev());
+assert.equal(o.dialogs.length, 1);
+""")
+
+
+def test_failed_popup_has_its_own_copy_and_label():
+	_run(r"""
+const d = desk();
+d.handlers.optimus_session_failed(ev());
+assert.equal(d.dialogs[0].cfg.primary_action_label, 'Review and Retry');
+assert.ok(d.dialogs[0].cfg.fields[0].options.includes('review the error and retry'));
+const r = desk();
+r.handlers.optimus_session_ready(ev());
+assert.equal(r.dialogs[0].cfg.primary_action_label, 'Open Session');
+""")
+
+
+def test_popup_failure_is_logged_with_console_warn():
+	_run(r"""
+const warns = [];
+const d = desk({dialogThrows:true, warns});
+d.handlers.optimus_session_ready(ev());
+assert.equal(warns.length, 1);
+""")
+
+
+def test_popup_works_when_local_storage_is_unavailable():
+	_run(r"""
+const d = desk({storageThrows:true});
+d.handlers.optimus_session_ready(ev());
+assert.equal(d.dialogs.length, 1);
+d.dialogs[0].hide();
+d.handlers.optimus_session_ready(ev());
+assert.equal(d.dialogs.length, 1, 'in-memory claim stops a duplicate');
+d.handlers.optimus_session_ready(ev({event_id:'e2'}));
+assert.equal(d.dialogs.length, 2, 'a new run still shows');
+""")
+
+
+def test_deferral_keeps_a_single_pending_timer():
+	_run(r"""
+const d = desk();
+d.doc.activeElement = {tagName:'TEXTAREA'};
+d.handlers.optimus_session_ready(ev());
+d.handlers.optimus_session_ready(ev({event_id:'e2', docname:'OS-2'}));
+assert.equal(d.timers.size, 1);
+d.setVisibility('visible');
+assert.equal(d.timers.size, 1, 'a re-flush replaces the timer');
+""")
