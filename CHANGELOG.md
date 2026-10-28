@@ -23,6 +23,14 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.92] - 2026-10-27
+
+### Internal
+
+- The MariaDB optimizer time limit (`SET SESSION max_statement_time`) is now passed as a bound value instead of being formatted into the SQL text. The value was already coerced with `float()`, so behavior is unchanged. This clears the pinned `frappe-sql-format-injection` semgrep rule, which failed the release PR's diff scan against main.
+
+---
+
 ## [0.12.91] - 2026-10-27
 
 ### Fixed
