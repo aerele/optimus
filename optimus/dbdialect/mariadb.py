@@ -63,7 +63,7 @@ class MariaDBDialect(Dialect):
 
 		try:
 			previous = frappe.db.sql("SELECT @@SESSION.max_statement_time")[0][0]
-			frappe.db.sql(f"SET SESSION max_statement_time = {float(seconds)}")
+			frappe.db.sql("SET SESSION max_statement_time = %s", (float(seconds),))
 		except Exception:
 			previous = None
 		try:
@@ -71,7 +71,7 @@ class MariaDBDialect(Dialect):
 		finally:
 			if previous is not None:
 				try:
-					frappe.db.sql(f"SET SESSION max_statement_time = {float(previous)}")
+					frappe.db.sql("SET SESSION max_statement_time = %s", (float(previous),))
 				except Exception:
 					pass
 

@@ -8,80 +8,14 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.106] - 2026-10-28
+@@ENTRY@@
+## [0.12.92] - 2026-10-27
 
-### Fixed
+### Internal
 
-- Scrubbing a value twice now gives the same result when a title was cut to its column inside an `Authorization` scheme word. Before, the cut left a bare scheme fragment that the schemeless-token rules masked again on a second pass, which lengthened the text and changed it each time.
+- The MariaDB optimizer time limit (`SET SESSION max_statement_time`) is now passed as a bound value instead of being formatted into the SQL text. The value was already coerced with `float()`, so behavior is unchanged. This clears the pinned `frappe-sql-format-injection` semgrep rule, which failed the release PR's diff scan against main.
 
-## [0.12.105] - 2026-10-28
-
-### Security
-
-- The Codex agent now always starts with the full list of tools turned off, including the default-on browser, code-mode and in-app automation tools. Before, a failed or empty `codex features list` check dropped the whole list. Features the installed CLI reports as on are still added when the check works.
-
-### Fixed
-
-- A Codex process killed by the system (for example out of memory) or a CLI too old for `codex login status` is now a temporary error instead of a fatal sign-out. A kill during the actual run is recorded as "sent, outcome unknown" so it is not repeated automatically.
-- A call whose time limit is used up before the CLI starts now stops with a timeout instead of launching it for one second. The feature check is also held to the time that is left.
-- The timeout message now names the configured limit, and a worker timeout during the run is recorded as "sent, outcome unknown".
-- A successful Codex run now refreshes the 30 second sign-in memo, so a bulk run does not re-check the session before every finding.
-- A reply that starts with a long run of blank lines no longer hides that it was cut at the output limit.
-- Failed feature checks, sign-in checks that do not report ChatGPT and failed runs are written to the `optimus` log with the event, CLI version, a fixed label and the exit code only, never the CLI output. The "signed in with an API key" message now names the CLI version.
-- The CLI path field and its error message now say to point at the `codex` launcher or a symlink named `codex`, not the `.js` file.
-
-## [0.12.104] - 2026-10-28
-
-### Fixed
-
-- A worker timeout or interrupt during a queued Codex refresh is no longer turned into an "AI configuration changed" error or silently ignored. It now stops the job as it does for the API-key path.
-- A Codex call no longer runs past its time limit. The wait for the sign-in lock and the feature check now come out of the call's budget.
-- The Codex agent is only told to turn off features that the installed CLI actually lists. If the feature check fails, the full fixed list still applies.
-- Clicking Connect no longer changes the modified time of Optimus Settings, so saving the form during a check no longer fails with a timestamp mismatch.
-- A session check that the system kills (for example out of memory, exit code 128 or above) is now a temporary error instead of a fatal sign-out.
-- A reply longer than the output limit always ends with the "(truncated)" marker, even when it ends inside a private key block that is hidden from the reply.
-- The security notice in the Codex prompt now marks only the captured application data as untrusted, so Optimus's own instructions are followed in full.
-- Removed a no-op `reload_doc` patch for the new settings fields. Optimus Settings is a single doctype and `bench migrate` already loads its fields.
-
-## [0.12.103] - 2026-10-28
-
-### Security
-
-- A queued refresh in subscription mode now re-reads the saved settings before every Codex call, like the API-key path does. If AI is turned off or the connection is switched, the rest of the job stops with the "AI configuration changed" error instead of still sending findings to the CLI.
-- The Codex agent now also starts with every capability-looking feature that the installed CLI reports as on turned off (read from `codex features list`), for example the browser, code-mode and annotation tools. If that check fails, the fixed list used before still applies.
-
-### Fixed
-
-- A CLI installed with npm (`codex` linking to `codex.js`) is now accepted. The name you point at must still be `codex`, and the file it resolves to must still be a trusted executable named `codex` or a Node entrypoint.
-- A CLI error is no longer called a sign-out because of text such as `expired` or `login` in echoed SQL, and a TLS "certificate has expired" error is reported as a network problem.
-- A session check that exits with 126 or 127 (the CLI or Node was not found on the worker) is now a temporary error instead of a fatal sign-out.
-- A reply longer than the output limit now ends with a "(truncated)" marker instead of looking complete.
-- With AI turned off, the unavailable message now tells you to enable AI instead of telling you to click Connect.
-- Optimus's own instructions now come before the untrusted-data notice in the Codex prompt, so the notice covers only the captured data.
-
-## [0.12.102] - 2026-10-27
-
-### Added
-
-- AI fix suggestions can now use a local Codex CLI subscription instead of a cloud API key. In Optimus Settings > AI, set Connection to "Subscription (local CLI)". It runs the logged-in `codex` CLI on the bench machine.
-- Subscription mode works like the API-key path: the analyze-time auto-suggest and the "Refresh AI suggestions" button both run through the local Codex CLI. Codex is the only CLI supported in this version. It requires `developer_mode` and the `optimus_allow_subscription_cli` site-config flag. The default stays "API Key", so existing setups are unchanged.
-- To enable it, set `"optimus_allow_subscription_cli": 1` in the site's `site_config.json` (in addition to `developer_mode`). A site-config change reaches running workers only after a bench restart or `bench clear-cache`.
-- A terminal CLI failure (missing, signed out, usage limit) stops a refresh at the first failure, like a rejected API key does. A timed-out or unreadable session check is treated as temporary.
-
-### Security
-
-- The Codex CLI runs as an agent with a read-only sandbox. It now starts with `HOME` and `CODEX_HOME` pointing at a private scratch directory that holds only a copy of the ChatGPT sign-in file, removed afterwards, so the agent no longer sees the operator's home directory or the bench. It can still read other files the bench user can read, and a prompt injection hidden in profiled data is mitigated (a security preamble and a secret scrub on the output) but not eliminated. Keep subscription mode to data you trust.
-- The CLI path must now be a `codex` file owned by the bench user (or root) and not writable by group or others.
-- The session check and version probes use the same restricted environment and scratch directory as the run itself.
-- The Codex agent now also starts with `unified_exec`, `multi_agent`, `view_image`, `hooks`, `image_generation`, browser and computer tools and web search turned off, so no file or command tool is left reachable. An opt-in live test (`OPTIMUS_LIVE_CODEX=1`) checks that a prompt asking for a file outside the scratch directory returns nothing.
-- Saving a refreshed ChatGPT sign-in back is done under a file lock with a unique temp file and an atomic replace. It only happens if the real file is unchanged since it was copied and the copy keeps the same keys and auth mode, so concurrent calls cannot overwrite a newer token and a bad child file is ignored.
-- The CLI path found on `PATH` (blank "CLI path") now goes through the same ownership and permission check as an explicit path.
-- A CLI send now marks the raw-value request as sent, so a re-ask after raw-value consent is revoked is refused.
-
-### Fixed
-
-- The CLI process group is always stopped when a call ends, and its output is read with a size limit instead of being buffered without bound.
-- A CLI failure is classified from the last lines of its error output only, so SQL or text echoed from the prompt can no longer be mistaken for a signed-out session.
+---
 
 ## [0.12.91] - 2026-10-27
 
