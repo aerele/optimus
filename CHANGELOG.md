@@ -8,11 +8,15 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.107] - 2026-10-27
+## [0.12.102] - 2026-10-28
 
 ### Fixed
 
-- A "Slow Background Job" finding in the Findings section now gets an AI fix suggestion like the other findings. It used to be skipped as "not eligible", so slow background jobs never showed a suggestion. The prompt carries the job method, the deepest hot frame with its share of the job's time, the source around it and the job's slowest queries. A job whose hot frame is framework code, or that names no source line, is still skipped and the card says why.
+- A "Slow Background Job" finding in the Findings section now gets an AI fix suggestion like the other findings. Before, it was skipped and the card said it "does not carry enough code or SQL context". The prompt carries the last part of the job method name, the deepest hot frame with its share of the job's time, the source around it and the job's slowest queries (taken from the job's recording when the prompt is built). A job whose hot frame is framework code, or that names no source line, gets no AI call; the card shows a note saying why, and any older stored suggestion is hidden.
+
+### Action needed
+
+- This type is now eligible with no opt-in. To keep it away from the AI provider, add `Slow Background Job` to Excluded finding types in Optimus Settings.
 
 ---
 
