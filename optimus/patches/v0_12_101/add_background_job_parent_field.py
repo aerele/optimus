@@ -7,7 +7,4 @@ import frappe
 
 
 def execute():
-	try:
-		frappe.reload_doc("optimus", "doctype", "optimus_background_job")
-	except Exception:
-		frappe.log_error(title="optimus patch: reload optimus_background_job")
+	frappe.reload_doc("optimus", "doctype", "optimus_background_job")

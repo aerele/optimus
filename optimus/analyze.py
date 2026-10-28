@@ -524,9 +524,48 @@ def _capture_job_terminal_status(session_uuid: str, job_id: str) -> None:
 		pass
 
 
+# An after-commit job has no RQ record until its transaction commits.
+_COMMIT_GRACE_SECONDS = 120
+
+
+def _within_commit_grace(meta: dict) -> bool:
+	"""True for a still-Queued job enqueued so recently it may be waiting on a commit."""
+	if meta.get("status") not in (None, "", "Queued") or not meta.get("enqueued_at"):
+		return False
+	try:
+		from frappe.utils import get_datetime, now_datetime
+
+		return (now_datetime() - get_datetime(meta["enqueued_at"])).total_seconds() < _COMMIT_GRACE_SECONDS
+	except Exception:
+		return False
+
+
+def _awaiting_commit(session_uuid: str, job_id: str) -> bool:
+	"""True if RQ has no record of the job yet but it was enqueued within the commit grace."""
+	try:
+		from frappe.utils.background_jobs import get_redis_conn
+		from rq.exceptions import NoSuchJobError
+		from rq.job import Job
+
+		try:
+			Job.fetch(job_id, connection=get_redis_conn())
+		except NoSuchJobError:
+			return _within_commit_grace(session._read_job(session_uuid, job_id) or {})
+	except Exception:
+		pass
+	return False
+
+
+def _job_in_flight(session_uuid: str, job_id: str) -> bool:
+	"""Active in RQ, or not yet visible because its enqueueing transaction has not committed."""
+	return _rq_job_active(job_id) or _awaiting_commit(session_uuid, job_id)
+
+
 def _mark_vanished_job(session_uuid: str, job_id: str) -> None:
 	"""Mark a never-started job that RQ no longer knows as Stopped."""
 	meta = session._read_job(session_uuid, job_id) or {}
+	if _within_commit_grace(meta):
+		return
 	if meta.get("status") in (None, "", "Queued"):
 		session.set_job_status(
 			session_uuid,
@@ -540,7 +579,7 @@ def _mark_vanished_job(session_uuid: str, job_id: str) -> None:
 def _finalize_pending_statuses(session_uuid: str, job_ids) -> None:
 	"""At the wait ceiling: record finished jobs' status, label active ones Running or Queued."""
 	for jid in job_ids:
-		if _rq_job_active(jid):
+		if _job_in_flight(session_uuid, jid):
 			session.set_job_status(session_uuid, jid, status=_active_job_label(jid))
 		else:
 			_capture_job_terminal_status(session_uuid, jid)
@@ -555,8 +594,9 @@ def _active_job_label(job_id: str) -> str:
 		job = Job.fetch(job_id, connection=get_redis_conn())
 		waiting = job.get_status(refresh=True) in ("queued", "deferred", "scheduled")
 		return "Queued" if waiting else "Running"
-	except Exception:
-		return "Running"
+	except Exception as exc:
+		# No RQ record yet: its enqueueing transaction has not committed.
+		return "Queued" if type(exc).__name__ == "NoSuchJobError" else "Running"
 
 
 def _bg_wait_for_pending_jobs(session_uuid: str, docname: str, deadline):
@@ -604,7 +644,7 @@ def _bg_wait_for_pending_jobs(session_uuid: str, docname: str, deadline):
 	# out and produced no recording.
 	still_running: list[str] = []
 	for jid in pending:
-		if _rq_job_active(jid):
+		if _job_in_flight(session_uuid, jid):
 			still_running.append(jid)
 		else:
 			_capture_job_terminal_status(session_uuid, jid)
@@ -640,7 +680,7 @@ def _bg_wait_for_pending_jobs(session_uuid: str, docname: str, deadline):
 	time.sleep(min(_BG_WAIT_THROTTLE_SECONDS, max(0.0, deadline - time.time())))
 	if time.time() >= deadline:
 		_finalize_pending_statuses(session_uuid, still_running)
-		return sum(1 for jid in still_running if _rq_job_active(jid))
+		return sum(1 for jid in still_running if _job_in_flight(session_uuid, jid))
 
 	try:
 		frappe.enqueue(
@@ -1875,6 +1915,43 @@ def _session_query_totals(recordings: list[dict]) -> tuple[int, float]:
 	return count, time_ms
 
 
+def _set_background_job_rows(doc, session_uuid: str) -> None:
+	"""One Optimus Background Job row per RQ job the flow enqueued, with its status.
+
+	A job with no status or still "Queued" gets its terminal status from RQ first
+	(a job RQ no longer knows is marked Stopped); a job with none at all is stored "Queued".
+	"""
+	try:
+		for _jm in session.get_jobs(session_uuid):
+			if _jm.get("status") in (None, "", "Queued"):
+				_capture_job_terminal_status(session_uuid, _jm["job_id"])
+		doc.set("background_jobs", [])
+		for _jm in session.get_jobs(session_uuid):
+			try:
+				doc.append("background_jobs", {
+					# method / job_id are Data(140) and come from external sources
+					# (the enqueue call, RQ): cap them so an unusually long value
+					# can't raise a "Data too long" insert error and sink the whole
+					# report save (the datetimes are already DB-safe via _rq_dt_to_db).
+					"job_id": (_jm.get("job_id") or "")[:140],
+					"method": (_jm.get("method") or "")[:140],
+					"status": _jm.get("status") or "Queued",
+					"error": (_jm.get("error") or "") or None,
+					# DB-safety guard: strip any tz offset a pre-fix build may have
+					# stored in Redis, so MariaDB's DATETIME column accepts them.
+					"enqueued_at": _db_datetime_str(_jm.get("enqueued_at")),
+					"started_at": _db_datetime_str(_jm.get("started_at")),
+					"ended_at": _db_datetime_str(_jm.get("ended_at")),
+					"duration_ms": _jm.get("duration_ms") or 0,
+					"recording_uuid": _jm.get("recording_uuid") or "",
+					"parent_recording_uuid": (_jm.get("parent_recording_uuid") or "")[:140],
+				})
+			except Exception:
+				frappe.log_error(title=f"optimus persist background_job row {_jm.get('job_id')}"[:140])
+	except Exception:
+		frappe.log_error(title="optimus persist background_jobs")
+
+
 def _persist(
 	docname: str,
 	context: AnalyzeContext,
@@ -2024,39 +2101,7 @@ def _persist(
 	for finding in context.findings:
 		doc.append("findings", finding)
 
-	# v0.7.x: one Optimus Background Job row per RQ job the flow enqueued, with
-	# its terminal status so failed / timed-out jobs are reported instead of
-	# vanishing. Belt-and-suspenders: capture a status for any job the wait
-	# didn't (e.g. the wait was skipped/disabled), then read the final hash.
-	try:
-		for _jm in session.get_jobs(context.session_uuid):
-			if _jm.get("status") in (None, "", "Queued"):
-				_capture_job_terminal_status(context.session_uuid, _jm["job_id"])
-		doc.set("background_jobs", [])
-		for _jm in session.get_jobs(context.session_uuid):
-			try:
-				doc.append("background_jobs", {
-					# method / job_id are Data(140) and come from external sources
-					# (the enqueue call, RQ): cap them so an unusually long value
-					# can't raise a "Data too long" insert error and sink the whole
-					# report save (the datetimes are already DB-safe via _rq_dt_to_db).
-					"job_id": (_jm.get("job_id") or "")[:140],
-					"method": (_jm.get("method") or "")[:140],
-					"status": _jm.get("status") or "Queued",
-					"error": (_jm.get("error") or "") or None,
-					# DB-safety guard: strip any tz offset a pre-fix build may have
-					# stored in Redis, so MariaDB's DATETIME column accepts them.
-					"enqueued_at": _db_datetime_str(_jm.get("enqueued_at")),
-					"started_at": _db_datetime_str(_jm.get("started_at")),
-					"ended_at": _db_datetime_str(_jm.get("ended_at")),
-					"duration_ms": _jm.get("duration_ms") or 0,
-					"recording_uuid": _jm.get("recording_uuid") or "",
-					"parent_recording_uuid": (_jm.get("parent_recording_uuid") or "")[:140],
-				})
-			except Exception:
-				frappe.log_error(title="optimus persist background_job row")
-	except Exception:
-		frappe.log_error(title="optimus persist background_jobs")
+	_set_background_job_rows(doc, context.session_uuid)
 
 	from optimus.managed import save_session
 

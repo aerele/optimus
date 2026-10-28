@@ -41,23 +41,44 @@ def safe_commit() -> None:
 # ---------------------------------------------------------------------------
 
 
-# Positions of enqueue's flags among its positional args after `method`.
+# Fallback positions of enqueue's flags among its positional args after `method`.
 _ENQUEUE_POSITIONS = {"is_async": 3, "now": 5, "enqueue_after_commit": 6}
 
 
-def _enqueue_flag(name, args, kwargs, default=False):
+def _enqueue_positions(fn) -> dict:
+	"""Flag positions read from ``fn``'s signature, so a reordered frappe enqueue stays correct."""
+	positions = dict(_ENQUEUE_POSITIONS)
+	try:
+		import inspect
+
+		kinds = (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+		names = [p.name for p in inspect.signature(fn).parameters.values() if p.kind in kinds]
+		for name in positions:
+			if name in names:
+				positions[name] = names.index(name) - 1
+	except (TypeError, ValueError):
+		pass
+	return positions
+
+
+def _enqueue_flag(name, args, kwargs, default=False, positions=_ENQUEUE_POSITIONS):
 	"""Value of an enqueue flag passed by keyword or by position."""
 	if name in kwargs:
 		return kwargs[name]
-	pos = _ENQUEUE_POSITIONS[name]
+	pos = positions[name]
 	return args[pos] if len(args) > pos else default
 
 
-def _is_synchronous_enqueue(args, kwargs) -> bool:
+def _is_synchronous_enqueue(args, kwargs, positions=_ENQUEUE_POSITIONS) -> bool:
 	"""True when frappe.enqueue will run the method inline instead of queueing it."""
-	if _enqueue_flag("now", args, kwargs):
+	if _enqueue_flag("now", args, kwargs, positions=positions):
 		return True
-	if _enqueue_flag("is_async", args, kwargs, True):
+	# frappe still honours the legacy ``async=`` keyword over ``is_async``.
+	if "async" in kwargs:
+		is_async = kwargs["async"]
+	else:
+		is_async = _enqueue_flag("is_async", args, kwargs, True, positions)
+	if is_async:
 		return False
 	try:
 		import frappe
@@ -67,25 +88,34 @@ def _is_synchronous_enqueue(args, kwargs) -> bool:
 		return False
 
 
+def _live_bg_session(session_uuid, user, _profiler_session):
+	"""The job's own session if still active or draining, else None (never resurrect a finished one)."""
+	if not session_uuid or not _profiler_session.get_session_meta(session_uuid):
+		return None
+	if _profiler_session.get_active_session_for(user) == session_uuid:
+		return session_uuid
+	return session_uuid if _profiler_session.is_draining(session_uuid) else None
+
+
 def _enqueue_session_for(user, _profiler_session):
-	"""Session for a job enqueued now: the one being recorded, else the user's active one."""
+	"""Session for a job enqueued now: the one being recorded, else a live inherited one, else the user's."""
 	import frappe
 
 	local = getattr(frappe, "local", None)
-	inherited = None
-	if local is not None:
-		inherited = getattr(local, "optimus_session_id", None) or getattr(
-			local, "optimus_bg_session_uuid", None
-		)
+	inherited = getattr(local, "optimus_session_id", None) if local is not None else None
+	if not inherited and local is not None:
+		bg_uuid = getattr(local, "optimus_bg_session_uuid", None)
+		inherited = _live_bg_session(bg_uuid, user, _profiler_session)
 	return inherited or _profiler_session.get_active_session_for(user)
 
 
-def _preassign_deferred_job_id(args, kwargs, _bg):
+def _preassign_deferred_job_id(args, kwargs, _bg, positions=_ENQUEUE_POSITIONS):
 	"""Give an after-commit job a known id and return its RQ id, else None."""
 	try:
-		if not _enqueue_flag("enqueue_after_commit", args, kwargs):
+		if not _enqueue_flag("enqueue_after_commit", args, kwargs, positions=positions):
 			return None
-		if kwargs.get("deduplicate") and not kwargs.get("job_id"):
+		# frappe may skip a deduplicated job, so its id cannot be tracked.
+		if kwargs.get("deduplicate"):
 			return None
 		if not kwargs.get("job_id"):
 			import frappe
@@ -123,10 +153,11 @@ def _patch_enqueue():
 		return
 
 	_original_enqueue = _bg.enqueue
+	_positions = _enqueue_positions(_original_enqueue)
 
 	def _profiler_enqueue(method, *args, **kwargs):
 		active = None
-		synchronous = _is_synchronous_enqueue(args, kwargs)
+		synchronous = _is_synchronous_enqueue(args, kwargs, _positions)
 		try:
 			# Lazy import to avoid circular dependency on app init.
 			from optimus import session as _profiler_session
@@ -163,7 +194,7 @@ def _patch_enqueue():
 		# enqueue_after_commit returns None, so pick the id ourselves.
 		deferred_job_id = None
 		if active and not synchronous:
-			deferred_job_id = _preassign_deferred_job_id(args, kwargs, _bg)
+			deferred_job_id = _preassign_deferred_job_id(args, kwargs, _bg, _positions)
 
 		job = _original_enqueue(method, *args, **kwargs)
 
@@ -177,8 +208,15 @@ def _patch_enqueue():
 				job_id = getattr(job, "id", None) or deferred_job_id
 				if job_id:
 					_track_enqueued_job(active, job_id, method)
-		except Exception:
-			pass
+		except Exception as exc:
+			# Log instead of writing an Error Log row into the caller's transaction.
+			try:
+				frappe.logger("optimus").warning(
+					f"optimus: could not track job {getattr(job, 'id', None) or deferred_job_id} "
+					f"for session {active}: {exc!r}"
+				)
+			except Exception:
+				pass
 
 		return job
 

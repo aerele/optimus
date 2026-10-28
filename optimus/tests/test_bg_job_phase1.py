@@ -15,7 +15,7 @@ USER_KEY = "profiler:active:alice@example.com"
 
 
 @pytest.fixture
-def env(fake_frappe):  # noqa: F811
+def env(fake_frappe, monkeypatch):  # noqa: F811
 	"""fake_frappe plus the bits phase-1 tracking needs (local, hashes, sets)."""
 	fake, fake_bg, calls = fake_frappe
 	fake.local = types.SimpleNamespace()
@@ -38,6 +38,12 @@ def env(fake_frappe):  # noqa: F811
 
 	fake_bg.enqueue = original
 	_reset_profiler_modules()
+	lp = types.ModuleType("optimus.line_profile.capture")
+	lp.is_active = lambda user: "lp-run-1"  # phase 2 is armed for the user
+	monkeypatch.setitem(sys.modules, "optimus.line_profile.capture", lp)
+	pkg = types.ModuleType("optimus.line_profile")
+	pkg.capture = lp
+	monkeypatch.setitem(sys.modules, "optimus.line_profile", pkg)
 	import optimus  # noqa: F401 installs the wrapper
 
 	return types.SimpleNamespace(fake=fake, bg=fake_bg, calls=calls, ret=ret, enqueue=fake_bg.enqueue)
@@ -85,6 +91,55 @@ class TestSynchronousEnqueue:
 		env.enqueue("m.f")
 		assert env.calls[0]["kwargs"]["_profiler_session_id"] == SESSION
 
+	def test_sync_calls_never_get_the_line_profile_marker(self, env):
+		env.enqueue("m.f", now=True)
+		env.enqueue("m.f", "default", None, None, True, None, True)
+		env.enqueue("m.f", is_async=False)
+		assert all("_lp_session_id" not in c["kwargs"] for c in env.calls)
+
+	def test_async_calls_get_the_line_profile_marker(self, env):
+		env.enqueue("m.f")
+		assert env.calls[0]["kwargs"]["_lp_session_id"] == "lp-run-1"
+
+	def test_legacy_async_keyword_is_synchronous(self, env):
+		env.enqueue("m.f", **{"async": False})
+		kw = env.calls[0]["kwargs"]
+		assert "_profiler_session_id" not in kw and "_lp_session_id" not in kw
+
+	def test_legacy_async_true_still_queues(self, env):
+		env.enqueue("m.f", **{"async": True})
+		assert env.calls[0]["kwargs"]["_profiler_session_id"] == SESSION
+
+
+class TestFlagPositions:
+	def test_positions_follow_the_real_signature(self):
+		from optimus import _enqueue_positions
+
+		def enqueue(method, queue="default", now=False, is_async=True, enqueue_after_commit=False, **kw):
+			pass
+
+		assert _enqueue_positions(enqueue) == {"now": 1, "is_async": 2, "enqueue_after_commit": 3}
+
+	def test_unreadable_signature_falls_back_to_defaults(self):
+		from optimus import _ENQUEUE_POSITIONS, _enqueue_positions
+
+		assert _enqueue_positions(object()) == _ENQUEUE_POSITIONS
+
+	def test_default_table_matches_frappe_when_installed(self):
+		import inspect
+
+		try:
+			import frappe.utils.background_jobs as bg
+		except ImportError:
+			pytest.skip("frappe is not installed")
+		if not hasattr(bg.enqueue, "__code__"):
+			pytest.skip("frappe is stubbed")
+
+		from optimus import _ENQUEUE_POSITIONS, _enqueue_positions
+
+		original = getattr(bg.enqueue, "__wrapped__", bg.enqueue)
+		assert _enqueue_positions(original) == _ENQUEUE_POSITIONS, inspect.signature(original)
+
 
 class TestDeferredEnqueue:
 	def test_after_commit_job_gets_known_id_and_is_tracked(self, env):
@@ -104,6 +159,16 @@ class TestDeferredEnqueue:
 		env.enqueue("m.f", enqueue_after_commit=True, deduplicate=True)
 		assert "job_id" not in env.calls[0]["kwargs"]
 
+	def test_positional_after_commit_is_tracked(self, env):
+		env.enqueue("m.f", "default", None, None, True, None, False, True)
+		assert env.calls[0]["kwargs"]["job_id"] == "h" * 20
+		assert _pending(env) == {"site::" + "h" * 20}
+
+	def test_deduplicated_after_commit_job_with_job_id_is_not_tracked(self, env):
+		env.enqueue("m.f", enqueue_after_commit=True, job_id="dup", deduplicate=True)
+		assert env.calls[0]["kwargs"]["job_id"] == "dup"
+		assert _pending(env) == set()
+
 	def test_plain_enqueue_does_not_invent_a_job_id(self, env):
 		env.enqueue("m.f")
 		assert "job_id" not in env.calls[0]["kwargs"]
@@ -117,9 +182,33 @@ class TestNestedAndForeignJobs:
 		assert env.calls[0]["kwargs"]["_profiler_session_id"] == SESSION
 
 	def test_child_of_orphaned_job_keeps_the_orphans_session(self, env):
-		env.fake.local.optimus_bg_session_uuid = "old-session"  # the job's own session, not the user's new one
+		from optimus import session
+
+		session.set_session_meta("old-session", {"user": "alice@example.com", "draining_until": 9e12})
+		env.fake.local.optimus_bg_session_uuid = "old-session"  # draining, not the user's new one
 		env.enqueue("m.nested")
 		assert env.calls[0]["kwargs"]["_profiler_session_id"] == "old-session"
+
+	def test_child_of_finished_session_does_not_resurrect_it(self, env):
+		env.fake.local.optimus_bg_session_uuid = "gone-session"  # meta already deleted by cleanup
+		env.enqueue("m.nested")
+		assert env.calls[0]["kwargs"]["_profiler_session_id"] == SESSION  # the user's live one
+		assert "gone-session" not in str(_pending(env))
+
+	def test_child_of_finished_session_without_active_user_session_is_not_tracked(self, env):
+		env.fake.cache.delete_value(USER_KEY)
+		env.fake.local.optimus_bg_session_uuid = "gone-session"
+		env.enqueue("m.nested")
+		assert "_profiler_session_id" not in env.calls[0]["kwargs"]
+
+	def test_child_of_expired_drain_window_is_not_inherited(self, env):
+		from optimus import session
+
+		env.fake.cache.delete_value(USER_KEY)
+		session.set_session_meta("old-session", {"draining_until": 1.0})
+		env.fake.local.optimus_bg_session_uuid = "old-session"
+		env.enqueue("m.nested")
+		assert "_profiler_session_id" not in env.calls[0]["kwargs"]
 
 	def test_no_session_no_marker(self, env):
 		env.fake.cache.delete_value(USER_KEY)
@@ -353,3 +442,121 @@ class TestAiJobEnqueues:
 		assert "_profiler_session_id" not in kw
 		assert kw["job_id"] == "optimus-ai-r1-1"
 		assert _pending(env) == set()
+
+
+class TestAfterCommitGrace:
+	"""An after-commit job has no RQ record until its transaction commits."""
+
+	@pytest.fixture
+	def an(self, monkeypatch, fake_rq):
+		import frappe.utils as fu
+		import frappe.utils.background_jobs as bj
+
+		from optimus import analyze
+
+		self.now = "2026-10-26 10:01:00"
+		self.meta = {"status": "Queued", "enqueued_at": "2026-10-26 10:00:30"}
+		self.set_calls = []
+		monkeypatch.setattr(bj, "get_redis_conn", lambda: object(), raising=False)
+		monkeypatch.setattr(fu, "now_datetime", lambda: self.parse(self.now), raising=False)
+		monkeypatch.setattr(fu, "get_datetime", lambda v: self.parse(v), raising=False)
+		monkeypatch.setattr(analyze.session, "_read_job", lambda s, j: self.meta, raising=False)
+		monkeypatch.setattr(
+			analyze.session, "set_job_status",
+			lambda su, jid, **kw: self.set_calls.append((jid, kw)), raising=False,
+		)
+		return analyze
+
+	@staticmethod
+	def parse(value):
+		import datetime
+
+		return datetime.datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+
+	def test_unknown_recent_job_is_in_flight_and_labelled_queued(self, an):
+		assert an._job_in_flight(SESSION, "j1") is True
+		an._finalize_pending_statuses(SESSION, ["j1"])
+		assert self.set_calls == [("j1", {"status": "Queued"})]
+
+	def test_unknown_old_job_is_vanished_and_stopped(self, an):
+		self.now = "2026-10-26 10:10:00"
+		assert an._job_in_flight(SESSION, "j1") is False
+		an._finalize_pending_statuses(SESSION, ["j1"])
+		jid, kw = self.set_calls[0]
+		assert kw["status"] == "Stopped" and "Never ran" in kw["error"]
+
+	def test_recent_unknown_job_is_not_stopped_by_the_status_capture(self, an):
+		an._capture_job_terminal_status(SESSION, "j1")
+		assert self.set_calls == []
+
+	def test_known_terminal_job_is_not_held_by_the_grace(self, an, fake_rq, monkeypatch):
+		job = types.SimpleNamespace(get_status=lambda refresh=True: "finished")
+		monkeypatch.setattr(fake_rq.Job, "fetch", staticmethod(lambda j, connection=None: job))
+		assert an._job_in_flight(SESSION, "j1") is False
+
+	def test_started_job_has_no_grace(self, an):
+		self.meta = {"status": "Running", "enqueued_at": "2026-10-26 10:00:55"}
+		assert an._awaiting_commit(SESSION, "j1") is False
+
+
+class TestBackgroundJobRowsPersist:
+	"""The seam that writes tracked jobs into the Optimus Session child table."""
+
+	class Doc:
+		def __init__(self):
+			self.rows = []
+
+		def set(self, field, value):
+			self.rows = list(value)
+
+		def append(self, field, row):
+			self.rows.append(row)
+
+	@pytest.fixture
+	def an(self, monkeypatch):
+		from optimus import analyze
+
+		self.jobs = []
+		self.captured = []
+		monkeypatch.setattr(analyze.session, "get_jobs", lambda su: self.jobs, raising=False)
+		monkeypatch.setattr(analyze, "_capture_job_terminal_status", lambda su, j: self.captured.append(j))
+		return analyze
+
+	def test_queued_job_gets_its_terminal_status_recaptured(self, an):
+		self.jobs = [
+			{"job_id": "j1", "status": "Queued"},
+			{"job_id": "j2", "status": ""},
+			{"job_id": "j3", "status": "Completed"},
+			{"job_id": "j4", "status": "Running"},
+		]
+		an._set_background_job_rows(self.Doc(), SESSION)
+		assert self.captured == ["j1", "j2"]
+
+	def test_job_without_status_is_stored_queued_not_running(self, an):
+		self.jobs = [{"job_id": "j1", "method": "m.f"}]
+		doc = self.Doc()
+		an._set_background_job_rows(doc, SESSION)
+		assert doc.rows[0]["status"] == "Queued"
+
+	def test_parent_recording_uuid_lands_in_the_row(self, an):
+		self.jobs = [{"job_id": "j1", "status": "Completed", "parent_recording_uuid": "rec-parent"}]
+		doc = self.Doc()
+		an._set_background_job_rows(doc, SESSION)
+		assert doc.rows[0]["parent_recording_uuid"] == "rec-parent"
+		assert doc.rows[0]["duration_ms"] == 0
+
+
+class TestJobKeyTtlIsSetOnce:
+	def test_existing_expiry_is_not_refreshed_by_a_job_chain(self, monkeypatch):
+		import frappe
+
+		from optimus import session
+
+		ttls = {"fresh": -1, "aging": 500, "gone": -2}
+		expired = []
+		redis = types.SimpleNamespace(ttl=lambda k: ttls[k], expire=lambda k, t: expired.append((k, t)))
+		monkeypatch.setattr(session, "_raw_redis", lambda: redis)
+		monkeypatch.setattr(frappe, "cache", types.SimpleNamespace(make_key=lambda k: k), raising=False)
+		for key in ("fresh", "aging", "gone"):
+			session._bound_ttl(key)
+		assert expired == [("fresh", session.JOB_KEYS_TTL_SECONDS)]

@@ -323,9 +323,15 @@ JOB_KEYS_TTL_SECONDS = 24 * 60 * 60
 
 
 def _bound_ttl(key: str) -> None:
-	"""Best-effort expiry on a per-session job key."""
+	"""Best-effort expiry set once, so a chain of jobs cannot keep a dead session's keys alive."""
 	try:
-		expire_key(key, JOB_KEYS_TTL_SECONDS)
+		r = _raw_redis()
+		if r is None:
+			expire_key(key, JOB_KEYS_TTL_SECONDS)
+			return
+		prefixed = frappe.cache.make_key(key)
+		if r.ttl(prefixed) == -1:  # exists without an expiry (-2: gone)
+			r.expire(prefixed, JOB_KEYS_TTL_SECONDS)
 	except Exception:
 		pass
 

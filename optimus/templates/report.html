@@ -2373,7 +2373,7 @@
 
 {% macro bg_status_badge(status) %}
   {%- set _s = status or "Running" -%}
-  {%- set _cls = {"Completed": "ok", "Failed": "fail", "Timeout": "warn", "Running": "info", "Started": "info", "Stopped": "mute", "Queued": "mute"}.get(_s, "mute") -%}
+  {%- set _cls = {"Completed": "ok", "Failed": "fail", "Timeout": "warn", "Running": "info", "Started": "info", "Stopped": "warn", "Queued": "mute"}.get(_s, "mute") -%}
   <span class="job-status job-status-{{ _cls }}">{{ _s }}</span>
 {%- endmacro %}
 
