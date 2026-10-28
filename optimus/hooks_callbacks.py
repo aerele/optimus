@@ -478,8 +478,14 @@ def before_job(method=None, kwargs=None, **rest):
 		# if we leave the marker in kwargs, the user's method will be
 		# called with an unexpected keyword argument and crash.
 		session_uuid = kwargs.pop("_profiler_session_id", None)
+		retry_state = _capture.job_retry_state(create=bool(session_uuid))
+		if not session_uuid and retry_state:
+			# Frappe re-runs a deadlocked job with the marker already popped.
+			session_uuid = retry_state.get("session_uuid")
 		if not session_uuid:
 			return
+		if retry_state is not None:
+			retry_state["session_uuid"] = session_uuid
 
 		# v0.7.x+: record this job's method + Running/started_at in the
 		# session's jobs hash BEFORE the user/active-session gates so the
@@ -523,6 +529,11 @@ def before_job(method=None, kwargs=None, **rest):
 
 		# All checks passed activate the recorder for this job.
 		frappe.local.optimus_session_id = session_uuid
+		if retry_state and retry_state.get("lock_events"):
+			# Lock events recorded by the attempt Frappe is retrying.
+			frappe.local.optimus_lock_events = retry_state["lock_events"]
+			if retry_state.get("lock_events_truncated"):
+				frappe.local.optimus_lock_events_truncated = True
 
 		# Same clobber protection as before_request: if the standalone
 		# recorder already activated (global flag + frappe's own

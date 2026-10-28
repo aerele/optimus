@@ -3232,9 +3232,11 @@ def _build_summary_html(
 					tied_finding.get("estimated_impact_ms") or 0
 				):
 					tied_finding = f
+		# A finding with no measured impact (Lock Contention) is never "the biggest issue".
+		timed_findings = [f for f in findings if f.get("estimated_impact_ms")]
 		overall_finding = max(
-			findings, key=lambda f: f.get("estimated_impact_ms") or 0
-		) if findings else None
+			timed_findings, key=lambda f: f.get("estimated_impact_ms") or 0
+		) if timed_findings else None
 
 		if tied_finding:
 			# v0.7.x: the "See the Findings section below …" pointer lives once,

@@ -236,7 +236,8 @@ LOCK_EVENTS_CAP_PER_RECORDING = 200
 
 _LOCK_STACK_TAIL_FRAMES = 10
 
-# Frappe code that catches a lock error itself: (path suffix, function).
+# Frappe code that catches a lock error itself: (path suffix, function). Not dead: user_callsite
+# picks the deepest user frame even when Frappe frames sit below it.
 _FRAPPE_HANDLED_LOCK_SITES = (
 	("frappe/sessions.py", "update_user_metadata"),  # savepoint(QueryDeadlockError)
 	("frappe/utils/change_log.py", "update_last_known_versions"),  # suppress(...)
@@ -323,45 +324,135 @@ def _lock_caller_frames() -> list:
 		return []
 
 
+def job_retry_state(create: bool = True) -> dict | None:
+	"""Per-RQ-job dict that outlives ``frappe.destroy()`` across Frappe's in-process retry."""
+	# execute_job destroys frappe.local and re-runs on a deadlock; the RQ job object survives.
+	try:
+		from rq import get_current_job
+
+		job = get_current_job()
+		if job is None:
+			return None
+		state = getattr(job, "_optimus_retry_state", None)
+		if state is None and create:
+			state = job._optimus_retry_state = {}
+		return state
+	except Exception:
+		return None
+
+
+_lock_capture_warned = False
+_installed_lock_wrap = None
+
+
+def _warn_lock_capture_once(what: str, exc: BaseException) -> None:
+	"""Log the first lock-capture failure of this process; later ones stay silent."""
+	global _lock_capture_warned
+	if _lock_capture_warned:
+		return
+	_lock_capture_warned = True
+	try:
+		import frappe
+
+		frappe.logger("optimus").warning(
+			f"optimus: lock capture {what} failed ({type(exc).__name__}); "
+			"Lock Contention findings may be missing"
+		)
+	except Exception:
+		pass
+
+
+def _append_lock_event(
+	local_proxy, kind, exc, query, duration_ms=None, keep_quoted_identifiers=False
+) -> None:
+	events = getattr(local_proxy, "optimus_lock_events", None)
+	if events is not None and len(events) >= LOCK_EVENTS_CAP_PER_RECORDING:
+		# Checked before the stack walk so a lock storm stays cheap.
+		_mark_lock_events_truncated(local_proxy)
+		return
+	if _is_nowait_probe(query):
+		return
+	frames = _lock_caller_frames()
+	if _handled_by_frappe(frames):
+		return
+
+	from optimus.analyzers.base import installed_apps_allowlist, user_callsite
+	from optimus.settings import get_config
+
+	callsite = user_callsite(
+		frames, tracked_apps=get_config().tracked_apps, installed_apps=installed_apps_allowlist()
+	)
+	if callsite is None:
+		return
+
+	at = next(i for i, frame in enumerate(frames) if frame is callsite)
+	if events is None:
+		events = local_proxy.optimus_lock_events = []
+		state = job_retry_state()
+		if state is not None:
+			# Shared list: a Frappe retry restores it after frappe.local is wiped.
+			state["lock_events"] = events
+	events.append({
+		"kind": kind,
+		"normalized_query": _normalize_sql_safe(query, keep_quoted_identifiers)[:2000],
+		"error": (str(exc).splitlines() or [""])[0][:200],
+		"caller_stack": [callsite, *frames[at + 1 :][-_LOCK_STACK_TAIL_FRAMES:]],
+		"duration_ms": round(duration_ms, 2) if duration_ms is not None else None,
+		"time": time.time(),
+	})
+
+
+def _mark_lock_events_truncated(local_proxy) -> None:
+	local_proxy.optimus_lock_events_truncated = True
+	state = job_retry_state(create=False)
+	if state is not None:
+		state["lock_events_truncated"] = True
+
+
 def _record_lock_event(
 	local_proxy, kind, exc, query, duration_ms=None, keep_quoted_identifiers=False
 ) -> None:
-	"""Append one lock event to ``local_proxy.optimus_lock_events``; never raises."""
+	"""Append one lock event to ``local_proxy.optimus_lock_events``; only an RQ timeout escapes."""
+	from optimus.safe_call import InterruptGuard
+
+	guard = InterruptGuard()
+	failure = None
 	try:
-		if _is_nowait_probe(query):
-			return
-		frames = _lock_caller_frames()
-		if _handled_by_frappe(frames):
-			return
+		with guard:
+			_append_lock_event(local_proxy, kind, exc, query, duration_ms, keep_quoted_identifiers)
+	except Exception as err:  # must never mask the DB exception the caller re-raises
+		failure = err
+	if guard.pending():
+		raise guard.interrupt()
+	if failure is not None:
+		_warn_lock_capture_once("recording", failure)
 
-		from optimus.analyzers.base import installed_apps_allowlist, user_callsite
-		from optimus.settings import get_config
 
-		callsite = user_callsite(
-			frames, tracked_apps=get_config().tracked_apps, installed_apps=installed_apps_allowlist()
-		)
-		if callsite is None:
-			return
+def _record_in_wrap(db, local_proxy, exc, args, kwargs, start) -> None:
+	"""Record ``exc`` if it is a lock error; only an RQ job timeout escapes."""
+	from optimus.safe_call import InterruptGuard
 
-		events = getattr(local_proxy, "optimus_lock_events", None)
-		if events is None:
-			events = []
-			local_proxy.optimus_lock_events = events
-		if len(events) >= LOCK_EVENTS_CAP_PER_RECORDING:
-			local_proxy.optimus_lock_events_truncated = True
-			return
-
-		at = next(i for i, frame in enumerate(frames) if frame is callsite)
-		events.append({
-			"kind": kind,
-			"normalized_query": _normalize_sql_safe(query, keep_quoted_identifiers)[:2000],
-			"error": (str(exc).splitlines() or [""])[0][:200],
-			"caller_stack": [callsite, *frames[at + 1 :][-_LOCK_STACK_TAIL_FRAMES:]],
-			"duration_ms": round(duration_ms, 2) if duration_ms is not None else None,
-			"time": time.time(),
-		})
-	except Exception:
-		pass  # must never mask the DB exception the caller re-raises
+	local_proxy._optimus_recording_lock = True
+	guard = InterruptGuard()
+	failure = None
+	try:
+		with guard:
+			kind = _lock_event_kind(exc)
+			if kind:
+				_record_lock_event(
+					local_proxy, kind, exc,
+					args[0] if args else kwargs.get("query"),
+					duration_ms=(time.monotonic() - start) * 1000.0,
+					keep_quoted_identifiers=getattr(db, "db_type", None) == "postgres",
+				)
+	except Exception as err:  # must never mask the DB exception the caller re-raises
+		failure = err
+	finally:
+		local_proxy._optimus_recording_lock = False
+	if guard.pending():
+		raise guard.interrupt()
+	if failure is not None:
+		_warn_lock_capture_once("wrapper", failure)
 
 
 def _make_lock_wrap(orig, local_proxy):
@@ -377,20 +468,7 @@ def _make_lock_wrap(orig, local_proxy):
 		except Exception as exc:
 			# The flag stops the settings read inside recording from re-entering.
 			if not getattr(local_proxy, "_optimus_recording_lock", False):
-				local_proxy._optimus_recording_lock = True
-				try:
-					kind = _lock_event_kind(exc)
-					if kind:
-						_record_lock_event(
-							local_proxy, kind, exc,
-							args[0] if args else kwargs.get("query"),
-							duration_ms=(time.monotonic() - start) * 1000.0,
-							keep_quoted_identifiers=getattr(self, "db_type", None) == "postgres",
-						)
-				except Exception:
-					pass  # must never mask the DB exception re-raised below
-				finally:
-					local_proxy._optimus_recording_lock = False
+				_record_in_wrap(self, local_proxy, exc, args, kwargs, start)
 			raise
 
 	wrapped._optimus_lock_wrap = True
@@ -412,17 +490,19 @@ def install_lock_capture(local_proxy) -> None:
 	database = _database_class()
 	if database is None or getattr(database.sql, "_optimus_lock_wrap", False):
 		return
+	global _installed_lock_wrap
 	try:
-		database.sql = _make_lock_wrap(database.sql, local_proxy)
-	except Exception:
-		pass  # no lock capture is better than a broken app load
+		database.sql = _installed_lock_wrap = _make_lock_wrap(database.sql, local_proxy)
+	except Exception as exc:
+		_warn_lock_capture_once("install", exc)  # no lock capture beats a broken app load
 
 
 def uninstall_lock_capture() -> None:
 	"""Restore the original ``Database.sql``."""
 	database = _database_class()
-	if database is not None and getattr(database.sql, "_optimus_lock_wrap", False):
-		database.sql = database.sql._optimus_original
+	# Only our own wrapper is unwrapped; a later wrapper stacked on top is left alone.
+	if database is not None and database.sql is _installed_lock_wrap:
+		database.sql = _installed_lock_wrap._optimus_original
 
 
 # Default pyinstrument sample interval in milliseconds. Overridable via

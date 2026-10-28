@@ -303,6 +303,7 @@ v0.5.1 emits 18 finding types across 10 analyzers. Every finding has a severity 
 | **Temporary Table** | `EXPLAIN.Extra` contains "Using temporary" | Query + recommendation |
 | **Low Filter Ratio** | `EXPLAIN.filtered < 10%` AND `rows > 100` | Query + *"WHERE clause selectivity is low"* |
 | **Missing Index** | `DBOptimizer` suggests an index AND the column exists AND is not already indexed AND is btree-compatible (v0.5.1 verifies against `information_schema` before emitting) | Table, column, verified DDL (with prefix length for TEXT/BLOB), example queries |
+| **Lock Contention** | A query failed with a deadlock or lock-wait timeout at a callsite in your own code (Frappe-handled errors and `NOWAIT` probes are skipped) | Callsite, the failed queries, time waited, *"keep transactions short, lock rows in a consistent order"* |
 
 ### Python call tree (4 types: v0.3.0)
 
