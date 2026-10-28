@@ -8,7 +8,7 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.105] - 2026-10-27
+## [0.12.104] - 2026-10-28
 
 ### Fixed
 
@@ -25,6 +25,14 @@ versions may contain breaking changes see migration notes below).
   sweep, instead of being marked Failed over a populated drill-down.
 - The report's drill-down panel and run list read one shared rule: a run with
   persisted results reads as Ready, so the two surfaces cannot disagree.
+
+---
+
+## [0.12.92] - 2026-10-27
+
+### Internal
+
+- The MariaDB optimizer time limit (`SET SESSION max_statement_time`) is now passed as a bound value instead of being formatted into the SQL text. The value was already coerced with `float()`, so behavior is unchanged. This clears the pinned `frappe-sql-format-injection` semgrep rule, which failed the release PR's diff scan against main.
 
 ---
 
