@@ -8,40 +8,30 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.101] - 2026-10-27
+## [0.12.103] - 2026-10-28
 
 ### Added
 
-- Capture and surface DB lock contention. A query that hits a deadlock
-  (`QueryDeadlockError`) or a lock-wait timeout (`QueryTimeoutError`) is now
-  recorded and reported as a new High-severity "Lock Contention" finding. The
-  Frappe recorder only logs queries that succeed, so these failed queries were
-  previously invisible to the profiler. Optimus patches `Database.sql` once at
-  class level, gated on an active Optimus session, records the contended
-  callsite plus the normalized query (no row data) and re-raises the error
-  unchanged, so Frappe's own retry and suppress behaviour is untouched. Because
-  it does not depend on the recorder's per-request `db.sql` / `db._sql` swap, it
-  keeps working across the recorder's patch / unpatch cycle and when the
-  recorder runs with "Record SQL" off.
-- Findings are raised only for contention at a callsite in your own code. The
-  same app classification as the Redundant Call and N+1 analyzers applies, so
-  ERPNext / HRMS code counts as framework (a deadlock in `stock_ledger.py` is
-  not a finding, but your app calling into it is attributed to your frame).
-  Lock errors that Frappe catches itself (session touch, change-log write,
-  dashboard refresh) are dropped even when your code is above them in the stack,
-  deliberate `NOWAIT` probes are skipped (detected on the raw SQL, so it holds
-  when the statement cannot be parsed), and a Postgres statement timeout
-  (a cancelled slow query) is not reported as a lock wait.
-- The finding is actionable (it joins the "Fix these first" plan), names the
-  callsite, lists every distinct contended query, shows the wall-time the query
-  waited before failing instead of a "0ms" badge, and gives a fix hint (short
-  transactions, consistent lock ordering, indexing, retry-safety). Within a
-  root-cause group it outranks timed findings of the same severity. The session
-  summary no longer says time "went into" it or attaches "~0ms".
-- Stored events are bounded: the callsite plus a short tail of frames, the
-  error is cut to its first line (Postgres appends other sessions' SQL), and
-  Postgres quoted identifiers are kept in the normalized query.
-- Lock Contention is deliberately not sent to the LLM: it skips the "Suggest a fix" step and shows only its canned fix hint.
+- Capture and surface DB lock contention. A query that hits a deadlock (`QueryDeadlockError`) or a lock-wait timeout (`QueryTimeoutError`) is recorded and reported as a High-severity "Lock Contention" finding. The Frappe recorder only logs queries that succeed, so these failed queries were invisible before. Optimus patches `Database.sql` once at class level, gated on an active Optimus session, records the contended callsite plus the normalized query (no row data) and re-raises the error unchanged. It keeps working when the recorder runs with "Record SQL" off. Run `bench migrate` to add the new finding type.
+- Findings are raised only for contention at a callsite in your own code (same app classification as the Redundant Call and N+1 analyzers). Lock errors Frappe catches itself (session touch, change-log write, dashboard refresh) are dropped even when your code is above them in the stack, deliberate `NOWAIT` probes are skipped, and a Postgres statement timeout is not reported as a lock wait.
+- The finding is actionable, names the callsite, lists every distinct contended query, shows the wall time the query waited before failing, and gives a fix hint. Within a root-cause group it outranks timed findings of the same severity. It is not sent to the LLM; it shows only its canned fix hint.
+- Stored events are bounded: at most 200 per recording (a truncation marker is added past that), the callsite plus a short tail of frames, and the error cut to its first line.
+- A background job that Frappe retries in the same worker after a deadlock or lock-wait timeout keeps its session and its lock events across the retry, so the deadlock that caused the retry is reported.
+
+### Fixed
+
+- The session summary no longer calls a finding with no measured impact "the biggest issue this session".
+- Lock capture no longer swallows an RQ job timeout raised while a lock event is being recorded.
+
+---
+
+## [0.12.92] - 2026-10-27
+
+### Internal
+
+- The MariaDB optimizer time limit (`SET SESSION max_statement_time`) is now passed as a bound value instead of being formatted into the SQL text. The value was already coerced with `float()`, so behavior is unchanged. This clears the pinned `frappe-sql-format-injection` semgrep rule, which failed the release PR's diff scan against main.
+
+---
 
 ## [0.12.91] - 2026-10-27
 
