@@ -1404,18 +1404,21 @@ def regenerate_reports(session_uuid: str) -> dict:
 	}
 
 
+def _require_system_manager(denied_message: str) -> str:
+	"""The profiler user, after refusing anyone who is not a System Manager (or
+	Administrator) with ``denied_message``. Optimus Settings itself is System-Manager-only."""
+	user = _require_profiler_user()
+	if "System Manager" not in set(frappe.get_roles(user)) and user != "Administrator":
+		frappe.throw(denied_message, frappe.PermissionError, title=_("Optimus"))
+	return user
+
+
 @frappe.whitelist(methods=["POST"])
 def test_ai_connection() -> dict:
 	"""Probe the configured AI provider. System-Manager-only (Optimus Settings itself is
 	System-Manager-only) and limited per user. Returns ``{"ok": bool, "message": str,
 	"model": str}``; never raises on a provider failure (the detail is in ``message``)."""
-	user = _require_profiler_user()
-	if "System Manager" not in set(frappe.get_roles(user)) and user != "Administrator":
-		frappe.throw(
-			_("Only a System Manager can test the AI connection."),
-			frappe.PermissionError,
-			title=_("Optimus"),
-		)
+	_require_system_manager(_("Only a System Manager can test the AI connection."))
 	ratelimit.enforce_user_rate_limit("test_ai_connection", **_AI_LIMITS["test_ai_connection"])
 	from optimus import ai_fix
 
@@ -1428,13 +1431,7 @@ def check_cli_session() -> dict:
 	Connect button in Optimus Settings. Never logs in. System-Manager-only and limited
 	per user. Returns ``ai_fix._cli_session_status()`` and stores its message in the
 	read-only ``ai_subscription_status`` field (best effort)."""
-	user = _require_profiler_user()
-	if "System Manager" not in set(frappe.get_roles(user)) and user != "Administrator":
-		frappe.throw(
-			_("Only a System Manager can check the CLI session."),
-			frappe.PermissionError,
-			title=_("Optimus"),
-		)
+	_require_system_manager(_("Only a System Manager can check the CLI session."))
 	ratelimit.enforce_user_rate_limit("check_cli_session", **_AI_LIMITS["check_cli_session"])
 	from optimus import ai_fix
 
@@ -1442,6 +1439,7 @@ def check_cli_session() -> dict:
 	def store():
 		frappe.db.set_single_value(
 			"Optimus Settings", "ai_subscription_status", (status.get("message") or "")[:140],
+			update_modified=False,
 		)
 		safe_commit()
 

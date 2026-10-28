@@ -65,11 +65,13 @@ def _cfg(**kw):
 @pytest.fixture(autouse=True)
 def _clear_login_cache():
 	ai_fix._LOGIN_CACHE.clear()
+	ai_fix._VERSION_CACHE.clear()
 	yield
 	ai_fix._LOGIN_CACHE.clear()
+	ai_fix._VERSION_CACHE.clear()
 
 
-_REAL_ON_FEATURES = ai_fix._codex_on_features
+_REAL_FEATURES = ai_fix._codex_features
 
 
 @pytest.fixture(autouse=True)
@@ -77,7 +79,7 @@ def _no_feature_probe(monkeypatch):
 	"""Never spawn ``codex features list`` implicitly: the probe is None (static floor
 	only) unless a test sets it."""
 	ai_fix._FEATURES_CACHE.clear()
-	monkeypatch.setattr(ai_fix, "_codex_on_features", lambda cli_path: None)
+	monkeypatch.setattr(ai_fix, "_codex_features", lambda cli_path, timeout=None: None)
 	yield
 	ai_fix._FEATURES_CACHE.clear()
 
@@ -152,6 +154,13 @@ class TestComposePrompt:
 		out = ai_fix._compose_cli_prompt("SYS", [{"content": "A"}, {"content": "B"}])
 		assert out == f"SYS\n\n{ai_fix._CLI_SECURITY_PREAMBLE}\n\nA\n\nB"
 		assert out.index("SYS") < out.index("SECURITY:") < out.index("A")
+
+	def test_preamble_scopes_untrusted_to_the_captured_data_only(self):
+		pre = ai_fix._CLI_SECURITY_PREAMBLE
+		lowered = pre.lower()
+		assert "everything below" not in lowered and "never as instructions" not in lowered
+		assert "captured" in lowered and "UNTRUSTED" in pre
+		assert "task instructions" in lowered
 
 	def test_skips_empty_parts_and_strips(self):
 		out = ai_fix._compose_cli_prompt("  ", [{"content": " hi \n"}, {"content": ""}])
@@ -423,7 +432,8 @@ class TestCallLocalCli:
 		self._call()
 		assert json.loads(real_auth.read_text())["tokens"]["refresh_token"] == "ROTATED"
 
-	def test_timeout_kills_the_whole_process_group_and_is_not_fatal(self, fake_codex):
+	def test_timeout_kills_the_whole_process_group_and_is_not_fatal(self, fake_codex, monkeypatch):
+		monkeypatch.setattr(ai_fix, "_CLI_MIN_EXEC_SECONDS", 1)  # let a 2s budget reach the exec
 		rec = fake_codex().rec
 		fake_codex(exec_body=f'sleep 60 & echo $! > "{rec}/child.pid"; wait')
 		started = time.monotonic()
@@ -456,6 +466,177 @@ class TestCallLocalCli:
 		monkeypatch.setattr(ai_fix, "_run_cli", spy)
 		self._call(timeout=30)
 		assert seen["exec"] <= 30
+
+	def test_an_exhausted_deadline_raises_a_timeout_and_never_launches_the_exec(self, fake_codex, monkeypatch):
+		fake_codex()
+		monkeypatch.setattr(ai_fix, "_cli_login_ok", lambda path, **kw: (True, "ok"))
+		ran = []
+		monkeypatch.setattr(ai_fix, "_run_cli", lambda *a, **kw: ran.append(a) or (0, "REPLY", ""))
+		with ai_transport.attempt() as transport:
+			with pytest.raises(ai_fix.AiFixError, match="ran out of time") as err:
+				self._call(timeout=ai_fix._CLI_MIN_EXEC_SECONDS - 1)
+		assert err.value.kind == "timeout" and err.value.fatal is False
+		assert ran == [] and transport.certainty == "not_sent"
+
+	def test_a_probe_that_uses_up_the_deadline_stops_before_the_exec(self, fake_codex, monkeypatch):
+		fake_codex()
+		clock = {"now": 1000.0}
+
+		class _Clock:
+			monotonic = staticmethod(lambda: clock["now"])
+
+			def __getattr__(self, name):
+				return getattr(time, name)
+
+		monkeypatch.setattr(ai_fix, "time", _Clock())
+		monkeypatch.setattr(ai_fix, "_cli_login_ok", lambda path, **kw: (True, "ok"))
+		real_build = ai_fix._build_cli_argv
+
+		def slow_build(path, work, out_file, **kw):
+			clock["now"] += 27  # leaves 3s of the 30s budget
+			return real_build(path, work, out_file, **kw)
+
+		monkeypatch.setattr(ai_fix, "_build_cli_argv", slow_build)
+		ran = []
+		monkeypatch.setattr(ai_fix, "_run_cli", lambda *a, **kw: ran.append(a) or (0, "REPLY", ""))
+		with pytest.raises(ai_fix.AiFixError, match="ran out of time") as err:
+			self._call(timeout=30)
+		assert err.value.kind == "timeout" and ran == []
+
+	def test_the_features_probe_is_capped_by_the_time_left(self, fake_codex, monkeypatch):
+		fake_codex()
+		seen = []
+		monkeypatch.setattr(ai_fix, "_codex_features", lambda p, timeout=None: seen.append(timeout))
+		self._call(timeout=30)
+		assert seen and 0 < seen[0] <= 30
+
+	def test_the_timeout_message_names_the_configured_limit(self, fake_codex, monkeypatch):
+		fake_codex()
+
+		def hang(*a, **kw):
+			raise subprocess.TimeoutExpired("codex", 1)
+
+		monkeypatch.setattr(ai_fix, "_cli_login_ok", lambda p, **kw: (True, "ok"))
+		monkeypatch.setattr(ai_fix, "_run_cli", hang)
+		with ai_transport.attempt() as transport:
+			with pytest.raises(ai_fix.AiFixError) as err:
+				self._call(timeout=30)
+		assert "within the 30s limit" in str(err.value) and err.value.kind == "timeout"
+		assert transport.certainty == "sent_unknown"
+
+	def test_a_job_timeout_during_the_exec_records_sent_unknown(self, fake_codex, monkeypatch):
+		fake_codex()
+
+		class _Interrupt(Exception):
+			pass
+
+		def killed(*a, **kw):
+			raise _Interrupt("job timeout")
+
+		monkeypatch.setattr(ai_fix, "_cli_login_ok", lambda p, **kw: (True, "ok"))
+		monkeypatch.setattr(ai_fix, "_run_cli", killed)
+		with ai_transport.attempt() as transport:
+			with pytest.raises(_Interrupt):
+				self._call()
+		assert transport.certainty == "sent_unknown"
+
+	@pytest.mark.parametrize("code", [-9, -11, 137])
+	def test_a_signal_killed_exec_is_sent_unknown_and_not_fatal(self, fake_codex, monkeypatch, code):
+		fake_codex()
+		monkeypatch.setattr(ai_fix, "_cli_login_ok", lambda p, **kw: (True, "ok"))
+		monkeypatch.setattr(ai_fix, "_run_cli", lambda *a, **kw: (code, "", "RAWCANARY"))
+		lines = []
+		monkeypatch.setattr(ai_fix, "_note_line", lines.append)
+		with ai_transport.attempt() as transport:
+			with pytest.raises(ai_fix.AiFixError) as err:
+				self._call()
+		assert err.value.kind == "transport" and err.value.fatal is False
+		assert transport.certainty == "sent_unknown" and "RAWCANARY" not in str(err.value)
+		assert lines and lines[0].startswith("codex cli: exec_failed") and f"code={code}" in lines[0]
+
+	def test_a_real_sigkill_of_the_exec_is_sent_unknown(self, fake_codex):
+		fake_codex(exec_body="kill -9 $$")
+		with ai_transport.attempt() as transport:
+			with pytest.raises(ai_fix.AiFixError) as err:
+				self._call()
+		assert err.value.kind == "transport" and transport.certainty == "sent_unknown"
+
+	def test_a_successful_exec_refreshes_the_login_memo(self, fake_codex, monkeypatch):
+		box = fake_codex()
+		path = str(box.path)
+		real_login = ai_fix._cli_login_ok
+		monkeypatch.setattr(ai_fix, "_cli_login_ok", lambda p, **kw: (True, "ok"))  # memoizes nothing
+		assert path not in ai_fix._LOGIN_CACHE
+		assert self._call() == "REPLY"
+		assert ai_fix._LOGIN_CACHE[path][1:] == (True, "ok")
+		monkeypatch.setattr(ai_fix, "_cli_login_ok", real_login)
+		assert self._call() == "REPLY"
+		assert "login status" not in _read(box.rec, "calls.txt")
+
+	def test_a_failed_exec_does_not_refresh_the_login_memo(self, fake_codex, monkeypatch):
+		box = fake_codex(exec_body="exit 3")
+		monkeypatch.setattr(ai_fix, "_cli_login_ok", lambda p, **kw: (True, "ok"))
+		with pytest.raises(ai_fix.AiFixError):
+			self._call()
+		assert str(box.path) not in ai_fix._LOGIN_CACHE
+
+	def test_exec_failure_is_logged_with_event_version_label_and_code_only(self, fake_codex, monkeypatch):
+		fake_codex(exec_body="echo 'RAWCANARY prompt text SELECT secret' >&2; exit 3")
+		lines = []
+		monkeypatch.setattr(ai_fix, "_note_line", lines.append)
+		with pytest.raises(ai_fix.AiFixError):
+			self._call()
+		assert lines == ["codex cli: exec_failed version=codex-cli 9.9.9 label=other code=3"]
+		assert "RAWCANARY" not in "".join(lines)
+
+	def test_over_cap_reply_behind_a_long_run_of_leading_blanks_is_still_flagged(self, tmp_path):
+		out = tmp_path / "out.txt"
+		out.write_text(" \n" * 2000 + "x" * (ai_fix._CLI_MAX_OUTPUT_CHARS + 500))
+		assert ai_fix._read_cli_reply(str(out), "") == ("x" * ai_fix._CLI_MAX_OUTPUT_CHARS, True)
+
+	def test_leading_blanks_on_the_stdout_fallback_do_not_hide_an_overflow(self, tmp_path):
+		stdout = " " * 3000 + "y" * (ai_fix._CLI_MAX_OUTPUT_CHARS + 500)
+		assert ai_fix._read_cli_reply(str(tmp_path / "missing"), stdout) == ("y" * ai_fix._CLI_MAX_OUTPUT_CHARS, True)
+
+	def test_a_short_reply_behind_blanks_is_returned_stripped_and_unflagged(self, tmp_path):
+		out = tmp_path / "out.txt"
+		out.write_text(" " * 5000 + "fix\n\n")
+		assert ai_fix._read_cli_reply(str(out), "") == ("fix", False)
+
+	def test_a_configured_path_that_is_not_named_codex_explains_what_to_set(self, sub_cfg, tmp_path):
+		sub_cfg.ai_cli_path = str(tmp_path / "codex.js")
+		with pytest.raises(ai_fix.AiFixError, match="symlink named `codex`") as err:
+			self._call()
+		assert err.value.kind == "config"
+
+	def test_probe_and_lock_wait_come_out_of_the_exec_budget(self, fake_codex, monkeypatch):
+		fake_codex()
+		clock = {"now": 1000.0}
+
+		class _Clock:
+			monotonic = staticmethod(lambda: clock["now"])
+
+			def __getattr__(self, name):
+				return getattr(time, name)
+
+		monkeypatch.setattr(ai_fix, "time", _Clock())
+		monkeypatch.setattr(ai_fix, "_cli_login_ok", lambda path, **kw: (True, "ok"))
+		real_build = ai_fix._build_cli_argv
+
+		def slow_build(path, work, out_file, **kw):
+			clock["now"] += 12  # the features probe (and any auth lock wait) burns time
+			return real_build(path, work, out_file, **kw)
+
+		monkeypatch.setattr(ai_fix, "_build_cli_argv", slow_build)
+		seen = {}
+
+		def fake_run(argv, env, cwd, timeout, stdin_text=None):
+			seen["timeout"] = timeout
+			return 0, "REPLY", ""
+
+		monkeypatch.setattr(ai_fix, "_run_cli", fake_run)
+		assert self._call(timeout=30) == "REPLY"
+		assert seen["timeout"] == 18
 
 	def test_guard_off_refuses_before_any_process(self, fake_codex, monkeypatch):
 		box = fake_codex()
@@ -500,20 +681,35 @@ class TestCallLocalCli:
 		fake_codex(exec_body="echo FROM_STDOUT")
 		assert self._call() == "FROM_STDOUT"
 
-	def test_over_cap_reply_file_is_cut_and_marked_truncated(self, tmp_path):
+	def test_over_cap_reply_file_is_cut_and_flagged_truncated(self, tmp_path):
 		out = tmp_path / "out.txt"
 		out.write_text("x" * 25_000)
-		text = ai_fix._read_cli_reply(str(out), "")
-		assert text == "x" * ai_fix._CLI_MAX_OUTPUT_CHARS + "\n…(truncated)"
+		assert ai_fix._read_cli_reply(str(out), "") == ("x" * ai_fix._CLI_MAX_OUTPUT_CHARS, True)
 
-	def test_over_cap_stdout_fallback_is_cut_and_marked_truncated(self, tmp_path):
-		text = ai_fix._read_cli_reply(str(tmp_path / "missing"), "y" * 25_000)
-		assert text.endswith("\n…(truncated)") and text.count("y") == ai_fix._CLI_MAX_OUTPUT_CHARS
+	def test_over_cap_stdout_fallback_is_cut_and_flagged_truncated(self, tmp_path):
+		text, truncated = ai_fix._read_cli_reply(str(tmp_path / "missing"), "y" * 25_000)
+		assert truncated is True and text == "y" * ai_fix._CLI_MAX_OUTPUT_CHARS
 
-	def test_reply_exactly_at_the_cap_is_not_marked(self, tmp_path):
+	def test_reply_exactly_at_the_cap_is_not_flagged(self, tmp_path):
 		out = tmp_path / "out.txt"
 		out.write_text("x" * ai_fix._CLI_MAX_OUTPUT_CHARS)
-		assert ai_fix._read_cli_reply(str(out), "") == "x" * ai_fix._CLI_MAX_OUTPUT_CHARS
+		assert ai_fix._read_cli_reply(str(out), "") == ("x" * ai_fix._CLI_MAX_OUTPUT_CHARS, False)
+
+	def test_over_cap_reply_comes_back_scrubbed_and_marked_truncated(self, fake_codex):
+		fake_codex(
+			exec_body='echo "db_password = \\"hunter2hunter2\\"" > "$out"; '
+			'i=0; while [ $i -lt 5000 ]; do printf "word " >> "$out"; i=$((i+1)); done'
+		)
+		reply = self._call()
+		assert "hunter2" not in reply and "[redacted]" in reply
+		assert reply.endswith("word\n…(truncated)") and len(reply) < ai_fix._CLI_MAX_OUTPUT_CHARS + 50
+
+	def test_truncation_marker_survives_an_unterminated_pem_block(self, fake_codex):
+		body = "-----BEGIN PRIVATE KEY-----\n" + "A" * 25_000
+		fake_codex(exec_body=f"printf '%s' '{body}' > \"$out\"")
+		reply = self._call()
+		assert "BEGIN PRIVATE KEY" not in reply and "A" * 100 not in reply
+		assert reply.endswith("\n…(truncated)")
 
 	def test_success_counts_one_known_zero_cost_call(self, fake_codex):
 		fake_codex()
@@ -573,6 +769,37 @@ class TestLoginProbe:
 	def test_other_non_zero_exit_is_still_signed_out(self, fake_codex):
 		box = fake_codex(login="exit 1")
 		assert ai_fix._cli_login_ok(str(box.path), use_cache=False) == (False, "signed_out")
+
+	@pytest.mark.parametrize("code", [137, 139])
+	def test_a_shell_style_signal_exit_is_a_crash_not_a_sign_out(self, fake_codex, code):
+		box = fake_codex(login=f"exit {code}")
+		assert ai_fix._cli_login_ok(str(box.path), use_cache=False) == (False, "error")
+
+	@pytest.mark.parametrize("sig", ["KILL", "SEGV"])
+	def test_a_real_signal_kill_has_a_negative_returncode_and_is_not_a_sign_out(self, fake_codex, sig):
+		box = fake_codex(login=f"kill -{sig} $$")
+		env = {"PATH": os.environ["PATH"]}
+		code, _, _ = ai_fix._run_cli([str(box.path), "login", "status"], env, str(box.rec), 10)
+		assert code < 0  # Popen without a shell reports a signal as -N, not 128+N
+		assert ai_fix._cli_login_ok(str(box.path), use_cache=False) == (False, "error")
+
+	@pytest.mark.parametrize("code,expected", [
+		(-9, (False, "error")), (-11, (False, "error")), (2, (False, "error")), (1, (False, "signed_out")),
+	])
+	def test_login_returncode_classification(self, monkeypatch, code, expected):
+		monkeypatch.setattr(ai_fix, "_run_cli", lambda *a, **kw: (code, "", "Not logged in"))
+		assert ai_fix._cli_login_ok("/x/codex", use_cache=False) == expected
+		assert "/x/codex" not in ai_fix._LOGIN_CACHE
+
+	def test_not_chatgpt_logs_the_version_and_the_message_names_it(self, fake_codex, monkeypatch):
+		box = fake_codex(login='echo "Logged in using an API key" >&2')
+		lines = []
+		monkeypatch.setattr(ai_fix, "_note_line", lines.append)
+		assert ai_fix._cli_login_ok(str(box.path), use_cache=False) == (False, "not_chatgpt")
+		assert lines == ["codex cli: login_not_chatgpt version=codex-cli 9.9.9"]
+		message = ai_fix._login_failure("not_chatgpt", str(box.path)).args[0]
+		assert "your codex CLI (codex-cli 9.9.9) may need updating" in message
+		assert "may need updating" not in ai_fix._login_failure("not_chatgpt").args[0]
 
 	def test_signed_out_stops_the_call_as_fatal(self, fake_codex):
 		fake_codex(login='echo "Not logged in" >&2; exit 1')
@@ -972,66 +1199,111 @@ class TestToolIsolation:
 	def _disabled(argv):
 		return [argv[i + 1] for i, a in enumerate(argv) if a == "--disable"]
 
+	@staticmethod
+	def _probe(monkeypatch, on):
+		monkeypatch.setattr(ai_fix, "_codex_features", lambda p, timeout=None: None if on is None else frozenset(on))
+
+	_NEW_FLOOR = (
+		"browser_use_external", "browser_use_full_cdp_access", "browser_annotation_api",
+		"code_mode_host", "code_mode_interrupt", "in_app_browser", "in_app_local_automation",
+	)
+
+	def test_the_floor_covers_the_default_on_browser_and_automation_tools(self):
+		assert set(self._NEW_FLOOR) <= set(ai_fix._CLI_DISABLED_FEATURES)
+		assert {"shell_tool", "browser_use", "plugins", "apps"} <= set(ai_fix._CLI_DISABLED_FEATURES)
+
 	def test_on_capability_features_from_the_probe_are_disabled_too(self, monkeypatch):
-		monkeypatch.setattr(ai_fix, "_codex_on_features", lambda p: frozenset({
-			"browser_use_external", "code_mode_host", "browser_use_full_cdp_access",
-			"browser_annotation_api", "code_mode_interrupt", "fast_mode", "goals", "steer",
-		}))
+		on = {"future_browser_tool", "remote_repl", "fast_mode", "goals", "steer"}
+		self._probe(monkeypatch, on)
 		disabled = self._disabled(ai_fix._build_cli_argv("codex", "/s", "/s/out"))
-		for name in ("browser_use_external", "code_mode_host", "browser_use_full_cdp_access",
-			"browser_annotation_api", "code_mode_interrupt"):
-			assert name in disabled
+		assert "future_browser_tool" in disabled and "remote_repl" in disabled
 		for name in ("fast_mode", "goals", "steer"):
 			assert name not in disabled
 		assert set(ai_fix._CLI_DISABLED_FEATURES) <= set(disabled)
 		assert len(disabled) == len(set(disabled)) and disabled == sorted(disabled)
 
-	def test_a_failed_probe_falls_back_to_the_full_static_floor(self):
+	def test_a_probed_browser_use_external_is_in_the_list_alongside_the_floor(self, monkeypatch):
+		self._probe(monkeypatch, {"browser_use_external"})
+		disabled = ai_fix._cli_disabled_features("codex")
+		assert "browser_use_external" in disabled
+		assert set(ai_fix._CLI_DISABLED_FEATURES) <= set(disabled)
+
+	@pytest.mark.parametrize("on", [None, frozenset()])
+	def test_the_full_floor_is_passed_when_the_probe_fails_or_lists_nothing_on(self, monkeypatch, on):
+		self._probe(monkeypatch, on)
 		disabled = self._disabled(ai_fix._build_cli_argv("codex", "/s", "/s/out"))
 		assert sorted(disabled) == sorted(ai_fix._CLI_DISABLED_FEATURES)
 
+	def test_the_floor_is_never_filtered_by_what_the_cli_lists(self, monkeypatch):
+		# A listing that omits a floor name (an older codex) must not drop its --disable.
+		self._probe(monkeypatch, {"fast_mode"})
+		assert set(ai_fix._CLI_DISABLED_FEATURES) <= set(ai_fix._cli_disabled_features("codex"))
+
+	@pytest.mark.parametrize("listing", ["", "Feature  Stage  Enabled\n", "garbage\n\n  \nsingle\n", "UPPER  stable  true\n"])
+	def test_a_header_only_or_garbage_listing_still_yields_the_full_floor(self, monkeypatch, listing):
+		monkeypatch.setattr(ai_fix, "_run_cli", lambda *a, **kw: (0, listing, ""))
+		monkeypatch.setattr(ai_fix, "_codex_features", _REAL_FEATURES)
+		ai_fix._FEATURES_CACHE.clear()
+		assert ai_fix._cli_disabled_features("/x/codex") == sorted(ai_fix._CLI_DISABLED_FEATURES)
+
 	def test_other_hardening_flags_are_kept_with_a_probe(self, monkeypatch):
-		monkeypatch.setattr(ai_fix, "_codex_on_features", lambda p: frozenset({"browser_use_external"}))
+		self._probe(monkeypatch, {"browser_use_external"})
 		argv = ai_fix._build_cli_argv("codex", "/s", "/s/out")
 		assert argv[argv.index("-c") + 1] == 'web_search="disabled"'
 		assert argv[argv.index("--sandbox") + 1] == "read-only" and argv[-1] == "-"
 
-	def test_features_listing_keeps_names_whose_last_column_is_true(self):
+	def test_features_listing_yields_the_on_names_including_dotted_ones(self):
 		listing = (
 			"browser_use_external                     stable             true\n"
 			"code_mode_host_grpc                      under development  false\n"
 			"fast_mode                                stable             true\n"
+			"ns.dotted_tool                           stable             true\n"
 			"\n"
 		)
-		assert ai_fix._parse_on_features(listing) == {"browser_use_external", "fast_mode"}
+		assert ai_fix._parse_features(listing) == {"browser_use_external", "fast_mode", "ns.dotted_tool"}
+
+	def test_a_listing_with_no_feature_lines_parses_to_none_and_all_off_to_empty(self):
+		assert ai_fix._parse_features("Feature Stage\nonlyone\n") is None
+		assert ai_fix._parse_features("fast_mode stable false\n") == frozenset()
 
 	def test_probe_runs_features_list_without_auth_and_is_cached(self, monkeypatch):
 		calls = []
 
 		def fake_run(argv, env, cwd, timeout, stdin_text=None):
-			calls.append(argv)
+			calls.append((argv, timeout))
 			return 0, "browser_use_external   stable   true\nfast_mode   stable   false\n", ""
 
 		monkeypatch.setattr(ai_fix, "_run_cli", fake_run)
-		assert _REAL_ON_FEATURES("/x/codex") == {"browser_use_external"}
-		assert _REAL_ON_FEATURES("/x/codex") == {"browser_use_external"}
-		assert calls == [["/x/codex", "features", "list"]]
+		assert _REAL_FEATURES("/x/codex") == {"browser_use_external"}
+		assert _REAL_FEATURES("/x/codex") == {"browser_use_external"}
+		assert calls == [(["/x/codex", "features", "list"], ai_fix._FEATURES_PROBE_SECONDS)]
+
+	def test_probe_timeout_is_capped_by_the_time_left(self, monkeypatch):
+		seen = []
+		monkeypatch.setattr(ai_fix, "_run_cli", lambda argv, env, cwd, timeout, stdin_text=None: (seen.append(timeout), (0, "a_b stable true\n", ""))[1])
+		_REAL_FEATURES("/x/codex", 3)
+		assert seen == [3]
 
 	@pytest.mark.parametrize("outcome", ["raises", "exit1", "empty"])
 	def test_probe_failure_is_none_and_never_raises(self, monkeypatch, outcome):
+		monkeypatch.setattr(ai_fix, "_note_line", lambda line: None)
+
 		def fake_run(*a, **kw):
 			if outcome == "raises":
 				raise subprocess.TimeoutExpired("codex", 10)
 			return (1, "", "boom") if outcome == "exit1" else (0, "garbage\n", "")
 
 		monkeypatch.setattr(ai_fix, "_run_cli", fake_run)
-		assert _REAL_ON_FEATURES("/x/codex") is None
+		assert _REAL_FEATURES("/x/codex") is None
 
 	def test_capability_regex_leaves_plain_completion_features_alone(self):
 		for name in ("fast_mode", "goals", "steer", "collaboration_modes", "sqlite", "item_ids"):
 			assert not ai_fix._CLI_CAPABILITY_RE.search(name)
-		for name in ("browser_use_external", "code_mode_host", "unified_exec", "sandbox_bypass_x"):
-			assert ai_fix._CLI_CAPABILITY_RE.search(name)
+		for name in (
+			"browser_use_external", "code_mode_host", "unified_exec", "sandbox_bypass_x",
+			"in_app_local_automation", "remote_control", "js_repl", "apply_patch_freeform", "memories",
+		):
+			assert ai_fix._CLI_CAPABILITY_RE.search(name), name
 
 	@pytest.mark.skipif(os.environ.get("OPTIMUS_LIVE_CODEX") != "1", reason="set OPTIMUS_LIVE_CODEX=1 with a logged-in codex")
 	def test_live_agent_cannot_read_a_file_outside_the_scratch_dir(self, tmp_path, monkeypatch, sub_cfg):
@@ -1047,6 +1319,66 @@ class TestToolIsolation:
 			timeout=120,
 		)
 		assert "OPTIMUS-LIVE-CANARY-7f3a91c2" not in reply
+
+
+class _FakeJobTimeout(Exception):
+	"""Stands in for rq's ``JobTimeoutException`` (an ``Exception``)."""
+
+
+@pytest.fixture(params=["job_timeout", "system_exit"])
+def interrupt(request, monkeypatch):
+	"""An interrupt the guard must re-raise: an RQ-style job timeout (the type registered
+	with the guard) or a non-Exception one (a gunicorn ``SystemExit``)."""
+	monkeypatch.setattr(ai_fix, "_job_timeout_types", lambda: (_FakeJobTimeout,))
+	return _FakeJobTimeout if request.param == "job_timeout" else SystemExit
+
+
+class TestInterruptsAreNotSwallowed:
+	def test_config_check_re_raises_an_interrupt(self, interrupt, monkeypatch):
+		def boom():
+			raise interrupt("worker timeout")
+
+		monkeypatch.setattr(ai_fix, "_read_provider_snapshot", boom)
+		with pytest.raises(interrupt):
+			ai_fix._subscription_config_valid({"protocol": "subscription"})
+
+	def test_config_check_still_fails_closed_on_a_plain_error(self, monkeypatch):
+		def boom():
+			raise RuntimeError("db down")
+
+		monkeypatch.setattr(ai_fix, "_read_provider_snapshot", boom)
+		assert ai_fix._subscription_config_valid({"protocol": "subscription"}) is False
+
+	def test_features_probe_re_raises_an_interrupt_and_caches_nothing(self, interrupt, monkeypatch):
+		def boom(*a, **kw):
+			raise interrupt("worker timeout")
+
+		monkeypatch.setattr(ai_fix, "_run_cli", boom)
+		with pytest.raises(interrupt):
+			_REAL_FEATURES("/x/codex")
+		assert "/x/codex" not in ai_fix._FEATURES_CACHE
+
+	def test_features_probe_failure_is_logged_without_stderr(self, monkeypatch):
+		lines = []
+		monkeypatch.setattr(ai_fix, "_note_line", lines.append)
+		monkeypatch.setattr(ai_fix, "_run_cli", lambda *a, **kw: (1, "RAWCANARY out", "RAWCANARY err"))
+		assert _REAL_FEATURES("/x/codex") is None
+		assert lines == ["codex cli: features_probe_failed"]
+
+	def test_diagnostic_carries_only_the_whitelisted_fields(self, monkeypatch):
+		lines = []
+		monkeypatch.setattr(ai_fix, "_note_line", lines.append)
+		ai_fix._log_cli_diagnostic("exec_failed", version="codex-cli 1.2.3", label="network", code=3)
+		ai_fix._log_cli_diagnostic("features_probe_failed")
+		assert lines == ["codex cli: exec_failed version=codex-cli 1.2.3 label=network code=3", "codex cli: features_probe_failed"]
+
+	def test_features_probe_failure_is_remembered_as_none(self, monkeypatch):
+		def boom(*a, **kw):
+			raise RuntimeError("spawn failed")
+
+		monkeypatch.setattr(ai_fix, "_run_cli", boom)
+		assert _REAL_FEATURES("/x/codex") is None
+		assert ai_fix._FEATURES_CACHE["/x/codex"][1] is None
 
 
 def _rotate(copy_dir, token, **extra):

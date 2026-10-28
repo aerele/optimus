@@ -8,6 +8,35 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.105] - 2026-10-28
+
+### Security
+
+- The Codex agent now always starts with the full list of tools turned off, including the default-on browser, code-mode and in-app automation tools. Before, a failed or empty `codex features list` check dropped the whole list. Features the installed CLI reports as on are still added when the check works.
+
+### Fixed
+
+- A Codex process killed by the system (for example out of memory) or a CLI too old for `codex login status` is now a temporary error instead of a fatal sign-out. A kill during the actual run is recorded as "sent, outcome unknown" so it is not repeated automatically.
+- A call whose time limit is used up before the CLI starts now stops with a timeout instead of launching it for one second. The feature check is also held to the time that is left.
+- The timeout message now names the configured limit, and a worker timeout during the run is recorded as "sent, outcome unknown".
+- A successful Codex run now refreshes the 30 second sign-in memo, so a bulk run does not re-check the session before every finding.
+- A reply that starts with a long run of blank lines no longer hides that it was cut at the output limit.
+- Failed feature checks, sign-in checks that do not report ChatGPT and failed runs are written to the `optimus` log with the event, CLI version, a fixed label and the exit code only, never the CLI output. The "signed in with an API key" message now names the CLI version.
+- The CLI path field and its error message now say to point at the `codex` launcher or a symlink named `codex`, not the `.js` file.
+
+## [0.12.104] - 2026-10-28
+
+### Fixed
+
+- A worker timeout or interrupt during a queued Codex refresh is no longer turned into an "AI configuration changed" error or silently ignored. It now stops the job as it does for the API-key path.
+- A Codex call no longer runs past its time limit. The wait for the sign-in lock and the feature check now come out of the call's budget.
+- The Codex agent is only told to turn off features that the installed CLI actually lists. If the feature check fails, the full fixed list still applies.
+- Clicking Connect no longer changes the modified time of Optimus Settings, so saving the form during a check no longer fails with a timestamp mismatch.
+- A session check that the system kills (for example out of memory, exit code 128 or above) is now a temporary error instead of a fatal sign-out.
+- A reply longer than the output limit always ends with the "(truncated)" marker, even when it ends inside a private key block that is hidden from the reply.
+- The security notice in the Codex prompt now marks only the captured application data as untrusted, so Optimus's own instructions are followed in full.
+- Removed a no-op `reload_doc` patch for the new settings fields. Optimus Settings is a single doctype and `bench migrate` already loads its fields.
+
 ## [0.12.103] - 2026-10-28
 
 ### Security
