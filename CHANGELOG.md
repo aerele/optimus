@@ -8,16 +8,25 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.97] - 2026-10-27
+## [0.12.97] - 2026-10-28
 
 ### Fixed
 
-- The Hot frames section now reliably separates your app's code from framework code. Before, the split guessed the app from a shortened file name, so frappe frames could appear under your app and, with Tracked Apps set, your own tracked app's frames could be pushed into the framework group. Each frame is now classified from its full file path, using the same rules as the rest of the report, and Optimus's own code is never shown as your app.
+- The Hot frames section now reliably separates your app's code from framework code. Before, the split guessed the app from a shortened file name, so frappe frames could appear under your app and, with Tracked Apps set, your own tracked app's frames could be pushed into the framework group. Each frame is now classified from its full file path, using the same rules as the rest of the report. Optimus's own code and frames with no file name are never shown as your app.
+- Hot frames no longer lose framework rows on large sessions: when the working set is trimmed, app frames are ranked by self time and framework frames by cumulative time, each in its own group.
 
 ### Changed
 
-- Hot frames now has two labelled groups, "Your app's code" first and "Framework code" second.
-- Two files whose shortened names match (for example a framework `user/user.py` and your app's `user/user.py`) are now separate Hot frames rows with their own times, so your app's time is no longer hidden inside framework time. Labels are lengthened only when two rows would otherwise read the same.
+- Hot frames now has two labelled groups, "Your app's code" first and "Framework code" second, each showing its own top 20.
+- Rows are totalled by app-relative file path plus function, so two files whose shortened names match (a framework `user/user.py` and your app's `user/user.py`) stay separate rows with their own times, while the same file reached by a relative or absolute path is one row. Labels are lengthened only when two rows would otherwise read the same.
+
+---
+
+## [0.12.92] - 2026-10-27
+
+### Internal
+
+- The MariaDB optimizer time limit (`SET SESSION max_statement_time`) is now passed as a bound value instead of being formatted into the SQL text. The value was already coerced with `float()`, so behavior is unchanged. This clears the pinned `frappe-sql-format-injection` semgrep rule, which failed the release PR's diff scan against main.
 
 ---
 
