@@ -8,6 +8,8 @@
 user, fails closed, checks status only after permission and counts the rate limit last.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from optimus import ai_fix, api
@@ -194,6 +196,8 @@ def test_ai_gate_allows_owner_and_counts_one_call(monkeypatch):
 
 def test_ai_gate_not_configured_is_refused_and_not_counted(monkeypatch):
 	fake, _ = _ai(monkeypatch, configured=False, perms=owner_perms())
+	# AI is on but the provider is not set up; with AI off the message says to enable it.
+	monkeypatch.setattr("optimus.settings.get_config", lambda: SimpleNamespace(ai_enabled=True))
 	with pytest.raises(FakeValidationError) as exc:
 		api._ai_session_gate(SESSION_UUID, section=None, action="refill_ai_suggestions")
 	assert "aren't configured" in str(exc.value)

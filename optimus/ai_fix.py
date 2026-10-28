@@ -885,11 +885,11 @@ def _read_provider_snapshot():
 	query = """SELECT s.field, s.value, a.password
 		FROM `tabSingles` s LEFT JOIN `__Auth` a
 		ON a.doctype = %s AND a.name = %s AND a.fieldname = %s AND a.encrypted = 1
-		WHERE s.doctype = %s AND s.field IN (%s, %s, %s, %s, %s)"""
+		WHERE s.doctype = %s AND s.field IN (%s, %s, %s, %s, %s, %s)"""
 	rows = frappe.db.multisql(
 		{"mariadb": query, "postgres": query.replace("`", '"')},
 		values=("Optimus Settings", "Optimus Settings", "ai_api_key", "Optimus Settings",
-			"ai_enabled", "ai_provider", "ai_base_url", "ai_model", "ai_context_tokens"),
+			"ai_enabled", "ai_connection_type", "ai_provider", "ai_base_url", "ai_model", "ai_context_tokens"),
 	)
 	values = {field: value for field, value, _ in rows}
 	values["ai_enabled"] = ai_privacy.opted_in(values.get("ai_enabled"))
@@ -932,6 +932,17 @@ def _key_for_provider(provider: dict) -> str:
 	if failed:
 		raise AiFixError(_("AI configuration changed or could not be read. Check Optimus Settings and retry the refresh."), kind="config") from None
 	return api_key.strip() if isinstance(api_key, str) else ""
+
+
+def _subscription_config_valid(provider: dict) -> bool:
+	"""True when AI is still on and the saved settings still resolve to ``provider``.
+	The keyless twin of the check in ``_key_for_provider``: a queued job must stop
+	once AI is turned off or the connection is switched. Fails closed."""
+	try:
+		cfg, _ciphertext = _read_provider_snapshot()
+		return bool(cfg.ai_enabled) and _provider_config(cfg) == provider
+	except Exception:
+		return False
 
 
 def _get_api_key(needs_key: bool = True, *, provider: dict | None = None) -> str:
@@ -2852,8 +2863,13 @@ def _dispatch_call(
 	Fetch the API key locally, collect usage for SQL settlement, and attribute logs
 	only to the explicit session reference. The parameter memo and whole-call
 	budget are shared with a possible guardrail re-ask. The local CLI branch
-	reports no token usage."""
+	reports no token usage. Like the HTTP path (``_key_for_provider``), it first
+	re-reads the saved settings and refuses a call whose provider snapshot is stale."""
 	if provider["protocol"] == "subscription":
+		if not _subscription_config_valid(provider):
+			from frappe import _
+
+			raise AiFixError(_("AI configuration changed or could not be read. Check Optimus Settings and retry the refresh."), kind="config")
 		return _call_local_cli(system, messages, usage_out=usage_out, timeout=timeout)
 	api_key = _get_api_key(provider.get("needs_key", True), provider=provider)
 	if provider.get("needs_key") and not api_key:
@@ -3327,16 +3343,23 @@ def _trusted_cli_file(real: str) -> bool:
 	)
 
 
+_CLI_ENTRYPOINT_NAMES = ("codex", "codex.js", "codex.cjs", "codex.mjs")
+
+
 def _cli_installed(cfg) -> str | None:
 	"""Resolved path of the Codex CLI, or None. An explicit ``ai_cli_path`` must be
-	absolute and, after symlinks are resolved, a trusted executable named ``codex``
-	(``_trusted_cli_file``). Blank falls back to the PATH hit, held to the same checks. No subprocess."""
+	absolute and named ``codex``; after symlinks are resolved it must be a trusted
+	executable (``_trusted_cli_file``) whose name is ``codex`` or a Node entrypoint
+	(``codex.js`` and friends, as npm installs it). Blank falls back to the PATH hit, held
+	to the same checks. No subprocess."""
 	configured = (getattr(cfg, "ai_cli_path", "") or "").strip()
 	candidate = configured or shutil.which("codex")
 	if not candidate or not os.path.isabs(candidate):
 		return None
+	if os.path.basename(candidate) != "codex":
+		return None
 	real = os.path.realpath(candidate)
-	if os.path.basename(real) != "codex" or not _trusted_cli_file(real):
+	if os.path.basename(real) not in _CLI_ENTRYPOINT_NAMES or not _trusted_cli_file(real):
 		return None
 	return real
 
@@ -3353,10 +3376,14 @@ _CLI_SECURITY_PREAMBLE = (
 
 
 def _compose_cli_prompt(system: str, messages: list[dict]) -> str:
-	"""One stdin prompt from the system prompt plus every message body (the CLI has
-	no separate system channel)."""
-	parts = [system or ""] + [m.get("content") or "" for m in messages]
-	return "\n\n".join(p.strip() for p in parts if p and p.strip()).strip()
+	"""One stdin prompt (the CLI has no separate system channel): Optimus's own system
+	prompt first (trusted), then the SECURITY preamble, then every message body (the
+	captured data). The preamble sits between them so it covers only the data."""
+	data = "\n\n".join(
+		(m.get("content") or "").strip() for m in messages if (m.get("content") or "").strip()
+	)
+	parts = [(system or "").strip(), _CLI_SECURITY_PREAMBLE if data else "", data]
+	return "\n\n".join(p for p in parts if p)
 
 
 # Agent tools that could read a file or run a command, turned off so the
@@ -3368,11 +3395,69 @@ _CLI_DISABLED_FEATURES = (
 )
 
 
+# Feature names that look like a tool, agent, browser or file/network capability. Every
+# such feature the installed CLI reports as ON is turned off too, so a capability added
+# by a newer codex (``browser_use_external``, ``code_mode_host``) is covered without a
+# code change. ``--sandbox read-only`` governs only model-run shell commands, not these.
+_CLI_CAPABILITY_RE = re.compile(
+	r"shell|exec|tool|browser|cdp|annotation|computer|code_mode|\bapps?\b|plugin|hook|mcp"
+	r"|web|image|agent|file|network|sandbox_bypass|danger",
+	re.IGNORECASE,
+)
+_FEATURES_PROBE_SECONDS = 10
+_FEATURES_CACHE_SECONDS = 600
+_FEATURES_FAILURE_CACHE_SECONDS = 60
+# {cli_path: (monotonic_ts, on_features or None)}. A failed probe is remembered briefly
+# so a broken probe does not add its timeout to every finding.
+_FEATURES_CACHE: dict[str, tuple[float, frozenset[str] | None]] = {}
+
+
+def _parse_on_features(listing: str) -> frozenset[str]:
+	"""Feature names whose last column (the effective state) is ``true``."""
+	on = set()
+	for line in listing.splitlines():
+		tokens = line.split()
+		if len(tokens) >= 2 and tokens[-1].lower() == "true":
+			on.add(tokens[0])
+	return frozenset(on)
+
+
+def _codex_on_features(cli_path: str) -> frozenset[str] | None:
+	"""Names of the features ``codex features list`` reports as ON, or None when the
+	probe fails (it never raises). Each line is ``name  stage  state``: the first token is
+	the name and the last the effective state. Cached per path for the process."""
+	now = time.monotonic()
+	hit = _FEATURES_CACHE.get(cli_path)
+	if hit and now - hit[0] < (_FEATURES_CACHE_SECONDS if hit[1] is not None else _FEATURES_FAILURE_CACHE_SECONDS):
+		return hit[1]
+	on = None
+	try:
+		with _cli_sandbox(with_auth=False) as (work, env):
+			code, out, _err = _run_cli([cli_path, "features", "list"], env, work, _FEATURES_PROBE_SECONDS)
+		if code == 0:
+			on = _parse_on_features(out) or None
+	except Exception:
+		on = None
+	_FEATURES_CACHE[cli_path] = (now, on)
+	return on
+
+
+def _cli_disabled_features(cli_path: str) -> list[str]:
+	"""The static floor plus every capability-looking feature the CLI has ON. A failed
+	probe leaves exactly the floor, never fewer."""
+	disabled = set(_CLI_DISABLED_FEATURES)
+	on = _codex_on_features(cli_path)
+	if on:
+		disabled |= {name for name in on if _CLI_CAPABILITY_RE.search(name)}
+	return sorted(disabled)
+
+
 def _build_cli_argv(cli_path: str, scratch_dir: str, out_file: str) -> list[str]:
 	"""Fixed argv for a read-only, ephemeral ``codex exec`` with every file, command,
-	agent and web tool turned off. Pure. The trailing ``-`` reads the prompt from stdin."""
+	agent, browser and web tool turned off (``_cli_disabled_features``). The trailing ``-``
+	reads the prompt from stdin."""
 	argv = [cli_path, "exec"]
-	for feature in _CLI_DISABLED_FEATURES:
+	for feature in _cli_disabled_features(cli_path):
 		argv += ["--disable", feature]
 	return argv + [
 		"-c", 'web_search="disabled"', "--sandbox", "read-only", "--skip-git-repo-check",
@@ -3626,6 +3711,10 @@ def _cli_login_ok(cli_path: str, *, use_cache: bool = True) -> tuple[bool, str]:
 		return False, "timeout"
 	except OSError:
 		return False, "error"
+	if code in (126, 127):
+		# The shell could not run codex (or the node behind it): an environment problem
+		# on this worker, not a sign-out, so it must not stop the whole refresh.
+		return False, "error"
 	if code != 0:
 		return False, "signed_out"
 	if "chatgpt" not in (out + "\n" + err).lower():
@@ -3707,10 +3796,17 @@ def _cli_session_status() -> dict:
 
 
 _CLI_STDERR_PATTERNS = (
-	("auth_expired", re.compile(r"\b401\b|unauthori[sz]ed|\blog ?in\b|expired", re.IGNORECASE)),
+	(
+		"auth_expired",
+		re.compile(
+			r"\b401\b|unauthori[sz]ed|not logged in|please (log|sign) ?in|sign in with"
+			r"|(session|token|credentials?|api key) (has |have )?expired",
+			re.IGNORECASE,
+		),
+	),
 	("usage_limit", re.compile(r"usage limit|rate limit|quota|\b429\b", re.IGNORECASE)),
 	("unknown_flag", re.compile(r"unexpected argument|unrecognized|unknown option|unknown feature", re.IGNORECASE)),
-	("network", re.compile(r"network|connection|timeout|\bdns\b|\btls\b|\bssl\b", re.IGNORECASE)),
+	("network", re.compile(r"network|connection|timeout|\bdns\b|\btls\b|\bssl\b|certificate", re.IGNORECASE)),
 )
 _CLI_STDERR_TAIL_LINES = 5
 _CLI_STDERR_TAIL_CHARS = 1000
@@ -3791,15 +3887,17 @@ def _scrub_secrets(text: str) -> str:
 
 
 def _read_cli_reply(out_file: str, stdout: str) -> str:
-	"""The reply the CLI wrote to ``out_file``, else its stdout, capped."""
+	"""The reply the CLI wrote to ``out_file``, else its stdout, capped at
+	``_CLI_MAX_OUTPUT_CHARS``. A longer reply is cut and ends with the ``_truncate``
+	marker, so a partial fix is never shown as a complete one."""
 	text = ""
 	try:
 		if os.path.isfile(out_file):
 			with open(out_file, encoding="utf-8", errors="replace") as f:  # nosemgrep: frappe-security-file-traversal -- out_file is built inside the private scratch dir
-				text = f.read(_CLI_MAX_OUTPUT_CHARS)
+				text = f.read(_CLI_MAX_OUTPUT_CHARS + 1)
 	except OSError:
 		text = ""
-	return (text.strip() or stdout[:_CLI_MAX_OUTPUT_CHARS]).strip()
+	return _truncate((text.strip() or stdout[: _CLI_MAX_OUTPUT_CHARS + 1]).strip(), _CLI_MAX_OUTPUT_CHARS)
 
 
 def _call_local_cli(
@@ -3810,8 +3908,8 @@ def _call_local_cli(
 	(``_cli_sandbox``), so it uses only the ChatGPT subscription session. ``timeout``
 	bounds the whole call, session check included.
 
-	The prompt opens with a SECURITY preamble naming everything after it as untrusted
-	data, and the reply goes through ``_scrub_secrets``. Residual risk: the agent can
+	The prompt carries Optimus's system prompt first, then a SECURITY preamble naming
+	everything after it (the captured data) as untrusted, and the reply goes through ``_scrub_secrets``. Residual risk: the agent can
 	still read files the bench user can read by absolute path, so a prompt injection is
 	mitigated, not eliminated.
 
@@ -3829,7 +3927,7 @@ def _call_local_cli(
 	if not path:
 		raise AiFixError("Codex CLI was not found on this machine.", kind="config")
 	content = _compose_cli_prompt(system, messages)
-	if not content:
+	if not content.strip():
 		raise AiFixError("There is no content to send to the CLI.", kind="internal")
 	deadline = time.monotonic() + (timeout or request_timeout_seconds())
 	ok, reason = _cli_login_ok(path)
@@ -3837,7 +3935,7 @@ def _call_local_cli(
 		raise _login_failure(reason)
 	# A lone surrogate in attacker-influenced SQL would make the stdin encode raise
 	# after the child spawned; replace it up front.
-	prompt = f"{_CLI_SECURITY_PREAMBLE}\n\n{content}".encode("utf-8", "replace").decode("utf-8")
+	prompt = content.encode("utf-8", "replace").decode("utf-8")
 	budget = max(1, int(deadline - time.monotonic()))
 	if isinstance(usage_out, Usage):
 		usage_out.begin()

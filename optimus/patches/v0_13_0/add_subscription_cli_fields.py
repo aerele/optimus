@@ -1,11 +1,11 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Add the local-CLI AI subscription fields (additive).
+"""Make sure the local-CLI AI subscription fields exist on Optimus Settings.
 
-Reloads Optimus Settings so bench migrate adds the ai_connection_type,
-ai_subscription_cli, ai_cli_path and ai_subscription_status columns
-deterministically during the patch run. Idempotent.
+Optimus Settings is a Single doctype, so its fields have no table columns. This is a
+defensive, idempotent ``reload_doc`` that re-syncs the doctype meta (ai_connection_type,
+ai_subscription_cli, ai_cli_path, ai_subscription_status) during the patch run.
 """
 
 import frappe

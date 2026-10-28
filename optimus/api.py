@@ -230,7 +230,11 @@ def _ai_unavailable_message(section: str | None) -> str:
 	if section == "humanize":
 		return _('AI-written "Steps to Reproduce" is turned off. Turn it on under Optimus Settings ▸ AI.')
 	from optimus import ai_fix
+	from optimus.settings import get_config
 
+	if not getattr(get_config(), "ai_enabled", False):
+		# The Connect button is hidden while AI is off, so "click Connect" would mislead.
+		return _("Enable AI fix suggestions under Optimus Settings ▸ AI.")
 	if ai_fix.subscription_mode_active():
 		return _(
 			"Codex CLI isn't ready. Open Optimus Settings, click Connect, and make sure "

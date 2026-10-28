@@ -123,16 +123,24 @@ def test_connect_check_is_rate_limited_per_user(connect):
 
 def test_unavailable_message_names_the_cli_in_subscription_mode(monkeypatch):
 	install(monkeypatch, make_fake_frappe())
-	_set_cfg(monkeypatch, ai_connection_type=SUBSCRIPTION)
+	_set_cfg(monkeypatch, ai_enabled=True, ai_connection_type=SUBSCRIPTION)
 	msg = api._ai_unavailable_message(None)
 	assert "Codex CLI" in msg and "optimus_allow_subscription_cli" in msg and "API key" not in msg
 
 
 def test_unavailable_message_names_the_provider_in_api_mode(monkeypatch):
 	install(monkeypatch, make_fake_frappe())
-	_set_cfg(monkeypatch, ai_connection_type="API Key")
+	_set_cfg(monkeypatch, ai_enabled=True, ai_connection_type="API Key")
 	msg = api._ai_unavailable_message(None)
 	assert "Codex" not in msg and "provider" in msg
+
+
+@pytest.mark.parametrize("connection", [SUBSCRIPTION, "API Key"])
+def test_unavailable_message_when_ai_is_off_does_not_mention_connect(monkeypatch, connection):
+	install(monkeypatch, make_fake_frappe())
+	_set_cfg(monkeypatch, ai_enabled=False, ai_connection_type=connection)
+	msg = api._ai_unavailable_message(None)
+	assert "Enable AI fix suggestions" in msg and "Connect" not in msg and "Codex" not in msg
 
 
 def test_section_messages_are_unchanged_in_subscription_mode(monkeypatch):

@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
 import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -68,12 +69,27 @@ def _clear_login_cache():
 	ai_fix._LOGIN_CACHE.clear()
 
 
+_REAL_ON_FEATURES = ai_fix._codex_on_features
+
+
+@pytest.fixture(autouse=True)
+def _no_feature_probe(monkeypatch):
+	"""Never spawn ``codex features list`` implicitly: the probe is None (static floor
+	only) unless a test sets it."""
+	ai_fix._FEATURES_CACHE.clear()
+	monkeypatch.setattr(ai_fix, "_codex_on_features", lambda cli_path: None)
+	yield
+	ai_fix._FEATURES_CACHE.clear()
+
+
 @pytest.fixture
 def sub_cfg(monkeypatch):
 	"""Subscription mode on and the dev-bench guard open."""
 	cfg = _cfg()
 	monkeypatch.setattr("optimus.settings.get_config", lambda: cfg)
 	monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: True)
+	# The saved settings the dispatch guard re-reads: still the same subscription config.
+	monkeypatch.setattr(ai_fix, "_read_provider_snapshot", lambda: (cfg, None))
 	return cfg
 
 
@@ -132,12 +148,18 @@ class TestBuildArgv:
 
 
 class TestComposePrompt:
-	def test_joins_system_and_messages_with_blank_lines(self):
+	def test_system_then_preamble_then_captured_data(self):
 		out = ai_fix._compose_cli_prompt("SYS", [{"content": "A"}, {"content": "B"}])
-		assert out == "SYS\n\nA\n\nB"
+		assert out == f"SYS\n\n{ai_fix._CLI_SECURITY_PREAMBLE}\n\nA\n\nB"
+		assert out.index("SYS") < out.index("SECURITY:") < out.index("A")
 
 	def test_skips_empty_parts_and_strips(self):
-		assert ai_fix._compose_cli_prompt("  ", [{"content": " hi \n"}, {"content": ""}]) == "hi"
+		out = ai_fix._compose_cli_prompt("  ", [{"content": " hi \n"}, {"content": ""}])
+		assert out == f"{ai_fix._CLI_SECURITY_PREAMBLE}\n\nhi"
+
+	def test_no_captured_data_means_no_preamble(self):
+		assert ai_fix._compose_cli_prompt("SYS", [{"content": " "}]) == "SYS"
+		assert ai_fix._compose_cli_prompt("", []) == ""
 
 
 class TestCliEnv:
@@ -194,6 +216,37 @@ class TestCliInstalled:
 		other = _make_exe(tmp_path / "sh")
 		assert ai_fix._cli_installed(_cfg(ai_cli_path=str(other))) is None
 		assert ai_fix._cli_installed(_cfg(ai_cli_path="/bin/sh")) is None
+
+	def test_npm_style_codex_symlink_to_codex_js_is_accepted(self, tmp_path, monkeypatch):
+		real_dir = tmp_path / "lib" / "bin"
+		real_dir.mkdir(parents=True)
+		entry = _make_exe(real_dir / "codex.js")
+		(tmp_path / "bin").mkdir()
+		link = tmp_path / "bin" / "codex"
+		link.symlink_to(entry)
+		assert ai_fix._cli_installed(_cfg(ai_cli_path=str(link))) == os.path.realpath(str(entry))
+		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: str(link))
+		assert ai_fix._cli_installed(_cfg()) == os.path.realpath(str(entry))
+
+	def test_codex_candidate_resolving_to_codex_js_is_accepted_with_mocked_resolution(self, monkeypatch):
+		monkeypatch.setattr(ai_fix.os.path, "realpath", lambda p: "/opt/node/lib/bin/codex.js")
+		monkeypatch.setattr(ai_fix, "_trusted_cli_file", lambda real: True)
+		assert ai_fix._cli_installed(_cfg(ai_cli_path="/usr/local/bin/codex")) == "/opt/node/lib/bin/codex.js"
+
+	def test_codex_symlink_to_a_shell_is_rejected(self, monkeypatch):
+		monkeypatch.setattr(ai_fix.os.path, "realpath", lambda p: "/bin/sh")
+		monkeypatch.setattr(ai_fix, "_trusted_cli_file", lambda real: True)
+		assert ai_fix._cli_installed(_cfg(ai_cli_path="/usr/local/bin/codex")) is None
+
+	def test_candidate_named_sh_is_rejected_even_if_it_resolves_to_codex(self, monkeypatch):
+		monkeypatch.setattr(ai_fix.os.path, "realpath", lambda p: "/opt/codex")
+		monkeypatch.setattr(ai_fix, "_trusted_cli_file", lambda real: True)
+		assert ai_fix._cli_installed(_cfg(ai_cli_path="/usr/local/bin/sh")) is None
+
+	def test_node_entrypoint_still_has_to_be_trusted(self, monkeypatch):
+		monkeypatch.setattr(ai_fix.os.path, "realpath", lambda p: "/opt/node/lib/bin/codex.js")
+		monkeypatch.setattr(ai_fix, "_trusted_cli_file", lambda real: False)
+		assert ai_fix._cli_installed(_cfg(ai_cli_path="/usr/local/bin/codex")) is None
 
 	def test_relative_path_is_rejected(self, tmp_path, monkeypatch):
 		_make_exe(tmp_path / "codex")
@@ -319,11 +372,12 @@ class TestCallLocalCli:
 		out = self._call()
 		assert "hunter2" not in out and "[redacted]" in out
 
-	def test_prompt_goes_on_stdin_after_the_security_preamble(self, fake_codex):
+	def test_prompt_goes_on_stdin_system_first_then_preamble_then_data(self, fake_codex):
 		box = fake_codex()
-		self._call(content="SELECT 'x; rm -rf /' -- $(whoami)")
+		self._call(system="OPTIMUS-FORMAT-RULES", content="SELECT 'x; rm -rf /' -- $(whoami)")
 		stdin = _read(box.rec, "stdin.txt")
-		assert stdin.startswith("SECURITY:") and "SELECT 'x; rm -rf /' -- $(whoami)" in stdin
+		assert stdin.startswith("OPTIMUS-FORMAT-RULES")
+		assert stdin.index("OPTIMUS-FORMAT-RULES") < stdin.index("SECURITY:") < stdin.index("SELECT 'x; rm -rf /'")
 		argv_seen = _read(box.rec, "calls.txt")
 		assert "rm -rf" not in argv_seen
 
@@ -446,6 +500,21 @@ class TestCallLocalCli:
 		fake_codex(exec_body="echo FROM_STDOUT")
 		assert self._call() == "FROM_STDOUT"
 
+	def test_over_cap_reply_file_is_cut_and_marked_truncated(self, tmp_path):
+		out = tmp_path / "out.txt"
+		out.write_text("x" * 25_000)
+		text = ai_fix._read_cli_reply(str(out), "")
+		assert text == "x" * ai_fix._CLI_MAX_OUTPUT_CHARS + "\n…(truncated)"
+
+	def test_over_cap_stdout_fallback_is_cut_and_marked_truncated(self, tmp_path):
+		text = ai_fix._read_cli_reply(str(tmp_path / "missing"), "y" * 25_000)
+		assert text.endswith("\n…(truncated)") and text.count("y") == ai_fix._CLI_MAX_OUTPUT_CHARS
+
+	def test_reply_exactly_at_the_cap_is_not_marked(self, tmp_path):
+		out = tmp_path / "out.txt"
+		out.write_text("x" * ai_fix._CLI_MAX_OUTPUT_CHARS)
+		assert ai_fix._read_cli_reply(str(out), "") == "x" * ai_fix._CLI_MAX_OUTPUT_CHARS
+
 	def test_success_counts_one_known_zero_cost_call(self, fake_codex):
 		fake_codex()
 		usage = ai_fix.Usage()
@@ -492,6 +561,18 @@ class TestLoginProbe:
 		assert ai_fix._login_failure("timeout").kind == "timeout"
 		assert ai_fix._login_failure("error").fatal is False
 		assert ai_fix._login_failure("unexpected").kind == "transport"
+
+	@pytest.mark.parametrize("code", [126, 127])
+	def test_command_not_runnable_is_an_environment_error_not_a_sign_out(self, fake_codex, code):
+		box = fake_codex(login=f"exit {code}")
+		ok, reason = ai_fix._cli_login_ok(str(box.path), use_cache=False)
+		assert (ok, reason) == (False, "error")
+		failure = ai_fix._login_failure("error")
+		assert failure.kind == "transport" and failure.fatal is False and failure.kind != "auth"
+
+	def test_other_non_zero_exit_is_still_signed_out(self, fake_codex):
+		box = fake_codex(login="exit 1")
+		assert ai_fix._cli_login_ok(str(box.path), use_cache=False) == (False, "signed_out")
 
 	def test_signed_out_stops_the_call_as_fatal(self, fake_codex):
 		fake_codex(login='echo "Not logged in" >&2; exit 1')
@@ -586,7 +667,13 @@ class TestClassifyStderr:
 	@pytest.mark.parametrize("text,label", [
 		("HTTP 401 Unauthorized", "auth_expired"),
 		("token expired", "auth_expired"),
+		("Your session has expired", "auth_expired"),
 		("please log in again", "auth_expired"),
+		("Not logged in", "auth_expired"),
+		("WHERE expired = 1", "other"),
+		("SELECT * FROM tabLogin Attempt", "other"),
+		("certificate has expired", "network"),
+		("tls handshake failed", "network"),
 		("You hit your usage limit", "usage_limit"),
 		("error 429", "usage_limit"),
 		("error: unexpected argument '--foo'", "unknown_flag"),
@@ -661,6 +748,38 @@ class TestProvider:
 		)
 		assert out == "FIXTEXT"
 		assert calls[0][0] == "SYS" and calls[0][2]["timeout"] == 33 and calls[0][2]["usage_out"] is usage
+
+	@pytest.mark.parametrize("change", ["ai_off", "api_key_mode", "unreadable"])
+	def test_dispatch_refuses_when_the_saved_config_no_longer_matches(self, sub_cfg, monkeypatch, change):
+		provider = ai_fix._provider_config()
+		monkeypatch.setattr(ai_fix, "_call_local_cli", _boom)
+		if change == "unreadable":
+			def snapshot():
+				raise RuntimeError("db down")
+		else:
+			def snapshot():
+				cfg = _cfg(ai_enabled=change != "ai_off")
+				if change == "api_key_mode":
+					cfg.ai_connection_type = "API Key"
+					cfg.ai_provider = "OpenAI"
+					monkeypatch.setattr("frappe.conf", {}, raising=False)
+				return cfg, None
+		monkeypatch.setattr(ai_fix, "_read_provider_snapshot", snapshot)
+		with pytest.raises(ai_fix.AiFixError) as err:
+			ai_fix._dispatch_call(provider, "SYS", [{"role": "user", "content": "q"}], usage_out=None)
+		assert err.value.kind == "config" and err.value.fatal is True
+		assert "AI configuration changed" in str(err.value)
+
+	def test_dispatch_proceeds_when_the_snapshot_still_matches(self, sub_cfg, monkeypatch):
+		provider = ai_fix._provider_config()
+		monkeypatch.setattr(ai_fix, "_read_provider_snapshot", lambda: (_cfg(), None))
+		monkeypatch.setattr(ai_fix, "_call_local_cli", lambda system, messages, **kw: "OK")
+		assert ai_fix._dispatch_call(provider, "S", [{"content": "q"}], usage_out=None) == "OK"
+
+	def test_snapshot_query_reads_the_connection_type(self):
+		import inspect
+		src = inspect.getsource(ai_fix._read_provider_snapshot)
+		assert '"ai_connection_type"' in src
 
 	def test_test_connection_checks_status_and_never_runs_exec(self, sub_cfg, monkeypatch):
 		monkeypatch.setattr(ai_fix, "_call_local_cli", _boom)
@@ -849,10 +968,74 @@ class TestToolIsolation:
 		assert len(ai_fix._CLI_DISABLED_FEATURES) == len(set(ai_fix._CLI_DISABLED_FEATURES))
 		assert argv.count("--disable") == len(ai_fix._CLI_DISABLED_FEATURES)
 
+	@staticmethod
+	def _disabled(argv):
+		return [argv[i + 1] for i, a in enumerate(argv) if a == "--disable"]
+
+	def test_on_capability_features_from_the_probe_are_disabled_too(self, monkeypatch):
+		monkeypatch.setattr(ai_fix, "_codex_on_features", lambda p: frozenset({
+			"browser_use_external", "code_mode_host", "browser_use_full_cdp_access",
+			"browser_annotation_api", "code_mode_interrupt", "fast_mode", "goals", "steer",
+		}))
+		disabled = self._disabled(ai_fix._build_cli_argv("codex", "/s", "/s/out"))
+		for name in ("browser_use_external", "code_mode_host", "browser_use_full_cdp_access",
+			"browser_annotation_api", "code_mode_interrupt"):
+			assert name in disabled
+		for name in ("fast_mode", "goals", "steer"):
+			assert name not in disabled
+		assert set(ai_fix._CLI_DISABLED_FEATURES) <= set(disabled)
+		assert len(disabled) == len(set(disabled)) and disabled == sorted(disabled)
+
+	def test_a_failed_probe_falls_back_to_the_full_static_floor(self):
+		disabled = self._disabled(ai_fix._build_cli_argv("codex", "/s", "/s/out"))
+		assert sorted(disabled) == sorted(ai_fix._CLI_DISABLED_FEATURES)
+
+	def test_other_hardening_flags_are_kept_with_a_probe(self, monkeypatch):
+		monkeypatch.setattr(ai_fix, "_codex_on_features", lambda p: frozenset({"browser_use_external"}))
+		argv = ai_fix._build_cli_argv("codex", "/s", "/s/out")
+		assert argv[argv.index("-c") + 1] == 'web_search="disabled"'
+		assert argv[argv.index("--sandbox") + 1] == "read-only" and argv[-1] == "-"
+
+	def test_features_listing_keeps_names_whose_last_column_is_true(self):
+		listing = (
+			"browser_use_external                     stable             true\n"
+			"code_mode_host_grpc                      under development  false\n"
+			"fast_mode                                stable             true\n"
+			"\n"
+		)
+		assert ai_fix._parse_on_features(listing) == {"browser_use_external", "fast_mode"}
+
+	def test_probe_runs_features_list_without_auth_and_is_cached(self, monkeypatch):
+		calls = []
+
+		def fake_run(argv, env, cwd, timeout, stdin_text=None):
+			calls.append(argv)
+			return 0, "browser_use_external   stable   true\nfast_mode   stable   false\n", ""
+
+		monkeypatch.setattr(ai_fix, "_run_cli", fake_run)
+		assert _REAL_ON_FEATURES("/x/codex") == {"browser_use_external"}
+		assert _REAL_ON_FEATURES("/x/codex") == {"browser_use_external"}
+		assert calls == [["/x/codex", "features", "list"]]
+
+	@pytest.mark.parametrize("outcome", ["raises", "exit1", "empty"])
+	def test_probe_failure_is_none_and_never_raises(self, monkeypatch, outcome):
+		def fake_run(*a, **kw):
+			if outcome == "raises":
+				raise subprocess.TimeoutExpired("codex", 10)
+			return (1, "", "boom") if outcome == "exit1" else (0, "garbage\n", "")
+
+		monkeypatch.setattr(ai_fix, "_run_cli", fake_run)
+		assert _REAL_ON_FEATURES("/x/codex") is None
+
+	def test_capability_regex_leaves_plain_completion_features_alone(self):
+		for name in ("fast_mode", "goals", "steer", "collaboration_modes", "sqlite", "item_ids"):
+			assert not ai_fix._CLI_CAPABILITY_RE.search(name)
+		for name in ("browser_use_external", "code_mode_host", "unified_exec", "sandbox_bypass_x"):
+			assert ai_fix._CLI_CAPABILITY_RE.search(name)
+
 	@pytest.mark.skipif(os.environ.get("OPTIMUS_LIVE_CODEX") != "1", reason="set OPTIMUS_LIVE_CODEX=1 with a logged-in codex")
 	def test_live_agent_cannot_read_a_file_outside_the_scratch_dir(self, tmp_path, monkeypatch, sub_cfg):
 		import shutil
-		import subprocess
 		codex = shutil.which("codex")
 		if not codex or subprocess.run([codex, "login", "status"], capture_output=True).returncode != 0:
 			pytest.skip("codex is not installed or not logged in")

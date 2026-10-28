@@ -8,6 +8,22 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.103] - 2026-10-28
+
+### Security
+
+- A queued refresh in subscription mode now re-reads the saved settings before every Codex call, like the API-key path does. If AI is turned off or the connection is switched, the rest of the job stops with the "AI configuration changed" error instead of still sending findings to the CLI.
+- The Codex agent now also starts with every capability-looking feature that the installed CLI reports as on turned off (read from `codex features list`), for example the browser, code-mode and annotation tools. If that check fails, the fixed list used before still applies.
+
+### Fixed
+
+- A CLI installed with npm (`codex` linking to `codex.js`) is now accepted. The name you point at must still be `codex`, and the file it resolves to must still be a trusted executable named `codex` or a Node entrypoint.
+- A CLI error is no longer called a sign-out because of text such as `expired` or `login` in echoed SQL, and a TLS "certificate has expired" error is reported as a network problem.
+- A session check that exits with 126 or 127 (the CLI or Node was not found on the worker) is now a temporary error instead of a fatal sign-out.
+- A reply longer than the output limit now ends with a "(truncated)" marker instead of looking complete.
+- With AI turned off, the unavailable message now tells you to enable AI instead of telling you to click Connect.
+- Optimus's own instructions now come before the untrusted-data notice in the Codex prompt, so the notice covers only the captured data.
+
 ## [0.12.102] - 2026-10-27
 
 ### Added
