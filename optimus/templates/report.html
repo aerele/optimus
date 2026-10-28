@@ -2060,6 +2060,18 @@
         {% endif %}
       {% endif %}
 
+      {# Phase-1 fallback hint. Hot Line findings whose hot line is a
+         call into uninstrumented framework code. #}
+      {% set _phase1_hint = (f.technical_detail or {}).get("phase1_hint") if f.technical_detail else None %}
+      {% if _phase1_hint %}
+      <div class="phase2-line">
+        <strong>Hint:</strong>
+        time flows into <code>{{ _phase1_hint.next_hot_callee }}</code>
+        ({{ fmt_ms(_phase1_hint.phase1_cumulative_ms) }}<small class="scope-tag">consolidated &middot; across hits</small> in phase&nbsp;1).
+        Pick this function for a line-level breakdown.
+      </div>
+      {% endif %}
+
       {# Drill-down from the line-profiling run (data key call_chain). Nested-call
          tree, terminal red. When the sampled drill-down below also renders, this
          block owns the single "Drill-down" heading and that one drops its label. #}
@@ -2072,18 +2084,6 @@
         {% for step in _phase2_chain %}{% set _ = _cc_rows.append(step.qualname ~ (":" ~ step.lineno if step.lineno else "")) %}{% endfor %}
         {{ chain_tree(_cc_rows) }}
         <div class="chain-foot">deepest line is where the cost is incurred</div>
-      </div>
-      {% endif %}
-
-      {# Phase-1 fallback hint. Hot Line findings whose hot line is a
-         call into uninstrumented framework code. #}
-      {% set _phase1_hint = (f.technical_detail or {}).get("phase1_hint") if f.technical_detail else None %}
-      {% if _phase1_hint %}
-      <div class="phase2-line">
-        <strong>Hint:</strong>
-        time flows into <code>{{ _phase1_hint.next_hot_callee }}</code>
-        ({{ fmt_ms(_phase1_hint.phase1_cumulative_ms) }}<small class="scope-tag">consolidated &middot; across hits</small> in phase&nbsp;1).
-        Pick this function for a line-level breakdown.
       </div>
       {% endif %}
 

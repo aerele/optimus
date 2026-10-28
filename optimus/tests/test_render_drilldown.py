@@ -416,7 +416,7 @@ class TestDrilldownHeadingWithBothBlocks:
 		{"qualname": "_inner_loop", "lineno": 41},
 	]
 
-	def _render(self, function, lineno, call_chain=None, with_tree=True):
+	def _render(self, function, lineno, call_chain=None, with_tree=True, hint=None):
 		from optimus import renderer
 
 		detail = {"callsite": {
@@ -425,6 +425,8 @@ class TestDrilldownHeadingWithBothBlocks:
 		}}
 		if call_chain:
 			detail["call_chain"] = call_chain
+		if hint:
+			detail["phase1_hint"] = hint
 		f = types.SimpleNamespace(
 			finding_type="Hot Line", severity="High", title="t",
 			customer_description="", estimated_impact_ms=120.0, affected_count=1,
@@ -455,6 +457,12 @@ class TestDrilldownHeadingWithBothBlocks:
 		assert html.find(self.LABEL) < html.find("deepest line is where")
 		assert html.find("deepest line is where") < html.find("walked through")
 		assert "Call chain" not in html
+
+	def test_hint_box_does_not_split_the_two_trees(self):
+		hint = {"next_hot_callee": "frappe.get_doc", "phase1_cumulative_ms": 50.0}
+		html = self._render("looped_validate", 6, call_chain=self.CHAIN, hint=hint)
+		assert html.find("<strong>Hint:</strong>") < html.find(self.LABEL)
+		assert html.find("deepest line is where") < html.find("walked through")
 
 	def test_neither_block_keeps_single_placeholder_heading(self):
 		html = self._render("not_in_tree", 1)

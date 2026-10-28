@@ -858,7 +858,7 @@ def hot_line_gate(
 	if filename and is_framework_callsite(filename, tracked_apps or None, installed_apps):
 		return (
 			f"This line is in framework or library code ({_short_path(filename)}), which your app "
-			"cannot change, so Optimus does not ask the AI about it. Follow the call chain above to "
+			"cannot change, so Optimus does not ask the AI about it. Follow the drill-down above to "
 			"the first line in your own app and reduce how often that path runs."
 		)
 	hint = detail.get("phase1_hint") if isinstance(detail.get("phase1_hint"), dict) else {}
