@@ -8,18 +8,11 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.99] - 2026-10-27
+## [0.12.92] - 2026-10-27
 
-### Fixed
+### Internal
 
-- Missing-index suggestions no longer propose an index that an existing index already serves for the same query. A composite index such as (a, b) now counts for a query that filters `a` and `b` by equality, and a FULLTEXT index no longer hides a real missing index.
-- A suggestion is dropped when the column is only used inside a function, such as `DATE(col)`, because a plain index cannot serve that filter. The warning now names Frappe's `ifnull(col, '')` and says to remove it from the filter.
-- `NOT (col = ...)`, `NOT EXISTS (...)`, `ANY`, `ALL` and `IN (...)` are no longer mistaken for function calls.
-- When a column leads an existing index but the only filter on it is `!=`, `NOT IN` or `NOT LIKE`, the warning says the index exists but may not be able to serve that filter.
-
-### Changed
-
-- Before suggesting an index, Optimus now checks the other queries in the same session. It drops the suggestion when the column is updated, or the table is written, far more often than the index would help reads, and otherwise adds a "Consider:" note naming the write counts and the flows that write. It also notes an existing composite index that already holds the column.
+- The MariaDB optimizer time limit (`SET SESSION max_statement_time`) is now passed as a bound value instead of being formatted into the SQL text. The value was already coerced with `float()`, so behavior is unchanged. This clears the pinned `frappe-sql-format-injection` semgrep rule, which failed the release PR's diff scan against main.
 
 ---
 
