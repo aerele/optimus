@@ -3119,8 +3119,9 @@ def _build_fix_request(
 		))
 	job_method = str(detail.get("job_method") or "").strip()
 	if ftype == "Slow Background Job" and job_method:
-		fixed.append((0, "Background job (the method the queue ran):\n" + block("job", ai_budget.clip(job_method, 300))))
+		fixed.append((0, "Background job (last component of the method the queue ran):\n" + block("job", ai_budget.clip(job_method, 300))))
 	hot_fn = (detail.get("function") or "").strip()
+	hot_label = "deepest hot frame" if ftype == "Slow Background Job" else "dominates this action"
 	cum_ms = detail.get("cumulative_ms")
 	wall_ms = detail.get("action_wall_time_ms")
 	if hot_fn and cum_ms:
@@ -3135,7 +3136,7 @@ def _build_fix_request(
 			share = ""
 		fixed.append((
 			1,
-			f"Hot function (dominates this action): ~{humanize_duration_ms(float(cum_ms), threshold_ms=threshold_ms)}"
+			f"Hot function ({hot_label}): ~{humanize_duration_ms(float(cum_ms), threshold_ms=threshold_ms)}"
 			f"{share}. Point at the lines inside it that cost the time.\n" + block("function", hot_fn),
 		))
 

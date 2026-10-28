@@ -902,9 +902,8 @@ def slow_job_gate(
 	if (finding.get("finding_type") or "") != "Slow Background Job":
 		return None
 	detail = finding_detail(finding)
-	callsite = detail.get("callsite") if isinstance(detail.get("callsite"), dict) else {}
-	filename = str(callsite.get("filename") or detail.get("filename") or detail.get("file") or "")
-	lineno = callsite.get("lineno") if callsite.get("filename") else detail.get("lineno")
+	filename = str(detail.get("filename") or detail.get("file") or "")
+	lineno = detail.get("lineno")
 	if not filename or not isinstance(lineno, int) or isinstance(lineno, bool) or lineno <= 0:
 		return JOB_NO_FRAME_NOTE
 	if is_framework_callsite(filename, tracked_apps or None, installed_apps):

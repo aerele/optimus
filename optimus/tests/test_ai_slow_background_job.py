@@ -71,6 +71,24 @@ class TestGate:
 			note = ai_fix.llm_gate_note(_job(detail))
 		assert "framework or library code" in note
 
+	def test_boolean_and_negative_lineno_are_refused(self):
+		for lineno in (True, -1):
+			with patch("optimus.settings.get_config", return_value=_cfg()):
+				note = ai_fix.llm_gate_note(_job({"filename": _USER_FILE, "lineno": lineno}))
+			assert note == ai_grounding.JOB_NO_FRAME_NOTE
+
+	def test_other_types_are_not_gated_by_the_job_gate(self):
+		assert ai_grounding.slow_job_gate({"finding_type": "Hot Line", "technical_detail": {}}) is None
+
+	def test_tracked_apps_scope_decides_user_code(self):
+		detail = {"filename": "/home/b/apps/frappe/frappe/model/document.py", "lineno": 5}
+		assert ai_grounding.slow_job_gate(_job(detail), tracked_apps=("frappe",)) is None
+		assert ai_grounding.slow_job_gate(_job(detail), tracked_apps=("myapp",)) is not None
+
+	def test_installed_apps_allowlist_scopes_user_code(self):
+		detail = {"filename": "/home/b/apps/vendored/vendored/x.py", "lineno": 5}
+		assert ai_grounding.slow_job_gate(_job(detail), installed_apps=frozenset({"vendored"})) is None
+
 	def test_render_dict_shape_is_gated_too(self):
 		finding = {"finding_type": "Slow Background Job", "technical_detail": {}}
 		assert ai_fix.llm_gate_note(finding) == ai_grounding.JOB_NO_FRAME_NOTE
@@ -135,6 +153,10 @@ class TestPrompt:
 			actions_by_idx={0: {"recording_uuid": "u"}},
 		)
 
+	def test_hot_frame_is_labelled_deepest_not_dominant(self, tmp_path):
+		content = ai_fix._build_fix_request(self._payload(tmp_path), threshold_ms=1000.0, context_tokens=200000)[1][0]["content"]
+		assert "Hot function (deepest hot frame)" in content and "dominates this action" not in content
+
 	def test_prompt_carries_job_hot_frame_source_and_slow_sql(self, tmp_path):
 		payload = self._payload(tmp_path)
 		_, messages, shown = ai_fix._build_fix_request(payload, threshold_ms=1000.0, context_tokens=200000)
@@ -151,19 +173,53 @@ class TestPrompt:
 		payload = self._payload(tmp_path)
 		payload["technical_detail"].pop("job_method")
 		_, messages, _ = ai_fix._build_fix_request(payload, threshold_ms=1000.0, context_tokens=200000)
-		assert "Background job (the method" not in messages[0]["content"]
+		assert "Background job (" not in messages[0]["content"]
 
 	def test_other_types_never_get_the_job_line(self, tmp_path):
 		payload = self._payload(tmp_path)
 		payload["finding_type"] = "N+1 Query"
 		_, messages, _ = ai_fix._build_fix_request(payload, threshold_ms=1000.0, context_tokens=200000)
-		assert "Background job (the method" not in messages[0]["content"]
+		assert "Background job (" not in messages[0]["content"]
 
 	def test_job_method_is_clipped(self, tmp_path):
 		payload = self._payload(tmp_path)
 		payload["technical_detail"]["job_method"] = "m" * 5000
 		_, messages, _ = ai_fix._build_fix_request(payload, threshold_ms=1000.0, context_tokens=200000)
-		assert "m" * 400 not in messages[0]["content"]
+		content = messages[0]["content"]
+		assert "m" * 300 in content and "m" * 301 not in content
+
+
+class TestRecipes:
+	def _card(self, detail, **kw):
+		return {"finding_type": "Slow Background Job", "technical_detail": detail,
+		        "llm_fix": {"suggestion": "old"}, **kw}
+
+	def _apply(self, card, **kw):
+		from optimus.renderer import recipe_enrichment
+		recipe_enrichment.apply_finding_recipes([card], evidence_lookup=lambda t: None, **kw)
+
+	def test_gated_job_loses_its_stored_fix_and_gets_the_note(self):
+		card = self._card({"filename": "/home/b/apps/frappe/frappe/model/document.py", "lineno": 5})
+		self._apply(card)
+		assert card["llm_fix"] is None and "framework or library code" in card["technical_detail"]["fix_hint"]
+
+	def test_job_without_a_frame_gets_the_no_frame_note(self):
+		card = self._card({"function": "f"})
+		self._apply(card)
+		assert card["llm_fix"] is None and card["technical_detail"]["fix_hint"] == ai_grounding.JOB_NO_FRAME_NOTE
+
+	def test_user_frame_keeps_its_stored_fix(self):
+		card = self._card({"filename": _USER_FILE, "lineno": 12})
+		self._apply(card)
+		assert card["llm_fix"] == {"suggestion": "old"} and "fix_hint" not in card["technical_detail"]
+
+	def test_gate_that_raises_fails_closed(self):
+		card = self._card({"filename": _USER_FILE, "lineno": 12})
+		with patch.object(ai_grounding, "slow_job_gate", side_effect=RuntimeError("boom")), \
+			patch("optimus.renderer.recipe_enrichment.log_error_line"):
+			self._apply(card)
+		assert card["llm_fix"] is None
+		assert card["technical_detail"]["fix_hint"] == ai_grounding.JOB_GATE_CHECK_FAILED_NOTE
 
 
 class TestReport:
