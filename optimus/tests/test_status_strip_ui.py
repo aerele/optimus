@@ -68,6 +68,8 @@ let drained = null;
 ctx._single_banner = (frm, id, cls, html) => { drained = html; };
 vm.runInContext("_drain_banner(frm, 'Waiting for jobs')", ctx);
 assert.match(drained, /^<span class="optimus-status-text" role="status" aria-live="polite">Waiting for jobs<\/span>$/);
+vm.runInContext("_drain_banner(frm, '<i>x</i>')", ctx);
+assert.match(drained, /&lt;i>x&lt;\/i>/, "drain text is escaped");
 console.log("ok");
 """
 

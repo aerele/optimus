@@ -1237,14 +1237,15 @@ function _drain_suffix(d) {
 	return win ? __(" · up to {0}", [win]) : "";
 }
 
-// Background-jobs drain banner (orange variant). Pass html=null to remove it.
+// Background-jobs drain banner (orange variant). Takes plain text (escaped here); null removes it.
 function _drain_banner(frm, html) {
+	const safe = html === null ? null : frappe.utils.escape_html(html);
 	_single_banner(
 		frm,
 		"optimus-drain-banner",
 		"optimus-status optimus-status-warn",
-		html === null ? null : '<span class="optimus-status-text" role="status" aria-live="polite">' + html + "</span>",
-		($b) => $b.find(".optimus-status-text").html(html)
+		safe === null ? null : '<span class="optimus-status-text" role="status" aria-live="polite">' + safe + "</span>",
+		($b) => $b.find(".optimus-status-text").html(safe)
 	);
 }
 

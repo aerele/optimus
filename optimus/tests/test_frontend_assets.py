@@ -244,3 +244,4 @@ def test_form_status_banner_selectors_exist_in_css():
 		css = f.read()
 	for selector in (".optimus-status", ".optimus-status-warn", ".optimus-status-bar"):
 		assert selector in css, f"Missing CSS: {selector}"
+	assert "prefers-reduced-motion: reduce" in css
