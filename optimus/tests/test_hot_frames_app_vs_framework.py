@@ -192,3 +192,48 @@ class TestKeyCollision:
 		tree = _n("<root>", "", 0, [_n("f", f, 100 + i) for i, f in enumerate(files)])
 		_, board = call_tree._aggregate_hot_frames([tree], None, frozenset({"myapp"}))
 		assert len(board) == call_tree.HOT_FRAMES_LEADERBOARD_SIZE
+
+
+class TestIntermediateTrim:
+	def test_framework_rows_survive_trim_with_many_app_frames(self):
+		cap = call_tree.HOT_FRAMES_INTERMEDIATE_CAP
+		fw = _n("fw", "/bench/apps/frappe/frappe/core/fw.py", 0)
+		fw["cumulative_ms"] = 900
+		trees = [_n("<root>", "", 0, [fw])]
+		for i in range(cap * 2 + 50):
+			node = _n(f"app{i}", f"/bench/apps/myapp/myapp/m{i}.py", 50)
+			trees.append(_n("<root>", "", 0, [node]))
+		_, board = call_tree._aggregate_hot_frames(trees, None, frozenset({"myapp", "frappe"}))
+		fw_rows = [r for r in board if r["is_framework"]]
+		assert [r["total_cumulative_ms"] for r in fw_rows] == [900]
+
+	def test_trim_keeps_top_of_each_group(self):
+		cap = call_tree.HOT_FRAMES_INTERMEDIATE_CAP
+		occ, cls = {}, {}
+		for i in range(cap):
+			occ[("a", f"app{i}")] = [(0, float(i), 0)]
+			cls[("a", f"app{i}")] = False
+			occ[("f", f"fw{i}")] = [(0, 0, float(i))]
+			cls[("f", f"fw{i}")] = True
+		kept = call_tree._trim_occurrences(occ, cls)
+		assert len(kept) == cap
+		assert ("a", f"app{cap - 1}") in kept and ("f", f"fw{cap - 1}") in kept
+		assert ("a", "app0") not in kept and set(cls) == set(kept)
+
+
+class TestIdentityNormalisation:
+	def test_relative_and_absolute_spellings_are_one_row(self):
+		abs_p = "/bench/apps/myapp/myapp/sales/invoice.py"
+		rel_p = "apps/myapp/myapp/sales/invoice.py"
+		tree = _n("<root>", "", 0, [_n("f", abs_p, 5), _n("f", rel_p, 7)])
+		_, board = call_tree._aggregate_hot_frames([tree], None, frozenset({"myapp"}))
+		assert len(board) == 1 and board[0]["total_ms"] == 12
+
+	def test_leading_slash_does_not_duplicate_labels(self):
+		tree = _n("<root>", "", 0, [_n("f", "/a/b.py", 5), _n("f", "a/b.py", 6)])
+		_, board = call_tree._aggregate_hot_frames([tree], None, None)
+		assert len(board) == 1
+
+	def test_empty_filename_is_framework(self):
+		assert call_tree._is_framework_frame_file("", ("myapp",), None) is True
+		assert call_tree._is_framework_frame_file("", None, frozenset({"myapp"})) is True

@@ -31,6 +31,7 @@ from optimus.analyzers.base import (
 	AnalyzerResult,
 	_extract_app_segment,
 	_last_app_segment,
+	cut_at_bench_apps,
 	dur,
 	installed_apps_allowlist,
 	is_error_log_hook_query,
@@ -1311,10 +1312,11 @@ def _redacted_module_key(function: str, filename: str = "") -> str | None:
 
 
 def _frame_identity(function: str, filename: str) -> tuple[str, str] | None:
-	"""Aggregation key: full normalised path plus function; None for synthetic nodes."""
+	"""Aggregation key: app-relative path plus function; None for synthetic nodes."""
 	if _redacted_module_key(function, filename) is None:
 		return None
-	return ((filename or "").replace("\\", "/"), function)
+	norm = (filename or "").replace("\\", "/")
+	return ((cut_at_bench_apps(norm) or norm).lstrip("/"), function)
 
 
 def _identity_label(identity: tuple[str, str], depth: int = 2) -> str:
@@ -1345,6 +1347,19 @@ def _row_labels(identities) -> dict:
 	return labels
 
 
+def _trim_occurrences(occurrences: dict, frame_class: dict) -> dict:
+	"""Keep the top rows per group (app by self time, framework by cumulative) and prune frame_class."""
+	keep = HOT_FRAMES_INTERMEDIATE_CAP // 2
+	kept: dict = defaultdict(list)
+	for is_framework, col in ((False, 1), (True, 2)):
+		group = [kv for kv in occurrences.items() if frame_class.get(kv[0], False) is is_framework]
+		group.sort(key=lambda kv: sum(o[col] for o in kv[1]), reverse=True)
+		kept.update(group[:keep])
+	for k in [k for k in frame_class if k not in kept]:
+		del frame_class[k]
+	return kept
+
+
 def _aggregate_hot_frames(
 	per_action_trees: list,
 	tracked_apps: tuple[str, ...] | None = None,
@@ -1366,14 +1381,7 @@ def _aggregate_hot_frames(
 		_walk_for_aggregation(tree, action_idx, occurrences, tracked_apps, installed_apps, frame_class)
 		# Cap intermediate map size to bound memory.
 		if len(occurrences) > HOT_FRAMES_INTERMEDIATE_CAP * 2:
-			by_total = sorted(
-				occurrences.items(),
-				key=lambda kv: sum(self_ms for _, self_ms, _ in kv[1]),
-				reverse=True,
-			)[:HOT_FRAMES_INTERMEDIATE_CAP]
-			occurrences = defaultdict(list, dict(by_total))
-			for k in [k for k in frame_class if k not in occurrences]:
-				del frame_class[k]
+			occurrences = _trim_occurrences(occurrences, frame_class)
 
 	findings = []
 	leaderboard_rows = []
@@ -1497,6 +1505,8 @@ def _walk_for_aggregation(
 def _is_framework_frame_file(filename: str, tracked_apps, installed_apps) -> bool:
 	"""True for framework or third-party code; Optimus's own code always counts."""
 	norm = (filename or "").replace("\\", "/")
+	if not norm:
+		return True
 	if is_framework_callsite(norm, tracked_apps, installed_apps):
 		return True
 	return _extract_app_segment(norm) == "optimus"
