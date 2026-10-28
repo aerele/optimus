@@ -148,7 +148,7 @@ def test_json_blobs_stay_hidden_and_read_only():
 
 
 def test_patch_registered_and_importable():
-	line = "optimus.patches.v0_12_98.reload_optimus_session_layout"
+	line = "optimus.patches.v0_12_100.reload_optimus_session_layout"
 	lines = (_ROOT / "patches.txt").read_text().splitlines()
 	assert lines.count(line) == 1
 	assert callable(importlib.import_module(line).execute)
