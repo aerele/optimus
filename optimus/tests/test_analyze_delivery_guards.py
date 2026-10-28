@@ -116,6 +116,15 @@ def test_empty_capture_renders_report_before_ready(delivery):
 	assert state.status == "Ready"
 
 
+def test_empty_capture_publishes_ready_event(delivery, monkeypatch):
+	state = delivery
+	state.requested, state.recordings = [], []
+	sent = []
+	monkeypatch.setattr(analyze, "_publish_session_event", lambda name, **kw: sent.append(name))
+	analyze.run("s")
+	assert sent.count("optimus_session_ready") == 1
+
+
 def test_empty_capture_render_failure_marks_failed_never_ready(delivery, monkeypatch):
 	state = delivery
 	state.requested, state.recordings = [], []

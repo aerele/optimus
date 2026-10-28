@@ -836,6 +836,8 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 				return
 			_run_ai_step(lambda: session.delete_session_state(session_uuid), title="optimus ai empty recording cleanup", session_uuid=session_uuid)
 			_publish_progress(100, "Complete (no data)", session_uuid)
+			_run_ai_step(lambda: _publish_session_event("optimus_session_ready", session_uuid=session_uuid, docname=docname),
+				title="optimus ai ready notification", session_uuid=session_uuid)
 			return
 
 		_touch_singleflight(session_uuid)  # M2 heartbeat before the EXPLAIN burst
