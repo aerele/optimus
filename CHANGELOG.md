@@ -17,6 +17,8 @@ versions may contain breaking changes see migration notes below).
 - A late "analyzing" update can no longer replace a "Report ready" pill, and a slow server reply can no longer undo a click on the pill or a newly started recording.
 - These background checks no longer pop an error dialog when they fail, a failed second-pass analyze found after a reload no longer shows placeholder text, and a stuck "Phase 2 recording" is rechecked after a failed stop.
 
+---
+
 ## [0.12.92] - 2026-10-27
 
 ### Internal
