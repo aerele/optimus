@@ -233,12 +233,12 @@ class TestStop:
 		env.store.pending["u1"] = ["job-1"]
 		_row(env)
 
-		before = time.time()
+		monkeypatch.setattr(api.time, "time", lambda: 1000.0)
 		api.stop()
 
 		assert env.db.rows["u1"]["status"] == "Capturing Background Jobs"
 		# deadline = wait + 60s analyze grace
-		assert before + 90 <= env.store.draining["u1"] <= time.time() + 90
+		assert env.store.draining["u1"] == 1090.0
 
 	def test_no_pending_jobs_means_no_draining_window(self, env, monkeypatch):
 		_scheduler(monkeypatch, disabled=False)
@@ -338,13 +338,14 @@ class TestDrainProgress:
 		_bg_wait(monkeypatch, 300)
 		_row(env, status="Capturing Background Jobs")
 		env.store.pending["u1"] = ["a", "b"]
-		env.store.meta["u1"] = {"draining_until": time.time() + 60 + 120}
+		monkeypatch.setattr(api.time, "time", lambda: 1000.0)
+		env.store.meta["u1"] = {"draining_until": 1000.0 + 60 + 120}
 
 		out = api.drain_progress("u1")
 
 		assert out["status"] == "Capturing Background Jobs"
 		assert out["pending"] == 2
-		assert 118 <= out["remaining_seconds"] <= 120
+		assert out["remaining_seconds"] == 120
 		assert out["window_seconds"] == 300
 
 	def test_remaining_never_goes_negative_after_the_window_closes(self, env, monkeypatch):
