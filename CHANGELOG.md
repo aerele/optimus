@@ -8,11 +8,12 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.106] - 2026-10-27
+## [0.12.98] - 2026-10-28
 
 ### Changed
 
-- The "Call chain" block on a finding card is now labelled "Drill-down", matching the existing Drill-down block. When a card has both, they sit under a single "Drill-down" heading: the line-profiling chain first, then the sampled call path without a second heading, each keeping its own footer line.
+- The "Call chain" block on a finding card is now labelled "Drill-down", matching the existing Drill-down block. When a card has both, they sit together under a single "Drill-down" heading: the line-profiling chain first, then the sampled call path without a second heading, each keeping its own footer line. The Hint box now renders above both trees so it no longer separates them.
+- The message shown for framework-code lines that skip the AI now says "Follow the drill-down above" instead of "call chain".
 
 ---
 
