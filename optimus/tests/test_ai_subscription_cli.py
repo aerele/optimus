@@ -76,10 +76,11 @@ _REAL_FEATURES = ai_fix._codex_features
 
 @pytest.fixture(autouse=True)
 def _no_feature_probe(monkeypatch):
-	"""Never spawn ``codex features list`` implicitly: the probe is None (static floor
-	only) unless a test sets it."""
+	"""Never spawn ``codex features list`` implicitly: the CLI knows every floor name and has
+	nothing else on, unless a test sets the probe."""
 	ai_fix._FEATURES_CACHE.clear()
-	monkeypatch.setattr(ai_fix, "_codex_features", lambda cli_path, timeout=None: None)
+	known = frozenset(ai_fix._CLI_DISABLED_FEATURES)
+	monkeypatch.setattr(ai_fix, "_codex_features", lambda cli_path, timeout=None: (known, frozenset()))
 	yield
 	ai_fix._FEATURES_CACHE.clear()
 
@@ -372,6 +373,85 @@ class TestCliSandbox:
 # Process-level behaviour against a fake codex script
 # ---------------------------------------------------------------------------
 
+class TestStaleSweep:
+	def _old(self, base, name, age=7200):
+		path = base / name
+		path.mkdir()
+		(path / "auth.json").write_text("{}")
+		os.utime(path, (time.time() - age, time.time() - age))
+		return path
+
+	def test_old_own_scratch_trees_are_deleted_and_fresh_or_foreign_ones_kept(self, tmp_path, monkeypatch):
+		monkeypatch.setattr(ai_fix.tempfile, "tempdir", str(tmp_path))
+		monkeypatch.setattr(ai_fix, "_LAST_SWEEP", 0.0)
+		stale = self._old(tmp_path, "optimus-codex-old")
+		fresh = self._old(tmp_path, "optimus-codex-new", age=10)
+		other = self._old(tmp_path, "something-else")
+		ai_fix._sweep_stale_sandboxes()
+		assert not stale.exists() and fresh.exists() and other.exists()
+
+	def test_the_sweep_is_throttled(self, tmp_path, monkeypatch):
+		monkeypatch.setattr(ai_fix.tempfile, "tempdir", str(tmp_path))
+		monkeypatch.setattr(ai_fix, "_LAST_SWEEP", 0.0)
+		ai_fix._sweep_stale_sandboxes()
+		stale = self._old(tmp_path, "optimus-codex-old")
+		ai_fix._sweep_stale_sandboxes()
+		assert stale.exists()
+
+	def test_creating_a_sandbox_sweeps(self, tmp_path, real_auth, monkeypatch):
+		monkeypatch.setattr(ai_fix.tempfile, "tempdir", str(tmp_path))
+		monkeypatch.setattr(ai_fix, "_LAST_SWEEP", 0.0)
+		stale = self._old(tmp_path, "optimus-codex-old")
+		with ai_fix._cli_sandbox(with_auth=False):
+			pass
+		assert not stale.exists()
+
+	def test_a_symlink_named_like_a_scratch_tree_is_not_followed(self, tmp_path, monkeypatch):
+		monkeypatch.setattr(ai_fix.tempfile, "tempdir", str(tmp_path))
+		monkeypatch.setattr(ai_fix, "_LAST_SWEEP", 0.0)
+		target = tmp_path / "precious"
+		target.mkdir()
+		(tmp_path / "optimus-codex-link").symlink_to(target)
+		ai_fix._sweep_stale_sandboxes()
+		assert target.exists()
+
+
+class TestCliResolve:
+	@pytest.mark.parametrize("path,reason", [
+		("codex", "relative"),
+		("/opt/bin/node", "name"),
+	])
+	def test_reasons_for_a_bad_configured_path(self, path, reason):
+		assert ai_fix._cli_resolve(_cfg(ai_cli_path=path)) == (None, reason)
+
+	def test_nothing_on_path_is_not_found(self, monkeypatch):
+		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: None)
+		assert ai_fix._cli_resolve(_cfg()) == (None, "not_found")
+
+	def test_untrusted_and_entrypoint_reasons(self, tmp_path):
+		bad = tmp_path / "codex"
+		bad.write_text("#!/bin/sh\n")
+		bad.chmod(0o777)
+		assert ai_fix._cli_resolve(_cfg(ai_cli_path=str(bad))) == (None, "untrusted")
+		other = tmp_path / "real_node"
+		other.write_text("x")
+		link = tmp_path / "lnk" / "codex"
+		link.parent.mkdir()
+		link.symlink_to(other)
+		assert ai_fix._cli_resolve(_cfg(ai_cli_path=str(link))) == (None, "entrypoint")
+
+	def test_every_reason_has_its_own_message(self):
+		texts = {ai_fix._cli_missing_text(r) for r in ("not_found", "relative", "name", "entrypoint", "untrusted")}
+		assert len(texts) == 5
+
+	def test_the_call_and_the_status_show_the_reason(self, sub_cfg):
+		sub_cfg.ai_cli_path = "codex"
+		with pytest.raises(ai_fix.AiFixError, match="absolute") as err:
+			ai_fix._call_local_cli("S", [{"content": "x"}])
+		assert err.value.kind == "config"
+		assert "absolute" in ai_fix._cli_session_status()["message"]
+
+
 class TestCallLocalCli:
 	def _call(self, system="SYS", content="hello", **kw):
 		return ai_fix._call_local_cli(system, [{"role": "user", "content": content}], **kw)
@@ -506,7 +586,8 @@ class TestCallLocalCli:
 	def test_the_features_probe_is_capped_by_the_time_left(self, fake_codex, monkeypatch):
 		fake_codex()
 		seen = []
-		monkeypatch.setattr(ai_fix, "_codex_features", lambda p, timeout=None: seen.append(timeout))
+		known = frozenset(ai_fix._CLI_DISABLED_FEATURES)
+		monkeypatch.setattr(ai_fix, "_codex_features", lambda p, timeout=None: (seen.append(timeout), (known, frozenset()))[1])
 		self._call(timeout=30)
 		assert seen and 0 < seen[0] <= 30
 
@@ -724,6 +805,7 @@ class TestCallLocalCli:
 		("Your access token expired", "auth", True),
 		("You hit your usage limit", "quota", True),
 		("error: unexpected argument '--foo'", "config", True),
+		("error 429 too many requests", "rate_limited", False),
 		("dns lookup failed", "transport", False),
 		("segfault", "unknown", False),
 	])
@@ -734,7 +816,22 @@ class TestCallLocalCli:
 				self._call()
 		assert err.value.kind == kind and err.value.fatal is fatal
 		assert "RAWCANARY" not in str(err.value) and err.value.detail == ""
-		assert transport.certainty == "known_response"
+		# A rejection before any answer is a known outcome; a network drop or crash may have been acted on.
+		known = kind in ("auth", "quota", "config", "rate_limited")
+		assert transport.certainty == ("known_response" if known else "sent_unknown")
+
+	@pytest.mark.parametrize("code", [126, 127])
+	def test_a_cli_that_cannot_run_names_the_cli_and_node(self, fake_codex, code):
+		fake_codex(exec_body=f"exit {code}")
+		with pytest.raises(ai_fix.AiFixError, match="Node.js") as err:
+			self._call()
+		assert err.value.kind == "transport" and err.value.fatal is False
+
+	def test_an_auth_failure_clears_the_login_memo(self, fake_codex):
+		box = fake_codex(exec_body="echo 'HTTP 401 Unauthorized' >&2; exit 1")
+		with pytest.raises(ai_fix.AiFixError):
+			self._call()
+		assert str(box.path) not in ai_fix._LOGIN_CACHE
 
 	def test_prompt_echoed_on_stderr_does_not_misclassify_a_generic_failure(self, fake_codex):
 		fake_codex(
@@ -766,9 +863,13 @@ class TestLoginProbe:
 		failure = ai_fix._login_failure("error")
 		assert failure.kind == "transport" and failure.fatal is False and failure.kind != "auth"
 
-	def test_other_non_zero_exit_is_still_signed_out(self, fake_codex):
-		box = fake_codex(login="exit 1")
+	def test_a_failure_that_says_not_logged_in_is_a_sign_out(self, fake_codex):
+		box = fake_codex(login='echo "Not logged in" >&2; exit 1')
 		assert ai_fix._cli_login_ok(str(box.path), use_cache=False) == (False, "signed_out")
+
+	def test_an_unrecognised_failure_is_an_error_not_a_sign_out(self, fake_codex):
+		box = fake_codex(login='echo "thread panicked" >&2; exit 1')
+		assert ai_fix._cli_login_ok(str(box.path), use_cache=False) == (False, "error")
 
 	@pytest.mark.parametrize("code", [137, 139])
 	def test_a_shell_style_signal_exit_is_a_crash_not_a_sign_out(self, fake_codex, code):
@@ -840,7 +941,7 @@ class TestLoginProbe:
 		assert ai_fix._cli_login_ok(path, use_cache=False) == (True, "ok")
 		assert _read(box.rec, "calls.txt").count("login status") == 2
 		ai_fix._LOGIN_CACHE.clear()
-		fake_codex(login="exit 1")
+		fake_codex(login='echo "Not logged in" >&2; exit 1')
 		assert ai_fix._cli_login_ok(path) == (False, "signed_out")
 		assert path not in ai_fix._LOGIN_CACHE
 
@@ -858,6 +959,33 @@ class TestSessionStatus:
 		assert st["state"] == "blocked" and st["ok"] is False
 		assert "developer_mode" in st["message"] and "optimus_allow_subscription_cli" in st["message"]
 
+	def test_the_blocked_message_says_how_to_enable_it_and_that_a_restart_is_needed(self, sub_cfg, monkeypatch):
+		monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: False)
+		message = ai_fix._cli_session_status()["message"]
+		assert "set-config optimus_allow_subscription_cli 1" in message
+		assert "set-config developer_mode 1" in message
+		assert "restart the bench" in message and "bench clear-cache" in message
+
+	def test_the_settings_field_description_carries_the_same_instructions(self):
+		path = os.path.join(os.path.dirname(__file__), "..", "optimus", "doctype", "optimus_settings", "optimus_settings.json")
+		with open(path) as f:
+			fields = {d["fieldname"]: d for d in json.load(f)["fields"]}
+		text = fields["ai_connection_type"]["description"]
+		assert "set-config optimus_allow_subscription_cli 1" in text and "restart the bench" in text
+
+	@pytest.mark.parametrize("version,tested", [
+		("codex-cli 0.164.0", True), ("codex-cli 0.165.9", True),
+		("codex-cli 0.163.0", False), ("codex-cli 0.170.1", False), ("dev", None), (None, None),
+	])
+	def test_the_tested_version_range(self, version, tested):
+		assert ai_fix._version_tested(version) is tested
+
+	def test_connect_warns_about_an_untested_version(self, fake_codex, monkeypatch):
+		fake_codex()
+		monkeypatch.setattr(ai_fix, "_cli_version_cached", lambda p, probe=True: "codex-cli 0.200.0")
+		message = ai_fix._cli_session_status()["message"]
+		assert "outside the range" in message and "0.164" in message and "0.165" in message
+
 	def test_missing_when_cli_not_found(self, sub_cfg, monkeypatch):
 		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: None)
 		assert ai_fix._cli_session_status()["state"] == "missing"
@@ -869,7 +997,7 @@ class TestSessionStatus:
 		assert "@" not in st["message"]
 
 	def test_signed_out_message_carries_no_account_detail(self, fake_codex):
-		fake_codex(login='echo "secret detail user@example.com" >&2; exit 1')
+		fake_codex(login='echo "Not logged in: secret detail user@example.com" >&2; exit 1')
 		st = ai_fix._cli_session_status()
 		assert st["state"] == "signed_out" and "user@example.com" not in st["message"]
 
@@ -882,7 +1010,7 @@ class TestSessionStatus:
 	def test_button_ignores_the_cached_success(self, fake_codex):
 		box = fake_codex()
 		ai_fix._LOGIN_CACHE[str(box.path)] = (time.monotonic(), True, "ok")
-		fake_codex(login="exit 1")
+		fake_codex(login='echo "Not logged in" >&2; exit 1')
 		assert ai_fix._cli_session_status()["state"] == "signed_out"
 
 
@@ -902,7 +1030,12 @@ class TestClassifyStderr:
 		("certificate has expired", "network"),
 		("tls handshake failed", "network"),
 		("You hit your usage limit", "usage_limit"),
-		("error 429", "usage_limit"),
+		("error 429", "rate_limited"),
+		("rate limit exceeded", "rate_limited"),
+		("Too Many Requests", "rate_limited"),
+		("status: 401", "auth_expired"),
+		("processed 401 rows", "other"),
+		("quota exceeded", "usage_limit"),
 		("error: unexpected argument '--foo'", "unknown_flag"),
 		("Error: Unknown feature flag: x", "unknown_flag"),
 		("dns lookup failed", "network"),
@@ -1193,15 +1326,19 @@ class TestToolIsolation:
 	def test_each_disable_flag_is_paired_with_a_feature_name(self):
 		argv = ai_fix._build_cli_argv("codex", "/s", "/s/out")
 		assert len(ai_fix._CLI_DISABLED_FEATURES) == len(set(ai_fix._CLI_DISABLED_FEATURES))
-		assert argv.count("--disable") == len(ai_fix._CLI_DISABLED_FEATURES)
+		assert argv.count("--disable") == len(ai_fix._CLI_DISABLED_FEATURES)  # the fixture CLI knows every name
 
 	@staticmethod
 	def _disabled(argv):
 		return [argv[i + 1] for i, a in enumerate(argv) if a == "--disable"]
 
 	@staticmethod
-	def _probe(monkeypatch, on):
-		monkeypatch.setattr(ai_fix, "_codex_features", lambda p, timeout=None: None if on is None else frozenset(on))
+	def _probe(monkeypatch, on, known=None):
+		"""Fake ``(known, on)``; ``known`` defaults to the floor plus ``on``."""
+		listing = None if on is None else (
+			frozenset(ai_fix._CLI_DISABLED_FEATURES if known is None else known) | frozenset(on), frozenset(on)
+		)
+		monkeypatch.setattr(ai_fix, "_codex_features", lambda p, timeout=None: listing)
 
 	_NEW_FLOOR = (
 		"browser_use_external", "browser_use_full_cdp_access", "browser_annotation_api",
@@ -1228,23 +1365,36 @@ class TestToolIsolation:
 		assert "browser_use_external" in disabled
 		assert set(ai_fix._CLI_DISABLED_FEATURES) <= set(disabled)
 
-	@pytest.mark.parametrize("on", [None, frozenset()])
-	def test_the_full_floor_is_passed_when_the_probe_fails_or_lists_nothing_on(self, monkeypatch, on):
-		self._probe(monkeypatch, on)
+	def test_only_floor_names_the_cli_lists_are_passed(self, monkeypatch):
+		# A name the installed codex does not know makes every `codex exec` exit 1.
+		known = set(ai_fix._CLI_DISABLED_FEATURES) - {"multi_agent_v2", "computer_use"}
+		self._probe(monkeypatch, set(), known=known)
 		disabled = self._disabled(ai_fix._build_cli_argv("codex", "/s", "/s/out"))
-		assert sorted(disabled) == sorted(ai_fix._CLI_DISABLED_FEATURES)
+		assert sorted(disabled) == sorted(known)
 
-	def test_the_floor_is_never_filtered_by_what_the_cli_lists(self, monkeypatch):
-		# A listing that omits a floor name (an older codex) must not drop its --disable.
-		self._probe(monkeypatch, {"fast_mode"})
-		assert set(ai_fix._CLI_DISABLED_FEATURES) <= set(ai_fix._cli_disabled_features("codex"))
+	def test_a_floor_name_listed_in_any_stage_is_still_passed(self, monkeypatch):
+		# Listed but off (a removed or under-development feature): known, so disabled.
+		self._probe(monkeypatch, set())
+		assert sorted(ai_fix._cli_disabled_features("codex")) == sorted(ai_fix._CLI_DISABLED_FEATURES)
 
-	@pytest.mark.parametrize("listing", ["", "Feature  Stage  Enabled\n", "garbage\n\n  \nsingle\n", "UPPER  stable  true\n"])
-	def test_a_header_only_or_garbage_listing_still_yields_the_full_floor(self, monkeypatch, listing):
-		monkeypatch.setattr(ai_fix, "_run_cli", lambda *a, **kw: (0, listing, ""))
-		monkeypatch.setattr(ai_fix, "_codex_features", _REAL_FEATURES)
-		ai_fix._FEATURES_CACHE.clear()
-		assert ai_fix._cli_disabled_features("/x/codex") == sorted(ai_fix._CLI_DISABLED_FEATURES)
+	@pytest.mark.parametrize("probe", [None, "empty", "garbage"])
+	def test_a_failed_probe_refuses_the_run_and_passes_no_argv(self, monkeypatch, probe):
+		if probe is None:
+			self._probe(monkeypatch, None)
+		else:
+			monkeypatch.setattr(ai_fix, "_run_cli", lambda *a, **kw: (0, "" if probe == "empty" else "garbage\nUPPER  stable  true\n", ""))
+			monkeypatch.setattr(ai_fix, "_codex_features", _REAL_FEATURES)
+			ai_fix._FEATURES_CACHE.clear()
+		with pytest.raises(ai_fix.AiFixError, match="refused for safety") as err:
+			ai_fix._build_cli_argv("/x/codex", "/s", "/s/out")
+		assert err.value.kind == "transport" and err.value.fatal is False
+
+	def test_a_failed_probe_never_starts_the_exec(self, fake_codex, monkeypatch):
+		box = fake_codex()
+		monkeypatch.setattr(ai_fix, "_codex_features", lambda p, timeout=None: None)
+		with pytest.raises(ai_fix.AiFixError, match="refused for safety"):
+			ai_fix._call_local_cli("S", [{"content": "x"}])
+		assert "exec" not in _read(box.rec, "calls.txt").replace("login status", "")
 
 	def test_other_hardening_flags_are_kept_with_a_probe(self, monkeypatch):
 		self._probe(monkeypatch, {"browser_use_external"})
@@ -1252,7 +1402,7 @@ class TestToolIsolation:
 		assert argv[argv.index("-c") + 1] == 'web_search="disabled"'
 		assert argv[argv.index("--sandbox") + 1] == "read-only" and argv[-1] == "-"
 
-	def test_features_listing_yields_the_on_names_including_dotted_ones(self):
+	def test_features_listing_yields_known_and_on_names_including_dotted_ones(self):
 		listing = (
 			"browser_use_external                     stable             true\n"
 			"code_mode_host_grpc                      under development  false\n"
@@ -1260,11 +1410,14 @@ class TestToolIsolation:
 			"ns.dotted_tool                           stable             true\n"
 			"\n"
 		)
-		assert ai_fix._parse_features(listing) == {"browser_use_external", "fast_mode", "ns.dotted_tool"}
+		known, on = ai_fix._parse_features(listing)
+		assert on == {"browser_use_external", "fast_mode", "ns.dotted_tool"}
+		assert known == on | {"code_mode_host_grpc"}
 
 	def test_a_listing_with_no_feature_lines_parses_to_none_and_all_off_to_empty(self):
 		assert ai_fix._parse_features("Feature Stage\nonlyone\n") is None
-		assert ai_fix._parse_features("fast_mode stable false\n") == frozenset()
+		known, on = ai_fix._parse_features("fast_mode stable false\n")
+		assert known == {"fast_mode"} and on == frozenset()
 
 	def test_probe_runs_features_list_without_auth_and_is_cached(self, monkeypatch):
 		calls = []
@@ -1274,8 +1427,9 @@ class TestToolIsolation:
 			return 0, "browser_use_external   stable   true\nfast_mode   stable   false\n", ""
 
 		monkeypatch.setattr(ai_fix, "_run_cli", fake_run)
-		assert _REAL_FEATURES("/x/codex") == {"browser_use_external"}
-		assert _REAL_FEATURES("/x/codex") == {"browser_use_external"}
+		expected = (frozenset({"browser_use_external", "fast_mode"}), frozenset({"browser_use_external"}))
+		assert _REAL_FEATURES("/x/codex") == expected
+		assert _REAL_FEATURES("/x/codex") == expected
 		assert calls == [(["/x/codex", "features", "list"], ai_fix._FEATURES_PROBE_SECONDS)]
 
 	def test_probe_timeout_is_capped_by_the_time_left(self, monkeypatch):
@@ -1416,19 +1570,104 @@ class TestAuthWriteBack:
 			ai_fix._write_private(str(tmp_path / "auth.json"), b"{}", replace=True)
 		assert os.listdir(tmp_path) == []
 
-	def test_a_stale_second_writer_does_not_clobber_the_newer_file(self, real_auth):
+	def test_a_second_run_cannot_start_while_the_first_holds_the_sign_in(self, real_auth):
+		# One lock from copy-in to write-back: the second run is refused, never a stale copy.
+		with ai_fix._cli_sandbox():
+			with pytest.raises(ai_fix._AuthBusy):
+				with ai_fix._cli_sandbox(lock_wait=0.1):
+					pytest.fail("the second run must not start")
+
+	def test_a_waiting_run_copies_the_token_the_first_run_wrote_back(self, real_auth):
+		import threading
+		seen, started = {}, threading.Event()
+
+		def second():
+			started.set()
+			with ai_fix._cli_sandbox() as (_, env):
+				seen["copy"] = json.loads(open(os.path.join(env["CODEX_HOME"], "auth.json")).read())
+
 		with ai_fix._cli_sandbox() as (_, first):
-			with ai_fix._cli_sandbox() as (_, second):
-				_rotate(second["CODEX_HOME"], "SECOND")
-			# SECOND is on disk now, so the outer copy's base is stale
+			thread = threading.Thread(target=second)
+			thread.start()
+			started.wait(2)
+			time.sleep(0.3)
+			assert thread.is_alive() and "copy" not in seen
 			_rotate(first["CODEX_HOME"], "FIRST")
-		assert json.loads(real_auth.read_text())["tokens"]["refresh_token"] == "SECOND"
+		thread.join(10)
+		assert seen["copy"]["tokens"]["refresh_token"] == "FIRST"
+		assert json.loads(real_auth.read_text())["tokens"]["refresh_token"] == "FIRST"
+
+	def test_a_busy_lock_leaves_no_scratch_tree(self, real_auth, tmp_path, monkeypatch):
+		monkeypatch.setattr(ai_fix.tempfile, "tempdir", str(tmp_path))
+		with ai_fix._cli_sandbox():
+			before = sorted(os.listdir(tmp_path))
+			with pytest.raises(ai_fix._AuthBusy):
+				with ai_fix._cli_sandbox(lock_wait=0.1):
+					pass
+			assert sorted(os.listdir(tmp_path)) == before
 
 	def test_stale_writer_is_skipped_when_the_file_changed_on_disk(self, real_auth):
 		with ai_fix._cli_sandbox() as (_, env):
 			real_auth.write_text(json.dumps({"tokens": {"refresh_token": "NEWER"}}))
 			_rotate(env["CODEX_HOME"], "STALE")
 		assert json.loads(real_auth.read_text())["tokens"]["refresh_token"] == "NEWER"
+
+	@pytest.fixture
+	def dropped(self, monkeypatch):
+		rows, lines = [], []
+		monkeypatch.setattr(ai_fix, "log_ai_failure", lambda title, *a, **kw: rows.append(title))
+		monkeypatch.setattr(ai_fix, "_note_line", lines.append)
+		return rows, lines
+
+	def test_a_dropped_refresh_is_logged_with_its_reason(self, real_auth, dropped):
+		rows, lines = dropped
+		with ai_fix._cli_sandbox() as (_, env):
+			real_auth.write_text(json.dumps({"tokens": {"refresh_token": "NEWER"}}))
+			_rotate(env["CODEX_HOME"], "STALE")
+		assert rows == ["Codex sign-in was not saved back: changed"]
+		assert lines == ["codex cli: auth_saveback_skipped label=changed"]
+
+	def test_a_bad_child_copy_is_logged_as_shape(self, real_auth, dropped):
+		rows, _ = dropped
+		with ai_fix._cli_sandbox() as (_, env):
+			with open(os.path.join(env["CODEX_HOME"], "auth.json"), "w") as f:
+				f.write('{"tokens": {}, "extra": 1}')
+		assert rows == ["Codex sign-in was not saved back: shape"]
+
+	def test_a_write_error_is_logged_as_oserror(self, real_auth, dropped, monkeypatch):
+		rows, _ = dropped
+		monkeypatch.setattr(ai_fix, "_write_private", lambda path, data, replace=False: (_ for _ in ()).throw(OSError("disk")) if replace else open(path, "wb").write(data))
+		with ai_fix._cli_sandbox() as (_, env):
+			_rotate(env["CODEX_HOME"], "ROTATED")
+		assert rows == ["Codex sign-in was not saved back: oserror"]
+		assert json.loads(real_auth.read_text())["tokens"]["refresh_token"] == "ORIGINAL"
+
+	def test_a_drop_while_an_error_propagates_logs_no_error_log_row(self, real_auth, dropped):
+		rows, lines = dropped
+		with pytest.raises(RuntimeError):
+			with ai_fix._cli_sandbox() as (_, env):
+				real_auth.write_text(json.dumps({"tokens": {"refresh_token": "NEWER"}}))
+				_rotate(env["CODEX_HOME"], "STALE")
+				raise RuntimeError("body failed")
+		assert rows == [] and lines == ["codex cli: auth_saveback_skipped label=changed"]
+
+	def test_a_clean_refresh_logs_nothing(self, real_auth, dropped):
+		rows, lines = dropped
+		with ai_fix._cli_sandbox() as (_, env):
+			_rotate(env["CODEX_HOME"], "ROTATED")
+		assert rows == [] and lines == []
+
+	@pytest.mark.parametrize("tokens", [
+		{"refresh_token": ""},
+		{"refresh_token": 5},
+		{"refresh_token": "X", "extra": "y"},
+		[],
+	])
+	def test_a_token_object_with_empty_or_odd_fields_is_not_saved(self, real_auth, tokens):
+		with ai_fix._cli_sandbox() as (_, env):
+			with open(os.path.join(env["CODEX_HOME"], "auth.json"), "w") as f:
+				json.dump({"tokens": tokens}, f)
+		assert json.loads(real_auth.read_text())["tokens"]["refresh_token"] == "ORIGINAL"
 
 	@pytest.mark.parametrize("bad", [
 		"[1, 2]",
@@ -1452,18 +1691,6 @@ class TestAuthWriteBack:
 		with ai_fix._cli_sandbox() as (_, env):
 			_rotate(env["CODEX_HOME"], "C", auth_mode="chatgpt")
 		assert json.loads(real_auth.read_text())["tokens"]["refresh_token"] == "C"
-
-	def test_write_back_is_skipped_when_the_lock_cannot_be_taken(self, real_auth, monkeypatch):
-		import fcntl
-		monkeypatch.setattr(ai_fix, "_AUTH_LOCK_WAIT_SECONDS", 0.2)
-		fd = os.open(f"{real_auth}.lock", os.O_RDWR | os.O_CREAT, 0o600)
-		try:
-			with ai_fix._cli_sandbox() as (_, env):
-				fcntl.flock(fd, fcntl.LOCK_EX)
-				_rotate(env["CODEX_HOME"], "ROTATED")
-		finally:
-			os.close(fd)
-		assert json.loads(real_auth.read_text())["tokens"]["refresh_token"] == "ORIGINAL"
 
 	def test_copy_waits_for_a_writer_holding_the_lock(self, real_auth):
 		import fcntl
@@ -1559,3 +1786,129 @@ class TestRunCli:
 		with pytest.raises(ai_fix.subprocess.TimeoutExpired):
 			self._run(f'sleep 60 & echo $! > "{pidfile}"; wait', timeout=1)
 		assert self._gone(int(pidfile.read_text()))
+
+
+class TestBusyLockAndFollowUps:
+	def _call(self, **kw):
+		return ai_fix._call_local_cli("SYS", [{"role": "user", "content": "hello"}], **kw)
+
+	def _hold(self, real_auth):
+		import fcntl
+		fd = os.open(f"{real_auth}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+		fcntl.flock(fd, fcntl.LOCK_EX)
+		return fd
+
+	def test_a_busy_sign_in_lock_is_a_temporary_timeout_for_the_exec(self, fake_codex, real_auth):
+		box = fake_codex()
+		ai_fix._LOGIN_CACHE[str(box.path)] = (time.monotonic(), True, "ok")
+		fd = self._hold(real_auth)
+		try:
+			with ai_transport.attempt() as transport:
+				with pytest.raises(ai_fix.AiFixError, match="sign-in file") as err:
+					self._call(timeout=7)
+		finally:
+			os.close(fd)
+		assert err.value.kind == "timeout" and err.value.fatal is False
+		assert transport.certainty == "not_sent"
+		assert not (box.rec / "calls.txt").exists()  # neither the login check nor the exec ran
+
+	def test_a_busy_sign_in_lock_is_a_temporary_timeout_for_the_login_check(self, fake_codex, real_auth):
+		box = fake_codex()
+		fd = self._hold(real_auth)
+		try:
+			assert ai_fix._cli_login_ok(str(box.path), use_cache=False, lock_wait=0.1) == (False, "busy")
+		finally:
+			os.close(fd)
+		failure = ai_fix._login_failure("busy")
+		assert failure.kind == "timeout" and failure.fatal is False
+
+	def test_two_threads_run_the_cli_one_after_the_other(self, fake_codex):
+		import threading
+		box = fake_codex()
+		fake_codex(exec_body=f'echo start >> "{box.rec}/order.txt"; sleep 0.4; echo end >> "{box.rec}/order.txt"; echo REPLY > "$out"')
+		errors = []
+
+		def run():
+			try:
+				self._call(timeout=30)
+			except Exception as e:
+				errors.append(e)
+
+		threads = [threading.Thread(target=run) for _ in range(2)]
+		for t in threads:
+			t.start()
+		for t in threads:
+			t.join(30)
+		assert errors == []
+		assert _read(box.rec, "order.txt").split() == ["start", "end", "start", "end"]
+
+	def test_a_truncated_reply_sets_the_length_finish_reason(self, fake_codex):
+		fake_codex(exec_body='head -c 25000 /dev/zero | tr "\\000" "a" > "$out"')
+		meta = {}
+		text = self._call(meta_out=meta)
+		assert text.endswith("(truncated)") and meta["finish_reason"] == "length"
+
+	def test_a_complete_reply_leaves_the_finish_reason_alone(self, fake_codex):
+		fake_codex()
+		meta = {}
+		self._call(meta_out=meta)
+		assert "finish_reason" not in meta
+
+	def _reask_run(self, monkeypatch, provider):
+		from optimus.tests.test_ai_fix import TestGuardedCompletion as _Replies
+		sent = []
+
+		def dispatch(*args, **kwargs):
+			sent.append(args)
+			kwargs["meta_out"]["finish_reason"] = "stop"
+			return _Replies._RAW
+
+		monkeypatch.setattr(ai_fix, "_dispatch_call", dispatch)
+		monkeypatch.setattr(ai_fix, "_reask_enabled", lambda: True)
+		shown = [line["content"] for line in _Replies._FINDING["source_window"]]
+		result = ai_fix._complete_with_guardrails(
+			{**_Replies._PROVIDER, **provider}, "system", [], shown_lines=shown,
+			usage={}, started_at=time.monotonic(), timeout=60,
+		)
+		return sent, result[1]
+
+	def test_the_guardrail_re_ask_is_skipped_for_the_cli(self, monkeypatch):
+		sent, guardrail = self._reask_run(monkeypatch, {"protocol": "subscription"})
+		assert len(sent) == 1 and guardrail["reasked"] is False
+
+	def test_the_re_ask_still_runs_for_an_http_provider(self, monkeypatch):
+		sent, _ = self._reask_run(monkeypatch, {})
+		assert len(sent) == 2
+
+	def test_a_descendant_that_keeps_the_pipe_open_does_not_hang_the_call(self, tmp_path):
+		script = tmp_path / "leak.sh"
+		script.write_text("#!/bin/sh\n(setsid sleep 8 &)\necho hi\n")
+		script.chmod(0o755)
+		started = time.monotonic()
+		code, out, _ = ai_fix._run_cli([str(script)], {"PATH": os.environ["PATH"]}, str(tmp_path), 20)
+		assert code == 0 and out.strip() == "hi" and time.monotonic() - started < 15
+
+	def test_a_spawn_error_is_logged_with_its_errno(self, fake_codex, monkeypatch):
+		fake_codex()
+		lines = []
+		monkeypatch.setattr(ai_fix, "_note_line", lines.append)
+
+		def run(argv, *a, **kw):
+			if "exec" in argv:
+				raise OSError(8, "Exec format error")
+			return 0, "Logged in using ChatGPT", ""
+
+		monkeypatch.setattr(ai_fix, "_run_cli", run)
+		with pytest.raises(ai_fix.AiFixError, match="could not be started"):
+			self._call()
+		assert any("exec_spawn_failed label=errno_8" in line for line in lines)
+
+	def test_a_non_zero_exit_with_no_recognised_cause_is_sent_unknown_and_logged(self, fake_codex, monkeypatch):
+		fake_codex(exec_body="echo 'panicked at main.rs' >&2; exit 101")
+		lines = []
+		monkeypatch.setattr(ai_fix, "_note_line", lines.append)
+		with ai_transport.attempt() as transport:
+			with pytest.raises(ai_fix.AiFixError):
+				self._call()
+		assert transport.certainty == "sent_unknown"
+		assert any("exec_failed" in line and "label=other code=101" in line for line in lines)

@@ -237,8 +237,9 @@ def _ai_unavailable_message(section: str | None) -> str:
 		return _("Enable AI fix suggestions under Optimus Settings ▸ AI.")
 	if ai_fix.subscription_mode_active():
 		return _(
-			"Codex CLI isn't ready. Open Optimus Settings, click Connect, and make sure "
-			"developer_mode and optimus_allow_subscription_cli are set in the site config."
+			"Codex CLI isn't ready. Ask a System Manager to open Optimus Settings, click "
+			"Connect, and make sure developer_mode and optimus_allow_subscription_cli are set "
+			"in the site config."
 		)
 	return _(
 		"AI suggestions aren't configured. Turn them on under Optimus Settings ▸ AI and set a "
@@ -1436,11 +1437,10 @@ def check_cli_session() -> dict:
 	from optimus import ai_fix
 
 	status = ai_fix._cli_session_status()
+
 	def store():
-		frappe.db.set_single_value(
-			"Optimus Settings", "ai_subscription_status", (status.get("message") or "")[:140],
-			update_modified=False,
-		)
+		text = f"{(status.get('message') or '')[:100]} ({_('checked')} {frappe.utils.now_datetime():%Y-%m-%d %H:%M})"
+		frappe.db.set_single_value("Optimus Settings", "ai_subscription_status", text, update_modified=False)
 		safe_commit()
 
 	safe_call.best_effort(store, None)

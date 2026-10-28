@@ -8,7 +8,33 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-@@ENTRY@@
+## [0.12.107] - 2026-10-28
+
+### Added
+
+- AI fix suggestions can now use the local Codex CLI signed in with ChatGPT instead of a cloud API key. In Optimus Settings > AI set Connection to "Subscription (local CLI)" and click Connect to check the CLI and the sign-in. The default stays "API Key", so existing setups are unchanged. Codex is the only CLI supported.
+- Subscription mode needs `developer_mode` and the `optimus_allow_subscription_cli` site flag: run `bench --site <site> set-config optimus_allow_subscription_cli 1`, then restart the bench (or run `bench clear-cache`). The blocked message and the field description now say so.
+- The analyze-time auto-suggest and the "Refresh AI suggestions" button both run through the CLI. A queued refresh re-reads the saved settings before every call, so turning AI off or switching the connection stops the rest of the job. A terminal CLI failure (missing CLI, signed out, usage limit, a rejected flag) stops a refresh at the first failure; a timeout, a rate limit or a network error does not.
+- The Connect button shows when it last checked, cannot be double clicked, and does not change the modified time of Optimus Settings.
+
+### Security
+
+- The CLI runs as a read-only, ephemeral agent in a private scratch directory with an allow-listed environment. `HOME`, `CODEX_HOME` and `TMPDIR` point inside it, and it holds only a copy of the sign-in file, deleted afterwards (stale copies left by a killed worker are removed on the next run).
+- Only the tool features the installed CLI lists are turned off (`--disable`), plus every capability-looking feature it reports as on. Before, a fixed list was always passed and one unknown name made every call fail. If `codex features list` cannot be read, the call is refused instead of running with a guess.
+- One lock is held from copying the sign-in file to saving a refreshed one, so two runs never share a refresh token and a stale copy can no longer replace a newer one. A refreshed sign-in that is not saved back is written to the Error Log with the reason (`changed`, `shape`, `oserror` or `unreadable`). The copy must keep the same keys, auth mode and non-empty token strings to be saved.
+- The CLI path (or the `PATH` hit) must be a `codex` launcher or a Node entrypoint owned by the bench user or root and not writable by group or others. A path that fails now says which check failed.
+- A CLI send marks the raw-value request as sent, so a re-ask after raw-value consent is revoked is refused. The guardrail re-ask is skipped for this mode because the CLI takes one flat prompt.
+- The reply goes through a pattern scrub for secrets. Known limits: the tool list is a denylist and the scrub is pattern based. Use this mode only on a developer bench with data you trust. Tested with codex 0.164 to 0.165; Connect warns outside that range. See SECURITY.md.
+
+### Fixed
+
+- A failure is read from the last lines of the CLI's error output only. A rate limit is a temporary "rate limited" error, a usage limit is the fatal "quota" error, and a bare `401` in echoed text is no longer a sign-out. A login check that fails without saying "not logged in", a process killed by the system, or a CLI or Node that cannot start is a temporary error, not a sign-out.
+- A failed run that may have reached OpenAI is recorded as "sent, outcome unknown" so it is not repeated automatically. Only a rejection before any answer counts as a known outcome.
+- A reply cut at the output limit ends with a "(truncated)" marker and is treated as incomplete by the guardrails.
+- A call stays inside its time limit: the lock wait, the sign-in check and the feature check come out of it, and the run stops with a timeout when too little is left. The sign-in check is remembered for 5 minutes and cleared when a run reports an expired session.
+- The CLI process group is always stopped when a call ends, and output is read with a size limit. A descendant that keeps the pipe open can no longer hang the call.
+- The unavailable message now tells a non-admin to ask a System Manager to open Optimus Settings and click Connect, and does not mention Connect while AI is off.
+
 ## [0.12.92] - 2026-10-27
 
 ### Internal

@@ -5,6 +5,7 @@
 predicate, the ``check_cli_session`` Connect-button endpoint and the connection-aware
 "AI isn't ready" message."""
 
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -78,7 +79,8 @@ def test_system_manager_gets_the_status_and_it_is_stored(connect):
 	assert api.check_cli_session() is result
 	assert calls == [True] and commits == [True]
 	args, kwargs = fake.spies.set_single_value[0]
-	assert args == ("Optimus Settings", "ai_subscription_status", "Connected.")
+	assert args[:2] == ("Optimus Settings", "ai_subscription_status")
+	assert re.fullmatch(r"Connected\. \(checked \d{4}-\d\d-\d\d \d\d:\d\d\)", args[2])  # the time makes a stale status visible
 	assert kwargs == {"update_modified": False}  # Connect must not bump the Settings timestamp
 	assert fake.spies.set_value == []
 
@@ -86,7 +88,8 @@ def test_system_manager_gets_the_status_and_it_is_stored(connect):
 def test_stored_message_is_truncated(connect):
 	fake, *_ = connect(("System Manager",), status={"ok": False, "state": "error", "message": "x" * 300})
 	api.check_cli_session()
-	assert fake.spies.set_single_value[0][0][2] == "x" * 140
+	stored = fake.spies.set_single_value[0][0][2]
+	assert stored.startswith("x" * 100 + " (checked ") and len(stored) <= 140
 
 
 def test_non_manager_is_refused_without_probing_or_counting(connect):
@@ -127,6 +130,7 @@ def test_unavailable_message_names_the_cli_in_subscription_mode(monkeypatch):
 	_set_cfg(monkeypatch, ai_enabled=True, ai_connection_type=SUBSCRIPTION)
 	msg = api._ai_unavailable_message(None)
 	assert "Codex CLI" in msg and "optimus_allow_subscription_cli" in msg and "API key" not in msg
+	assert "Ask a System Manager" in msg
 
 
 def test_unavailable_message_names_the_provider_in_api_mode(monkeypatch):

@@ -45,6 +45,9 @@ const OPTIMUS_SENSITIVITY_FIELDS = [
 	"ai_auto_suggest_max",
 ];
 
+// True while a Connect check is running, so a double click cannot stack dialogs.
+let cli_check_pending = false;
+
 frappe.ui.form.on("Optimus Settings", {
 	refresh(frm) {
 		// Render the app-wide intro as one id-scoped banner (see
@@ -182,12 +185,20 @@ frappe.ui.form.on("Optimus Settings", {
 					);
 					return;
 				}
+				if (cli_check_pending) {
+					return;
+				}
+				cli_check_pending = true;
 				frappe.show_alert({
 					message: __("Checking the Codex CLI session..."),
 					indicator: "blue",
 				});
 				frappe.call({
 					method: "optimus.api.check_cli_session",
+					freeze: true,
+					always() {
+						cli_check_pending = false;
+					},
 					callback(r) {
 						const m = (r && r.message) || {};
 						let indicator = "red";

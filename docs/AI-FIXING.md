@@ -543,6 +543,30 @@ enabled scheduler are required for execution and recovery. See
 [background refresh operations](AI-REFRESH.md) for deployment, cancellation,
 uncertain usage, resume limits, report recovery and API response changes.
 
+### 6.4a Subscription mode (local Codex CLI)
+
+Instead of an API key you can use the Codex CLI that is signed in with ChatGPT on the bench machine. It is meant for developer benches only.
+
+1. Install the `codex` CLI for the bench user and run `codex login` (choose "Sign in with ChatGPT"; an API-key login is refused).
+2. Enable the site flags, then restart the bench (or run `bench clear-cache`) so running workers see them:
+
+```bash
+bench --site <site> set-config developer_mode 1
+bench --site <site> set-config optimus_allow_subscription_cli 1
+```
+
+3. In Optimus Settings > AI set Connection to "Subscription (local CLI)", save, and click Connect. Connect only checks the CLI and the sign-in; it never logs in and shows when it last checked.
+
+What to know:
+
+- The prompt leaves the host: Codex sends it to OpenAI. Section 2 applies as for an API call.
+- Each call runs `codex exec` read-only with the file, command and browser tools turned off. Calls run one after another because they share one sign-in file, so a bulk refresh is slower than with an API key.
+- A call can take longer than 60 seconds. Raise `ai_request_timeout_seconds` (180 is a good start). The wait for the sign-in lock and the check of the CLI come out of the same limit.
+- If `codex features list` cannot be read, the call is refused with "refused for safety". Check that the command works for the bench user.
+- The guardrail re-ask is not used with this mode, because the CLI takes one flat prompt.
+- Tested with codex 0.164 to 0.165. See SECURITY.md for the residual risks (denylist of tools, pattern based output scrub).
+- If a refreshed sign-in cannot be saved back, an Error Log row says why (`changed`, `shape`, `oserror` or `unreadable`); run `codex login` again if the next call says you are signed out.
+
 ### 6.5 Troubleshooting
 
 - **"The model's context window (N tokens) is too small for the Optimus prompt."** The window cannot hold the system prompt plus a minimal answer (about 2,760 tokens for a fix suggestion, 2,168 for the Steps to Reproduce rewrite). Raise the server's window and the Context window (tokens) setting together.

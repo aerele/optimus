@@ -495,7 +495,7 @@
   {
    "default": "API Key",
    "depends_on": "eval:doc.ai_enabled",
-   "description": "API Key calls a cloud provider over HTTP. Subscription (local CLI) runs the logged-in Codex CLI on this machine using your ChatGPT subscription (local developer benches only, requires developer_mode and the optimus_allow_subscription_cli site-config flag). The CLI runs as an agent in a read-only sandbox with its shell tool off and a private scratch HOME holding only a copy of its sign-in file, but it can still read files the bench user can read, so a prompt injection in profiled data is mitigated, not eliminated. Use it on data you trust.",
+   "description": "Subscription (local CLI) needs developer_mode and the optimus_allow_subscription_cli site-config flag: run `bench --site <site> set-config optimus_allow_subscription_cli 1`, then restart the bench (or run `bench clear-cache`) so running workers see it. It runs the logged-in Codex CLI on this machine as a read-only agent with a private scratch HOME, but it can still read files the bench user can read, so a prompt injection in profiled data is mitigated, not eliminated; use it only on data you trust. A call can take longer than the default request timeout, so raise the AI request timeout. API Key calls a cloud provider over HTTP.",
    "fieldname": "ai_connection_type",
    "fieldtype": "Select",
    "label": "Connection",

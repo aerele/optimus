@@ -33,7 +33,9 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -2879,7 +2881,7 @@ def _dispatch_call(
 			from frappe import _
 
 			raise AiFixError(_("AI configuration changed or could not be read. Check Optimus Settings and retry the refresh."), kind="config")
-		return _call_local_cli(system, messages, usage_out=usage_out, timeout=timeout)
+		return _call_local_cli(system, messages, usage_out=usage_out, timeout=timeout, meta_out=meta_out)
 	api_key = _get_api_key(provider.get("needs_key", True), provider=provider)
 	if provider.get("needs_key") and not api_key:
 		from frappe import _
@@ -2993,6 +2995,8 @@ def _complete_with_guardrails(
 		elapsed = time.monotonic() - started_at
 		if not _reask_enabled():
 			_log_reask("skipped-knob")
+		elif provider["protocol"] == "subscription":
+			_log_reask("skipped-transport")  # the CLI prompt has no roles, so a correction would be read as data
 		elif elapsed >= timeout * 0.5:
 			_log_reask("skipped-budget")
 		elif not ai_budget.reask_fits(ctx, fit_usage, reask_text, out_tokens=ai_budget.MIN_OUTPUT_TOKENS):
@@ -3355,22 +3359,49 @@ def _trusted_cli_file(real: str) -> bool:
 _CLI_ENTRYPOINT_NAMES = ("codex", "codex.js", "codex.cjs", "codex.mjs")
 
 
-def _cli_installed(cfg) -> str | None:
-	"""Resolved path of the Codex CLI, or None. An explicit ``ai_cli_path`` must be
-	absolute and named ``codex``; after symlinks are resolved it must be a trusted
-	executable (``_trusted_cli_file``) whose name is ``codex`` or a Node entrypoint
-	(``codex.js`` and friends, as npm installs it). Blank falls back to the PATH hit, held
-	to the same checks. No subprocess."""
+def _cli_resolve(cfg) -> tuple[str | None, str]:
+	"""``(path, reason)``: the resolved path of the Codex CLI and ``ok``, or None and why
+	not (``not_found`` / ``relative`` / ``name`` / ``entrypoint`` / ``untrusted``). An
+	explicit ``ai_cli_path`` must be absolute and named ``codex``; after symlinks are
+	resolved it must be a trusted executable (``_trusted_cli_file``) whose name is ``codex``
+	or a Node entrypoint (``codex.js`` and friends, as npm installs it). Blank falls back
+	to the PATH hit, held to the same checks. No subprocess."""
 	configured = (getattr(cfg, "ai_cli_path", "") or "").strip()
 	candidate = configured or shutil.which("codex")
-	if not candidate or not os.path.isabs(candidate):
-		return None
+	if not candidate:
+		return None, "not_found"
+	if not os.path.isabs(candidate):
+		return None, "relative"
 	if os.path.basename(candidate) != "codex":
-		return None
+		return None, "name"
 	real = os.path.realpath(candidate)
-	if os.path.basename(real) not in _CLI_ENTRYPOINT_NAMES or not _trusted_cli_file(real):
-		return None
-	return real
+	if os.path.basename(real) not in _CLI_ENTRYPOINT_NAMES:
+		return None, "entrypoint"
+	if not _trusted_cli_file(real):
+		return None, "untrusted"
+	return real, "ok"
+
+
+def _cli_installed(cfg) -> str | None:
+	"""Resolved path of the Codex CLI, or None (see ``_cli_resolve`` for why)."""
+	return _cli_resolve(cfg)[0]
+
+
+def _cli_missing_text(reason: str) -> str:
+	"""Operator-facing explanation for a ``_cli_resolve`` failure."""
+	from frappe import _
+
+	if reason == "not_found":
+		return _("Codex CLI not found. Install it or set the CLI path in Optimus Settings.")
+	if reason == "relative":
+		return _("The Codex CLI path must be absolute.")
+	if reason == "name":
+		return _("The CLI path must point at the `codex` launcher or a symlink named `codex`, not the `.js` file.")
+	if reason == "entrypoint":
+		return _("The Codex CLI path resolves to a file that is not `codex` or a Node entrypoint (`codex.js`).")
+	return _(
+		"The Codex CLI file must be owned by the bench user or root and not writable by group or others."
+	)
 
 
 # The data that follows the SECURITY line is captured from an application and may
@@ -3399,8 +3430,10 @@ def _compose_cli_prompt(system: str, messages: list[dict]) -> str:
 
 # Agent tools that could read a file or run a command, turned off so the
 # sign-in copy and bench files are out of the agent's reach. ``--sandbox read-only``
-# governs only model-run shell commands, not these tool features, so the whole list is
-# always passed (an unknown ``--disable`` name is a no-op), even when the probe below fails.
+# governs only model-run shell commands, not these tool features. Names are version
+# specific, so only those the installed CLI lists are passed (an unknown ``--disable``
+# name makes every ``codex exec`` exit 1). This is a denylist: a capability the CLI adds
+# under a name outside this list and the regex below stays reachable (see SECURITY.md).
 _CLI_DISABLED_FEATURES = (
 	"shell_tool", "unified_exec", "unified_exec_tty", "multi_agent", "multi_agent_v2",
 	"view_image", "hooks", "image_generation", "browser_use", "computer_use",
@@ -3408,11 +3441,13 @@ _CLI_DISABLED_FEATURES = (
 	"browser_use_external", "browser_use_full_cdp_access", "browser_annotation_api",
 	"code_mode_host", "code_mode_interrupt", "in_app_browser", "in_app_local_automation",
 )
+# The codex versions this isolation was last checked against (major, minor), inclusive.
+_CLI_TESTED_VERSIONS = ((0, 164), (0, 165))
 
 
 # Feature names that look like a tool, agent, browser or file/network capability. Every
 # such feature the installed CLI reports as ON is turned off too, so a capability added
-# by a newer codex is covered without a code change. The probe only ADDS to the floor.
+# by a newer codex is covered without a code change.
 _CLI_CAPABILITY_RE = re.compile(
 	r"shell|exec|tool|browser|cdp|annotation|computer|code_mode|\bapps?\b|plugin|hook|mcp"
 	r"|web|image|agent|file|network|sandbox_bypass|danger"
@@ -3422,32 +3457,32 @@ _CLI_CAPABILITY_RE = re.compile(
 _FEATURES_PROBE_SECONDS = 10
 _FEATURES_CACHE_SECONDS = 600
 _FEATURES_FAILURE_CACHE_SECONDS = 60
-# {cli_path: (monotonic_ts, on_features or None)}. A failed probe is remembered briefly
+# {cli_path: (monotonic_ts, (known, on) or None)}. A failed probe is remembered briefly
 # so a broken probe does not add its timeout to every finding.
-_FEATURES_CACHE: dict[str, tuple[float, frozenset[str] | None]] = {}
+_FEATURES_CACHE: dict[str, tuple[float, tuple[frozenset[str], frozenset[str]] | None]] = {}
 _FEATURE_NAME_RE = re.compile(r"[a-z][a-z0-9_.]*")
 
 
-def _parse_features(listing: str) -> frozenset[str] | None:
-	"""The feature names that are ON in a ``codex features list`` listing, or None when
-	no line looks like one. Each line is ``name  stage  state``: the first token is the
-	name and the last the effective state (the name is ON when it is ``true``)."""
-	seen, on = False, set()
+def _parse_features(listing: str) -> tuple[frozenset[str], frozenset[str]] | None:
+	"""``(known, on)`` from a ``codex features list`` listing, or None when no line looks
+	like one. Each line is ``name  stage  state``: the first token is the name (``known``
+	holds every stage) and the last the effective state (``on`` when it is ``true``)."""
+	known, on = set(), set()
 	for line in listing.splitlines():
 		tokens = line.split()
 		if len(tokens) < 2 or not _FEATURE_NAME_RE.fullmatch(tokens[0]):
 			continue
-		seen = True
+		known.add(tokens[0])
 		if tokens[-1].lower() == "true":
 			on.add(tokens[0])
-	return frozenset(on) if seen else None
+	return (frozenset(known), frozenset(on)) if known else None
 
 
-def _codex_features(cli_path: str, timeout: float | None = None) -> frozenset[str] | None:
-	"""The ON feature names from ``codex features list``, or None when the probe fails (it
-	never raises, except to let a worker timeout or interrupt leave via the guard).
-	``timeout`` caps the probe below ``_FEATURES_PROBE_SECONDS``. Cached per path for the
-	process."""
+def _codex_features(cli_path: str, timeout: float | None = None) -> tuple[frozenset[str], frozenset[str]] | None:
+	"""``(known, on)`` feature names from ``codex features list``, or None when the probe
+	fails (it never raises, except to let a worker timeout or interrupt leave via the
+	guard). ``timeout`` caps the probe below ``_FEATURES_PROBE_SECONDS``. Cached per path
+	for the process."""
 	now = time.monotonic()
 	hit = _FEATURES_CACHE.get(cli_path)
 	if hit and now - hit[0] < (_FEATURES_CACHE_SECONDS if hit[1] is not None else _FEATURES_FAILURE_CACHE_SECONDS):
@@ -3467,20 +3502,25 @@ def _codex_features(cli_path: str, timeout: float | None = None) -> frozenset[st
 		raise guard.interrupt()
 	_FEATURES_CACHE[cli_path] = (now, features)
 	if features is None:
-		# The agent still starts with the full static floor, never fewer.
 		_log_cli_diagnostic("features_probe_failed", version=_cli_version_cached(cli_path, probe=False))
 	return features
 
 
 def _cli_disabled_features(cli_path: str, timeout: float | None = None) -> list[str]:
-	"""The whole static floor plus every capability-looking feature the CLI has ON. The
-	floor is never filtered: a failed or degenerate probe leaves exactly the floor, and
-	an unknown ``--disable`` name is a no-op, so isolation fails closed."""
-	wanted = set(_CLI_DISABLED_FEATURES)
-	on = _codex_features(cli_path, timeout)
-	if on:
-		wanted |= {name for name in on if _CLI_CAPABILITY_RE.search(name)}
-	return sorted(wanted)
+	"""The floor names the CLI lists plus every capability-looking feature it has ON. When
+	the feature probe fails nothing is known about the isolation, so the run is refused."""
+	from frappe import _
+
+	listing = _codex_features(cli_path, timeout)
+	if listing is None:
+		raise AiFixError(
+			_("The Codex CLI feature list could not be read, so the run was refused for safety. "
+			"Check that `codex features list` works for the bench user, then try again."),
+			kind="transport",
+		)
+	known, on = listing
+	return sorted({name for name in _CLI_DISABLED_FEATURES if name in known}
+		| {name for name in on if _CLI_CAPABILITY_RE.search(name)})
 
 
 def _build_cli_argv(cli_path: str, scratch_dir: str, out_file: str, *, probe_seconds: float | None = None) -> list[str]:
@@ -3569,15 +3609,19 @@ def _write_private(path: str, data: bytes, *, replace: bool = False) -> None:
 _AUTH_LOCK_WAIT_SECONDS = 10
 
 
+class _AuthBusy(Exception):
+	"""The sign-in lock could not be taken in time (another call holds it)."""
+
+
 @contextlib.contextmanager
-def _auth_lock(source: str):
+def _auth_lock(source: str, wait: float = _AUTH_LOCK_WAIT_SECONDS):
 	"""Hold an exclusive flock on a lock file next to the sign-in file; yields True
-	when held, False when it could not be taken in time (callers then skip the write)."""
+	when held, False when it could not be taken within ``wait`` seconds."""
 	fd = None
 	held = False
 	try:
 		fd = os.open(f"{source}.lock", os.O_RDWR | os.O_CREAT, 0o600)
-		limit = time.monotonic() + _AUTH_LOCK_WAIT_SECONDS
+		limit = time.monotonic() + max(0, wait)
 		while not held:
 			try:
 				fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -3604,45 +3648,112 @@ def _auth_shape(data: bytes) -> tuple[frozenset, object] | None:
 	return (frozenset(obj), obj.get("auth_mode")) if isinstance(obj, dict) else None
 
 
-def _save_refreshed_auth(source: str, original: bytes, refreshed: bytes) -> None:
-	"""Replace the real sign-in file with the CLI's refreshed copy, under the lock, only
-	when the real file still equals what was copied and the copy keeps its keys and auth mode."""
+_AUTH_TOKEN_FIELDS = ("access_token", "refresh_token")
+
+
+def _refresh_acceptable(original: bytes, refreshed: bytes) -> bool:
+	"""True when the CLI's copy keeps the keys and auth mode of the original and, where the
+	original has a ``tokens`` object, the same token keys with non-empty token strings."""
 	shape = _auth_shape(refreshed)
 	if shape is None or shape != _auth_shape(original):
+		return False
+	old, new = json.loads(original).get("tokens"), json.loads(refreshed).get("tokens")
+	if not isinstance(old, dict):
+		return True
+	if not isinstance(new, dict) or set(new) != set(old):
+		return False
+	return all(isinstance(new.get(f), str) and new[f] for f in _AUTH_TOKEN_FIELDS if f in old)
+
+
+def _save_refreshed_auth(source: str, original: bytes, refreshed: bytes) -> str | None:
+	"""Replace the real sign-in file with the CLI's refreshed copy and return None, or return
+	why it was not saved (``shape`` / ``changed`` / ``oserror``). The caller holds the lock.
+	It writes only when the real file still equals what was copied."""
+	if not _refresh_acceptable(original, refreshed):
+		return "shape"
+	if _read_auth(source) != original:
+		return "changed"
+	try:
+		_write_private(source, refreshed, replace=True)
+	except OSError:
+		return "oserror"
+	return None
+
+
+def _report_dropped_auth(reason: str, *, in_flight: bool) -> None:
+	"""Record why a rotated sign-in was not saved back. An Error Log row is written only
+	when no exception is in flight (``log_ai_failure`` must run outside an ``except``)."""
+	_log_cli_diagnostic("auth_saveback_skipped", label=reason)
+	if not in_flight:
+		log_ai_failure(f"Codex sign-in was not saved back: {reason}")
+
+
+_SANDBOX_PREFIX = "optimus-codex-"
+_SANDBOX_STALE_SECONDS = 3600
+_SWEEP_EVERY_SECONDS = 600
+_LAST_SWEEP = 0.0
+
+
+def _sweep_stale_sandboxes() -> None:
+	"""Delete our own scratch trees left behind by a killed worker (they hold a 0600 copy of
+	the sign-in file). Best-effort, at most once per ``_SWEEP_EVERY_SECONDS``."""
+	global _LAST_SWEEP
+	now = time.monotonic()
+	if _LAST_SWEEP and now - _LAST_SWEEP < _SWEEP_EVERY_SECONDS:
 		return
-	with _auth_lock(source) as held:
-		if held and _read_auth(source) == original:
-			_write_private(source, refreshed, replace=True)
+	_LAST_SWEEP = now
+	with contextlib.suppress(Exception):
+		base = tempfile.gettempdir()
+		for name in os.listdir(base):
+			if not name.startswith(_SANDBOX_PREFIX):
+				continue
+			path = os.path.join(base, name)
+			st = os.lstat(path)
+			if stat.S_ISDIR(st.st_mode) and st.st_uid == os.geteuid() and time.time() - st.st_mtime > _SANDBOX_STALE_SECONDS:
+				shutil.rmtree(path, ignore_errors=True)
 
 
 @contextlib.contextmanager
-def _cli_sandbox(*, with_auth: bool = True):
+def _cli_sandbox(*, with_auth: bool = True, lock_wait: float = _AUTH_LOCK_WAIT_SECONDS):
 	"""A private 0700 scratch tree for one CLI invocation, removed afterwards. It
 	yields ``(work_dir, env)``: HOME, CODEX_HOME and TMPDIR point inside the tree, and
 	CODEX_HOME holds only a copy of the sign-in file, so the child sees none of the
-	operator's home directory. A sign-in file the CLI refreshed meanwhile is saved
-	back, since the old refresh token may no longer be valid."""
-	root = tempfile.mkdtemp(prefix="optimus-codex-")
+	operator's home directory. With ``with_auth`` the sign-in lock is held from the copy
+	to the write-back of a refreshed file (so runs are serialised and a stale refresh token
+	can never replace a newer one); ``_AuthBusy`` is raised if it is not free within
+	``lock_wait`` seconds. A dropped refresh is logged with its reason."""
+	_sweep_stale_sandboxes()
+	root = tempfile.mkdtemp(prefix=_SANDBOX_PREFIX)
+	dropped = None
 	try:
 		dirs = {name: os.path.join(root, name) for name in ("home", "codex", "tmp", "work")}
 		for path in dirs.values():
 			os.mkdir(path, 0o700)
 		source, copy, original = _auth_source_path(), os.path.join(dirs["codex"], "auth.json"), None
-		if with_auth:
-			with _auth_lock(source):
+		env = _build_cli_env(home=dirs["home"], codex_home=dirs["codex"], tmpdir=dirs["tmp"])
+		with _auth_lock(source, lock_wait) if with_auth else contextlib.nullcontext(True) as held:
+			if not held:
+				raise _AuthBusy
+			if with_auth:
 				original = _read_auth(source)
 				if original is not None:
 					_write_private(copy, original)
-		env = _build_cli_env(home=dirs["home"], codex_home=dirs["codex"], tmpdir=dirs["tmp"])
-		try:
-			yield dirs["work"], env
-		finally:
-			refreshed = _read_auth(copy) if original is not None else None
-			if refreshed is not None and refreshed != original:
-				with contextlib.suppress(OSError):
-					_save_refreshed_auth(source, original, refreshed)
+			try:
+				yield dirs["work"], env
+			finally:
+				if original is not None:
+					refreshed = _read_auth(copy)
+					if refreshed is None:
+						dropped = "unreadable"
+					elif refreshed != original:
+						dropped = _save_refreshed_auth(source, original, refreshed)
+					if dropped and sys.exc_info()[0] is not None:
+						_report_dropped_auth(dropped, in_flight=True)
+						dropped = None
 	finally:
 		shutil.rmtree(root, ignore_errors=True)
+	if dropped:
+		_report_dropped_auth(dropped, in_flight=False)
 
 
 def _kill_process_group(proc) -> None:
@@ -3663,6 +3774,7 @@ def _drain(stream, box: dict, *, keep_tail: bool) -> None:
 	"""Read ``stream`` to its end, keeping at most ``_CLI_STREAM_LIMIT`` bytes (the first
 	ones, or the last ones with ``keep_tail``) so the child never blocks on a full pipe."""
 	buf = bytearray()
+	box["data"] = b""
 	with contextlib.suppress(Exception):
 		while chunk := stream.read1(1 << 16):
 			if keep_tail:
@@ -3670,7 +3782,7 @@ def _drain(stream, box: dict, *, keep_tail: bool) -> None:
 				del buf[:-_CLI_STREAM_LIMIT]
 			elif len(buf) < _CLI_STREAM_LIMIT:
 				buf += chunk[: _CLI_STREAM_LIMIT - len(buf)]
-	box["data"] = bytes(buf)
+			box["data"] = bytes(buf)  # kept current so a reader a descendant never lets finish still yields what it read
 
 
 def _feed(stream, data: bytes) -> None:
@@ -3708,27 +3820,36 @@ def _run_cli(argv: list[str], env: dict, cwd: str, timeout: float, stdin_text: s
 		_kill_process_group(proc)
 		for thread in threads:
 			thread.join(timeout=5)
-		for pipe in (proc.stdin, proc.stdout, proc.stderr):
+		# A pipe a daemon thread still reads is left to it: closing it here would block on
+		# the reader's buffer lock when a descendant kept the other end open.
+		for pipe, thread in ((proc.stdin, threads[-1] if stdin_text is not None else None), (proc.stdout, threads[0]), (proc.stderr, threads[1])):
 			with contextlib.suppress(Exception):
-				if pipe is not None:
+				if pipe is not None and (thread is None or not thread.is_alive()):
 					pipe.close()
 	out, err = (box.get("data", b"").decode("utf-8", "replace") for box in boxes)
 	return proc.returncode, out, err
 
 
-_LOGIN_CACHE_SECONDS = 30
+_LOGIN_CACHE_SECONDS = 300
 _LOGIN_PROBE_SECONDS = 5
 # {cli_path: (monotonic_ts, ok, reason)}. Successes only: a failure is never
 # cached so the operator can fix the login and retry at once.
 _LOGIN_CACHE: dict[str, tuple[float, bool, str]] = {}
 
 
-def _cli_login_ok(cli_path: str, *, use_cache: bool = True) -> tuple[bool, str]:
+_NOT_LOGGED_IN_RE = re.compile(
+	r"not (logged|signed) ?in|no (stored )?(credentials|auth)|(log|sign) ?in required|please (log|sign) ?in",
+	re.IGNORECASE,
+)
+
+
+def _cli_login_ok(cli_path: str, *, use_cache: bool = True, lock_wait: float = _AUTH_LOCK_WAIT_SECONDS) -> tuple[bool, str]:
 	"""Read-only ``codex login status`` check returning ``(ok, reason)`` with
 	``reason`` one of ``ok`` / ``not_chatgpt`` / ``signed_out`` / ``timeout`` /
-	``error``. It runs in the same sandbox as the real call; the CLI prints the status
+	``busy`` / ``error``. It runs in the same sandbox as the real call; the CLI prints the status
 	to stderr, so both streams are read. An API-key login is rejected because only the
-	subscription is wanted. A success is memoized for 30s per path; failures never are.
+	subscription is wanted. A success is memoized for 5 minutes per path; failures never are.
+	``lock_wait`` bounds the wait for the sign-in lock (``busy`` when it is not free).
 	``use_cache=False`` forces a fresh probe (the Connect button)."""
 	now = time.monotonic()
 	if use_cache:
@@ -3736,11 +3857,14 @@ def _cli_login_ok(cli_path: str, *, use_cache: bool = True) -> tuple[bool, str]:
 		if hit and now - hit[0] < _LOGIN_CACHE_SECONDS:
 			return hit[1], hit[2]
 	try:
-		with _cli_sandbox() as (work, env):
+		with _cli_sandbox(lock_wait=lock_wait) as (work, env):
 			code, out, err = _run_cli([cli_path, "login", "status"], env, work, _LOGIN_PROBE_SECONDS)
 	except subprocess.TimeoutExpired:
 		return False, "timeout"
-	except OSError:
+	except _AuthBusy:
+		return False, "busy"
+	except OSError as e:
+		_log_cli_diagnostic("login_probe_failed", label=f"errno_{e.errno}")
 		return False, "error"
 	if code < 0 or code in (2, 126, 127) or code >= 128:
 		# Not a sign-out, so it must not stop the whole refresh: 126/127 mean the shell could
@@ -3749,7 +3873,11 @@ def _cli_login_ok(cli_path: str, *, use_cache: bool = True) -> tuple[bool, str]:
 		# ``_run_cli`` uses a shell-less Popen, and 128+ is the shell form of the same.
 		return False, "error"
 	if code != 0:
-		return False, "signed_out"
+		# Only output that says "not logged in" is a sign-out; any other failure is an error.
+		if _NOT_LOGGED_IN_RE.search(out + "\n" + err):
+			return False, "signed_out"
+		_log_cli_diagnostic("login_probe_failed", label="other", code=code, version=_cli_version_cached(cli_path))
+		return False, "error"
 	if "chatgpt" not in (out + "\n" + err).lower():
 		# A codex that rewords `login status` lands here too: log the version for diagnosis.
 		_log_cli_diagnostic("login_not_chatgpt", version=_cli_version_cached(cli_path))
@@ -3818,6 +3946,7 @@ _LOGIN_FAILURES = {
 		"auth",
 	),
 	"timeout": ("The Codex CLI session check timed out. Try again.", "timeout"),
+	"busy": ("Another Codex call is using the sign-in file. Try again shortly.", "timeout"),
 	"error": ("The Codex CLI session could not be checked. Try again.", "transport"),
 }
 
@@ -3826,11 +3955,14 @@ def _login_failure_text(reason: str, cli_path: str | None = None) -> tuple[str, 
 	"""``(message, kind)`` for a failed login check. A ``not_chatgpt`` result also names the
 	CLI version when known (cache only), since a codex that rewords its status output looks
 	the same as an API-key login."""
+	from frappe import _
+
 	message, kind = _LOGIN_FAILURES.get(reason, _LOGIN_FAILURES["error"])
+	message = _(message)
 	if reason == "not_chatgpt" and cli_path:
 		version = _cli_version_cached(cli_path, probe=False)
 		if version:
-			message += f" If you are signed in with ChatGPT, your codex CLI ({version}) may need updating."
+			message += " " + _("If you are signed in with ChatGPT, your codex CLI ({0}) may need updating.").format(version)
 	return message, kind
 
 
@@ -3839,39 +3971,52 @@ def _login_failure(reason: str, cli_path: str | None = None) -> AiFixError:
 	return AiFixError(message, kind=kind)
 
 
+def _version_tested(version: str | None) -> bool | None:
+	"""True when ``version`` is inside ``_CLI_TESTED_VERSIONS``, False when outside, None
+	when it carries no ``major.minor`` number."""
+	m = re.search(r"(\d+)\.(\d+)", version or "")
+	if not m:
+		return None
+	low, high = _CLI_TESTED_VERSIONS
+	return low <= (int(m.group(1)), int(m.group(2))) <= high
+
+
 def _cli_session_status() -> dict:
 	"""Read-only status of the local Codex CLI for the Connect button. Never logs in
 	and never includes an account id or email."""
+	from frappe import _
+
 	result = {"ok": False, "state": "error", "message": "", "cli": "codex", "version": None}
 	if not _subscription_allowed():
 		result.update(
 			state="blocked",
-			message=(
-				"Subscription mode is blocked. Set developer_mode and "
-				"optimus_allow_subscription_cli in this site's config to enable it."
+			message=_(
+				"Subscription mode is blocked. Run `bench --site <site> set-config developer_mode 1` and "
+				"`bench --site <site> set-config optimus_allow_subscription_cli 1`, then restart the bench "
+				"(or run `bench clear-cache`) so the running workers pick the change up."
 			),
 		)
 		return result
 	try:
 		from optimus.settings import get_config
-		path = _cli_installed(get_config())
+		path, reason = _cli_resolve(get_config())
 	except Exception:
-		path = None
+		path, reason = None, "not_found"
 	if not path:
-		result.update(
-			state="missing",
-			message="Codex CLI not found. Install it or set the CLI path in Optimus Settings.",
-		)
+		_log_cli_diagnostic("cli_not_usable", label=reason)
+		result.update(state="missing", message=_cli_missing_text(reason))
 		return result
-	result["version"] = _cli_version(path)
-	# A fresh probe: the button must reflect the session now, not 30s ago.
+	result["version"] = _cli_version_cached(path)
+	# A fresh probe: the button must reflect the session now, not minutes ago.
 	ok, reason = _cli_login_ok(path, use_cache=False)
 	if ok:
 		suffix = f" ({result['version']})" if result["version"] else ""
-		result.update(
-			ok=True, state="connected",
-			message=f"Connected. Codex CLI{suffix} is signed in with ChatGPT on this machine.",
-		)
+		message = _("Connected. Codex CLI{0} is signed in with ChatGPT on this machine.").format(suffix)
+		if _version_tested(result["version"]) is False:
+			message += " " + _("This codex version is outside the range Optimus was tested with ({0}.{1} to {2}.{3}).").format(
+				*_CLI_TESTED_VERSIONS[0], *_CLI_TESTED_VERSIONS[1]
+			)
+		result.update(ok=True, state="connected", message=message)
 		return result
 	state = "signed_out" if reason in ("signed_out", "not_chatgpt") else "error"
 	result.update(state=state, message=_login_failure_text(reason, path)[0])
@@ -3882,12 +4027,13 @@ _CLI_STDERR_PATTERNS = (
 	(
 		"auth_expired",
 		re.compile(
-			r"\b401\b|unauthori[sz]ed|not logged in|please (log|sign) ?in|sign in with"
-			r"|(session|token|credentials?|api key) (has |have )?expired",
+			r"\bHTTP 401\b|status:? ?401\b|\b401 unauthori[sz]ed|unauthori[sz]ed|not logged in|please (log|sign) ?in"
+			r"|sign in with|(session|token|credentials?|api key) (has |have )?expired",
 			re.IGNORECASE,
 		),
 	),
-	("usage_limit", re.compile(r"usage limit|rate limit|quota|\b429\b", re.IGNORECASE)),
+	("usage_limit", re.compile(r"usage limit|quota|hit your .{0,40}limit", re.IGNORECASE)),
+	("rate_limited", re.compile(r"rate.?limit|too many requests|\b429\b", re.IGNORECASE)),
 	("unknown_flag", re.compile(r"unexpected argument|unrecognized|unknown option|unknown feature", re.IGNORECASE)),
 	("network", re.compile(r"network|connection|timeout|\bdns\b|\btls\b|\bssl\b|certificate", re.IGNORECASE)),
 )
@@ -3897,7 +4043,7 @@ _CLI_STDERR_TAIL_CHARS = 1000
 
 def _classify_cli_stderr(stderr: str | None) -> str:
 	"""Reduce a CLI's stderr to ONE fixed label (``auth_expired`` / ``usage_limit``
-	/ ``unknown_flag`` / ``network`` / ``other``) by matching an allow-list of regexes
+	/ ``rate_limited`` / ``unknown_flag`` / ``network`` / ``other``) by matching an allow-list of regexes
 	against its last few lines only: the start of the stream echoes the prompt, which
 	holds captured application text. The raw text is never returned, logged or shown."""
 	lines = [line for line in (stderr or "").splitlines() if line.strip()]
@@ -3913,6 +4059,7 @@ def _classify_cli_stderr(stderr: str | None) -> str:
 _CLI_EXEC_ERRORS = {
 	"auth_expired": ("Codex session expired. Run `codex login`.", "auth"),
 	"usage_limit": ("Codex usage limit reached. Try again later.", "quota"),
+	"rate_limited": ("Codex is rate limiting requests. Wait a few minutes and try again.", "rate_limited"),
 	"unknown_flag": ("Codex rejected a command-line flag. Update the codex CLI.", "config"),
 	"network": ("Codex could not reach the network.", "transport"),
 }
@@ -4014,43 +4161,49 @@ def _out_of_time() -> AiFixError:
 	return AiFixError("Codex CLI ran out of time before it could start.", kind="timeout")
 
 
+# Labels where the CLI rejected the call before any answer was produced: the outcome is known.
+_CLI_KNOWN_FAILURES = frozenset({"auth_expired", "usage_limit", "rate_limited", "unknown_flag"})
+
+
 def _call_local_cli(
 	system: str, messages: list[dict], *, usage_out: dict | None = None, timeout: int | None = None,
+	meta_out: dict | None = None,
 ) -> str:
 	"""Run one read-only ``codex exec`` and return its reply text. The prompt goes on
 	stdin and the child runs in a private scratch tree with an allowlisted environment
 	(``_cli_sandbox``), so it uses only the ChatGPT subscription session. ``timeout``
-	bounds the whole call, session check included.
+	bounds the whole call, session check and the wait for the sign-in lock included.
 
 	The prompt carries Optimus's system prompt first, then a SECURITY preamble naming
 	the captured data that follows as untrusted, and the reply goes through
-	``_scrub_secrets`` (an over-cap reply gets its truncation marker after that scrub). Residual risk: the agent can
+	``_scrub_secrets`` (an over-cap reply gets its truncation marker after that scrub, and
+	``meta_out["finish_reason"]`` is set to ``length``). Residual risk: the agent can
 	still read files the bench user can read by absolute path, so a prompt injection is
 	mitigated, not eliminated.
 
 	No token usage is reported (a subscription is not token-billed). Failures are
 	``AiFixError``s whose ``kind`` follows ``AI_FATAL_KINDS``: missing CLI, signed out,
 	usage limit and a rejected flag stop a refresh; a timeout or network error does not."""
+	from frappe import _
+
 	if not _subscription_allowed():
 		raise AiFixError(
-			"The local CLI subscription is only available on a developer-mode bench "
-			"with optimus_allow_subscription_cli set.",
+			_("The local CLI subscription is only available on a developer-mode bench "
+			"with optimus_allow_subscription_cli set."),
 			kind="config",
 		)
 	from optimus.settings import get_config
 	cfg = get_config()
-	path = _cli_installed(cfg)
+	path, missing = _cli_resolve(cfg)
 	if not path:
-		message = "Codex CLI was not found on this machine."
-		if (getattr(cfg, "ai_cli_path", "") or "").strip():
-			message += " The CLI path must point at the `codex` launcher or a symlink named `codex`, not the `.js` file."
-		raise AiFixError(message, kind="config")
+		_log_cli_diagnostic("cli_not_usable", label=missing)
+		raise AiFixError(_cli_missing_text(missing), kind="config")
 	content = _compose_cli_prompt(system, messages)
 	if not content.strip():
-		raise AiFixError("There is no content to send to the CLI.", kind="internal")
+		raise AiFixError(_("There is no content to send to the CLI."), kind="internal")
 	total_seconds = int(timeout or request_timeout_seconds())
 	deadline = time.monotonic() + total_seconds
-	ok, reason = _cli_login_ok(path)
+	ok, reason = _cli_login_ok(path, lock_wait=total_seconds - _CLI_MIN_EXEC_SECONDS)
 	if not ok:
 		raise _login_failure(reason, path)
 	if deadline - time.monotonic() < _CLI_MIN_EXEC_SECONDS:
@@ -4063,9 +4216,9 @@ def _call_local_cli(
 		usage_out.observe(True)  # nothing is billed per token, so the cost is a known zero
 	ai_privacy.before_http_send()  # a CLI send discloses the prompt like an HTTP one
 	try:
-		with _cli_sandbox() as (work, env):
+		with _cli_sandbox(lock_wait=deadline - time.monotonic() - _CLI_MIN_EXEC_SECONDS) as (work, env):
 			out_file = os.path.join(work, "out.txt")
-			# The login check and the auth lock wait came out of the deadline; the features
+			# The login check and the lock wait came out of the deadline; the features
 			# probe is capped by what is left, and then the exec gets what the probe left.
 			remaining = deadline - time.monotonic()
 			if remaining < _CLI_MIN_EXEC_SECONDS:
@@ -4085,28 +4238,44 @@ def _call_local_cli(
 				raise
 			text, truncated = _read_cli_reply(out_file, out) if code == 0 else ("", False)
 	except subprocess.TimeoutExpired:
-		raise AiFixError(f"Codex CLI didn't respond within the {total_seconds}s limit.", kind="timeout")
-	except OSError:
-		raise AiFixError("Codex CLI could not be started.", kind="transport")
+		raise AiFixError(_("Codex CLI didn't respond within the {0}s limit.").format(total_seconds), kind="timeout")
+	except _AuthBusy:
+		raise AiFixError(_("Another Codex call is using the sign-in file. Try again shortly."), kind="timeout")
+	except OSError as e:
+		_log_cli_diagnostic("exec_spawn_failed", label=f"errno_{e.errno}")
+		raise AiFixError(_("Codex CLI could not be started."), kind="transport")
 	if code < 0 or code >= 128:
 		# Killed by a signal (OOM, SIGSEGV) after the prompt was sent: an uncertain outcome.
 		ai_transport.observe("sent_unknown")
 		_log_cli_diagnostic("exec_failed", label="signal", code=code, version=_cli_version_cached(path))
-		raise AiFixError(f"Codex CLI was stopped before it finished (exit {code}). Try again.", kind="transport")
-	ai_transport.observe("known_response")
+		raise AiFixError(_("Codex CLI was stopped before it finished (exit {0}). Try again.").format(code), kind="transport")
+	if code in (126, 127):
+		_log_cli_diagnostic("exec_failed", label="not_runnable", code=code, version=_cli_version_cached(path))
+		raise AiFixError(
+			_("Codex CLI could not be run (exit {0}). Check that the codex CLI and Node.js work for the bench user.").format(code),
+			kind="transport",
+		)
 	if code != 0:
 		label = _classify_cli_stderr(err)
+		# Only a rejection before any answer is a known outcome; anything else may have been
+		# acted on, so it is not repeated automatically.
+		ai_transport.observe("known_response" if label in _CLI_KNOWN_FAILURES else "sent_unknown")
 		_log_cli_diagnostic("exec_failed", label=label, code=code, version=_cli_version_cached(path))
+		if label == "auth_expired":
+			_LOGIN_CACHE.pop(path, None)
 		if label in _CLI_EXEC_ERRORS:
 			message, kind = _CLI_EXEC_ERRORS[label]
-			raise AiFixError(message, kind=kind)
-		raise AiFixError(f"Codex CLI could not produce a suggestion (exit {code}).")
+			raise AiFixError(_(message), kind=kind)
+		raise AiFixError(_("Codex CLI could not produce a suggestion (exit {0}).").format(code))
+	ai_transport.observe("known_response")
 	# A successful exec proves the session, and takes long enough for the memo to lapse.
 	_LOGIN_CACHE[path] = (time.monotonic(), True, "ok")
 	if not text:
-		raise AiFixError("Codex CLI returned an empty response.", kind="bad_response")
+		raise AiFixError(_("Codex CLI returned an empty response."), kind="bad_response")
 	text = _scrub_secrets(text)
 	if truncated:
 		# Appended after the scrub: a PEM-open rule cannot swallow the marker.
 		text = text.rstrip() + "\n…(truncated)"
+		if meta_out is not None:
+			meta_out["finish_reason"] = "length"
 	return text

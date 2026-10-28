@@ -42,7 +42,8 @@ the highest-value security considerations:
    admin-only.
 2. **AI fix sends source code to an LLM.** When the AI fix feature
    is enabled (Optimus Settings ▸ AI Fix), code snippets +
-   normalised SQL are POSTed to the configured `ai_base_url`. The
+   normalised SQL are POSTed to the configured `ai_base_url`
+   (or, in Subscription mode, passed to the local Codex CLI, see below). The
    site operator chooses the endpoint (typically OpenAI / Anthropic
    / a self-hosted Ollama instance). The URL policy below rejects unsafe
    syntax and literal metadata addresses. Operators still control the
@@ -61,7 +62,7 @@ the highest-value security considerations:
    Frappe applies its CSRF protection. AI and report actions count per-user
    fixed-window limits (`optimus/ratelimit.py`) after permission checks. Defaults:
    `refill_ai_suggestions` 6 per hour; `regenerate_reports` 30 per minute;
-   `retry_analyze` 5 per minute; `test_ai_connection` 10 per minute;
+   `retry_analyze` 5 per minute; `test_ai_connection` and `check_cli_session` 10 per minute;
    `download_pdf` and `export_session` 20 per minute. Session and Phase 2
    starts allow 10 per minute, their stops allow 20 per minute, and
    `retry_phase2_analyze` allows 5 per minute. A batch contains at most 5
@@ -79,6 +80,46 @@ the highest-value security considerations:
    Dotted paths import installed apps only; other paths may inspect already
    loaded modules. Server Script bodies require both the acting user and
    the session owner or refresh requester to have read permission.
+
+## Subscription (local CLI) mode
+
+Off by default. It needs `developer_mode` and the `optimus_allow_subscription_cli`
+site-config flag, and Optimus Settings > AI > Connection set to "Subscription
+(local CLI)". Instead of an API key, each AI call runs `codex exec` on the bench
+machine and uses the bench user's ChatGPT subscription. The prompt (normalised SQL,
+source snippets, URLs, parameters) goes to OpenAI through that CLI, so it leaves the
+host like an API-key call does. The Connect button (`check_cli_session`) is limited to
+10 per minute per user and System Manager only.
+
+What Optimus does to contain the CLI:
+
+- The child process gets an allow-listed environment and a private scratch `HOME`,
+  `CODEX_HOME` and `TMPDIR` that hold only a copy of the sign-in file, removed afterwards
+  (stale copies left by a killed worker are deleted on the next run).
+- It runs `--sandbox read-only --ephemeral` with the tool features that could read a file
+  or run a command turned off (`--disable`). Only the feature names the installed CLI
+  lists are passed, and every capability-looking feature it reports as on is turned off too.
+- If `codex features list` cannot be read, the run is refused. Nothing is guessed.
+- One lock is held from the sign-in copy to the write-back of a refreshed token, so two
+  runs never use the same refresh token and a stale copy never replaces a newer one. A
+  refreshed sign-in that is not saved back is logged with the reason.
+- The reply goes through a pattern scrub for secrets before it is stored.
+
+Residual risk, in plain words:
+
+- The tool list is a denylist. A new capability that the installed CLI adds under a name
+  the floor and the regex do not match stays reachable, and `--sandbox read-only` limits
+  writes, not reads. A prompt injection hidden in profiled data could then ask the agent to
+  read a file the bench user can read (the sign-in copy, `site_config.json`, private files).
+- The output scrub is pattern based. Encoding or splitting a secret defeats it, and it can
+  also rewrite legitimate code that looks like a secret.
+- Use this mode only on a developer bench and only with data you trust.
+- Tested with codex 0.164 to 0.165. Connect warns when the installed version is outside
+  that range; re-check the isolation (run the opt-in `OPTIMUS_LIVE_CODEX=1` test) before
+  moving to a newer one.
+
+Follow-ups under discussion: a dedicated Optimus-owned `CODEX_HOME` (removes the copy and
+write-back) and OS-level confinement (bwrap/landlock) instead of the denylist.
 
 ## API key handling
 
