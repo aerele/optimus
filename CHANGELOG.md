@@ -8,6 +8,12 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.106] - 2026-10-28
+
+### Fixed
+
+- Scrubbing a value twice now gives the same result when a title was cut to its column inside an `Authorization` scheme word. Before, the cut left a bare scheme fragment that the schemeless-token rules masked again on a second pass, which lengthened the text and changed it each time.
+
 ## [0.12.105] - 2026-10-28
 
 ### Security

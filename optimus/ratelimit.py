@@ -6,9 +6,12 @@
 Frappe's ``@rate_limit(key=...)`` reads ``key`` as the name of a request form field, so its bucket
 is per IP (plus that field's value): users behind one NAT share a bucket and a caller can open a
 fresh bucket by sending the field with a new value. This module keys the bucket on the action, the
-window length and the logged-in user only. Frappe #42815 adds ``@rate_limit(user_based=True)``
-upstream; it is not in v16.18 (``test_ratelimit.py::test_frappe_rate_limit_user_based_canary``
-fails once the installed Frappe has it), so switch to it once Optimus requires such a release.
+window length and the logged-in user only. Frappe now ships ``@rate_limit(user_based=True)``
+(frappe#42815), but Optimus keeps ``enforce_user_rate_limit`` on purpose: Frappe's decorator runs
+before the function body, so it counts every call, including a denied, permission-failed or
+misconfigured one, while Optimus counts a call only after the permission gate passed, so a denied
+call never uses up a user's budget. A decorator cannot keep that order.
+``test_ratelimit.py::test_optimus_keeps_count_after_gate_limiter`` locks the decision in.
 
 Limits are fixed windows: every call ``INCR``s the counter and the call that creates it arms the
 window with ``EXPIRE``; a counter found without a TTL (a crash between the two, or an eviction
