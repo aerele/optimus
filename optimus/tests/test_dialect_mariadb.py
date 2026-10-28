@@ -160,7 +160,7 @@ class TestStatementTimeLimit:
 		seen = []
 
 		def sql(q, *a, **k):
-			seen.append(q)
+			seen.append((q, a))
 			return [[2.5]] if q.startswith("SELECT @@") else []
 
 		_install_db(monkeypatch, sql)
@@ -169,7 +169,11 @@ class TestStatementTimeLimit:
 				raise RuntimeError("optimizer failed")
 		except RuntimeError:
 			pass
-		assert seen[1:] == ["SET SESSION max_statement_time = 5.0", "SET SESSION max_statement_time = 2.5"]
+		# The limit is bound as a value, never formatted into the SQL text.
+		assert seen[1:] == [
+			("SET SESSION max_statement_time = %s", ((5.0,),)),
+			("SET SESSION max_statement_time = %s", ((2.5,),)),
+		]
 
 	def test_is_statement_timeout_matches_1969_only(self):
 		d = MariaDBDialect()

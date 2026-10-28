@@ -8,13 +8,21 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.94] - 2026-10-27
+## [0.12.94] - 2026-10-28
 
 ### Added
 
-- When a profiling session finishes, a popup now shows the Optimus Session ID with an "Open Session" button that takes you to the record. It appears once per session even with several tabs open, wherever you are in Desk, and waits if you are typing in a field.
-- A session that ends with no recorded requests, or whose analysis fails, shows its own message instead of a "ready" claim.
-- The pill and alert for a session with no recorded requests now say "No data" instead of "Report ready". The popup opens even if a checkbox, button or search box has focus, and after about 30 seconds even if you are still typing. If the popup fails to open, it can still show on the next attempt or in another tab.
+- When a profiling session finishes, fails or ends with no recorded requests, a popup shows the Optimus Session ID with a button that opens the record. It appears once per run even with several tabs open, only in a visible tab, wherever you are in Desk, except when you are already on that session's form.
+- The popup waits while you type in a text field or another dialog is open, and opens anyway after about 30 seconds. If it fails to open, the error goes to the browser console and it can still show on the next attempt or in another tab.
+- The pill and alert for a session with no recorded requests say "No data" instead of "Report ready", and so does the alert on the session form.
+
+## [0.12.92] - 2026-10-27
+
+### Internal
+
+- The MariaDB optimizer time limit (`SET SESSION max_statement_time`) is now passed as a bound value instead of being formatted into the SQL text. The value was already coerced with `float()`, so behavior is unchanged. This clears the pinned `frappe-sql-format-injection` semgrep rule, which failed the release PR's diff scan against main.
+
+---
 
 ## [0.12.91] - 2026-10-27
 
