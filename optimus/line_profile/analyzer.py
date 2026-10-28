@@ -559,7 +559,7 @@ def _compute_run(parent_docname: str, run_uuid: str):
 	return results_json, result, total_ms
 
 
-# Each phase-2 finding carries its run_uuid here so a re-persist of the same run replaces its own findings.
+# Reserved technical_detail_json key: a re-persist of a run replaces the findings tagged with its run_uuid.
 _PHASE2_RUN_TAG = "_phase2_run_uuid"
 
 
@@ -583,8 +583,10 @@ def _drop_prior_run_findings(parent, run_uuid: str) -> None:
 	kept = []
 	for row in existing:
 		owned = False
+		raw = getattr(row, "technical_detail_json", None) or ""
 		try:
-			detail = json.loads(getattr(row, "technical_detail_json", None) or "")
+			# Cheap substring check first: most findings never mention this run.
+			detail = json.loads(raw) if run_uuid in raw else None
 			owned = isinstance(detail, dict) and detail.get(_PHASE2_RUN_TAG) == run_uuid
 		except (TypeError, ValueError):
 			owned = False

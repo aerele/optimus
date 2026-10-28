@@ -619,14 +619,17 @@ function render_phase2_button(frm) {
 		);
 	} else {
 		// A Ready run can still need a report after a file/render failure.
-		const pending = (frm.doc.phase_2_runs || []).some(row => row.status === "Ready" && row.analyze_render_pending);
-		_phase2_armed_banner(frm, pending
-			? __("Phase 2 results are saved. Use Regenerate Reports to update the report.") : null);
+		const rows = frm.doc.phase_2_runs || [];
+		const saving = rows.some(row => row.status === "Analyzing" && row.analyze_render_pending);
+		const pending = rows.some(row => row.status === "Ready" && row.analyze_render_pending);
+		_phase2_armed_banner(frm, saving ? __("Phase 2 results are saved. Saving the report...")
+			: pending ? __("Phase 2 results are saved. Use Regenerate Reports to update the report.") : null);
 	}
 
 	// Retrying attaches to live work or queues a bounded new generation.
+	// Analyzing with saved results (pending flag) is only waiting for its report, so Retry would discard them.
 	const stuck_runs = (frm.doc.phase_2_runs || []).filter(row =>
-		row.status === "Analyzing" || row.status === "Failed");
+		(row.status === "Analyzing" && !row.analyze_render_pending) || row.status === "Failed");
 	const clean_form = () => {
 		if (!frm.is_dirty()) return true;
 		frappe.msgprint(__("Save or discard your changes before queueing Phase 2 analysis."));

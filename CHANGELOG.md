@@ -14,17 +14,23 @@ versions may contain breaking changes see migration notes below).
 
 - Phase 2 (Line-Level Drilldown): a run no longer shows "Ready" before its
   report exists. The results and findings are saved while the run is still
-  "Analyzing", the report is rebuilt and attached, and only then is the run
-  flipped to "Ready" (fenced to the worker that owns the run) and the "Phase 2
-  report generated" popup shown. If the rebuild fails the run still becomes
-  Ready, flagged "report update pending" so Regenerate Reports can finish it.
+  "Analyzing" (with `analyze_render_pending` set), the report is rebuilt and
+  attached, and only then is the run flipped to "Ready" (fenced to the worker
+  that owns the run by generation and token) and the "Phase 2 report generated"
+  popup shown. If the rebuild fails the run still becomes Ready with the flag
+  kept, meaning a report update is owed, so Regenerate Reports can finish it.
+- A saved run whose worker died before the report step is completed by the
+  queue recovery after 10 minutes (Ready, report update owed, one log line), and
+  by the legacy janitor sweep, instead of being marked Failed over a populated
+  drill-down. If the report did get attached meanwhile, the owed flag is cleared.
+- Retrying an expired saved run starts clean (stale results are dropped).
 - Saving a run's findings is idempotent: a re-save of the same run replaces its
   own findings instead of adding a second copy.
-- A run whose results were saved but whose report step stalled is completed
-  (Ready, report update pending) by the queue recovery and by the legacy janitor
-  sweep, instead of being marked Failed over a populated drill-down.
 - The report's drill-down panel and run list read one shared rule: a run with
-  persisted results reads as Ready, so the two surfaces cannot disagree.
+  persisted results reads as Ready. An AI report refresh no longer clears the
+  owed-report flag of a run that is still Analyzing.
+- The Session form and floating widget agree with the report: a saved run is not
+  offered Retry, and the widget says "results saved" when the report update is owed.
 
 ---
 

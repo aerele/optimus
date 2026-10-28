@@ -821,10 +821,12 @@
 			currentState.phase2 = false;
 			currentState.run_uuid = null;
 			currentState.docname = data.parent || currentState.docname;
-			setDisplay("ready", "Phase 2 report ready", "click to view");
+			setDisplay("ready", data.render_pending ? "Phase 2 results saved" : "Phase 2 report ready", "click to view");
 			frappe.show_alert({
-				message: __("Phase 2 line-profile report ready"),
-				indicator: "blue",
+				message: data.render_pending
+					? __("Phase 2 results saved. Use Regenerate Reports to update the report.")
+					: __("Phase 2 line-profile report ready"),
+				indicator: data.render_pending ? "orange" : "blue",
 			});
 		});
 

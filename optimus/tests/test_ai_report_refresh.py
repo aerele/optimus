@@ -166,6 +166,19 @@ def test_phase2_render_pending_clears_only_with_report_commit(report, fail):
 	assert report.journal.db.rows["Optimus Phase Two Run"]["fake-child"]["analyze_render_pending"] == int(fail)
 
 
+def test_phase2_render_pending_ignores_a_run_that_is_still_analyzing(report):
+	rows = {
+		"saving": {"name": "saving", "parent": "fake-session-doc", "analyze_render_pending": 1, "status": "Analyzing"},
+		"owed": {"name": "owed", "parent": "fake-session-doc", "analyze_render_pending": 1, "status": "Ready"},
+		"other": {"name": "other", "parent": "another-session", "analyze_render_pending": 1, "status": "Ready"},
+	}
+	report.journal.db.rows["Optimus Phase Two Run"] = rows
+	report.mod.render_report("fake-session-doc")
+	assert rows["saving"]["analyze_render_pending"] == 1
+	assert rows["owed"]["analyze_render_pending"] == 0
+	assert rows["other"]["analyze_render_pending"] == 1
+
+
 @pytest.mark.parametrize("expired_field", ["lease_until", "deadline"])
 def test_manual_report_recovers_expired_ai_without_provider_or_scheduler(report, monkeypatch, expired_field):
 	run = report.journal.run

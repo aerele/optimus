@@ -25,7 +25,8 @@ def phase2(monkeypatch):
 		"name": "fake-child", "parent": "fake-session-doc", "run_uuid": "fake-phase2",
 		"status": "Failed", "analyze_attempts": 0,
 	}}
-	fake = SimpleNamespace(db=db, ValidationError=ValueError)
+	fake = SimpleNamespace(db=db, ValidationError=ValueError,
+		logger=lambda: SimpleNamespace(warning=lambda *a: None))
 	monkeypatch.setattr(mod, "frappe", fake)
 	monkeypatch.setattr(ai_refresh_store, "frappe", fake)
 	monkeypatch.setattr(mod, "_authorized", lambda *a: True)
@@ -845,3 +846,74 @@ def test_legacy_expiry_completes_a_run_whose_results_were_saved(phase2):
 		assert phase2.mod.expire_legacy("fake-session-doc", "fake-phase2", status="Analyzing",
 			cutoff=datetime.datetime(2026, 2, 1))
 	assert row["status"] == "Failed"
+
+
+def test_legacy_expiry_marks_saved_results_as_owing_a_report(phase2):
+	import datetime
+	row = phase2.row()
+	row.update(status="Analyzing", results_json="[]", modified=datetime.datetime(2026, 1, 1))
+	with phase2.db.transaction():
+		phase2.mod.expire_legacy("fake-session-doc", "fake-phase2", status="Analyzing",
+			cutoff=datetime.datetime(2026, 2, 1))
+	assert row["status"] == "Ready" and row["analyze_render_pending"] == 1
+
+
+def test_saved_run_waits_only_a_short_lease_for_its_report(worker):
+	admit(worker)
+	run = claim(worker)
+	with worker.db.transaction():
+		worker.mod._complete(run, now=102, persist=lambda: None)
+	assert worker.row()["analyze_lease_until"] == 102 + worker.mod.RENDER_LEASE_SECONDS
+	assert worker.mod.RENDER_LEASE_SECONDS < worker.mod.LEASE_SECONDS
+
+
+def test_readmitting_an_expired_saved_run_drops_the_stale_results(worker):
+	admit(worker)
+	run = claim(worker)
+	with worker.db.transaction():
+		worker.mod._complete(run, now=102, persist=lambda: None)
+	worker.row().update(results_json="[1]")
+	result = admit(worker, generation="generation-2", now=10**9)
+	assert result["status"] == "queued"
+	assert worker.row()["analyze_render_pending"] == 0 and worker.row()["results_json"] is None
+
+
+def test_finish_after_recovery_clears_the_spurious_pending_flag(worker):
+	admit(worker)
+	run = claim(worker)
+	with worker.db.transaction():
+		worker.mod._complete(run, now=102, persist=lambda: None)
+	with worker.db.transaction():
+		assert worker.mod._recover("fake-session-doc", "fake-phase2", now=10**9) == "Ready"
+	with worker.db.transaction():
+		assert not worker.mod._finish(run, render_failed=False)
+	assert worker.row()["status"] == "Ready" and worker.row()["analyze_render_pending"] == 0
+	# A failed render keeps the owed-report flag.
+	worker.row().update(analyze_render_pending=1)
+	with worker.db.transaction():
+		assert not worker.mod._finish(run, render_failed=True)
+	assert worker.row()["analyze_render_pending"] == 1
+
+
+def test_no_ready_event_when_finish_lost_the_run(worker, monkeypatch):
+	admit(worker)
+	monkeypatch.setattr(worker.mod, "_finish", lambda *a, **k: False)
+	run_worker(worker)
+	assert "phase_2_run_ready" not in [event for event, _ in worker.calls.events]
+
+
+@pytest.mark.parametrize("saved,event,pending", [(True, "phase_2_run_ready", True), (False, "phase_2_run_failed", False)])
+def test_recovery_scan_publishes_the_matching_event(worker, monkeypatch, saved, event, pending):
+	admit(worker)
+	run = claim(worker)
+	if saved:
+		with worker.db.transaction():
+			worker.mod._complete(run, now=102, persist=lambda: None)
+	worker.row().update(analyze_lease_until=1)
+	expired = {"parent": "fake-session-doc", "run_uuid": "fake-phase2", "analyze_generation": "generation-1",
+		"analyze_requested_by": "fake-owner"}
+	monkeypatch.setattr(worker.mod.frappe, "get_all",
+		lambda table, **kw: [expired] if kw["filters"].get("analyze_lease_until") == ["<=", 100] else [], raising=False)
+	worker.mod._recover_pending()
+	assert worker.calls.events[-1][0] == event
+	assert worker.calls.events[-1][1]["render_pending"] is pending
