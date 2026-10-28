@@ -8,12 +8,24 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.100] - 2026-10-27
+## [0.12.108] - 2026-10-28
 
 ### Changed
 
-- The "Phase 2" feature is now called "Line profiling" everywhere you see it: the Optimus Session form buttons and dialog (Line Profiling > Run Line-Profile Pass, Stop Line Profiling Run, Retry), the floating widget status text, notifications and error messages, the Optimus Settings section and field labels, and the line profiling wording in reports. Existing data, runs and settings are unaffected.
-- Reports now say "in the normal profile" instead of "in phase 1" in the line profiling fallback hint.
+- The "Phase 2" feature is now called "Line profiling" in what you see: the Optimus Session form buttons and dialogs (Line Profiling > Run Line-Profile Pass, Stop Line Profiling Run, Retry Line Profiling Analyze), the floating widget text, notifications and error messages, the Optimus Settings labels, and the report text. Reports now say "in the normal profile" instead of "in phase 1" in the line profiling fallback hint.
+- Error Log titles for the line profiling workers were renamed too (for example `optimus ai phase 2 worker availability` is now `optimus ai line profiling worker availability`), so saved Error Log filters on the old titles stop matching.
+- Messages that were built by joining strings now use placeholders so they can be translated. Site Translation overrides keyed on the old strings stop matching, and findings or reports stored by earlier runs keep the old wording until re-analysed.
+- No DocType name, fieldname, event, API method or setting key changed.
+
+---
+
+## [0.12.92] - 2026-10-27
+
+### Internal
+
+- The MariaDB optimizer time limit (`SET SESSION max_statement_time`) is now passed as a bound value instead of being formatted into the SQL text. The value was already coerced with `float()`, so behavior is unchanged. This clears the pinned `frappe-sql-format-injection` semgrep rule, which failed the release PR's diff scan against main.
+
+---
 
 ## [0.12.91] - 2026-10-27
 

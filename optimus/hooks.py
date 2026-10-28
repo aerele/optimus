@@ -82,7 +82,7 @@ after_migrate = ["optimus.install.after_migrate"]
 # corresponding client-side guard.
 boot_session = "optimus.boot.boot_session"
 
-# Request lifecycle (Phase 1)
+# Request lifecycle (normal profile)
 # ---------------------------
 # These hooks run AFTER frappe's own recorder hooks, so by the time
 # `before_request` runs, frappe.recorder.record() has already been called
@@ -100,7 +100,7 @@ after_request = [
 	"optimus.line_profile.hooks.after_request_line_profile",
 ]
 
-# Background job lifecycle (Phase 2)
+# Background job lifecycle (line profiling)
 # ----------------------------------
 # These mirror the request hooks. The frappe.enqueue monkey-patch in
 # optimus/__init__.py injects `_profiler_session_id` into job

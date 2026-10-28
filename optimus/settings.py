@@ -158,7 +158,7 @@ _DEFAULTS = {
 # "Reference values: Strict: X · Recommended: Y · Relaxed: Z" triplet
 # joins the Sensitivity Profile. Pre-v0.13.x this was nine detection-
 # sensitivity thresholds only (the comment block here used to say
-# "display filters / Phase-2 UI / capture caps / retention / AI are
+# "display filters / line profiling UI / capture caps / retention / AI are
 # deployment choices, not detection sensitivity") but every one of
 # those fields ALSO advertises a triplet in its operator-facing
 # description, which made the UI promise something the resolve path
@@ -191,7 +191,7 @@ _SENSITIVITY_KEYS = (
 	"slow_hot_path_min_ms",
 	"hot_line_high_pct",
 	"hot_line_high_min_ms",
-	# Phase-2 UI knobs
+	# line profiling UI knobs
 	"phase2_max_runs_per_session",
 	"auto_expand_max_depth",
 	"auto_expand_min_ms",
@@ -215,7 +215,7 @@ _SENSITIVITY_KEYS = (
 # pair.
 _PROFILES = {
 	"Strict": {
-		# General + capture + display + Phase-2 + AI extras (v0.13.x)
+		# General + capture + display + line profiling + AI extras (v0.13.x)
 		#
 		# Posture: "see everything, keep nothing longer than needed".
 		# Fields with a "0 = unlimited" sentinel that the read site
@@ -252,7 +252,7 @@ _PROFILES = {
 	},
 	"Recommended": {key: _DEFAULTS[key] for key in _SENSITIVITY_KEYS},
 	"Relaxed": {
-		# General + capture + display + Phase-2 + AI extras (v0.13.x)
+		# General + capture + display + line profiling + AI extras (v0.13.x)
 		"session_retention_days": 7,
 		"max_queries_per_recording": 1000,
 		"pyinstrument_sampler_interval_ms": 5.0,
@@ -331,7 +331,7 @@ class OptimusConfig:
 	redundant_cache_threshold: int = 50
 	redundant_perm_threshold: int = 10
 	n_plus_one_min_occurrences: int = 10
-	# v0.6.0 Round 6: severity tuning + capture / phase-2 / skip-rule
+	# v0.6.0 Round 6: severity tuning + capture / line profiling / skip-rule
 	# knobs that used to be hardcoded constants in their consumers.
 	slow_query_threshold_ms: float = 200.0
 	slow_hot_path_pct_threshold: float = 25.0
@@ -507,7 +507,7 @@ def _read_doctype_row() -> dict | None:
 		"background_job_wait_seconds": int(
 			doc.get("background_job_wait_seconds", _DEFAULTS["background_job_wait_seconds"]) or 0
 		),
-		# Phase-2 default auto-expand is a Check; bool() handles the
+		# Line profiling default auto-expand is a Check; bool() handles the
 		# 1/0 from Frappe's storage. We can't use ``or None`` here
 		# because False is a legitimate value.
 		"phase2_default_auto_expand": bool(doc.get("phase2_default_auto_expand", 1)),
