@@ -421,18 +421,30 @@ def _acquire_singleflight(session_uuid: str, docname: str, deadline) -> bool:
 	return False
 
 
+_RQ_ACTIVE = ("queued", "started", "deferred", "scheduled")
+_RQ_WAITING = ("queued", "deferred", "scheduled")
+
+
+def _rq_status(job_id: str) -> str | None:
+	"""RQ status of ``job_id``, "missing" if RQ has no record of it, None on any other error."""
+	try:
+		from frappe.utils.background_jobs import get_redis_conn
+		from rq.exceptions import NoSuchJobError
+		from rq.job import Job
+
+		try:
+			return Job.fetch(job_id, connection=get_redis_conn()).get_status(refresh=True)
+		except NoSuchJobError:
+			return "missing"
+	except Exception:
+		return None
+
+
 def _rq_job_active(job_id: str) -> bool:
 	"""True if RQ job ``job_id`` is still queued / started / deferred / scheduled.
 	False if terminal or no longer fetchable. Any error counts as not active (so
 	analyze never blocks on it)."""
-	try:
-		from frappe.utils.background_jobs import get_redis_conn
-		from rq.job import Job
-
-		job = Job.fetch(job_id, connection=get_redis_conn())
-		return job.get_status(refresh=True) in ("queued", "started", "deferred", "scheduled")
-	except Exception:
-		return False
+	return _rq_status(job_id) in _RQ_ACTIVE
 
 
 def _short_exc(exc_info) -> str | None:
@@ -540,25 +552,21 @@ def _within_commit_grace(meta: dict) -> bool:
 		return False
 
 
-def _awaiting_commit(session_uuid: str, job_id: str) -> bool:
+def _awaiting_commit(session_uuid: str, job_id: str, status: str | None = None) -> bool:
 	"""True if RQ has no record of the job yet but it was enqueued within the commit grace."""
+	status = status or _rq_status(job_id)
+	if status != "missing":
+		return False
 	try:
-		from frappe.utils.background_jobs import get_redis_conn
-		from rq.exceptions import NoSuchJobError
-		from rq.job import Job
-
-		try:
-			Job.fetch(job_id, connection=get_redis_conn())
-		except NoSuchJobError:
-			return _within_commit_grace(session._read_job(session_uuid, job_id) or {})
+		return _within_commit_grace(session._read_job(session_uuid, job_id) or {})
 	except Exception:
-		pass
-	return False
+		return False
 
 
-def _job_in_flight(session_uuid: str, job_id: str) -> bool:
+def _job_in_flight(session_uuid: str, job_id: str, status: str | None = None) -> bool:
 	"""Active in RQ, or not yet visible because its enqueueing transaction has not committed."""
-	return _rq_job_active(job_id) or _awaiting_commit(session_uuid, job_id)
+	status = status or _rq_status(job_id)
+	return status in _RQ_ACTIVE or _awaiting_commit(session_uuid, job_id, status)
 
 
 def _mark_vanished_job(session_uuid: str, job_id: str) -> None:
@@ -571,32 +579,24 @@ def _mark_vanished_job(session_uuid: str, job_id: str) -> None:
 			session_uuid,
 			job_id,
 			status="Stopped",
-			error="Never ran: no RQ record found (the enqueueing transaction may have "
-			"rolled back, or the job expired before a worker picked it up).",
+			error="Never ran: the queue has no record of this job (the transaction that "
+			"queued it may have rolled back, or the job expired before a worker took it).",
 		)
 
 
 def _finalize_pending_statuses(session_uuid: str, job_ids) -> None:
 	"""At the wait ceiling: record finished jobs' status, label active ones Running or Queued."""
 	for jid in job_ids:
-		if _job_in_flight(session_uuid, jid):
-			session.set_job_status(session_uuid, jid, status=_active_job_label(jid))
+		status = _rq_status(jid)
+		if _job_in_flight(session_uuid, jid, status):
+			session.set_job_status(session_uuid, jid, status=_active_job_label(status))
 		else:
 			_capture_job_terminal_status(session_uuid, jid)
 
 
-def _active_job_label(job_id: str) -> str:
-	""""Running" for a started RQ job, "Queued" for one still waiting."""
-	try:
-		from frappe.utils.background_jobs import get_redis_conn
-		from rq.job import Job
-
-		job = Job.fetch(job_id, connection=get_redis_conn())
-		waiting = job.get_status(refresh=True) in ("queued", "deferred", "scheduled")
-		return "Queued" if waiting else "Running"
-	except Exception as exc:
-		# No RQ record yet: its enqueueing transaction has not committed.
-		return "Queued" if type(exc).__name__ == "NoSuchJobError" else "Running"
+def _active_job_label(status: str | None) -> str:
+	""""Queued" for a job still waiting or not yet visible in RQ, else "Running"."""
+	return "Queued" if status in _RQ_WAITING or status == "missing" else "Running"
 
 
 def _bg_wait_for_pending_jobs(session_uuid: str, docname: str, deadline):

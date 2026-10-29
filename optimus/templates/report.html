@@ -2423,6 +2423,7 @@
       <div class="small" style="margin: 0 0 8px;">
         {{ bg_status_badge(job.status) }}
         {% if job.error %}<code style="color: var(--accent); margin-left: 6px; word-break: break-word;">{{ job.error }}</code>{% endif %}
+        {% if job.status in ("Queued", "Running") %}<span class="muted" style="margin-left: 6px;">Still {{ job.status | lower }} when this report was prepared. Regenerate the report later to see its result.</span>{% endif %}
       </div>
       {% endif %}
       {# v0.7.x: mirror the action_row trim - drop the entry-callsite

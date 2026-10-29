@@ -285,8 +285,7 @@ class TestWaitCapLabels:
 		return analyze
 
 	def test_waiting_job_is_labelled_queued(self, an, monkeypatch):
-		monkeypatch.setattr(an, "_rq_job_active", lambda j: True)
-		monkeypatch.setattr(an, "_active_job_label", lambda j: "Queued")
+		monkeypatch.setattr(an, "_rq_status", lambda j: "queued")
 		an._finalize_pending_statuses(SESSION, ["j1"])
 		assert self.set_calls == [("j1", {"status": "Queued"})]
 
@@ -297,7 +296,7 @@ class TestWaitCapLabels:
 		for rq_status, label in (("queued", "Queued"), ("deferred", "Queued"), ("started", "Running")):
 			job = types.SimpleNamespace(get_status=lambda refresh=True, s=rq_status: s)
 			monkeypatch.setattr(fake_rq.Job, "fetch", staticmethod(lambda j, connection=None, jb=job: jb))
-			assert an._active_job_label("j1") == label
+			assert an._active_job_label(an._rq_status("j1")) == label
 
 	def test_vanished_queued_job_is_stopped_with_reason(self, an, monkeypatch):
 		monkeypatch.setattr(an.session, "_read_job", lambda s, j: {"status": "Queued"}, raising=False)
@@ -374,6 +373,13 @@ class TestTriggeredBy:
 		path = os.path.join(os.path.dirname(__file__), "..", "templates", "report.html")
 		src = open(path).read()
 		assert "Triggered by" in src and "job.triggered_by" in src
+
+	def test_template_explains_unfinished_jobs(self):
+		import os
+
+		path = os.path.join(os.path.dirname(__file__), "..", "templates", "report.html")
+		src = open(path).read()
+		assert 'job.status in ("Queued", "Running")' in src and "when this report was prepared" in src
 
 
 class TestRecordingCap:
@@ -493,6 +499,15 @@ class TestAfterCommitGrace:
 		job = types.SimpleNamespace(get_status=lambda refresh=True: "finished")
 		monkeypatch.setattr(fake_rq.Job, "fetch", staticmethod(lambda j, connection=None: job))
 		assert an._job_in_flight(SESSION, "j1") is False
+
+	def test_job_is_fetched_once_per_pending_check(self, an, fake_rq, monkeypatch):
+		calls = []
+		job = types.SimpleNamespace(get_status=lambda refresh=True: "started")
+		monkeypatch.setattr(
+			fake_rq.Job, "fetch", staticmethod(lambda j, connection=None: calls.append(j) or job)
+		)
+		an._finalize_pending_statuses(SESSION, ["j1"])
+		assert calls == ["j1"] and self.set_calls == [("j1", {"status": "Running"})]
 
 	def test_started_job_has_no_grace(self, an):
 		self.meta = {"status": "Running", "enqueued_at": "2026-10-26 10:00:55"}
