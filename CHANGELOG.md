@@ -8,11 +8,59 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.95] - 2026-10-28
+## [0.12.106] - 2026-10-29
 
 ### Changed
 
 - The "Preparing report" and "Capturing background jobs" banners on the Optimus Session form are now a slim one-line strip with a thin progress bar instead of a large block, so they no longer push the form content down. They stay aligned and wrap cleanly on narrow screens and follow the Desk dark theme. The strip text is announced politely to screen readers, its contrast is higher, the drain text is escaped, and the bar and spinner animations stop when the user prefers reduced motion.
+
+---
+
+## [0.12.103] - 2026-10-29
+
+### Fixed
+
+- Frontend metrics sent when leaving a page during a session are no longer rejected with a CSRF error (400). The beacon now carries the CSRF token in its body.
+
+---
+
+## [0.12.102] - 2026-10-29
+
+### Fixed
+
+- Removing every row from Ignored Apps now ignores no app, instead of silently falling back to the 11 default framework apps. A one-time patch seeds the table on installs that predate the seed, so their behavior does not change.
+
+---
+
+## [0.12.101] - 2026-10-29
+
+### Fixed
+
+- Captured SQL now redacts values of columns that contain a secret name as one part, such as reset_password_key or api_secret. Previously only exact names were matched, so the password reset key hash reached the stored recordings.
+
+---
+
+## [0.12.100] - 2026-10-29
+
+### Fixed
+
+- Top Severity now counts only the findings the report shows. A session whose only finding has no callsite (such as Memory Pressure) no longer shows High in the list while its report says there is nothing to fix.
+
+---
+
+## [0.12.99] - 2026-10-29
+
+### Fixed
+
+- Saving a document that clears the cache (such as Print Settings) while a session is recording no longer hangs the server. Re-reading Optimus Settings recorded its own queries, which read the settings again in a loop.
+
+---
+
+## [0.12.94] - 2026-10-29
+
+### Fixed
+
+- A save that clears the cache (such as Print Settings) no longer ends the active recording session. Profiler keys are now kept by frappe.clear_cache(); the Optimus Settings cache is still cleared.
 
 ---
 
