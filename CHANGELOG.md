@@ -8,6 +8,14 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.102] - 2026-10-29
+
+### Fixed
+
+- Removing every row from Ignored Apps now ignores no app, instead of silently falling back to the 11 default framework apps. A one-time patch seeds the table on installs that predate the seed, so their behavior does not change.
+
+---
+
 ## [0.12.101] - 2026-10-29
 
 ### Fixed
