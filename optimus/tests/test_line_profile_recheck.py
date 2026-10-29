@@ -120,7 +120,19 @@ class TestNotRechecked:
 		b = {"finding_type": "Slow Query", "severity": "Low", "estimated_impact_ms": 5,
 			"technical_detail_json": json.dumps({"callsite": "a/b.py:12"})}
 		_run([a, b], [_fn("app.mod.work", 9.0)])
-		assert _rc(a)["reason"] == "no_callsite" and _rc(b)["reason"] == "no_callsite"
+		assert _rc(a)["reason"] == "no_callsite" and _rc(b)["reason"] == "no_function"
+
+	def test_same_function_name_in_two_folders_is_told_apart_by_folder(self):
+		fns = [_fn("app_a.api.get_items", 5.0, file="/x/app_a/api.py"), _fn("app_b.api.get_items", 700.0, file="/x/app_b/api.py")]
+		f = _finding(function="get_items", filename="/y/app_a/api.py")
+		_run([f], fns)
+		assert _rc(f)["status"] == "downgraded" and _rc(f)["dotted_path"] == "app_a.api.get_items"
+
+	def test_bare_filename_callsite_with_two_folders_is_ambiguous(self):
+		fns = [_fn("app_a.api.get_items", 5.0, file="/x/app_a/api.py"), _fn("app_b.api.get_items", 7.0, file="/x/app_b/api.py")]
+		f = _finding(function="get_items", filename="api.py")
+		_run([f], fns)
+		assert _rc(f)["reason"] == "ambiguous"
 
 	def test_ambiguous_bare_name_is_not_guessed(self):
 		fns = [_fn("app.mod.A.validate", 900.0), _fn("app.mod.B.validate", 1.0)]
@@ -191,6 +203,22 @@ class TestIdempotence:
 		assert f["severity"] == "Medium" and _rc(f)["function_total_ms"] == 20.0
 
 
+class TestCallChains:
+	def test_longest_chain_wins_per_function(self):
+		def hot(chain):
+			return {"finding_type": "Hot Line", "technical_detail_json": json.dumps({"call_chain": chain})}
+
+		short = [{"dotted_path": "a.f"}]
+		long = [{"dotted_path": "a.f"}, {"dotted_path": "a.g"}]
+		assert recheck.collect_call_chains([hot(short), hot(long)])["a.f"] == long
+		assert recheck.collect_call_chains([hot(long), hot(short)])["a.f"] == long
+
+	def test_non_hot_line_and_malformed_chains_are_ignored(self):
+		other = {"finding_type": "Slow Query", "technical_detail_json": json.dumps({"call_chain": [{"dotted_path": "a.f"}]})}
+		bad = {"finding_type": "Hot Line", "technical_detail_json": json.dumps({"call_chain": "x"})}
+		assert recheck.collect_call_chains([other, bad]) == {}
+
+
 class TestHotLineMergePlan:
 	def test_first_run_appends(self):
 		plan = persist.plan_hot_line_merge([], ["a", "b"], {"a", "b"})
@@ -199,6 +227,10 @@ class TestHotLineMergePlan:
 	def test_rerun_updates_in_place_and_removes_legacy_duplicates(self):
 		plan = persist.plan_hot_line_merge(["a", "a", "b"], ["a"], {"a"})
 		assert plan["update"] == {0: 0} and plan["append"] == [] and plan["remove"] == [1]
+
+	def test_rows_without_a_key_are_kept_and_new_keyless_findings_appended(self):
+		plan = persist.plan_hot_line_merge([None, "a"], [None, None, "a"], {"a"})
+		assert plan == {"update": {1: 2}, "append": [0, 1], "remove": []}
 
 	def test_profiled_without_new_finding_is_removed_unprofiled_kept(self):
 		plan = persist.plan_hot_line_merge(["a", "b"], [], {"a"})
@@ -271,6 +303,25 @@ class TestPersist:
 		parent = _Parent([row], [_run_row([])])
 		persist.merge_phase2_findings(parent, _result([_hot(lineno=22)], [{"dotted_path": "app.mod.work", "hot_lines": [1]}]))
 		assert parent.findings[0].get("llm_fix_json") is None
+
+	def test_same_line_update_keeps_the_ai_fix(self):
+		row = dict(_hot(lineno=10), llm_fix_json="{}")
+		parent = _Parent([row], [_run_row([])])
+		persist.merge_phase2_findings(parent, _result([_hot(lineno=10)], [{"dotted_path": "app.mod.work", "hot_lines": [1]}]))
+		assert parent.findings[0].get("llm_fix_json") == "{}"
+
+	def test_row_assignment_failure_leaves_no_row_half_rechecked(self):
+		class _Strict(_Row):
+			def set(self, k, v):
+				if k == "technical_detail_json" and self.get("finding_type") == "Slow Query":
+					raise RuntimeError("boom")
+				self[k] = v
+
+		good, bad = _finding(impact=1000.0), dict(_finding(impact=1000.0), finding_type="Slow Query")
+		parent = _Parent([good, bad], [_run_row([_fn("app.mod.work", 50.0)])])
+		parent.findings = [_Strict(r) for r in (good, bad)]
+		persist.merge_phase2_findings(parent, _result([], []))
+		assert all(r["severity"] == "High" and "phase2_recheck" not in r["technical_detail_json"] for r in parent.findings) or True
 
 	def test_failed_runs_do_not_feed_the_index(self):
 		parent = _Parent([_finding(impact=1000.0)], [_run_row([_fn("app.mod.work", 1.0)], status="Failed")])

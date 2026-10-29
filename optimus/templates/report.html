@@ -2066,7 +2066,7 @@
       <div class="phase2-line">
         <strong>Line-Level Recheck:</strong>
         {% if _rc.status == "not_rechecked" %}
-        not rechecked, {{ {"not_profiled": "this function was not line-profiled", "ambiguous": "several profiled functions share this name", "not_exercised": "the profiled function did not run", "no_callsite": "the finding has no function location", "cap": "too many findings to recheck"}.get(_rc.reason, "no line evidence") }}.
+        not rechecked, {{ {"not_profiled": "this function was not line-profiled", "ambiguous": "several profiled functions share this name", "not_exercised": "the profiled function did not run", "no_callsite": "the finding has no function location", "no_function": "the finding names a file and line but no function", "cap": "too many findings to recheck"}.get(_rc.reason, "no line evidence") }}.
         {% else %}
         {% set _rc_basis = fmt_ms(_rc.function_total_ms) ~ " measured vs " ~ fmt_ms(_rc.phase1_impact_ms) ~ " estimated" %}
         {{ {"confirmed": "confirmed (" ~ _rc_basis ~ ")", "downgraded": "downgraded from " ~ _rc.phase1_severity ~ " to " ~ f.severity ~ " (" ~ _rc_basis ~ ")", "measured": "measured " ~ fmt_ms(_rc.function_total_ms) ~ ", not comparable with the estimate, severity unchanged"}.get(_rc.status, _rc.status) }}.

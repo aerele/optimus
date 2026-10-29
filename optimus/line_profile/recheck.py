@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 
 from optimus.line_profile.function_index import num as _num
 
@@ -20,6 +21,7 @@ CALL_CHAIN_CAP = 10
 CONTENT_CAP = 200
 RECHECK_KEY = "phase2_recheck"
 
+_PATH_LINE = re.compile(r".+:\d+$")
 _SEVERITY_STEP_DOWN = {"High": "Medium", "Medium": "Low"}
 # Phase-1 count fields: an estimate summed over many calls is not comparable with one run's total.
 _MULTI_CALL_KEYS = ("occurrences", "count", "call_count", "affected_count")
@@ -130,12 +132,14 @@ def _evidence(fn: dict, chains: dict) -> dict:
 def _resolve_function(detail: dict, index: dict) -> tuple[dict | None, str]:
 	target = _callsite_target(detail)
 	if target is None:
-		return None, "no_callsite"
+		return None, _missing_target_reason(detail)
 	filename, name = target
-	base = os.path.basename(filename)
-	entry = index.get((base, name))
+	# A callsite with a parent folder is matched on it too; a bare filename on the basename alone.
+	folder = os.path.basename(os.path.dirname(filename.rstrip("/")))
+	prefix = (folder, os.path.basename(filename)) if folder else (os.path.basename(filename),)
+	entry = index.get((*prefix, name))
 	if entry is None:
-		entry = index.get((base, name.rsplit(".", 1)[-1]))
+		entry = index.get((*prefix, name.rsplit(".", 1)[-1]))
 		# Both qualified but different (Bar.process vs Foo.process): another function.
 		if entry is not None and "." in name and "." in entry["qualname"] and name != entry["qualname"]:
 			entry = None
@@ -143,17 +147,17 @@ def _resolve_function(detail: dict, index: dict) -> tuple[dict | None, str]:
 		return None, "not_profiled"
 	if entry.get("collides"):
 		return None, "ambiguous"
-	if not _same_package_dir(filename, entry["file"]):
-		return None, "not_profiled"
 	if not entry["invoked"]:
 		return None, "not_exercised"
 	return entry, ""
 
 
-def _same_package_dir(callsite_file: str, profiled_file: str) -> bool:
-	"""Whether the parent directory names agree; a bare filename has no directory to compare."""
-	wanted = os.path.basename(os.path.dirname(callsite_file.rstrip("/")))
-	return not wanted or wanted == os.path.basename(os.path.dirname(profiled_file))
+def _missing_target_reason(detail: dict) -> str:
+	"""A "path:lineno" string callsite names a place but no function to match."""
+	callsite = detail.get("callsite")
+	if isinstance(callsite, str) and _PATH_LINE.match(callsite):
+		return "no_function"
+	return "no_callsite"
 
 
 def _callsite_target(detail: dict) -> tuple[str, str] | None:

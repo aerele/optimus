@@ -9,7 +9,7 @@ import os
 
 
 def build_function_index(runs: list[tuple[str, list]]) -> dict:
-	"""Map (basename, qualname) and (basename, bare name) to a function entry.
+	"""Map (basename, name) and (parent folder, basename, name) to a function entry; name is qualname or bare.
 
 	``runs`` is oldest first: a function seen in several runs keeps its newest result. Distinct functions
 	sharing a key keep the one with the larger hot line and the entry is marked ``collides``.
@@ -24,8 +24,10 @@ def build_function_index(runs: list[tuple[str, list]]) -> dict:
 	index: dict[tuple, dict] = {}
 	for entry in latest.values():
 		basename = os.path.basename(entry["file"])
+		folder = os.path.basename(os.path.dirname(entry["file"]))
 		bare = entry["qualname"].rsplit(".", 1)[-1]
-		for key in {(basename, entry["qualname"]), (basename, bare)}:
+		names = {entry["qualname"], bare}
+		for key in {(basename, n) for n in names} | {(folder, basename, n) for n in names}:
 			other = index.get(key)
 			if other is None:
 				index[key] = entry
