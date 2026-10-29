@@ -8,6 +8,12 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.114] - 2026-10-29
+
+### Fixed
+
+- A session with no recordings is now marked Ready only after its (empty) report is rendered and attached, like every other session. If the report cannot be produced, the session is marked Failed instead of showing Ready with no report. The Ready notification is now also sent for such sessions.
+
 ## [0.12.113] - 2026-10-29
 
 ### Fixed
