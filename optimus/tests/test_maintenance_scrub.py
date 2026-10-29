@@ -1428,7 +1428,7 @@ class TestNoQueue:
 	def test_the_claim_key_is_no_longer_kept_across_clear_cache(self):
 		from optimus import hooks
 
-		assert not hasattr(hooks, "persistent_cache_keys")
+		assert not any("queue_claim" in k for k in getattr(hooks, "persistent_cache_keys", []))
 
 
 class TestHooksCacheRefresh:
