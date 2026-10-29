@@ -18,7 +18,7 @@ versions may contain breaking changes see migration notes below).
 ### Changed
 
 - Hot frames now has two labelled groups, "Your app's code" first and "Framework code" second, each showing its own top 20.
-- Rows are totalled by app-relative file path plus function, so two files whose shortened names match (a framework `user/user.py` and your app's `user/user.py`) stay separate rows with their own times, while the same file reached by a relative or absolute path is one row. Labels are lengthened only when two rows would otherwise read the same.
+- Rows are totalled by app-relative file path plus function, so two files whose shortened names match (a framework `user/user.py` and your app's `user/user.py`) stay separate rows with their own times, while the same file reached by a relative or absolute path is one row. Labels are lengthened only when two rows would otherwise read the same. If two rows still read the same at every length, each shows its last three path segments plus a short hash, never the full path.
 
 ---
 

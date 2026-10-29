@@ -23,6 +23,7 @@ self_time + descendant time); the user-facing report tags the same value as
 other without a project-owner sign-off.
 """
 
+import hashlib
 import json
 from collections import defaultdict
 
@@ -1327,6 +1328,12 @@ def _identity_label(identity: tuple[str, str], depth: int = 2) -> str:
 	return f"{short}::{function}" if short else function
 
 
+def _hashed_label(identity: tuple[str, str]) -> str:
+	"""Last 3 path segments plus a short stable hash, so a full path is never shown."""
+	digest = hashlib.sha1("\0".join(identity).encode("utf-8", "replace")).hexdigest()[:6]
+	return f"{_identity_label(identity, 3)}#{digest}"
+
+
 def _row_labels(identities) -> dict:
 	"""Map each identity to a display label, lengthening only labels that collide."""
 	labels = {i: _identity_label(i) for i in identities}
@@ -1343,7 +1350,7 @@ def _row_labels(identities) -> dict:
 				labels.update(candidate)
 				break
 		else:
-			labels.update({i: _identity_label(i, 0) for i in group})
+			labels.update({i: _hashed_label(i) for i in group})
 	return labels
 
 

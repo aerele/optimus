@@ -237,3 +237,21 @@ class TestIdentityNormalisation:
 	def test_empty_filename_is_framework(self):
 		assert call_tree._is_framework_frame_file("", ("myapp",), None) is True
 		assert call_tree._is_framework_frame_file("", None, frozenset({"myapp"})) is True
+
+
+class TestCollidingAbsolutePaths:
+	def test_unresolvable_collision_gets_short_hashed_labels(self):
+		a = "/srv/lib/pkg/sub//util.py"
+		b = "/srv/lib/pkg/sub/util.py"
+		tree = _n("<root>", "", 0, [_n("f", a, 105), _n("f", b, 106)])
+		_, board = call_tree._aggregate_hot_frames([tree], None, None)
+		labels = [r["function"] for r in board]
+		assert len(board) == 2 and len(set(labels)) == 2
+		for label in labels:
+			assert "srv" not in label
+			assert "#" in label
+
+	def test_hash_label_is_stable(self):
+		ident = ("opt/x/y/z/util.py", "f")
+		assert call_tree._hashed_label(ident) == call_tree._hashed_label(ident)
+		assert call_tree._hashed_label(ident).startswith("y/z/util.py::f#")
