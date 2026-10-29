@@ -1885,7 +1885,6 @@ def _persist(
 	doc.total_query_time_ms = round(total_query_time_ms, 2)
 	doc.total_duration_ms = round(total_duration_ms, 2)
 	doc.analyze_duration_ms = round(analyze_elapsed_ms, 2)
-	doc.top_severity = _compute_top_severity(context.findings)
 	doc.summary_html = _build_summary_html(context, total_queries, recordings)
 	doc.top_queries_json = json.dumps(
 		context.aggregate.get("top_queries", []), default=str
@@ -2000,6 +1999,7 @@ def _persist(
 	doc.set("findings", [])
 	for finding in context.findings:
 		doc.append("findings", finding)
+	doc.top_severity = _compute_top_severity(doc.findings)
 
 	# v0.7.x: one Optimus Background Job row per RQ job the flow enqueued, with
 	# its terminal status so failed / timed-out jobs are reported instead of
@@ -3115,13 +3115,18 @@ def assemble_humanized_notes(steps_markdown: str) -> str:
 
 
 
-def _compute_top_severity(findings: list[dict]) -> str:
-	"""Highest severity present in the findings list ("High"/"Medium"/"Low", else
+def _compute_top_severity(findings: list) -> str:
+	"""Highest severity among the finding rows the report shows ("High"/"Medium"/"Low", else
 	"None"). Populated per session so the list view can show a "Top Severity"
 	column without loading child rows."""
 	if not findings:
 		return "None"
-	severities = {f.get("severity") for f in findings}
+	file_cache: dict = {}
+	severities = {
+		f.severity
+		for f in findings
+		if renderer._has_renderable_callsite(renderer._finding_to_dict(f, file_cache=file_cache))
+	}
 	for level in ("High", "Medium", "Low"):
 		if level in severities:
 			return level
