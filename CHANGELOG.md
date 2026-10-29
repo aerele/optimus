@@ -8,6 +8,14 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.94] - 2026-10-29
+
+### Fixed
+
+- A save that clears the cache (such as Print Settings) no longer ends the active recording session. Profiler keys are now kept by frappe.clear_cache(); the Optimus Settings cache is still cleared.
+
+---
+
 ## [0.12.92] - 2026-10-27
 
 ### Internal
