@@ -83,3 +83,23 @@ typing-modules = ["frappe.types.DF"]
 quote-style = "double"
 indent-style = "tab"
 docstring-code-format = true
+
+[tool.coverage.run]
+source = ["optimus"]
+branch = true
+omit = [
+	"optimus/tests/*",
+	# Need a real bench and site.
+	"optimus/tests_integration/*",
+	# One-shot migrations.
+	"optimus/patches/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+exclude_also = [
+	"if TYPE_CHECKING:",
+	"raise NotImplementedError",
+	"if __name__ == .__main__.:",
+]
