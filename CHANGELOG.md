@@ -21,7 +21,7 @@ versions may contain breaking changes see migration notes below).
 ### Changed
 
 - Before suggesting an index, Optimus checks the other queries in the same session. It drops the suggestion when the column is updated, or the table is written, far more often than the index would help reads (`HOT_COLUMN_MIN_UPDATES` 5, `WRITE_HEAVY_MIN_WRITES` 50, ratio 10), and says why in the warning. Otherwise it adds a "Before adding, check:" note with the write counts and the flows that write, a table with at least `CAUTION_MIN_WRITES` (10) writes, a column with at most `LOW_CARDINALITY_MAX` (10) distinct values, and an existing composite index that already holds the column. The finding's JSON gains `cautions` and `write_impact`.
-- Write detection also reads aliased UPDATE statements and double-quoted table names; `UPDATE ... JOIN` is still not counted.
+- Write detection also reads aliased UPDATE statements and double-quoted table names; `UPDATE ... JOIN` and multi-table `UPDATE a, b SET` are not counted (stated in the module docstring), which only means fewer suppressions. A failed alias parse is logged at debug level.
 
 ---
 

@@ -1,7 +1,11 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Would a suggested index hurt other flows? Compares session-wide write counts with helped reads."""
+"""Would a suggested index hurt other flows? Compares session-wide write counts with helped reads.
+
+Only single-table UPDATE, INSERT/REPLACE and DELETE are counted; ``UPDATE ... JOIN`` and
+multi-table ``UPDATE a, b SET`` are not, so such sessions get fewer suppressions, never more.
+"""
 
 import re
 from collections import Counter, defaultdict

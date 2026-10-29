@@ -13,6 +13,7 @@ the read gain (``index_harm``).
 """
 
 import json
+import logging
 import re
 from collections import Counter, defaultdict
 
@@ -215,6 +216,7 @@ def _query_aliases(sql: str) -> dict:
 	except job_timeout_types():
 		raise
 	except Exception:
+		logging.getLogger(__name__).debug("alias parse failed", exc_info=True)
 		return {}
 
 
@@ -413,6 +415,8 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 				skipped_by_type += 1
 				continue
 
+			# One group holds every literal variant of a query; its shape (LIKE 'x%' vs '%x') is
+			# taken from the first raw sample.
 			entry = unique_queries.setdefault(
 				normalized,
 				{"duration": 0.0, "count": 0, "raw": raw, "normalized": normalized},
@@ -515,9 +519,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	unindexable_reasons: list[str] = []
 	index_cache: dict[str, list] = {}
 	writes = None
-	covered_targets: list[str] = []
-	wrapped_targets: list[str] = []
-	weak_targets: list[str] = []
+	targets: dict[str, list[str]] = {reason: [] for reason in _SKIP_WARNINGS}
 	harm_reasons: dict[str, str] = {}
 
 	findings = []
@@ -555,7 +557,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 			continue
 		if status == "already_indexed":
 			if _all_weakly_served(table, column, bucket["entries"], indexes):
-				weak_targets.append(f"{table}.{column}")
+				targets["weak"].append(f"{table}.{column}")
 			else:
 				drop_already_indexed += 1
 			continue
@@ -567,11 +569,11 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 		kept, served, wrapped, weak = _partition_queries(table, column, bucket["entries"], indexes)
 		if not kept:
 			if not served:
-				wrapped_targets.append(f"{table}.{column}")
+				targets["wrapped"].append(f"{table}.{column}")
 			elif len(weak) == len(served):
-				weak_targets.append(f"{table}.{column}")
+				targets["weak"].append(f"{table}.{column}")
 			else:
-				covered_targets.append(f"{table}.{column}")
+				targets["covered"].append(f"{table}.{column}")
 			continue
 		kept_count = sum(e["count"] for e in kept)
 		kept_ms = sum(e["duration"] for e in kept)
@@ -726,28 +728,9 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 			"(indexes included) a hand-added index there is pointless and "
 			"would be clobbered on the next migrate."
 		)
-	if covered_targets:
-		warnings.append(
-			f"Suppressed index suggestion(s) already served by an existing index "
-			f"({_sample(covered_targets)}): a single or composite index covers the column "
-			"for the queries that filter it directly (any other query uses it only inside a function)."
-		)
-	if wrapped_targets:
-		warnings.append(
-			f"Suppressed index suggestion(s) where the column is only used inside a function "
-			f"({_sample(wrapped_targets)}), e.g. DATE(col) or Frappe's ifnull(col, ''); a plain index "
-			"cannot serve that filter. To make it indexable, rewrite the filter as a range on the bare "
-			"column (for example col >= x AND col < x + 1), add a functional index on the expression, "
-			"or avoid the code path that wraps the column. Do not just drop ifnull: that changes how "
-			"NULLs match."
-		)
-	if weak_targets:
-		warnings.append(
-			f"Index suggestion(s) not made because an existing index contains the column "
-			f"({_sample(weak_targets)}), but the only filter on it is !=, NOT IN, NOT LIKE or NOT (...), "
-			"which that index may not be able to serve. Check with EXPLAIN whether those queries use "
-			"it, or rewrite them with a positive filter."
-		)
+	for reason, template in _SKIP_WARNINGS.items():
+		if targets[reason]:
+			warnings.append(template.format(targets=_sample(targets[reason])))
 	if harm_reasons:
 		shown = list(harm_reasons.values())[:3]
 		more = f" (+{len(harm_reasons) - 3} more)" if len(harm_reasons) > 3 else ""
@@ -782,6 +765,29 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 			pass
 
 	return AnalyzerResult(findings=findings, warnings=warnings)
+
+
+# reason a suggestion was skipped -> warning template taking the sampled ``{targets}``.
+_SKIP_WARNINGS = {
+	"covered": (
+		"Suppressed index suggestion(s) already served by an existing index ({targets}): a single or "
+		"composite index covers the column for the queries that filter it directly (any other query "
+		"uses it only inside a function)."
+	),
+	"wrapped": (
+		"Suppressed index suggestion(s) where the column is only used inside a function ({targets}), "
+		"e.g. DATE(col) or Frappe's ifnull(col, ''); a plain index cannot serve that filter. To make "
+		"it indexable, rewrite the filter as a range on the bare column (for example col >= x AND "
+		"col < x + 1), add a functional index on the expression, or avoid the code path that wraps "
+		"the column. Do not just drop ifnull: that changes how NULLs match."
+	),
+	"weak": (
+		"Index suggestion(s) not made because an existing index contains the column ({targets}), but "
+		"the only filter on it is !=, NOT IN, NOT LIKE or NOT (...), which that index may not be able "
+		"to serve. Check with EXPLAIN whether those queries use it, or rewrite them with a positive "
+		"filter."
+	),
+}
 
 
 def _safe_collect_writes(recordings: list[dict]) -> dict:

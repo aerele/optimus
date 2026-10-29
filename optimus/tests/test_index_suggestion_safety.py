@@ -763,3 +763,10 @@ def test_a_parser_failure_keeps_the_suggestion(monkeypatch, empty_context):
 
 	monkeypatch.setattr(index_suggestions, "parse_where", boom)
 	assert _missing(_analyze(empty_context, _select("b = 'y'", n=3)))
+
+
+def test_alias_parse_failure_is_logged_at_debug(monkeypatch, caplog):
+	monkeypatch.setitem(sys.modules, "sql_metadata", types.SimpleNamespace(Parser=lambda sql: 1 / 0))
+	with caplog.at_level("DEBUG", logger=index_suggestions.__name__):
+		assert index_suggestions._query_aliases("SELECT 1") == {}
+	assert "alias parse failed" in caplog.text
