@@ -596,7 +596,7 @@ def _recover_pending():
 			if changed == "Ready":
 				frappe.logger().warning(f"optimus phase 2 run {row['run_uuid']} completed by recovery; report update pending")
 				_notify({**row, "analyze_render_pending": 1}, "phase_2_run_ready")
-			else:
+			elif changed == "Failed":
 				_notify(row, "phase_2_run_failed")
 	# Separate scans prevent many live workers from hiding undelivered jobs.
 	rows = frappe.get_all(TABLE, filters={"status": "Analyzing", "analyze_dispatch_pending": 1,

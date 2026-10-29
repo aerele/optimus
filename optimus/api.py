@@ -1228,6 +1228,7 @@ def export_session(session_uuid: str) -> dict:
 			"severity": f.severity,
 			"title": f.title,
 			"customer_description": f.customer_description,
+			# May carry the reserved _phase2_run_uuid ownership key; clients ignore it.
 			"technical_detail": _parse_json_field(f.technical_detail_json),
 			"estimated_impact_ms": f.estimated_impact_ms,
 			"affected_count": f.affected_count,

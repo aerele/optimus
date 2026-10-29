@@ -604,6 +604,7 @@ def finding_detail(finding: dict) -> dict:
 	if isinstance(detail, dict):
 		return detail
 	try:
+		# The dict may hold the reserved _phase2_run_uuid key; readers pick keys by name.
 		parsed = json.loads(finding.get("technical_detail_json") or "{}")
 	except (TypeError, ValueError):
 		return {}
