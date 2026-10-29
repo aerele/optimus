@@ -363,6 +363,16 @@ def _warn_lock_capture_once(what: str, exc: BaseException) -> None:
 		pass
 
 
+def _log_lock_skipped(reason: str) -> None:
+	"""Leave a debug trace for a lock error that is deliberately not reported."""
+	try:
+		import frappe
+
+		frappe.logger("optimus").debug(f"optimus: lock error not reported ({reason})")
+	except Exception:
+		pass
+
+
 def _append_lock_event(
 	local_proxy, kind, exc, query, duration_ms=None, keep_quoted_identifiers=False
 ) -> None:
@@ -372,9 +382,11 @@ def _append_lock_event(
 		_mark_lock_events_truncated(local_proxy)
 		return
 	if _is_nowait_probe(query):
+		_log_lock_skipped("NOWAIT probe")
 		return
 	frames = _lock_caller_frames()
 	if _handled_by_frappe(frames):
+		_log_lock_skipped("handled by Frappe")
 		return
 
 	from optimus.analyzers.base import installed_apps_allowlist, user_callsite
@@ -384,6 +396,7 @@ def _append_lock_event(
 		frames, tracked_apps=get_config().tracked_apps, installed_apps=installed_apps_allowlist()
 	)
 	if callsite is None:
+		_log_lock_skipped("no callsite in tracked apps")
 		return
 
 	at = next(i for i, frame in enumerate(frames) if frame is callsite)

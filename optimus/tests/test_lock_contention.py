@@ -297,6 +297,17 @@ def test_wrap_skips_nowait_probe(lock_env):
 	assert not hasattr(lock_env.local, "optimus_lock_events")
 
 
+def test_skipped_nowait_probe_leaves_a_debug_trace(lock_env, monkeypatch):
+	import frappe
+
+	reasons = []
+	monkeypatch.setattr(capture, "_log_lock_skipped", reasons.append)
+	lock_env.raises(_lock_error("QueryTimeoutError", "could not obtain lock"))
+	with pytest.raises(frappe.QueryTimeoutError):
+		lock_env.db.sql("SELECT name FROM `tabX` WHERE name = 'y' FOR UPDATE NOWAIT")
+	assert reasons == ["NOWAIT probe"]
+
+
 def test_nowait_probe_is_skipped_even_when_sql_cannot_be_parsed(lock_env, monkeypatch):
 	"""The NOWAIT check does not depend on sqlparse."""
 	import frappe
