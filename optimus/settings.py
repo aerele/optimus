@@ -688,8 +688,9 @@ def _resolve(*, row=_UNREAD_ROW) -> OptimusConfig:
 		# rows themselves, so the row read returns the configured tuple
 		# and this fallback is bypassed; the no-bench / pure-pytest path
 		# is what depends on this default.
+		# An emptied table is a choice to ignore no app, so only a missing row falls back.
 		ignored_apps=tuple(
-			row.get("ignored_apps") or _DEFAULTS["ignored_apps"]
+			row["ignored_apps"] if "ignored_apps" in row else _DEFAULTS["ignored_apps"]
 		),
 		hide_framework_tables=bool(
 			row.get("hide_framework_tables")

@@ -51,6 +51,12 @@ DEFAULT_SENSITIVE_SQL_COLUMNS: tuple[str, ...] = (
 	"credit", "card", "bank",
 )
 
+# Secret names whose compound columns (reset_password_key, api_secret) are secrets too.
+_COMPOUND_SQL_COLUMNS = frozenset({
+	"password", "pwd", "api_key", "apikey", "token", "secret",
+	"encryption_key", "private_key", "session_id", "access_key",
+})
+
 
 def is_sensitive_key(key, *, extra: tuple[str, ...] = ()) -> bool:
 	"""Return True when ``key`` looks like a sensitive identifier.
@@ -119,8 +125,13 @@ def _sql_literal_regex(columns: tuple[str, ...]) -> re.Pattern:
 	# parenthesised IN-list, then a BARE token (unquoted number/hex/identifier)
 	# the last catches ``WHERE password = 123`` / ``= 0xDEAD`` / ``= admin`` which
 	# the quoted-only pattern leaked verbatim.
+	# A secret name also matches as one underscore-separated part of a column, as in reset_password_key.
+	compound = [c for c in columns if c in _COMPOUND_SQL_COLUMNS]
+	exact = [c for c in columns if c not in _COMPOUND_SQL_COLUMNS]
+	names = [r"(?:[A-Za-z0-9]+_)*(?:" + "|".join(re.escape(c) for c in compound) + r")(?:_[A-Za-z0-9]+)*"] if compound else []
+	names += [re.escape(c) for c in exact]
 	return re.compile(
-		r"""(\b(?:""" + "|".join(re.escape(c) for c in columns)
+		r"""(\b(?:""" + "|".join(names)
 		+ r""")\b[`"]?\s*(?:=|LIKE|IN)\s*)("(?:[^"\\]|\\.|"")*"|'(?:[^'\\]|\\.|'')*'|\([^)]*\)|[\w.+-]+)""",
 		re.IGNORECASE,
 	)

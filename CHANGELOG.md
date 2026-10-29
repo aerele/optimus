@@ -8,7 +8,7 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.107] - 2026-10-28
+## [0.12.118] - 2026-10-29
 
 ### Added
 
@@ -36,6 +36,56 @@ versions may contain breaking changes see migration notes below).
 - A call stays inside its time limit: the sign-in check and the feature check come out of it, and the run stops with a timeout when too little is left. The sign-in check is remembered for 5 minutes and cleared when a run reports an expired session.
 - The CLI process group is always stopped when a call ends, and output is read with a size limit. A descendant that keeps the pipe open can no longer hang the call.
 - The unavailable message now tells a non-admin to ask a System Manager to open Optimus Settings and click Connect, and does not mention Connect while AI is off.
+
+---
+
+## [0.12.103] - 2026-10-29
+
+### Fixed
+
+- Frontend metrics sent when leaving a page during a session are no longer rejected with a CSRF error (400). The beacon now carries the CSRF token in its body.
+
+---
+
+## [0.12.102] - 2026-10-29
+
+### Fixed
+
+- Removing every row from Ignored Apps now ignores no app, instead of silently falling back to the 11 default framework apps. A one-time patch seeds the table on installs that predate the seed, so their behavior does not change.
+
+---
+
+## [0.12.101] - 2026-10-29
+
+### Fixed
+
+- Captured SQL now redacts values of columns that contain a secret name as one part, such as reset_password_key or api_secret. Previously only exact names were matched, so the password reset key hash reached the stored recordings.
+
+---
+
+## [0.12.100] - 2026-10-29
+
+### Fixed
+
+- Top Severity now counts only the findings the report shows. A session whose only finding has no callsite (such as Memory Pressure) no longer shows High in the list while its report says there is nothing to fix.
+
+---
+
+## [0.12.99] - 2026-10-29
+
+### Fixed
+
+- Saving a document that clears the cache (such as Print Settings) while a session is recording no longer hangs the server. Re-reading Optimus Settings recorded its own queries, which read the settings again in a loop.
+
+---
+
+## [0.12.94] - 2026-10-29
+
+### Fixed
+
+- A save that clears the cache (such as Print Settings) no longer ends the active recording session. Profiler keys are now kept by frappe.clear_cache(); the Optimus Settings cache is still cleared.
+
+---
 
 ## [0.12.92] - 2026-10-27
 
