@@ -265,7 +265,7 @@
 		currentState = res.state;
 		if (res.ui) setDisplay(res.ui.display, res.ui.label, res.ui.elapsed, res.ui.tone);
 		if (res.alert) {
-			frappe.show_alert({ message: __(res.alert.message), indicator: res.alert.indicator });
+			frappe.show_alert({ message: __(res.alert.message, res.alert.args), indicator: res.alert.indicator });
 		}
 		if (widget && !currentState.session_uuid) {
 			widget.removeAttribute("data-session-uuid");
@@ -345,9 +345,9 @@
 				if (done) done();
 			},
 			error: (xhr) => {
-					_diag("[optimus] pill_state poll failed:", xhr && xhr.status);
-					if (done) done();
-				},
+				_diag("[optimus] pill_state poll failed:", xhr && xhr.status);
+				if (done) done();
+			},
 		});
 	}
 

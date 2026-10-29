@@ -31,7 +31,8 @@ test("phase 2 ready/failed clear analyzing and drop the run", () => {
 	assert.strictEqual(ok.state.run_uuid, null);
 	const bad = ev(s, "phase_2_run_failed", { run_uuid: "r1", error: "boom" });
 	assert.strictEqual(bad.state.display, "ready");
-	assert.ok(bad.alert.message.includes("boom"));
+	assert.strictEqual(bad.alert.message, "Phase 2 analyze failed: {0}");
+	assert.deepStrictEqual(bad.alert.args, ["boom"]);
 });
 
 test("late analyzing event after ready is ignored (reordered delivery)", () => {

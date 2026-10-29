@@ -16,7 +16,7 @@ versions may contain breaking changes see migration notes below).
 - While waiting, the pill checks with a growing delay and gives up 15 minutes after the wait began, even if the server keeps answering "still analyzing". It then shows "Check report" instead of polling forever.
 - A late "analyzing" update can no longer replace a "Report ready" pill, and a slow server reply can no longer undo a click on the pill or a newly started recording.
 - A failed analyze and the "Check report" give-up state now have their own red and amber colours instead of the blue "ready" look, and a stop click discards any status reply that was already on its way.
-- These background checks no longer pop an error dialog when they fail, a failed second-pass analyze found after a reload no longer shows placeholder text, and a stuck "Phase 2 recording" is rechecked after a failed stop.
+- These background checks no longer pop an error dialog when they fail, a failed second-pass analyze found after a reload no longer shows placeholder text, and a stuck "Phase 2 recording" is rechecked after a failed stop. The failed-analyze alert text is now translatable as a whole sentence.
 
 ---
 

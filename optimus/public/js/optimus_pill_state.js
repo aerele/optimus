@@ -104,8 +104,9 @@
 			ui: { display: "ready", label: terminalLabel(kind, phase2), elapsed: "click to view", tone: failed ? "failed" : null },
 			alert: already ? null : {
 				message: failed
-					? (phase2 ? "Phase 2 analyze failed" + (data.error ? ": " + data.error : ", open the session for details") : "Profiler analyze failed check Error Log")
+					? (phase2 ? (data.error ? "Phase 2 analyze failed: {0}" : "Phase 2 analyze failed, open the session for details") : "Profiler analyze failed, check Error Log")
 					: (phase2 ? "Phase 2 line-profile report ready" : "Profiler report ready"),
+				args: failed && phase2 && data.error ? [data.error] : undefined,
 				indicator: failed ? "red" : "blue",
 			},
 		};
