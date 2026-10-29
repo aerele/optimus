@@ -93,24 +93,35 @@ host like an API-key call does. The Connect button (`check_cli_session`) is limi
 
 What Optimus does to contain the CLI:
 
-- The child process gets an allow-listed environment and a private scratch `HOME`,
-  `CODEX_HOME` and `TMPDIR` that hold only a copy of the sign-in file, removed afterwards
-  (stale copies left by a killed worker are deleted on the next run).
+- The child process gets an allow-listed environment and a private scratch `HOME` and
+  `TMPDIR`, removed afterwards (stale trees left by a killed worker are deleted on the next
+  run and the removal is logged). Its `CODEX_HOME` is a folder owned by Optimus,
+  `<site>/private/optimus-codex` (created mode 0700), that is used by nothing else. The
+  operator's own `~/.codex` is never read, copied or written. The operator signs in once with
+  `CODEX_HOME=<that folder> codex login` (Connect shows the exact command), and the codex
+  CLI refreshes its own sign-in inside that folder. Optimus does not copy, merge or write
+  back tokens, and takes no lock; concurrent codex runs in that one folder are codex's own
+  business.
 - It runs `--sandbox read-only --ephemeral` with the tool features that could read a file
   or run a command turned off (`--disable`). Only the feature names the installed CLI
   lists are passed, and every capability-looking feature it reports as on is turned off too.
 - If `codex features list` cannot be read, the run is refused. Nothing is guessed.
-- One lock is held from the sign-in copy to the write-back of a refreshed token, so two
-  runs never use the same refresh token and a stale copy never replaces a newer one. A
-  refreshed sign-in that is not saved back is logged with the reason.
+- On Linux the child is started with `PR_SET_PDEATHSIG` (SIGKILL), so the kernel stops it when
+  the worker that started it dies, and the whole process group is killed when a call ends or
+  times out. Limits: the signal reaches the direct child only, not what it spawned, and other
+  platforms have no such call. An abandoned run is logged (`exec_abandoned`).
 - The reply goes through a pattern scrub for secrets before it is stored.
 
 Residual risk, in plain words:
 
+- The Optimus-owned Codex home holds the live sign-in, and the agent runs with
+  `CODEX_HOME` pointing at it, so a prompt injection that gets past the tool list can read or
+  replace that sign-in. It is the Optimus ChatGPT sign-in only, never the operator's own, and
+  `codex login` restores it.
 - The tool list is a denylist. A new capability that the installed CLI adds under a name
   the floor and the regex do not match stays reachable, and `--sandbox read-only` limits
   writes, not reads. A prompt injection hidden in profiled data could then ask the agent to
-  read a file the bench user can read (the sign-in copy, `site_config.json`, private files).
+  read a file the bench user can read (the Optimus sign-in, `site_config.json`, private files).
 - The output scrub is pattern based. Encoding or splitting a secret defeats it, and it can
   also rewrite legitimate code that looks like a secret.
 - Use this mode only on a developer bench and only with data you trust.
@@ -118,8 +129,7 @@ Residual risk, in plain words:
   that range; re-check the isolation (run the opt-in `OPTIMUS_LIVE_CODEX=1` test) before
   moving to a newer one.
 
-Follow-ups under discussion: a dedicated Optimus-owned `CODEX_HOME` (removes the copy and
-write-back) and OS-level confinement (bwrap/landlock) instead of the denylist.
+Follow-up under discussion: OS-level confinement (bwrap/landlock) instead of the denylist.
 
 ## API key handling
 

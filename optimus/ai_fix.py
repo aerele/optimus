@@ -26,11 +26,13 @@ helpers are unit-testable without a bench.
 from __future__ import annotations
 
 import contextlib
-import fcntl
+import ctypes
+import errno
 import ipaddress
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import stat
@@ -3325,9 +3327,9 @@ _QUOTA_CODES = frozenset({
 
 
 # ---------------------------------------------------------------------------
-# Local CLI subscription layer (Codex CLI). Never logs in: it reuses a session
-# the operator created with `codex login` on this machine. The prompt travels
-# on stdin, never on argv.
+# Local CLI subscription layer (Codex CLI). Never logs in: it reuses the session the
+# operator created once with `CODEX_HOME=<site>/private/optimus-codex codex login`, in a
+# Codex home that only Optimus uses. The prompt travels on stdin, never on argv.
 # ---------------------------------------------------------------------------
 
 def _subscription_allowed() -> bool:
@@ -3429,7 +3431,7 @@ def _compose_cli_prompt(system: str, messages: list[dict]) -> str:
 
 
 # Agent tools that could read a file or run a command, turned off so the
-# sign-in copy and bench files are out of the agent's reach. ``--sandbox read-only``
+# sign-in and bench files are out of the agent's reach. ``--sandbox read-only``
 # governs only model-run shell commands, not these tool features. Names are version
 # specific, so only those the installed CLI lists are passed (an unknown ``--disable``
 # name makes every ``codex exec`` exit 1). This is a denylist: a capability the CLI adds
@@ -3451,7 +3453,8 @@ _CLI_TESTED_VERSIONS = ((0, 164), (0, 165))
 _CLI_CAPABILITY_RE = re.compile(
 	r"shell|exec|tool|browser|cdp|annotation|computer|code_mode|\bapps?\b|plugin|hook|mcp"
 	r"|web|image|agent|file|network|sandbox_bypass|danger"
-	r"|automation|local_|remote|external|operator|repl|patch|js_|run|memor",
+	r"|automation|local_|remote|external|operator|repl|patch|js_|run|memor"
+	r"|daemon|skill|realtime",
 	re.IGNORECASE,
 )
 _FEATURES_PROBE_SECONDS = 10
@@ -3568,124 +3571,51 @@ def _build_cli_env(environ=None, *, home: str | None = None, codex_home: str | N
 	return env
 
 
-def _auth_source_path() -> str:
-	"""The operator's real Codex sign-in file."""
-	home = os.environ.get("CODEX_HOME") or os.path.join(os.path.expanduser("~"), ".codex")
-	return os.path.join(home, "auth.json")
+_CODEX_HOME_SUBDIR = "optimus-codex"
 
 
-def _read_auth(path: str) -> bytes | None:
-	"""The sign-in file's bytes when it is a JSON object, else None."""
+def _codex_home_path() -> str:
+	"""The Optimus-owned Codex home: ``<site>/private/optimus-codex``. It is never the
+	operator's own ``~/.codex``."""
+	import frappe
+
+	return frappe.get_site_path("private", _CODEX_HOME_SUBDIR)
+
+
+def _codex_login_command() -> str:
+	"""The one-time sign-in command for the Optimus-owned Codex home."""
+	return f"CODEX_HOME={shlex.quote(_codex_home_path())} codex login"
+
+
+def _ensure_codex_home() -> str:
+	"""Create the Optimus-owned Codex home (mode 0700) when missing and return its path.
+	It must be a real directory owned by this user, never a link."""
+	path = _codex_home_path()
+	os.makedirs(path, mode=0o700, exist_ok=True)
+	st = os.lstat(path)
+	if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid():
+		raise NotADirectoryError(errno.ENOTDIR, "Codex home is not a directory owned by this user")
+	if stat.S_IMODE(st.st_mode) != 0o700:
+		os.chmod(path, 0o700)
+	return path
+
+
+def _cli_preexec():
+	"""A ``preexec_fn`` that makes the kernel SIGKILL the CLI child when the worker thread that
+	started it dies (Linux ``PR_SET_PDEATHSIG``), or None where that is unavailable. It signals
+	the direct child only, not what it spawned. The libc call is resolved here, in the parent,
+	so the child runs no imports between fork and exec."""
+	if not sys.platform.startswith("linux"):
+		return None
 	try:
-		with open(path, "rb") as f:  # nosemgrep: frappe-security-file-traversal -- path is built by the program, not user input
-			data = f.read(1_000_000)
-		return data if isinstance(json.loads(data), dict) else None
-	except (OSError, ValueError):
+		prctl = ctypes.CDLL(None, use_errno=True).prctl
+	except (OSError, AttributeError):
 		return None
 
+	def die_with_parent():
+		prctl(1, signal.SIGKILL, 0, 0, 0)
 
-def _write_private(path: str, data: bytes, *, replace: bool = False) -> None:
-	"""Write ``data`` to ``path`` with mode 0600. ``replace`` swaps an existing file
-	atomically through a unique sibling temp file."""
-	if not replace:
-		fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-		with os.fdopen(fd, "wb") as f:
-			f.write(data)
-		return
-	fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".auth-", suffix=".tmp")
-	try:
-		with os.fdopen(fd, "wb") as f:
-			os.fchmod(f.fileno(), 0o600)
-			f.write(data)
-			f.flush()
-			os.fsync(f.fileno())
-		os.replace(tmp, path)
-	except BaseException:
-		with contextlib.suppress(OSError):
-			os.unlink(tmp)
-		raise
-
-
-_AUTH_LOCK_WAIT_SECONDS = 10
-
-
-class _AuthBusy(Exception):
-	"""The sign-in lock could not be taken in time (another call holds it)."""
-
-
-@contextlib.contextmanager
-def _auth_lock(source: str, wait: float = _AUTH_LOCK_WAIT_SECONDS):
-	"""Hold an exclusive flock on a lock file next to the sign-in file; yields True
-	when held, False when it could not be taken within ``wait`` seconds."""
-	fd = None
-	held = False
-	try:
-		fd = os.open(f"{source}.lock", os.O_RDWR | os.O_CREAT, 0o600)
-		limit = time.monotonic() + max(0, wait)
-		while not held:
-			try:
-				fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-				held = True
-			except BlockingIOError:
-				if time.monotonic() >= limit:
-					break
-				time.sleep(0.05)
-	except OSError:
-		held = False
-	try:
-		yield held
-	finally:
-		if fd is not None:
-			os.close(fd)
-
-
-def _auth_shape(data: bytes) -> tuple[frozenset, object] | None:
-	"""Key set and auth mode of a sign-in file, or None when it is not a JSON object."""
-	try:
-		obj = json.loads(data)
-	except ValueError:
-		return None
-	return (frozenset(obj), obj.get("auth_mode")) if isinstance(obj, dict) else None
-
-
-_AUTH_TOKEN_FIELDS = ("access_token", "refresh_token")
-
-
-def _refresh_acceptable(original: bytes, refreshed: bytes) -> bool:
-	"""True when the CLI's copy keeps the keys and auth mode of the original and, where the
-	original has a ``tokens`` object, the same token keys with non-empty token strings."""
-	shape = _auth_shape(refreshed)
-	if shape is None or shape != _auth_shape(original):
-		return False
-	old, new = json.loads(original).get("tokens"), json.loads(refreshed).get("tokens")
-	if not isinstance(old, dict):
-		return True
-	if not isinstance(new, dict) or set(new) != set(old):
-		return False
-	return all(isinstance(new.get(f), str) and new[f] for f in _AUTH_TOKEN_FIELDS if f in old)
-
-
-def _save_refreshed_auth(source: str, original: bytes, refreshed: bytes) -> str | None:
-	"""Replace the real sign-in file with the CLI's refreshed copy and return None, or return
-	why it was not saved (``shape`` / ``changed`` / ``oserror``). The caller holds the lock.
-	It writes only when the real file still equals what was copied."""
-	if not _refresh_acceptable(original, refreshed):
-		return "shape"
-	if _read_auth(source) != original:
-		return "changed"
-	try:
-		_write_private(source, refreshed, replace=True)
-	except OSError:
-		return "oserror"
-	return None
-
-
-def _report_dropped_auth(reason: str, *, in_flight: bool) -> None:
-	"""Record why a rotated sign-in was not saved back. An Error Log row is written only
-	when no exception is in flight (``log_ai_failure`` must run outside an ``except``)."""
-	_log_cli_diagnostic("auth_saveback_skipped", label=reason)
-	if not in_flight:
-		log_ai_failure(f"Codex sign-in was not saved back: {reason}")
+	return die_with_parent
 
 
 _SANDBOX_PREFIX = "optimus-codex-"
@@ -3695,13 +3625,14 @@ _LAST_SWEEP = 0.0
 
 
 def _sweep_stale_sandboxes() -> None:
-	"""Delete our own scratch trees left behind by a killed worker (they hold a 0600 copy of
-	the sign-in file). Best-effort, at most once per ``_SWEEP_EVERY_SECONDS``."""
+	"""Delete our own scratch trees left behind by a killed worker, logging one line when it
+	removes any. Best-effort, at most once per ``_SWEEP_EVERY_SECONDS``."""
 	global _LAST_SWEEP
 	now = time.monotonic()
 	if _LAST_SWEEP and now - _LAST_SWEEP < _SWEEP_EVERY_SECONDS:
 		return
 	_LAST_SWEEP = now
+	removed = 0
 	with contextlib.suppress(Exception):
 		base = tempfile.gettempdir()
 		for name in os.listdir(base):
@@ -3711,49 +3642,29 @@ def _sweep_stale_sandboxes() -> None:
 			st = os.lstat(path)
 			if stat.S_ISDIR(st.st_mode) and st.st_uid == os.geteuid() and time.time() - st.st_mtime > _SANDBOX_STALE_SECONDS:
 				shutil.rmtree(path, ignore_errors=True)
+				removed += 1
+	if removed:
+		_log_cli_diagnostic("stale_sandbox_removed", label=f"count_{removed}")
 
 
 @contextlib.contextmanager
-def _cli_sandbox(*, with_auth: bool = True, lock_wait: float = _AUTH_LOCK_WAIT_SECONDS):
-	"""A private 0700 scratch tree for one CLI invocation, removed afterwards. It
-	yields ``(work_dir, env)``: HOME, CODEX_HOME and TMPDIR point inside the tree, and
-	CODEX_HOME holds only a copy of the sign-in file, so the child sees none of the
-	operator's home directory. With ``with_auth`` the sign-in lock is held from the copy
-	to the write-back of a refreshed file (so runs are serialised and a stale refresh token
-	can never replace a newer one); ``_AuthBusy`` is raised if it is not free within
-	``lock_wait`` seconds. A dropped refresh is logged with its reason."""
+def _cli_sandbox(*, with_auth: bool = True):
+	"""A private 0700 scratch tree for one CLI invocation, removed afterwards. It yields
+	``(work_dir, env)``: HOME and TMPDIR point inside the tree. With ``with_auth`` CODEX_HOME
+	is the Optimus-owned Codex home (``_ensure_codex_home``), where the CLI keeps and
+	refreshes its own sign-in; otherwise it is an empty directory in the tree. Nothing is
+	read from or written to the operator's own ``~/.codex``."""
 	_sweep_stale_sandboxes()
 	root = tempfile.mkdtemp(prefix=_SANDBOX_PREFIX)
-	dropped = None
 	try:
 		dirs = {name: os.path.join(root, name) for name in ("home", "codex", "tmp", "work")}
 		for path in dirs.values():
 			os.mkdir(path, 0o700)
-		source, copy, original = _auth_source_path(), os.path.join(dirs["codex"], "auth.json"), None
-		env = _build_cli_env(home=dirs["home"], codex_home=dirs["codex"], tmpdir=dirs["tmp"])
-		with _auth_lock(source, lock_wait) if with_auth else contextlib.nullcontext(True) as held:
-			if not held:
-				raise _AuthBusy
-			if with_auth:
-				original = _read_auth(source)
-				if original is not None:
-					_write_private(copy, original)
-			try:
-				yield dirs["work"], env
-			finally:
-				if original is not None:
-					refreshed = _read_auth(copy)
-					if refreshed is None:
-						dropped = "unreadable"
-					elif refreshed != original:
-						dropped = _save_refreshed_auth(source, original, refreshed)
-					if dropped and sys.exc_info()[0] is not None:
-						_report_dropped_auth(dropped, in_flight=True)
-						dropped = None
+		codex_home = _ensure_codex_home() if with_auth else dirs["codex"]
+		env = _build_cli_env(home=dirs["home"], codex_home=codex_home, tmpdir=dirs["tmp"])
+		yield dirs["work"], env
 	finally:
 		shutil.rmtree(root, ignore_errors=True)
-	if dropped:
-		_report_dropped_auth(dropped, in_flight=False)
 
 
 def _kill_process_group(proc) -> None:
@@ -3801,7 +3712,7 @@ def _run_cli(argv: list[str], env: dict, cwd: str, timeout: float, stdin_text: s
 	proc = subprocess.Popen(
 		argv, stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
 		stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd, env=env,
-		start_new_session=True,
+		start_new_session=True, preexec_fn=_cli_preexec(),
 	)
 	boxes = ({}, {})
 	threads = [
@@ -3843,13 +3754,12 @@ _NOT_LOGGED_IN_RE = re.compile(
 )
 
 
-def _cli_login_ok(cli_path: str, *, use_cache: bool = True, lock_wait: float = _AUTH_LOCK_WAIT_SECONDS) -> tuple[bool, str]:
+def _cli_login_ok(cli_path: str, *, use_cache: bool = True) -> tuple[bool, str]:
 	"""Read-only ``codex login status`` check returning ``(ok, reason)`` with
 	``reason`` one of ``ok`` / ``not_chatgpt`` / ``signed_out`` / ``timeout`` /
-	``busy`` / ``error``. It runs in the same sandbox as the real call; the CLI prints the status
+	``error``. It runs in the same sandbox as the real call; the CLI prints the status
 	to stderr, so both streams are read. An API-key login is rejected because only the
 	subscription is wanted. A success is memoized for 5 minutes per path; failures never are.
-	``lock_wait`` bounds the wait for the sign-in lock (``busy`` when it is not free).
 	``use_cache=False`` forces a fresh probe (the Connect button)."""
 	now = time.monotonic()
 	if use_cache:
@@ -3857,12 +3767,10 @@ def _cli_login_ok(cli_path: str, *, use_cache: bool = True, lock_wait: float = _
 		if hit and now - hit[0] < _LOGIN_CACHE_SECONDS:
 			return hit[1], hit[2]
 	try:
-		with _cli_sandbox(lock_wait=lock_wait) as (work, env):
+		with _cli_sandbox() as (work, env):
 			code, out, err = _run_cli([cli_path, "login", "status"], env, work, _LOGIN_PROBE_SECONDS)
 	except subprocess.TimeoutExpired:
 		return False, "timeout"
-	except _AuthBusy:
-		return False, "busy"
 	except OSError as e:
 		_log_cli_diagnostic("login_probe_failed", label=f"errno_{e.errno}")
 		return False, "error"
@@ -3938,17 +3846,22 @@ def _log_cli_diagnostic(event: str, *, version: str | None = None, label: str | 
 # Operator-facing text and error kind per failed login-check reason. A signed-out
 # session is fatal (``auth``) so a refresh stops at the first item; a slow or
 # unreadable check may pass on the next call, so it is not.
-_LOGIN_SIGN_IN_HINT = "Run `codex login` and choose Sign in with ChatGPT."
 _LOGIN_FAILURES = {
-	"not_chatgpt": ("Codex CLI is signed in with an API key, not ChatGPT. " + _LOGIN_SIGN_IN_HINT, "auth"),
-	"signed_out": (
-		"Codex CLI is not signed in with ChatGPT (an API-key login does not count). " + _LOGIN_SIGN_IN_HINT,
-		"auth",
-	),
+	"not_chatgpt": ("Codex CLI is signed in with an API key, not ChatGPT.", "auth"),
+	"signed_out": ("Codex CLI is not signed in with ChatGPT (an API-key login does not count).", "auth"),
 	"timeout": ("The Codex CLI session check timed out. Try again.", "timeout"),
-	"busy": ("Another Codex call is using the sign-in file. Try again shortly.", "timeout"),
 	"error": ("The Codex CLI session could not be checked. Try again.", "transport"),
 }
+
+
+def _sign_in_hint() -> str:
+	"""How to sign in: Optimus keeps its own Codex home, apart from the operator's ``~/.codex``."""
+	from frappe import _
+
+	return _(
+		"Optimus uses its own Codex sign-in, separate from ~/.codex. Sign in once with "
+		"`{0}` and choose Sign in with ChatGPT (an API-key login is refused)."
+	).format(_codex_login_command())
 
 
 def _login_failure_text(reason: str, cli_path: str | None = None) -> tuple[str, str]:
@@ -3959,6 +3872,8 @@ def _login_failure_text(reason: str, cli_path: str | None = None) -> tuple[str, 
 
 	message, kind = _LOGIN_FAILURES.get(reason, _LOGIN_FAILURES["error"])
 	message = _(message)
+	if kind == "auth":
+		message += " " + _sign_in_hint()
 	if reason == "not_chatgpt" and cli_path:
 		version = _cli_version_cached(cli_path, probe=False)
 		if version:
@@ -4057,7 +3972,7 @@ def _classify_cli_stderr(stderr: str | None) -> str:
 # (message, error kind) per stderr label; "other" carries the exit code, so it is
 # built at the call site. Only the kinds in ``AI_FATAL_KINDS`` stop a refresh.
 _CLI_EXEC_ERRORS = {
-	"auth_expired": ("Codex session expired. Run `codex login`.", "auth"),
+	"auth_expired": ("Codex session expired.", "auth"),
 	"usage_limit": ("Codex usage limit reached. Try again later.", "quota"),
 	"rate_limited": ("Codex is rate limiting requests. Wait a few minutes and try again.", "rate_limited"),
 	"unknown_flag": ("Codex rejected a command-line flag. Update the codex CLI.", "config"),
@@ -4138,8 +4053,12 @@ def _read_cli_reply(out_file: str, stdout: str) -> tuple[str, bool]:
 	limit = _CLI_MAX_OUTPUT_CHARS + _CLI_READ_SLACK
 	raw, more = "", ""
 	try:
-		if os.path.isfile(out_file):
-			with open(out_file, encoding="utf-8", errors="replace") as f:  # nosemgrep: frappe-security-file-traversal -- out_file is built inside the private scratch dir
+		# The child can plant a link or a FIFO at this name: refuse both.
+		fd = os.open(out_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)  # nosemgrep: frappe-security-file-traversal -- out_file is built inside the private scratch dir
+		if not stat.S_ISREG(os.fstat(fd).st_mode):
+			os.close(fd)
+		else:
+			with os.fdopen(fd, encoding="utf-8", errors="replace") as f:
 				raw = _read_after_leading_space(f, limit)
 				if len(raw) >= limit:
 					more = f.read(1 << 16)
@@ -4172,7 +4091,7 @@ def _call_local_cli(
 	"""Run one read-only ``codex exec`` and return its reply text. The prompt goes on
 	stdin and the child runs in a private scratch tree with an allowlisted environment
 	(``_cli_sandbox``), so it uses only the ChatGPT subscription session. ``timeout``
-	bounds the whole call, session check and the wait for the sign-in lock included.
+	bounds the whole call, session check included.
 
 	The prompt carries Optimus's system prompt first, then a SECURITY preamble naming
 	the captured data that follows as untrusted, and the reply goes through
@@ -4203,7 +4122,7 @@ def _call_local_cli(
 		raise AiFixError(_("There is no content to send to the CLI."), kind="internal")
 	total_seconds = int(timeout or request_timeout_seconds())
 	deadline = time.monotonic() + total_seconds
-	ok, reason = _cli_login_ok(path, lock_wait=total_seconds - _CLI_MIN_EXEC_SECONDS)
+	ok, reason = _cli_login_ok(path)
 	if not ok:
 		raise _login_failure(reason, path)
 	if deadline - time.monotonic() < _CLI_MIN_EXEC_SECONDS:
@@ -4216,9 +4135,9 @@ def _call_local_cli(
 		usage_out.observe(True)  # nothing is billed per token, so the cost is a known zero
 	ai_privacy.before_http_send()  # a CLI send discloses the prompt like an HTTP one
 	try:
-		with _cli_sandbox(lock_wait=deadline - time.monotonic() - _CLI_MIN_EXEC_SECONDS) as (work, env):
+		with _cli_sandbox() as (work, env):
 			out_file = os.path.join(work, "out.txt")
-			# The login check and the lock wait came out of the deadline; the features
+			# The login check came out of the deadline; the features
 			# probe is capped by what is left, and then the exec gets what the probe left.
 			remaining = deadline - time.monotonic()
 			if remaining < _CLI_MIN_EXEC_SECONDS:
@@ -4231,16 +4150,15 @@ def _call_local_cli(
 				code, out, err = _run_cli(argv, env, work, exec_seconds, prompt)
 			except OSError:
 				raise  # could not start, so nothing was sent
-			except BaseException:
+			except BaseException as e:
 				# A timeout, a worker/job interrupt or a kill after the prompt was fed:
 				# the outcome is unknown, so record it before the exception propagates.
 				ai_transport.observe("sent_unknown")
+				_log_cli_diagnostic("exec_abandoned", label=type(e).__name__)
 				raise
 			text, truncated = _read_cli_reply(out_file, out) if code == 0 else ("", False)
 	except subprocess.TimeoutExpired:
 		raise AiFixError(_("Codex CLI didn't respond within the {0}s limit.").format(total_seconds), kind="timeout")
-	except _AuthBusy:
-		raise AiFixError(_("Another Codex call is using the sign-in file. Try again shortly."), kind="timeout")
 	except OSError as e:
 		_log_cli_diagnostic("exec_spawn_failed", label=f"errno_{e.errno}")
 		raise AiFixError(_("Codex CLI could not be started."), kind="transport")
@@ -4265,6 +4183,9 @@ def _call_local_cli(
 			_LOGIN_CACHE.pop(path, None)
 		if label in _CLI_EXEC_ERRORS:
 			message, kind = _CLI_EXEC_ERRORS[label]
+			if label == "auth_expired":
+				message = f"{_(message)} {_sign_in_hint()}"
+				raise AiFixError(message, kind=kind)
 			raise AiFixError(_(message), kind=kind)
 		raise AiFixError(_("Codex CLI could not produce a suggestion (exit {0}).").format(code))
 	ai_transport.observe("known_response")

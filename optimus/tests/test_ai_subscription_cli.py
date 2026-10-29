@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess
+import sys
 import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -96,14 +98,25 @@ def sub_cfg(monkeypatch):
 	return cfg
 
 
-@pytest.fixture
-def real_auth(tmp_path, monkeypatch):
-	"""A fake operator sign-in file; ``_auth_source_path`` points at it."""
-	home = tmp_path / "operator_codex"
+@pytest.fixture(autouse=True)
+def optimus_home(tmp_path, monkeypatch):
+	"""Keep every test off the real ``~/.codex`` and the real site: HOME is a temp dir and the
+	Optimus-owned Codex home is a temp path that does not exist until a test creates it."""
+	home = tmp_path / "bench_home"
 	home.mkdir()
-	auth = home / "auth.json"
+	monkeypatch.setenv("HOME", str(home))
+	monkeypatch.delenv("CODEX_HOME", raising=False)
+	codex_home = tmp_path / "site" / "private" / "optimus-codex"
+	monkeypatch.setattr(ai_fix, "_codex_home_path", lambda: str(codex_home))
+	return codex_home
+
+
+@pytest.fixture
+def real_auth(optimus_home):
+	"""The Optimus-owned Codex home after a one-time sign-in; returns its ``auth.json``."""
+	optimus_home.mkdir(parents=True, mode=0o700)
+	auth = optimus_home / "auth.json"
 	auth.write_text(json.dumps({"tokens": {"refresh_token": "ORIGINAL"}}))
-	monkeypatch.setattr(ai_fix, "_auth_source_path", lambda: str(auth))
 	return auth
 
 
@@ -319,17 +332,17 @@ class TestCliInstalled:
 # ---------------------------------------------------------------------------
 
 class TestCliSandbox:
-	def test_tree_is_private_holds_only_the_auth_copy_and_is_removed(self, real_auth):
+	def test_tree_is_private_and_removed_and_codex_home_is_the_optimus_one(self, real_auth, optimus_home):
 		with ai_fix._cli_sandbox() as (work, env):
 			root = os.path.dirname(work)
 			assert stat.S_IMODE(os.stat(root).st_mode) == 0o700
+			assert env["CODEX_HOME"] == str(optimus_home)
 			assert os.listdir(env["CODEX_HOME"]) == ["auth.json"]
-			copy = os.path.join(env["CODEX_HOME"], "auth.json")
-			assert stat.S_IMODE(os.stat(copy).st_mode) == 0o600
-			assert open(copy, "rb").read() == real_auth.read_bytes()
 			assert os.listdir(env["HOME"]) == []
-			assert env["HOME"] != os.path.expanduser("~")
+			assert env["HOME"] != os.path.expanduser("~") and env["HOME"].startswith(root)
+			assert env["TMPDIR"].startswith(root)
 		assert not os.path.exists(root)
+		assert real_auth.exists()  # the dedicated home outlives the run
 
 	def test_tree_is_removed_when_the_body_raises(self, real_auth):
 		with pytest.raises(RuntimeError):
@@ -338,35 +351,48 @@ class TestCliSandbox:
 				raise RuntimeError("boom")
 		assert not os.path.exists(root)
 
-	def test_without_auth_nothing_is_copied(self, real_auth):
-		with ai_fix._cli_sandbox(with_auth=False) as (work, env):
-			assert os.listdir(env["CODEX_HOME"]) == []
-
-	def test_missing_or_invalid_auth_file_is_skipped(self, real_auth):
-		real_auth.write_text("not json")
+	def test_the_dedicated_home_is_created_private_when_missing(self, optimus_home):
+		assert not optimus_home.exists()
 		with ai_fix._cli_sandbox() as (work, env):
-			assert os.listdir(env["CODEX_HOME"]) == []
-		real_auth.unlink()
-		with ai_fix._cli_sandbox() as (work, env):
-			assert os.listdir(env["CODEX_HOME"]) == []
+			assert os.path.isdir(env["CODEX_HOME"]) and os.listdir(env["CODEX_HOME"]) == []
+		assert stat.S_IMODE(os.stat(optimus_home).st_mode) == 0o700
 
-	def test_refreshed_auth_is_saved_back_and_unchanged_auth_is_not_rewritten(self, real_auth):
-		before = real_auth.stat().st_mtime_ns
+	def test_a_loose_dedicated_home_is_tightened(self, optimus_home):
+		optimus_home.mkdir(parents=True)
+		os.chmod(optimus_home, 0o755)
 		with ai_fix._cli_sandbox():
 			pass
-		assert real_auth.stat().st_mtime_ns == before
-		with ai_fix._cli_sandbox() as (work, env):
-			with open(os.path.join(env["CODEX_HOME"], "auth.json"), "w") as f:
-				json.dump({"tokens": {"refresh_token": "ROTATED"}}, f)
-		assert json.loads(real_auth.read_text())["tokens"]["refresh_token"] == "ROTATED"
-		assert stat.S_IMODE(real_auth.stat().st_mode) == 0o600
+		assert stat.S_IMODE(os.stat(optimus_home).st_mode) == 0o700
 
-	def test_garbage_written_to_the_copy_is_not_saved_back(self, real_auth):
-		original = real_auth.read_text()
+	def test_a_link_in_place_of_the_dedicated_home_is_refused(self, optimus_home, tmp_path):
+		target = tmp_path / "elsewhere"
+		target.mkdir()
+		optimus_home.parent.mkdir(parents=True)
+		optimus_home.symlink_to(target)
+		with pytest.raises(OSError):
+			with ai_fix._cli_sandbox():
+				pytest.fail("the sandbox must not start")
+
+	def test_without_auth_the_codex_home_is_an_empty_scratch_dir(self, real_auth, optimus_home):
+		with ai_fix._cli_sandbox(with_auth=False) as (work, env):
+			assert env["CODEX_HOME"] != str(optimus_home)
+			assert env["CODEX_HOME"].startswith(os.path.dirname(work))
+			assert os.listdir(env["CODEX_HOME"]) == []
+
+	def test_without_auth_the_dedicated_home_is_not_created(self, optimus_home):
+		with ai_fix._cli_sandbox(with_auth=False):
+			pass
+		assert not optimus_home.exists()
+
+	def test_the_operators_own_codex_home_is_never_touched(self, real_auth, tmp_path, monkeypatch):
+		operator = tmp_path / "bench_home" / ".codex"
+		operator.mkdir()
+		(operator / "auth.json").write_text('{"tokens": {"refresh_token": "OPERATOR"}}')
+		monkeypatch.setenv("CODEX_HOME", str(operator))
+		before = {p.name: p.read_bytes() for p in operator.iterdir()}
 		with ai_fix._cli_sandbox() as (work, env):
-			with open(os.path.join(env["CODEX_HOME"], "auth.json"), "w") as f:
-				f.write("garbage")
-		assert real_auth.read_text() == original
+			assert env["CODEX_HOME"] == str(real_auth.parent)
+		assert {p.name: p.read_bytes() for p in operator.iterdir()} == before
 
 
 # ---------------------------------------------------------------------------
@@ -397,6 +423,23 @@ class TestStaleSweep:
 		stale = self._old(tmp_path, "optimus-codex-old")
 		ai_fix._sweep_stale_sandboxes()
 		assert stale.exists()
+
+	def test_a_removal_logs_one_line(self, tmp_path, monkeypatch):
+		monkeypatch.setattr(ai_fix.tempfile, "tempdir", str(tmp_path))
+		monkeypatch.setattr(ai_fix, "_LAST_SWEEP", 0.0)
+		lines = []
+		monkeypatch.setattr(ai_fix, "_note_line", lines.append)
+		self._old(tmp_path, "optimus-codex-old")
+		ai_fix._sweep_stale_sandboxes()
+		assert lines == ["codex cli: stale_sandbox_removed label=count_1"]
+
+	def test_a_sweep_that_removes_nothing_logs_nothing(self, tmp_path, monkeypatch):
+		monkeypatch.setattr(ai_fix.tempfile, "tempdir", str(tmp_path))
+		monkeypatch.setattr(ai_fix, "_LAST_SWEEP", 0.0)
+		lines = []
+		monkeypatch.setattr(ai_fix, "_note_line", lines.append)
+		ai_fix._sweep_stale_sandboxes()
+		assert lines == []
 
 	def test_creating_a_sandbox_sweeps(self, tmp_path, real_auth, monkeypatch):
 		monkeypatch.setattr(ai_fix.tempfile, "tempdir", str(tmp_path))
@@ -470,7 +513,7 @@ class TestCallLocalCli:
 		argv_seen = _read(box.rec, "calls.txt")
 		assert "rm -rf" not in argv_seen
 
-	def test_child_sees_a_private_home_and_none_of_the_bench_environment(self, fake_codex, monkeypatch):
+	def test_child_sees_a_private_home_and_none_of_the_bench_environment(self, fake_codex, real_auth, monkeypatch):
 		box = fake_codex()
 		monkeypatch.setenv("OPTIMUS_TEST_DB_PASSWORD", "supersecret")
 		monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
@@ -479,7 +522,7 @@ class TestCallLocalCli:
 		assert "supersecret" not in env and "OPENAI_API_KEY" not in env
 		home = _read(box.rec, "home_exec.txt").strip()
 		codex_home = _read(box.rec, "codexhome_exec.txt").strip()
-		assert home != os.path.expanduser("~") and codex_home.startswith(os.path.dirname(home))
+		assert home != os.path.expanduser("~") and codex_home == str(real_auth.parent)
 		assert _read(box.rec, "codexhome_ls_exec.txt").split() == ["auth.json"]
 		assert _read(box.rec, "pwd_exec.txt").strip().startswith(os.path.dirname(home))
 
@@ -507,10 +550,22 @@ class TestCallLocalCli:
 			)
 			assert not os.path.exists(os.path.dirname(_read(box.rec, f"home_{name}.txt").strip()))
 
-	def test_refreshed_sign_in_is_saved_back(self, fake_codex, real_auth):
+	def test_the_codex_cli_refreshes_its_own_sign_in_in_the_dedicated_home_only(self, fake_codex, real_auth, tmp_path):
 		fake_codex(exec_body='echo \'{"tokens": {"refresh_token": "ROTATED"}}\' > "$CODEX_HOME/auth.json"; echo OK > "$out"')
+		skip = {"rec", "bin"}
+
+		def snapshot():
+			found = set()
+			for root, dirs, files in os.walk(tmp_path):
+				dirs[:] = [d for d in dirs if not (root == str(tmp_path) and d in skip)]
+				found.update(os.path.join(root, n) for n in dirs + files)
+			return found
+
+		before = snapshot()
 		self._call()
 		assert json.loads(real_auth.read_text())["tokens"]["refresh_token"] == "ROTATED"
+		assert snapshot() == before  # nothing new anywhere, and no ~/.codex appeared
+		assert not (tmp_path / "bench_home" / ".codex").exists()
 
 	def test_timeout_kills_the_whole_process_group_and_is_not_fatal(self, fake_codex, monkeypatch):
 		monkeypatch.setattr(ai_fix, "_CLI_MIN_EXEC_SECONDS", 1)  # let a 2s budget reach the exec
@@ -684,13 +739,25 @@ class TestCallLocalCli:
 		out.write_text(" " * 5000 + "fix\n\n")
 		assert ai_fix._read_cli_reply(str(out), "") == ("fix", False)
 
+	def test_a_link_planted_as_the_reply_file_is_not_followed(self, tmp_path):
+		secret = tmp_path / "site_config.json"
+		secret.write_text("TOP-SECRET")
+		out = tmp_path / "out.txt"
+		out.symlink_to(secret)
+		assert ai_fix._read_cli_reply(str(out), "from stdout") == ("from stdout", False)
+
+	def test_a_fifo_planted_as_the_reply_file_does_not_block(self, tmp_path):
+		out = tmp_path / "out.txt"
+		os.mkfifo(out)
+		assert ai_fix._read_cli_reply(str(out), "from stdout") == ("from stdout", False)
+
 	def test_a_configured_path_that_is_not_named_codex_explains_what_to_set(self, sub_cfg, tmp_path):
 		sub_cfg.ai_cli_path = str(tmp_path / "codex.js")
 		with pytest.raises(ai_fix.AiFixError, match="symlink named `codex`") as err:
 			self._call()
 		assert err.value.kind == "config"
 
-	def test_probe_and_lock_wait_come_out_of_the_exec_budget(self, fake_codex, monkeypatch):
+	def test_probe_time_comes_out_of_the_exec_budget(self, fake_codex, monkeypatch):
 		fake_codex()
 		clock = {"now": 1000.0}
 
@@ -705,7 +772,7 @@ class TestCallLocalCli:
 		real_build = ai_fix._build_cli_argv
 
 		def slow_build(path, work, out_file, **kw):
-			clock["now"] += 12  # the features probe (and any auth lock wait) burns time
+			clock["now"] += 12  # the features probe burns time
 			return real_build(path, work, out_file, **kw)
 
 		monkeypatch.setattr(ai_fix, "_build_cli_argv", slow_build)
@@ -902,6 +969,43 @@ class TestLoginProbe:
 		assert "your codex CLI (codex-cli 9.9.9) may need updating" in message
 		assert "may need updating" not in ai_fix._login_failure("not_chatgpt").args[0]
 
+	def test_an_operator_who_has_not_signed_in_yet_gets_signed_out_not_an_error(self, fake_codex, optimus_home):
+		box = fake_codex(login='echo "Not logged in" >&2; exit 1')
+		shutil.rmtree(optimus_home)  # fake_codex starts signed in; this operator has not
+		assert ai_fix._cli_login_ok(str(box.path), use_cache=False) == (False, "signed_out")
+		assert stat.S_IMODE(os.stat(optimus_home).st_mode) == 0o700
+
+	@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory modes")
+	def test_an_unwritable_site_folder_is_an_error_not_a_sign_out(self, fake_codex, optimus_home, tmp_path):
+		box = fake_codex(login='echo "Not logged in" >&2; exit 1')
+		shutil.rmtree(optimus_home.parent)  # no private/ folder yet, and the site folder is read-only
+		os.chmod(optimus_home.parent.parent, 0o500)
+		try:
+			assert ai_fix._cli_login_ok(str(box.path), use_cache=False) == (False, "error")
+		finally:
+			os.chmod(optimus_home.parent.parent, 0o700)
+
+	def test_the_not_signed_in_message_gives_the_exact_login_command_with_the_path(self, optimus_home):
+		for reason in ("signed_out", "not_chatgpt"):
+			message = ai_fix._login_failure(reason).args[0]
+			assert f"CODEX_HOME={optimus_home} codex login" in message
+			assert "~/.codex" in message
+
+	def test_the_login_command_quotes_a_path_with_spaces(self, monkeypatch):
+		monkeypatch.setattr(ai_fix, "_codex_home_path", lambda: "/srv/my site/private/optimus-codex")
+		assert ai_fix._codex_login_command() == "CODEX_HOME='/srv/my site/private/optimus-codex' codex login"
+
+	def test_connect_shows_the_login_command_when_signed_out(self, fake_codex, optimus_home):
+		fake_codex(login='echo "Not logged in" >&2; exit 1')
+		st = ai_fix._cli_session_status()
+		assert st["state"] == "signed_out" and f"CODEX_HOME={optimus_home} codex login" in st["message"]
+
+	def test_an_expired_session_message_gives_the_login_command(self, fake_codex, optimus_home):
+		fake_codex(exec_body="echo 'HTTP 401 unauthorized' >&2; exit 1")
+		with pytest.raises(ai_fix.AiFixError) as err:
+			ai_fix._call_local_cli("S", [{"content": "x"}])
+		assert err.value.kind == "auth" and f"CODEX_HOME={optimus_home} codex login" in err.value.args[0]
+
 	def test_signed_out_stops_the_call_as_fatal(self, fake_codex):
 		fake_codex(login='echo "Not logged in" >&2; exit 1')
 		with pytest.raises(ai_fix.AiFixError, match="not signed in") as err:
@@ -950,6 +1054,58 @@ class TestLoginProbe:
 		bad.write_text("not a script and no shebang")
 		bad.chmod(0o755)
 		assert ai_fix._cli_login_ok(str(bad)) == (False, "error")
+
+
+class TestChildDiesWithTheWorker:
+	linux = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="PR_SET_PDEATHSIG is Linux only")
+
+	def test_the_preexec_hook_is_used_on_linux_and_absent_elsewhere(self, monkeypatch):
+		monkeypatch.setattr(ai_fix.sys, "platform", "darwin")
+		assert ai_fix._cli_preexec() is None
+		monkeypatch.setattr(ai_fix.sys, "platform", "linux")
+		assert callable(ai_fix._cli_preexec())
+
+	def test_a_libc_without_prctl_means_no_hook(self, monkeypatch):
+		monkeypatch.setattr(ai_fix.sys, "platform", "linux")
+		monkeypatch.setattr(ai_fix.ctypes, "CDLL", lambda *a, **kw: object())
+		assert ai_fix._cli_preexec() is None
+
+	def test_run_cli_passes_the_hook_to_popen(self, monkeypatch):
+		seen = {}
+
+		class _Stop(Exception):
+			pass
+
+		def popen(argv, **kw):
+			seen.update(kw)
+			raise _Stop
+
+		monkeypatch.setattr(ai_fix.subprocess, "Popen", popen)
+		monkeypatch.setattr(ai_fix, "_cli_preexec", lambda: "HOOK")
+		with pytest.raises(_Stop):
+			ai_fix._run_cli(["x"], {}, "/tmp", 1)
+		assert seen["preexec_fn"] == "HOOK" and seen["start_new_session"] is True
+
+	@linux
+	def test_the_child_asks_the_kernel_to_kill_it_with_its_parent(self):
+		code, out, err = ai_fix._run_cli(
+			[sys.executable, "-I", "-c", "import ctypes,sys;v=ctypes.c_int();ctypes.CDLL(None).prctl(2,ctypes.byref(v));print(v.value)"],
+			{"PATH": os.environ["PATH"]}, "/tmp", 20,
+		)
+		assert code == 0 and out.strip() == str(int(ai_fix.signal.SIGKILL))
+
+	def test_an_abandoned_run_logs_one_line(self, fake_codex, monkeypatch):
+		fake_codex()
+		lines = []
+		monkeypatch.setattr(ai_fix, "_note_line", lines.append)
+
+		def stuck(*a, **kw):
+			raise ai_fix.subprocess.TimeoutExpired("codex", 1)
+
+		monkeypatch.setattr(ai_fix, "_run_cli", lambda argv, *a, **kw: stuck() if argv[1] == "exec" else (0, "Logged in using ChatGPT", ""))
+		with pytest.raises(ai_fix.AiFixError):
+			ai_fix._call_local_cli("S", [{"content": "x"}])
+		assert "codex cli: exec_abandoned label=TimeoutExpired" in lines
 
 
 class TestSessionStatus:
@@ -1310,7 +1466,7 @@ class TestScrubSecrets:
 
 
 # ---------------------------------------------------------------------------
-# Tool isolation, auth write-back, consent re-check and process cleanup
+# Tool isolation, consent re-check and process cleanup
 # ---------------------------------------------------------------------------
 
 class TestToolIsolation:
@@ -1450,6 +1606,10 @@ class TestToolIsolation:
 		monkeypatch.setattr(ai_fix, "_run_cli", fake_run)
 		assert _REAL_FEATURES("/x/codex") is None
 
+	@pytest.mark.parametrize("name", ["daemon_auto_start", "skill_search", "realtime_conversation"])
+	def test_capability_regex_covers_daemon_skill_and_realtime_features(self, name):
+		assert ai_fix._CLI_CAPABILITY_RE.search(name)
+
 	def test_capability_regex_leaves_plain_completion_features_alone(self):
 		for name in ("fast_mode", "goals", "steer", "collaboration_modes", "sqlite", "item_ids"):
 			assert not ai_fix._CLI_CAPABILITY_RE.search(name)
@@ -1535,184 +1695,6 @@ class TestInterruptsAreNotSwallowed:
 		assert ai_fix._FEATURES_CACHE["/x/codex"][1] is None
 
 
-def _rotate(copy_dir, token, **extra):
-	with open(os.path.join(copy_dir, "auth.json"), "w") as f:
-		json.dump({"tokens": {"refresh_token": token}, **extra}, f)
-
-
-class TestAuthWriteBack:
-	def test_write_back_is_atomic_private_and_leaves_no_temp_files(self, real_auth):
-		with ai_fix._cli_sandbox() as (work, env):
-			_rotate(env["CODEX_HOME"], "ROTATED")
-		assert json.loads(real_auth.read_text())["tokens"]["refresh_token"] == "ROTATED"
-		assert stat.S_IMODE(real_auth.stat().st_mode) == 0o600
-		assert sorted(os.listdir(real_auth.parent)) == ["auth.json", "auth.json.lock"]
-
-	def test_temp_name_is_unique_per_writer(self, tmp_path, monkeypatch):
-		names = []
-		real = ai_fix.tempfile.mkstemp
-
-		def spy(*a, **kw):
-			fd, name = real(*a, **kw)
-			names.append(name)
-			return fd, name
-
-		monkeypatch.setattr(ai_fix.tempfile, "mkstemp", spy)
-		target = tmp_path / "auth.json"
-		ai_fix._write_private(str(target), b"{}", replace=True)
-		ai_fix._write_private(str(target), b"{}", replace=True)
-		assert len(set(names)) == 2 and not any(n.endswith("auth.json.tmp") for n in names)
-		assert stat.S_IMODE(target.stat().st_mode) == 0o600
-
-	def test_failed_replace_cleans_the_temp_file(self, tmp_path, monkeypatch):
-		monkeypatch.setattr(ai_fix.os, "replace", MagicMock(side_effect=OSError("nope")))
-		with pytest.raises(OSError):
-			ai_fix._write_private(str(tmp_path / "auth.json"), b"{}", replace=True)
-		assert os.listdir(tmp_path) == []
-
-	def test_a_second_run_cannot_start_while_the_first_holds_the_sign_in(self, real_auth):
-		# One lock from copy-in to write-back: the second run is refused, never a stale copy.
-		with ai_fix._cli_sandbox():
-			with pytest.raises(ai_fix._AuthBusy):
-				with ai_fix._cli_sandbox(lock_wait=0.1):
-					pytest.fail("the second run must not start")
-
-	def test_a_waiting_run_copies_the_token_the_first_run_wrote_back(self, real_auth):
-		import threading
-		seen, started = {}, threading.Event()
-
-		def second():
-			started.set()
-			with ai_fix._cli_sandbox() as (_, env):
-				seen["copy"] = json.loads(open(os.path.join(env["CODEX_HOME"], "auth.json")).read())
-
-		with ai_fix._cli_sandbox() as (_, first):
-			thread = threading.Thread(target=second)
-			thread.start()
-			started.wait(2)
-			time.sleep(0.3)
-			assert thread.is_alive() and "copy" not in seen
-			_rotate(first["CODEX_HOME"], "FIRST")
-		thread.join(10)
-		assert seen["copy"]["tokens"]["refresh_token"] == "FIRST"
-		assert json.loads(real_auth.read_text())["tokens"]["refresh_token"] == "FIRST"
-
-	def test_a_busy_lock_leaves_no_scratch_tree(self, real_auth, tmp_path, monkeypatch):
-		monkeypatch.setattr(ai_fix.tempfile, "tempdir", str(tmp_path))
-		with ai_fix._cli_sandbox():
-			before = sorted(os.listdir(tmp_path))
-			with pytest.raises(ai_fix._AuthBusy):
-				with ai_fix._cli_sandbox(lock_wait=0.1):
-					pass
-			assert sorted(os.listdir(tmp_path)) == before
-
-	def test_stale_writer_is_skipped_when_the_file_changed_on_disk(self, real_auth):
-		with ai_fix._cli_sandbox() as (_, env):
-			real_auth.write_text(json.dumps({"tokens": {"refresh_token": "NEWER"}}))
-			_rotate(env["CODEX_HOME"], "STALE")
-		assert json.loads(real_auth.read_text())["tokens"]["refresh_token"] == "NEWER"
-
-	@pytest.fixture
-	def dropped(self, monkeypatch):
-		rows, lines = [], []
-		monkeypatch.setattr(ai_fix, "log_ai_failure", lambda title, *a, **kw: rows.append(title))
-		monkeypatch.setattr(ai_fix, "_note_line", lines.append)
-		return rows, lines
-
-	def test_a_dropped_refresh_is_logged_with_its_reason(self, real_auth, dropped):
-		rows, lines = dropped
-		with ai_fix._cli_sandbox() as (_, env):
-			real_auth.write_text(json.dumps({"tokens": {"refresh_token": "NEWER"}}))
-			_rotate(env["CODEX_HOME"], "STALE")
-		assert rows == ["Codex sign-in was not saved back: changed"]
-		assert lines == ["codex cli: auth_saveback_skipped label=changed"]
-
-	def test_a_bad_child_copy_is_logged_as_shape(self, real_auth, dropped):
-		rows, _ = dropped
-		with ai_fix._cli_sandbox() as (_, env):
-			with open(os.path.join(env["CODEX_HOME"], "auth.json"), "w") as f:
-				f.write('{"tokens": {}, "extra": 1}')
-		assert rows == ["Codex sign-in was not saved back: shape"]
-
-	def test_a_write_error_is_logged_as_oserror(self, real_auth, dropped, monkeypatch):
-		rows, _ = dropped
-		monkeypatch.setattr(ai_fix, "_write_private", lambda path, data, replace=False: (_ for _ in ()).throw(OSError("disk")) if replace else open(path, "wb").write(data))
-		with ai_fix._cli_sandbox() as (_, env):
-			_rotate(env["CODEX_HOME"], "ROTATED")
-		assert rows == ["Codex sign-in was not saved back: oserror"]
-		assert json.loads(real_auth.read_text())["tokens"]["refresh_token"] == "ORIGINAL"
-
-	def test_a_drop_while_an_error_propagates_logs_no_error_log_row(self, real_auth, dropped):
-		rows, lines = dropped
-		with pytest.raises(RuntimeError):
-			with ai_fix._cli_sandbox() as (_, env):
-				real_auth.write_text(json.dumps({"tokens": {"refresh_token": "NEWER"}}))
-				_rotate(env["CODEX_HOME"], "STALE")
-				raise RuntimeError("body failed")
-		assert rows == [] and lines == ["codex cli: auth_saveback_skipped label=changed"]
-
-	def test_a_clean_refresh_logs_nothing(self, real_auth, dropped):
-		rows, lines = dropped
-		with ai_fix._cli_sandbox() as (_, env):
-			_rotate(env["CODEX_HOME"], "ROTATED")
-		assert rows == [] and lines == []
-
-	@pytest.mark.parametrize("tokens", [
-		{"refresh_token": ""},
-		{"refresh_token": 5},
-		{"refresh_token": "X", "extra": "y"},
-		[],
-	])
-	def test_a_token_object_with_empty_or_odd_fields_is_not_saved(self, real_auth, tokens):
-		with ai_fix._cli_sandbox() as (_, env):
-			with open(os.path.join(env["CODEX_HOME"], "auth.json"), "w") as f:
-				json.dump({"tokens": tokens}, f)
-		assert json.loads(real_auth.read_text())["tokens"]["refresh_token"] == "ORIGINAL"
-
-	@pytest.mark.parametrize("bad", [
-		"[1, 2]",
-		'{"tokens": {}, "extra": 1}',
-		'{"auth_mode": "apikey"}',
-		'"just a string"',
-	])
-	def test_child_output_with_other_keys_or_shape_is_not_saved(self, real_auth, bad):
-		real_auth.write_text(json.dumps({"tokens": {"refresh_token": "ORIGINAL"}, "auth_mode": "chatgpt"}))
-		before = real_auth.read_text()
-		with ai_fix._cli_sandbox() as (_, env):
-			with open(os.path.join(env["CODEX_HOME"], "auth.json"), "w") as f:
-				f.write(bad)
-		assert real_auth.read_text() == before
-
-	def test_changed_auth_mode_is_rejected_but_a_token_rotation_keeps_it(self, real_auth):
-		real_auth.write_text(json.dumps({"auth_mode": "chatgpt", "tokens": {"refresh_token": "A"}}))
-		with ai_fix._cli_sandbox() as (_, env):
-			_rotate(env["CODEX_HOME"], "B", auth_mode="apikey")
-		assert json.loads(real_auth.read_text())["tokens"]["refresh_token"] == "A"
-		with ai_fix._cli_sandbox() as (_, env):
-			_rotate(env["CODEX_HOME"], "C", auth_mode="chatgpt")
-		assert json.loads(real_auth.read_text())["tokens"]["refresh_token"] == "C"
-
-	def test_copy_waits_for_a_writer_holding_the_lock(self, real_auth):
-		import fcntl
-		import threading
-		fd = os.open(f"{real_auth}.lock", os.O_RDWR | os.O_CREAT, 0o600)
-		fcntl.flock(fd, fcntl.LOCK_EX)
-		seen = {}
-
-		def run():
-			with ai_fix._cli_sandbox() as (_, env):
-				seen["copy"] = open(os.path.join(env["CODEX_HOME"], "auth.json")).read()
-
-		thread = threading.Thread(target=run)
-		thread.start()
-		time.sleep(0.3)
-		assert thread.is_alive()
-		real_auth.write_text(json.dumps({"tokens": {"refresh_token": "FRESH"}}))
-		os.close(fd)
-		thread.join(10)
-		assert "FRESH" in seen["copy"]
-
-
 class TestConsentRecheck:
 	def _call(self):
 		return ai_fix._call_local_cli("SYS", [{"role": "user", "content": "hello"}])
@@ -1788,44 +1770,19 @@ class TestRunCli:
 		assert self._gone(int(pidfile.read_text()))
 
 
-class TestBusyLockAndFollowUps:
+class TestConcurrencyAndFollowUps:
 	def _call(self, **kw):
 		return ai_fix._call_local_cli("SYS", [{"role": "user", "content": "hello"}], **kw)
 
-	def _hold(self, real_auth):
-		import fcntl
-		fd = os.open(f"{real_auth}.lock", os.O_RDWR | os.O_CREAT, 0o600)
-		fcntl.flock(fd, fcntl.LOCK_EX)
-		return fd
-
-	def test_a_busy_sign_in_lock_is_a_temporary_timeout_for_the_exec(self, fake_codex, real_auth):
-		box = fake_codex()
-		ai_fix._LOGIN_CACHE[str(box.path)] = (time.monotonic(), True, "ok")
-		fd = self._hold(real_auth)
-		try:
-			with ai_transport.attempt() as transport:
-				with pytest.raises(ai_fix.AiFixError, match="sign-in file") as err:
-					self._call(timeout=7)
-		finally:
-			os.close(fd)
-		assert err.value.kind == "timeout" and err.value.fatal is False
-		assert transport.certainty == "not_sent"
-		assert not (box.rec / "calls.txt").exists()  # neither the login check nor the exec ran
-
-	def test_a_busy_sign_in_lock_is_a_temporary_timeout_for_the_login_check(self, fake_codex, real_auth):
-		box = fake_codex()
-		fd = self._hold(real_auth)
-		try:
-			assert ai_fix._cli_login_ok(str(box.path), use_cache=False, lock_wait=0.1) == (False, "busy")
-		finally:
-			os.close(fd)
-		failure = ai_fix._login_failure("busy")
-		assert failure.kind == "timeout" and failure.fatal is False
-
-	def test_two_threads_run_the_cli_one_after_the_other(self, fake_codex):
+	def test_concurrent_calls_run_together_not_one_after_the_other(self, fake_codex):
 		import threading
 		box = fake_codex()
-		fake_codex(exec_body=f'echo start >> "{box.rec}/order.txt"; sleep 0.4; echo end >> "{box.rec}/order.txt"; echo REPLY > "$out"')
+		order = f"{box.rec}/order.txt"
+		# Each run waits (up to 10s) for the other to have started before it ends.
+		fake_codex(exec_body=(
+			f'echo start >> "{order}"; i=0; while [ "$(wc -l < "{order}")" -lt 2 ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done; '
+			f'echo end >> "{order}"; echo REPLY > "$out"'
+		))
 		errors = []
 
 		def run():
@@ -1840,7 +1797,7 @@ class TestBusyLockAndFollowUps:
 		for t in threads:
 			t.join(30)
 		assert errors == []
-		assert _read(box.rec, "order.txt").split() == ["start", "end", "start", "end"]
+		assert _read(box.rec, "order.txt").split() == ["start", "start", "end", "end"]
 
 	def test_a_truncated_reply_sets_the_length_finish_reason(self, fake_codex):
 		fake_codex(exec_body='head -c 25000 /dev/zero | tr "\\000" "a" > "$out"')

@@ -495,7 +495,7 @@
   {
    "default": "API Key",
    "depends_on": "eval:doc.ai_enabled",
-   "description": "Subscription (local CLI) needs developer_mode and the optimus_allow_subscription_cli site-config flag: run `bench --site <site> set-config optimus_allow_subscription_cli 1`, then restart the bench (or run `bench clear-cache`) so running workers see it. It runs the logged-in Codex CLI on this machine as a read-only agent with a private scratch HOME, but it can still read files the bench user can read, so a prompt injection in profiled data is mitigated, not eliminated; use it only on data you trust. A call can take longer than the default request timeout, so raise the AI request timeout. API Key calls a cloud provider over HTTP.",
+   "description": "Subscription (local CLI) needs developer_mode and the optimus_allow_subscription_cli site-config flag: run `bench --site <site> set-config optimus_allow_subscription_cli 1`, then restart the bench (or run `bench clear-cache`) so running workers see it. Sign in once to the Codex home Optimus owns: `CODEX_HOME=<bench>/sites/<site>/private/optimus-codex codex login` (Connect shows the exact command); your own ~/.codex is never used. It runs the Codex CLI on this machine as a read-only agent with a private scratch HOME, but it can still read files the bench user can read, so a prompt injection in profiled data is mitigated, not eliminated; use it only on data you trust. A call can take longer than the default request timeout, so raise the AI request timeout. API Key calls a cloud provider over HTTP.",
    "fieldname": "ai_connection_type",
    "fieldtype": "Select",
    "label": "Connection",
@@ -685,7 +685,7 @@
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-10-20 10:11:41.945295",
+ "modified": "2026-10-29 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Optimus",
  "name": "Optimus Settings",
