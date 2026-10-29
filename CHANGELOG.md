@@ -8,6 +8,14 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.101] - 2026-10-29
+
+### Fixed
+
+- Captured SQL now redacts values of columns that contain a secret name as one part, such as reset_password_key or api_secret. Previously only exact names were matched, so the password reset key hash reached the stored recordings.
+
+---
+
 ## [0.12.100] - 2026-10-29
 
 ### Fixed
