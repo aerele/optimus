@@ -13,7 +13,7 @@ const vm = require("node:vm"), fs = require("node:fs"), assert = require("node:a
 const ctx = {
   __: (text, args=[]) => text.replace(/\{(\d+)\}/g, (_, n) => args[n]),
   frappe: {ui: {form: {on: () => {}}}, router: {on: () => {}},
-    utils: {escape_html: v => String(v).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;")}},
+    utils: {escape_html: v => String(v).replace(/[&<>"'`=]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;", "`": "&#x60;", "=": "&#x3D;"}[c]))}},
 };
 vm.createContext(ctx); vm.runInContext(fs.readFileSync(process.argv[1], "utf8"), ctx);
 let banner = null, rewrites = 0;
@@ -59,7 +59,7 @@ assert.equal(banner.bar.now, 0);
 assert.match(banner.text, /Preparing report 0%/);
 strip("null", "<b>x</b>");
 assert.equal(banner.bar, null, "no percent means no bar");
-assert.match(banner.html_src, /&lt;b>x&lt;\/b>/);
+assert.match(banner.html_src, /&lt;b&gt;x&lt;\/b&gt;/);
 strip(10, "y");
 assert.equal(banner.bar.now, 10, "bar comes back when a percent arrives");
 assert.match(banner.html_src, /<span class="optimus-status-text" role="status" aria-live="polite">/);
@@ -69,7 +69,7 @@ ctx._single_banner = (frm, id, cls, html) => { drained = html; };
 vm.runInContext("_drain_banner(frm, 'Waiting for jobs')", ctx);
 assert.match(drained, /^<span class="optimus-status-text" role="status" aria-live="polite">Waiting for jobs<\/span>$/);
 vm.runInContext("_drain_banner(frm, '<i>x</i>')", ctx);
-assert.match(drained, /&lt;i>x&lt;\/i>/, "drain text is escaped");
+assert.match(drained, /&lt;i&gt;x&lt;\/i&gt;/, "drain text is escaped");
 console.log("ok");
 """
 
