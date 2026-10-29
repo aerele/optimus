@@ -37,17 +37,18 @@ function desk(opts = {}) {
   __sd:(display,label)=>pills.push({display,label}),
   frappe:{session:{user:'owner'},set_route:()=>{},get_route:()=>opts.route||[],
    ui:{Dialog,open_dialogs:opts.openDialogs||[]},utils:{escape_html:s=>String(s)},
-   realtime:{on:(n,fn)=>handlers[n]=fn},show_alert:a=>alerts.push(a)}};
+   realtime:{socket:opts.noSocket?undefined:{},on:(n,fn)=>handlers[n]=fn},show_alert:a=>alerts.push(a)}};
  vm.createContext(ctx);
  let code=fs.readFileSync(process.argv[1],'utf8');
  const tail=/\}\)\(\);\s*$/, hook='function setDisplay(display, label, elapsed) {';
  assert.ok(tail.test(code) && code.includes(hook), 'widget source shape changed: update the harness');
- code=code.replace(tail,`globalThis.w={subscribeRealtime,state:currentState};})();`);
+ code=code.replace(tail,`globalThis.w={subscribeRealtime,state:currentState,realtime:frappe.realtime};})();`);
  code=code.replace(hook,hook+' globalThis.__sd(display,label);');
  vm.runInContext(code,ctx);ctx.w.subscribeRealtime();
+ const realtime=ctx.w.realtime;
  const tick=()=>{ const fns=[...timers.values()]; timers.clear(); fns.forEach(f=>f()); };
  const setVisibility=v=>{ doc.visibilityState=v; (docListeners.visibilitychange||[]).forEach(f=>f()); };
- return {handlers,dialogs,alerts,pills,store,doc,tick,timers,setVisibility,state:ctx.w.state};
+ return {realtime,subscribeRealtime:ctx.w.subscribeRealtime,handlers,dialogs,alerts,pills,store,doc,tick,timers,setVisibility,state:ctx.w.state};
 }
 const ev=(o={})=>({session_uuid:'s1',docname:'OS-1',recording_user:'owner',event_id:'e1',...o});
 """
@@ -357,4 +358,33 @@ d.handlers.optimus_session_ready(ev({event_id:'e2', docname:'OS-2'}));
 assert.equal(d.timers.size, 1);
 d.setVisibility('visible');
 assert.equal(d.timers.size, 1, 'a re-flush replaces the timer');
+""")
+
+
+def test_handlers_register_once_the_socket_exists():
+	_run(r"""
+const d = desk({noSocket: true});
+assert.equal(Object.keys(d.handlers).length, 0);
+assert.equal(d.timers.size, 1);
+d.tick();
+assert.equal(Object.keys(d.handlers).length, 0);
+d.realtime.socket = {};
+d.tick();
+assert.ok(d.handlers.optimus_session_ready);
+assert.equal(d.timers.size, 0);
+const first = d.handlers.optimus_session_ready;
+d.subscribeRealtime();
+d.tick();
+assert.equal(d.handlers.optimus_session_ready, first);
+d.handlers.optimus_session_ready(ev());
+assert.equal(d.dialogs.length, 1);
+""")
+
+
+def test_realtime_retry_gives_up_without_a_socket():
+	_run(r"""
+const d = desk({noSocket: true});
+for (let i = 0; i < 200; i++) d.tick();
+assert.equal(d.timers.size, 0);
+assert.equal(Object.keys(d.handlers).length, 0);
 """)

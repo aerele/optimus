@@ -419,8 +419,9 @@ def stop() -> dict:
 
 	Returns a dict with ``stopped``, ``session_uuid``, ``docname``,
 	``ran_inline`` and, only when ran_inline is True, the final ``status``
-	(``Ready`` or ``Failed``) and ``empty`` (a Ready session with no recorded requests). The widget uses ran_inline + status to pick its
-	terminal state (Analyzing / Report ready / Analyze failed).
+	(``Ready`` or ``Failed``) and ``empty`` (a Ready session with no recorded
+	requests). The widget uses ran_inline + status + empty to pick its
+	terminal state (Analyzing / Report ready / No data / Analyze failed).
 	"""
 	user = _require_profiler_user()
 	active = session.get_active_session_for(user)

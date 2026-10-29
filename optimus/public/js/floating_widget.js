@@ -833,7 +833,28 @@
 		}
 	}
 
+	let realtimeSubscribed = false;
+	let realtimeAttempts = 0;
+	const REALTIME_RETRY_MS = 250;
+	const REALTIME_MAX_ATTEMPTS = 120;
+
 	function subscribeRealtime() {
+		// Frappe creates the socket after this bootstrap runs, and
+		// frappe.realtime.on is a silent no-op until it exists: retry
+		// until it does, then register once.
+		if (realtimeSubscribed) return;
+		if (!frappe.realtime || !frappe.realtime.on) return;
+		if (!frappe.realtime.socket) {
+			if (++realtimeAttempts < REALTIME_MAX_ATTEMPTS) {
+				setTimeout(subscribeRealtime, REALTIME_RETRY_MS);
+			}
+			return;
+		}
+		realtimeSubscribed = true;
+		registerRealtimeHandlers();
+	}
+
+	function registerRealtimeHandlers() {
 		// v0.5.1: realtime is now the PRIMARY state-transition channel
 		// (polling is gone). Server emits:
 		//
@@ -846,10 +867,6 @@
 		// The widget rehydrates state from these events so a session
 		// driven from tab A is visible in tabs B, C, D without any tab
 		// issuing an HTTP poll.
-		if (!frappe.realtime || !frappe.realtime.on) {
-			return;
-		}
-
 		// A socket can receive the same event through its user and document
 		// rooms. Shared-form events must never take over this user's widget.
 		const seenEvents = new Set();
