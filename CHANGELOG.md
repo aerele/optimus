@@ -8,7 +8,7 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.110] - 2026-10-29
+## [0.12.112] - 2026-10-29
 
 ### Fixed
 
@@ -22,6 +22,14 @@ versions may contain breaking changes see migration notes below).
 
 - Before suggesting an index, Optimus checks the other queries in the same session. It drops the suggestion when the column is updated, or the table is written, far more often than the index would help reads (`HOT_COLUMN_MIN_UPDATES` 5, `WRITE_HEAVY_MIN_WRITES` 50, ratio 10), and says why in the warning. Otherwise it adds a "Before adding, check:" note with the write counts and the flows that write, a table with at least `CAUTION_MIN_WRITES` (10) writes, a column with at most `LOW_CARDINALITY_MAX` (10) distinct values, and an existing composite index that already holds the column. The finding's JSON gains `cautions` and `write_impact`.
 - Write detection also reads aliased UPDATE statements and double-quoted table names; `UPDATE ... JOIN` and multi-table `UPDATE a, b SET` are not counted (stated in the module docstring), which only means fewer suppressions. A failed alias parse is logged at debug level.
+
+---
+
+## [0.12.111] - 2026-10-29
+
+### Changed
+
+- The Optimus Session form is reorganised so the most useful things come first. An Overview tab shows the status, top severity and report links, then the totals, the summary, the session details and your notes. Findings, the recorded actions and background jobs, line-profiling runs and the technical and AI usage details each get their own tab or collapsed section. Existing sessions pick this up on the next migrate, and no session data changes.
 
 ---
 
@@ -141,6 +149,9 @@ versions may contain breaking changes see migration notes below).
 - Normalized EXPLAIN rows are coerced with `to_int` / `to_float`, so a string or
   `Decimal` value no longer drops that row's findings. `to_int` / `to_float` also
   treat `nan` / `inf` as missing instead of passing them to threshold checks.
+- Test coverage is now configured for the unit suite (line and branch; tests, integration tests and data patches excluded). Run `python -m pytest optimus/tests/ --cov --cov-report=term-missing:skip-covered`.
+- New behaviour tests for the session start/stop/retry endpoints, the request and background-job hooks, install/uninstall, the AI settings warning, the janitor and the Redis schema sentinel.
+- Removed an unused test fixture (`sidecar_with_pii.json`).
 
 
 
