@@ -8,6 +8,14 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.99] - 2026-10-29
+
+### Fixed
+
+- Saving a document that clears the cache (such as Print Settings) while a session is recording no longer hangs the server. Re-reading Optimus Settings recorded its own queries, which read the settings again in a loop.
+
+---
+
 ## [0.12.94] - 2026-10-29
 
 ### Fixed
