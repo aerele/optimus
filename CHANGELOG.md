@@ -8,6 +8,14 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.100] - 2026-10-29
+
+### Fixed
+
+- Top Severity now counts only the findings the report shows. A session whose only finding has no callsite (such as Memory Pressure) no longer shows High in the list while its report says there is nothing to fix.
+
+---
+
 ## [0.12.99] - 2026-10-29
 
 ### Fixed
