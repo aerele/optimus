@@ -6,6 +6,8 @@
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from optimus.analyzers.base import AnalyzerResult
 from optimus.line_profile import function_index, persist, recheck
 
@@ -310,7 +312,7 @@ class TestPersist:
 		persist.merge_phase2_findings(parent, _result([_hot(lineno=10)], [{"dotted_path": "app.mod.work", "hot_lines": [1]}]))
 		assert parent.findings[0].get("llm_fix_json") == "{}"
 
-	def test_row_assignment_failure_leaves_no_row_half_rechecked(self):
+	def test_row_assignment_failure_restores_the_rows_already_written(self):
 		class _Strict(_Row):
 			def set(self, k, v):
 				if k == "technical_detail_json" and self.get("finding_type") == "Slow Query":
@@ -320,8 +322,10 @@ class TestPersist:
 		good, bad = _finding(impact=1000.0), dict(_finding(impact=1000.0), finding_type="Slow Query")
 		parent = _Parent([good, bad], [_run_row([_fn("app.mod.work", 50.0)])])
 		parent.findings = [_Strict(r) for r in (good, bad)]
-		persist.merge_phase2_findings(parent, _result([], []))
-		assert all(r["severity"] == "High" and "phase2_recheck" not in r["technical_detail_json"] for r in parent.findings) or True
+		before = [dict(r) for r in parent.findings]
+		with pytest.raises(RuntimeError):
+			persist._recheck_phase1_rows(parent)
+		assert [dict(r) for r in parent.findings] == before
 
 	def test_failed_runs_do_not_feed_the_index(self):
 		parent = _Parent([_finding(impact=1000.0)], [_run_row([_fn("app.mod.work", 1.0)], status="Failed")])

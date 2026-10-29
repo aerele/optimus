@@ -20,7 +20,7 @@ versions may contain breaking changes see migration notes below).
 ### Fixed
 
 - Running phase 2 again no longer adds a second Hot Line row for the same function. The row is updated in place, and old duplicate rows are removed.
-- A failure while rechecking no longer stops the phase 2 results from being saved.
+- A failure while rechecking no longer stops the phase 2 results from being saved. If a row cannot be written, the rows already rechecked are put back, so the findings table is never left half rechecked.
 
 ---
 

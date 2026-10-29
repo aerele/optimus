@@ -108,15 +108,27 @@ def _recheck_phase1_rows(parent) -> None:
 	chains = recheck.collect_call_chains(views)
 	stats = recheck.recheck_findings(views, index, chains, frozenset(truncated))
 	_log("info", f"optimus phase2 recheck: {stats} from {len(runs)} run(s)")
-	# Collect every change before touching a row so a failure cannot leave the table half rechecked.
 	changes = [
 		(row, key, view[key])
 		for row, view in zip(rows, views, strict=True)
 		for key in _ROW_FIELDS
 		if row.get(key) != view[key]
 	]
-	for row, key, value in changes:
-		row.set(key, value)
+	_apply_all_or_none(changes)
+
+
+def _apply_all_or_none(changes: list) -> None:
+	# On a failed write, put back the values already written, then re-raise.
+	written = []
+	try:
+		for row, key, value in changes:
+			old = row.get(key)
+			row.set(key, value)
+			written.append((row, key, old))
+	except Exception:
+		for row, key, old in reversed(written):
+			row.set(key, old)
+		raise
 
 
 def _clamp_titles(findings: list[dict]) -> None:
