@@ -8,7 +8,7 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.97] - 2026-10-28
+## [0.12.108] - 2026-10-29
 
 ### Fixed
 
@@ -19,6 +19,54 @@ versions may contain breaking changes see migration notes below).
 
 - Hot frames now has two labelled groups, "Your app's code" first and "Framework code" second, each showing its own top 20.
 - Rows are totalled by app-relative file path plus function, so two files whose shortened names match (a framework `user/user.py` and your app's `user/user.py`) stay separate rows with their own times, while the same file reached by a relative or absolute path is one row. Labels are lengthened only when two rows would otherwise read the same. If two rows still read the same at every length, each shows its last three path segments plus a short hash, never the full path.
+
+---
+
+## [0.12.103] - 2026-10-29
+
+### Fixed
+
+- Frontend metrics sent when leaving a page during a session are no longer rejected with a CSRF error (400). The beacon now carries the CSRF token in its body.
+
+---
+
+## [0.12.102] - 2026-10-29
+
+### Fixed
+
+- Removing every row from Ignored Apps now ignores no app, instead of silently falling back to the 11 default framework apps. A one-time patch seeds the table on installs that predate the seed, so their behavior does not change.
+
+---
+
+## [0.12.101] - 2026-10-29
+
+### Fixed
+
+- Captured SQL now redacts values of columns that contain a secret name as one part, such as reset_password_key or api_secret. Previously only exact names were matched, so the password reset key hash reached the stored recordings.
+
+---
+
+## [0.12.100] - 2026-10-29
+
+### Fixed
+
+- Top Severity now counts only the findings the report shows. A session whose only finding has no callsite (such as Memory Pressure) no longer shows High in the list while its report says there is nothing to fix.
+
+---
+
+## [0.12.99] - 2026-10-29
+
+### Fixed
+
+- Saving a document that clears the cache (such as Print Settings) while a session is recording no longer hangs the server. Re-reading Optimus Settings recorded its own queries, which read the settings again in a loop.
+
+---
+
+## [0.12.94] - 2026-10-29
+
+### Fixed
+
+- A save that clears the cache (such as Print Settings) no longer ends the active recording session. Profiler keys are now kept by frappe.clear_cache(); the Optimus Settings cache is still cleared.
 
 ---
 
