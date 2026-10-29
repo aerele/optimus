@@ -303,6 +303,13 @@ def _sanitize_report_html(value):
 	return sanitize_html(str(soup), always_sanitize=True)
 
 
+def _has_renderable_callsite(f: dict) -> bool:
+	"""True when the finding has a callsite file; the report drops the rest."""
+	detail = f.get("technical_detail") or {}
+	callsite = detail.get("callsite") or {}
+	return bool((callsite.get("filename") or "").strip())
+
+
 @render_validation_budget()
 def render(
 	session_doc: Any,
@@ -412,11 +419,6 @@ def render(
 	# survive. The filter is global these findings also disappear
 	# from the Executive Summary, severity counts and observations
 	# so there's no phantom-row inconsistency between sections.
-	def _has_renderable_callsite(f):
-		detail = f.get("technical_detail") or {}
-		callsite = detail.get("callsite") or {}
-		return bool((callsite.get("filename") or "").strip())
-
 	all_findings = [f for f in all_findings if _has_renderable_callsite(f)]
 	# v0.7.x: "X was picked but never invoked during line profiling" is non-actionable
 	# noise it just means the replay didn't exercise that pick. The Line-Level

@@ -261,10 +261,9 @@ def test_frontend_js_wraps_beacon_body_for_frappe_routing():
         "{payload: body} for sendBeacon see comment explaining the "
         "server contract"
     )
-    # Must wrap as {payload: body}.
-    assert "JSON.stringify({ payload: body })" in src or \
-           'JSON.stringify({"payload": body})' in src, (
-        "beaconBody must be JSON.stringify({ payload: body })"
+    # Must wrap as {payload: body} and carry the CSRF token, since a beacon sends no headers.
+    assert "JSON.stringify({ payload: body, csrf_token: frappe.csrf_token })" in src, (
+        "beaconBody must be JSON.stringify({ payload: body, csrf_token: frappe.csrf_token })"
     )
     # The Blob constructor used with sendBeacon must reference
     # beaconBody, not the unwrapped body. Find `new Blob([beaconBody]`
