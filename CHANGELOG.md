@@ -8,7 +8,7 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.105] - 2026-10-29
+## [0.12.115] - 2026-10-29
 
 ### Added
 
@@ -19,6 +19,49 @@ versions may contain breaking changes see migration notes below).
 ### Fixed
 
 - The widget never received the session events the session events on a fresh page load: it subscribed before Frappe had created the realtime socket, where `frappe.realtime.on` does nothing, so no popup, pill or alert update arrived. The widget now waits for the socket (checking every 250 ms, for up to 30 seconds) and registers its handlers exactly once.
+
+---
+
+## [0.12.114] - 2026-10-29
+
+### Fixed
+
+- A session with no recordings is now marked Ready only after its (empty) report is rendered and attached, like every other session. If the report cannot be produced, the session is marked Failed instead of showing Ready with no report. The Ready notification is now also sent for such sessions.
+
+## [0.12.113] - 2026-10-29
+
+### Fixed
+
+- A "Slow Background Job" finding in the Findings section now gets an AI fix suggestion like the other findings. Before, it was skipped and the card said it "does not carry enough code or SQL context". The prompt carries the last part of the job method name, the deepest hot frame with its share of the job's time, the source around it and the job's slowest queries (taken from the job's recording when the prompt is built). A job whose hot frame is framework code, or that names no source line, gets no AI call; the card shows a note saying why, and any older stored suggestion is hidden.
+
+### Action needed
+
+- This type is now eligible with no opt-in. To keep it away from the AI provider, add `Slow Background Job` to Excluded finding types in Optimus Settings.
+
+---
+
+## [0.12.112] - 2026-10-29
+
+### Fixed
+
+- Missing-index suggestions no longer propose an index that an existing index already serves for the same query. A composite index such as (a, b) counts for a query that filters `a` and `b` by equality, a FULLTEXT index no longer hides a real missing index, and a column used only inside a function (such as `DATE(col)` or Frappe's `ifnull(col, '')`) gets no suggestion because a plain index cannot serve it. The warning for that case lists the real options: a range rewrite, a functional index, or avoiding the code path that wraps the column.
+- `NOT (col = ...)`, `NOT EXISTS (...)`, `ANY`, `ALL` and `IN (...)` are no longer mistaken for function calls. `LIKE` with anything but a plain prefix literal, such as `LIKE CONCAT('%', x)`, counts as a scan, `IS NOT NULL` is not treated as a weak negation, and a top-level `UNION` is treated as ambiguous so a real suggestion is kept.
+- When a column leads an existing index but the only filter on it is `!=`, `NOT IN` or `NOT LIKE`, the warning says the index exists but may not be able to serve that filter.
+- Many leading `/* ... */` comments, deep parenthesis nesting or unterminated quotes in a recorded statement can no longer stall the analyze worker; the statement and write parsers now run in linear time.
+- The savings floor and the example queries are computed from the queries that still need the index, the first known column cardinality is kept (numeric strings and Decimal values count), and a non-string query or a parser error fails open instead of dropping every index finding. An RQ job timeout is no longer swallowed while reading table aliases.
+
+### Changed
+
+- Before suggesting an index, Optimus checks the other queries in the same session. It drops the suggestion when the column is updated, or the table is written, far more often than the index would help reads (`HOT_COLUMN_MIN_UPDATES` 5, `WRITE_HEAVY_MIN_WRITES` 50, ratio 10), and says why in the warning. Otherwise it adds a "Before adding, check:" note with the write counts and the flows that write, a table with at least `CAUTION_MIN_WRITES` (10) writes, a column with at most `LOW_CARDINALITY_MAX` (10) distinct values, and an existing composite index that already holds the column. The finding's JSON gains `cautions` and `write_impact`.
+- Write detection also reads aliased UPDATE statements and double-quoted table names; `UPDATE ... JOIN` and multi-table `UPDATE a, b SET` are not counted (stated in the module docstring), which only means fewer suppressions. A failed alias parse is logged at debug level.
+
+---
+
+## [0.12.111] - 2026-10-29
+
+### Changed
+
+- The Optimus Session form is reorganised so the most useful things come first. An Overview tab shows the status, top severity and report links, then the totals, the summary, the session details and your notes. Findings, the recorded actions and background jobs, line-profiling runs and the technical and AI usage details each get their own tab or collapsed section. Existing sessions pick this up on the next migrate, and no session data changes.
 
 ---
 
@@ -138,6 +181,9 @@ versions may contain breaking changes see migration notes below).
 - Normalized EXPLAIN rows are coerced with `to_int` / `to_float`, so a string or
   `Decimal` value no longer drops that row's findings. `to_int` / `to_float` also
   treat `nan` / `inf` as missing instead of passing them to threshold checks.
+- Test coverage is now configured for the unit suite (line and branch; tests, integration tests and data patches excluded). Run `python -m pytest optimus/tests/ --cov --cov-report=term-missing:skip-covered`.
+- New behaviour tests for the session start/stop/retry endpoints, the request and background-job hooks, install/uninstall, the AI settings warning, the janitor and the Redis schema sentinel.
+- Removed an unused test fixture (`sidecar_with_pii.json`).
 
 
 
