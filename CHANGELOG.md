@@ -8,6 +8,14 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.103] - 2026-10-29
+
+### Fixed
+
+- Frontend metrics sent when leaving a page during a session are no longer rejected with a CSRF error (400). The beacon now carries the CSRF token in its body.
+
+---
+
 ## [0.12.102] - 2026-10-29
 
 ### Fixed
