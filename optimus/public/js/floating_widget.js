@@ -623,10 +623,13 @@
 							indicator: "red",
 						});
 					} else {
-						setDisplay("ready", "Report ready", "click to view");
+						const empty = !!data.empty;
+						setDisplay("ready", empty ? "No data" : "Report ready", "click to view");
 						frappe.show_alert({
-							message: __("Profiler report ready"),
-							indicator: "blue",
+							message: empty
+								? __("Profiling finished, but no requests were recorded")
+								: __("Profiler report ready"),
+							indicator: empty ? "orange" : "blue",
 						});
 					}
 				} else {
@@ -740,7 +743,7 @@
 	function isOtherDialogOpen() {
 		const open = frappe.ui && frappe.ui.open_dialogs;
 		if (open && open.length) return true;
-		return !!(document.querySelector && document.querySelector(".modal.show"));
+		return !!(document.querySelector && document.querySelector(".modal.show:not(.optimus-session-popup)"));
 	}
 
 	function openPopup(item) {
@@ -768,6 +771,7 @@
 				frappe.set_route("Form", "Optimus Session", item.docname);
 			},
 		});
+		if (d.$wrapper && d.$wrapper.addClass) d.$wrapper.addClass("optimus-session-popup");
 		d.onhide = () => {
 			popupBusy = false;
 			flushPopups();

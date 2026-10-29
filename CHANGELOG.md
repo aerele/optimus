@@ -14,7 +14,7 @@ versions may contain breaking changes see migration notes below).
 
 - When a profiling session finishes, fails or ends with no recorded requests, a popup shows the Optimus Session ID with a button that opens the record. It appears once per run even with several tabs open, only in a visible tab, wherever you are in Desk, except when you are already on that session's form.
 - The popup waits while you type in a text field or another dialog is open, and opens anyway after about 30 seconds. If it fails to open, the error goes to the browser console and it can still show on the next attempt or in another tab.
-- The pill and alert for a session with no recorded requests say "No data" instead of "Report ready", and so does the alert on the session form.
+- The pill and alert for a session with no recorded requests say "No data" instead of "Report ready", and so does the alert on the session form. The inline stop response now says whether the session was empty, so the same wording applies there. The session form also shows a red alert when analysis fails.
 
 ## [0.12.92] - 2026-10-27
 

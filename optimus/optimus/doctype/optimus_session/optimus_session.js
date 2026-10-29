@@ -432,6 +432,7 @@ function subscribe_session_progress(frm) {
 	frappe.realtime.on("optimus_session_failed", (p) => {
 		if (!mine(p)) return;
 		_progress_banner(frm, null);
+		frappe.show_alert({ message: __("Analysis failed"), indicator: "red" });
 		reload();
 	});
 	// v0.7.x: auto-arm fires server-side during analyze (off-form). Tell the

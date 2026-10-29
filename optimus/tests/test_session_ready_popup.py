@@ -131,6 +131,15 @@ assert.equal(a.dialogs.length, 2);
 """)
 
 
+def test_own_popup_hide_animation_does_not_count_as_another_dialog():
+	_run(r"""
+const d = desk();
+d.doc.querySelector = sel => sel.includes(':not(.optimus-session-popup)') ? null : {};
+d.handlers.optimus_session_ready(ev());
+assert.equal(d.dialogs.length, 1);
+""")
+
+
 def test_empty_session_sets_no_data_pill_and_toast():
 	_run(r"""
 const d = desk();
