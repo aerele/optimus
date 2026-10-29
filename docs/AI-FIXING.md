@@ -59,7 +59,7 @@ Every value captured from your site (title, callsite, source, SQL, EXPLAIN, hot 
 
 | Field | Source | Typical size | Notes |
 |---|---|---|---|
-| `finding_type` | Optimus Finding | ~15 chars | One of the 4 eligible types (§ 5). |
+| `finding_type` | Optimus Finding | ~15 chars | One of the 5 eligible types (§ 5). |
 | `severity` | Optimus Finding | 4–6 chars | High / Medium / Low. |
 | `title` | Optimus Finding | 60–200 chars | Profiler-generated label (e.g. "`frappe.get_doc` on line 12 loops 18×"). |
 | `estimated_impact_ms` | Optimus Finding | ~5 chars | Profiler's impact estimate. |
