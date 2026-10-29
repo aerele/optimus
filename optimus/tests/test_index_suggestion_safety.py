@@ -446,6 +446,29 @@ def test_assess_harm_is_deterministic_and_pure():
 	assert first == second and first.suppress_reason
 
 
+@pytest.mark.parametrize(
+	("writes", "helped", "suppressed"),
+	[(49, 4, False), (50, 5, True), (50, 6, False), (59, 5, True), (60, 6, True), (60, 7, False)],
+)
+def test_write_heavy_boundary(writes, helped, suppressed):
+	table_writes = {"tabT": index_harm.TableWrites(inserts=writes)}
+	result = index_harm.assess_harm("tabT", "b", helped, table_writes)
+	assert bool(result.suppress_reason) is suppressed
+
+
+@pytest.mark.parametrize(("updates", "helped", "suppressed"), [(4, 1, False), (5, 5, True), (5, 6, False), (6, 5, True)])
+def test_hot_column_boundary(updates, helped, suppressed):
+	tw = index_harm.TableWrites(updates=updates, updated_columns=Counter({"b": updates}))
+	result = index_harm.assess_harm("tabT", "b", helped, {"tabT": tw})
+	assert bool(result.suppress_reason) is suppressed
+
+
+@pytest.mark.parametrize(("distinct", "cautioned"), [(0, False), (1, True), (10, True), (11, False), (None, False)])
+def test_low_cardinality_boundary(distinct, cautioned):
+	result = index_harm.assess_harm("tabT", "b", 5, {}, cardinality=distinct)
+	assert any("distinct value" in c for c in result.cautions) is cautioned
+
+
 # ---------------------------------------------------------------------------
 # 5. Dialect adapter: SHOW INDEX exposes the index type
 # ---------------------------------------------------------------------------
