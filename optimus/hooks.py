@@ -123,6 +123,9 @@ after_job = [
 	"optimus.line_profile.hooks.after_job_line_profile",
 ]
 
+# Keep live sessions and recordings when a save calls frappe.clear_cache().
+persistent_cache_keys = ["profiler:*"]
+
 # Janitor (Phase 6)
 # -----------------
 # Sweep stale Recording sessions (started but never explicitly stopped)

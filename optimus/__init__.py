@@ -1,4 +1,4 @@
-__version__ = "0.12.93"
+__version__ = "0.12.104"
 
 
 def safe_commit() -> None:
@@ -194,6 +194,12 @@ def _patch_recorder():
 	def _read_extras():
 		"""Read the live sensitive-list settings. Falls back to empty extras
 		(defaults still apply) if settings can't be loaded."""
+		import frappe
+
+		# A config cache miss reads settings from the DB, and those queries re-enter register.
+		if getattr(frappe.local, "optimus_reading_extras", False):
+			return ((), ())
+		frappe.local.optimus_reading_extras = True
 		try:
 			from optimus.settings import get_config
 
@@ -204,6 +210,8 @@ def _patch_recorder():
 			)
 		except Exception:
 			return ((), ())
+		finally:
+			frappe.local.optimus_reading_extras = False
 
 	def _profiler_init(self, *args, **kwargs):
 		_original_init(self, *args, **kwargs)
