@@ -3454,7 +3454,7 @@ _CLI_CAPABILITY_RE = re.compile(
 	r"shell|exec|tool|browser|cdp|annotation|computer|code_mode|\bapps?\b|plugin|hook|mcp"
 	r"|web|image|agent|file|network|sandbox_bypass|danger"
 	r"|automation|local_|remote|external|operator|repl|patch|js_|run|memor"
-	r"|daemon|skill|realtime",
+	r"|daemon|skill|realtime|goal|mention|worktree|write_stdin|collab|workspace_dep",
 	re.IGNORECASE,
 )
 _FEATURES_PROBE_SECONDS = 10
@@ -3579,7 +3579,8 @@ def _codex_home_path() -> str:
 	operator's own ``~/.codex``."""
 	import frappe
 
-	return frappe.get_site_path("private", _CODEX_HOME_SUBDIR)
+	# get_site_path is relative to the sites folder; the child runs in a scratch cwd.
+	return os.path.abspath(frappe.get_site_path("private", _CODEX_HOME_SUBDIR))
 
 
 def _codex_login_command() -> str:
@@ -3591,6 +3592,7 @@ def _ensure_codex_home() -> str:
 	"""Create the Optimus-owned Codex home (mode 0700) when missing and return its path.
 	It must be a real directory owned by this user, never a link."""
 	path = _codex_home_path()
+	assert os.path.isabs(path), "the Codex home must be an absolute path"
 	os.makedirs(path, mode=0o700, exist_ok=True)
 	st = os.lstat(path)
 	if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid():
@@ -3749,7 +3751,8 @@ _LOGIN_CACHE: dict[str, tuple[float, bool, str]] = {}
 
 
 _NOT_LOGGED_IN_RE = re.compile(
-	r"not (logged|signed) ?in|no (stored )?(credentials|auth)|(log|sign) ?in required|please (log|sign) ?in",
+	r"not (logged|signed) ?in|no (stored )?(credentials|auth)|(log|sign) ?in required|please (log|sign) ?in"
+	r"|error checking login status",
 	re.IGNORECASE,
 )
 
@@ -3926,7 +3929,7 @@ def _cli_session_status() -> dict:
 	ok, reason = _cli_login_ok(path, use_cache=False)
 	if ok:
 		suffix = f" ({result['version']})" if result["version"] else ""
-		message = _("Connected. Codex CLI{0} is signed in with ChatGPT on this machine.").format(suffix)
+		message = _("Connected. Codex CLI{0} is signed in with ChatGPT on this machine (the token is checked on first use).").format(suffix)
 		if _version_tested(result["version"]) is False:
 			message += " " + _("This codex version is outside the range Optimus was tested with ({0}.{1} to {2}.{3}).").format(
 				*_CLI_TESTED_VERSIONS[0], *_CLI_TESTED_VERSIONS[1]
@@ -3943,7 +3946,9 @@ _CLI_STDERR_PATTERNS = (
 		"auth_expired",
 		re.compile(
 			r"\bHTTP 401\b|status:? ?401\b|\b401 unauthori[sz]ed|unauthori[sz]ed|not logged in|please (log|sign) ?in"
-			r"|sign in with|(session|token|credentials?|api key) (has |have )?expired",
+			r"|sign in with|(session|token|credentials?|api key) (has |have )?expired"
+			r"|refresh token (was|has been) (already used|revoked)|token was revoked"
+			r"|access token could not be refreshed|log out and sign in",
 			re.IGNORECASE,
 		),
 	),
@@ -4055,7 +4060,12 @@ def _read_cli_reply(out_file: str, stdout: str) -> tuple[str, bool]:
 	try:
 		# The child can plant a link or a FIFO at this name: refuse both.
 		fd = os.open(out_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)  # nosemgrep: frappe-security-file-traversal -- out_file is built inside the private scratch dir
-		if not stat.S_ISREG(os.fstat(fd).st_mode):
+		try:
+			is_file = stat.S_ISREG(os.fstat(fd).st_mode)
+		except OSError:
+			os.close(fd)
+			raise
+		if not is_file:
 			os.close(fd)
 		else:
 			with os.fdopen(fd, encoding="utf-8", errors="replace") as f:
@@ -4082,6 +4092,49 @@ def _out_of_time() -> AiFixError:
 
 # Labels where the CLI rejected the call before any answer was produced: the outcome is known.
 _CLI_KNOWN_FAILURES = frozenset({"auth_expired", "usage_limit", "rate_limited", "unknown_flag"})
+
+
+_CLI_AUTH_RETRY_WAIT = 2
+
+
+def _auth_retry_fits(deadline: float) -> bool:
+	"""True when enough time is left to wait and run the exec once more."""
+	return deadline - time.monotonic() - _CLI_AUTH_RETRY_WAIT >= _CLI_MIN_EXEC_SECONDS
+
+
+def _exec_cli_once(path: str, prompt: str, deadline: float, total_seconds: int):
+	"""Run ``codex exec`` once in a fresh sandbox and return ``(code, text, truncated, stderr)``."""
+	from frappe import _
+
+	try:
+		with _cli_sandbox() as (work, env):
+			out_file = os.path.join(work, "out.txt")
+			# The login check came out of the deadline; the features
+			# probe is capped by what is left, and then the exec gets what the probe left.
+			remaining = deadline - time.monotonic()
+			if remaining < _CLI_MIN_EXEC_SECONDS:
+				raise _out_of_time()
+			argv = _build_cli_argv(path, work, out_file, probe_seconds=remaining - _CLI_MIN_EXEC_SECONDS)
+			exec_seconds = int(deadline - time.monotonic())
+			if exec_seconds < _CLI_MIN_EXEC_SECONDS:
+				raise _out_of_time()
+			try:
+				code, out, err = _run_cli(argv, env, work, exec_seconds, prompt)
+			except OSError:
+				raise  # could not start, so nothing was sent
+			except BaseException as e:
+				# A timeout, a worker/job interrupt or a kill after the prompt was fed:
+				# the outcome is unknown, so record it before the exception propagates.
+				ai_transport.observe("sent_unknown")
+				_log_cli_diagnostic("exec_abandoned", label=type(e).__name__)
+				raise
+			text, truncated = _read_cli_reply(out_file, out) if code == 0 else ("", False)
+	except subprocess.TimeoutExpired:
+		raise AiFixError(_("Codex CLI didn't respond within the {0}s limit.").format(total_seconds), kind="timeout")
+	except OSError as e:
+		_log_cli_diagnostic("exec_spawn_failed", label=f"errno_{e.errno}")
+		raise AiFixError(_("Codex CLI could not be started."), kind="transport")
+	return code, text, truncated, err
 
 
 def _call_local_cli(
@@ -4134,34 +4187,14 @@ def _call_local_cli(
 		usage_out.begin()
 		usage_out.observe(True)  # nothing is billed per token, so the cost is a known zero
 	ai_privacy.before_http_send()  # a CLI send discloses the prompt like an HTTP one
-	try:
-		with _cli_sandbox() as (work, env):
-			out_file = os.path.join(work, "out.txt")
-			# The login check came out of the deadline; the features
-			# probe is capped by what is left, and then the exec gets what the probe left.
-			remaining = deadline - time.monotonic()
-			if remaining < _CLI_MIN_EXEC_SECONDS:
-				raise _out_of_time()
-			argv = _build_cli_argv(path, work, out_file, probe_seconds=remaining - _CLI_MIN_EXEC_SECONDS)
-			exec_seconds = int(deadline - time.monotonic())
-			if exec_seconds < _CLI_MIN_EXEC_SECONDS:
-				raise _out_of_time()
-			try:
-				code, out, err = _run_cli(argv, env, work, exec_seconds, prompt)
-			except OSError:
-				raise  # could not start, so nothing was sent
-			except BaseException as e:
-				# A timeout, a worker/job interrupt or a kill after the prompt was fed:
-				# the outcome is unknown, so record it before the exception propagates.
-				ai_transport.observe("sent_unknown")
-				_log_cli_diagnostic("exec_abandoned", label=type(e).__name__)
-				raise
-			text, truncated = _read_cli_reply(out_file, out) if code == 0 else ("", False)
-	except subprocess.TimeoutExpired:
-		raise AiFixError(_("Codex CLI didn't respond within the {0}s limit.").format(total_seconds), kind="timeout")
-	except OSError as e:
-		_log_cli_diagnostic("exec_spawn_failed", label=f"errno_{e.errno}")
-		raise AiFixError(_("Codex CLI could not be started."), kind="transport")
+	code, text, truncated, err = _exec_cli_once(path, prompt, deadline, total_seconds)
+	if code != 0 and _classify_cli_stderr(err) == "auth_expired" and _auth_retry_fits(deadline):
+		# Parallel runs share one sign-in: a lost refresh race is rejected before any answer
+		# and the winner has rewritten auth.json, so one retry cures it.
+		_LOGIN_CACHE.pop(path, None)
+		_log_cli_diagnostic("auth_retry", label="auth_expired", code=code)
+		time.sleep(_CLI_AUTH_RETRY_WAIT)
+		code, text, truncated, err = _exec_cli_once(path, prompt, deadline, total_seconds)
 	if code < 0 or code >= 128:
 		# Killed by a signal (OOM, SIGSEGV) after the prompt was sent: an uncertain outcome.
 		ai_transport.observe("sent_unknown")

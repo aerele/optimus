@@ -24,6 +24,9 @@ import pytest
 
 from optimus import ai_fix, ai_transport
 
+# The real path function, kept before the autouse fixture replaces it.
+_REAL_CODEX_HOME_PATH = ai_fix._codex_home_path
+
 _FAKE_CODEX = """#!/bin/sh
 R="{rec}"
 echo "$1 $2" >> "$R/calls.txt"
@@ -894,6 +897,63 @@ class TestCallLocalCli:
 			self._call()
 		assert err.value.kind == "transport" and err.value.fatal is False
 
+	def test_the_codex_home_path_is_absolute_even_when_the_site_path_is_relative(self, monkeypatch, tmp_path):
+		import frappe
+
+		# Frappe's get_site_path is relative to sites_path ("."): the child runs elsewhere.
+		monkeypatch.setattr(frappe, "get_site_path", lambda *p: os.path.join(".", "site1", *p), raising=False)
+		monkeypatch.setattr(ai_fix, "_codex_home_path", _REAL_CODEX_HOME_PATH)
+		monkeypatch.chdir(tmp_path)
+		path = ai_fix._ensure_codex_home()
+		assert os.path.isabs(path) and path == str(tmp_path / "site1" / "private" / "optimus-codex")
+		assert os.path.isabs(ai_fix._codex_home_path())
+		with ai_fix._cli_sandbox() as (work, env):
+			assert env["CODEX_HOME"] == path
+			monkeypatch.chdir(work)  # the child's cwd: the home still resolves
+			assert os.path.isdir(env["CODEX_HOME"])
+		monkeypatch.chdir(tmp_path)
+		assert ai_fix._codex_login_command().startswith(f"CODEX_HOME={path} ")
+
+	def test_a_relative_codex_home_is_refused(self, monkeypatch):
+		monkeypatch.setattr(ai_fix, "_codex_home_path", lambda: "site1/private/optimus-codex")
+		with pytest.raises(AssertionError):
+			ai_fix._ensure_codex_home()
+
+	@pytest.mark.parametrize("stderr", [
+		"Your access token could not be refreshed. Please log out and sign in again.",
+		"refresh token was already used. Please log out and sign in again.",
+		"token was revoked. Please log out and sign in again.",
+	])
+	def test_real_refresh_failures_are_an_auth_error_with_the_login_hint(self, fake_codex, optimus_home, stderr):
+		fake_codex(exec_body=f"echo '{stderr}' >&2; exit 1")
+		with pytest.raises(ai_fix.AiFixError) as err:
+			self._call()
+		assert err.value.kind == "auth" and f"CODEX_HOME={optimus_home} codex login" in str(err.value)
+
+	def test_a_lost_refresh_race_is_retried_once_and_succeeds(self, fake_codex, monkeypatch, tmp_path):
+		monkeypatch.setattr(ai_fix, "_CLI_AUTH_RETRY_WAIT", 0)
+		count = tmp_path / "rec" / "n"
+		fake_codex(exec_body=(
+			f'echo x >> "{count}"; '
+			f'if [ "$(wc -l < "{count}")" = 1 ]; then echo "refresh token was already used" >&2; exit 1; fi; '
+			'echo RETRIED > "$out"'
+		))
+		assert self._call().startswith("RETRIED")
+		assert len(count.read_text().split()) == 2
+
+	def test_a_second_auth_failure_is_not_retried_again(self, fake_codex, monkeypatch, tmp_path):
+		monkeypatch.setattr(ai_fix, "_CLI_AUTH_RETRY_WAIT", 0)
+		count = tmp_path / "rec" / "n"
+		fake_codex(exec_body=f'echo x >> "{count}"; echo "token was revoked" >&2; exit 1')
+		with pytest.raises(ai_fix.AiFixError) as err:
+			self._call()
+		assert err.value.kind == "auth"
+		assert len(count.read_text().split()) == 2
+
+	def test_no_retry_when_too_little_time_is_left(self):
+		assert not ai_fix._auth_retry_fits(time.monotonic() + 3)
+		assert ai_fix._auth_retry_fits(time.monotonic() + 60)
+
 	def test_an_auth_failure_clears_the_login_memo(self, fake_codex):
 		box = fake_codex(exec_body="echo 'HTTP 401 Unauthorized' >&2; exit 1")
 		with pytest.raises(ai_fix.AiFixError):
@@ -1506,11 +1566,11 @@ class TestToolIsolation:
 		assert {"shell_tool", "browser_use", "plugins", "apps"} <= set(ai_fix._CLI_DISABLED_FEATURES)
 
 	def test_on_capability_features_from_the_probe_are_disabled_too(self, monkeypatch):
-		on = {"future_browser_tool", "remote_repl", "fast_mode", "goals", "steer"}
+		on = {"future_browser_tool", "remote_repl", "fast_mode", "goals", "steer", "worktrees", "collab"}
 		self._probe(monkeypatch, on)
 		disabled = self._disabled(ai_fix._build_cli_argv("codex", "/s", "/s/out"))
-		assert "future_browser_tool" in disabled and "remote_repl" in disabled
-		for name in ("fast_mode", "goals", "steer"):
+		assert {"future_browser_tool", "remote_repl", "goals", "worktrees", "collab"} <= set(disabled)
+		for name in ("fast_mode", "steer"):
 			assert name not in disabled
 		assert set(ai_fix._CLI_DISABLED_FEATURES) <= set(disabled)
 		assert len(disabled) == len(set(disabled)) and disabled == sorted(disabled)
@@ -1611,7 +1671,7 @@ class TestToolIsolation:
 		assert ai_fix._CLI_CAPABILITY_RE.search(name)
 
 	def test_capability_regex_leaves_plain_completion_features_alone(self):
-		for name in ("fast_mode", "goals", "steer", "collaboration_modes", "sqlite", "item_ids"):
+		for name in ("fast_mode", "steer", "sqlite", "item_ids"):
 			assert not ai_fix._CLI_CAPABILITY_RE.search(name)
 		for name in (
 			"browser_use_external", "code_mode_host", "unified_exec", "sandbox_bypass_x",

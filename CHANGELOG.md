@@ -36,6 +36,9 @@ versions may contain breaking changes see migration notes below).
 - A call stays inside its time limit: the sign-in check and the feature check come out of it, and the run stops with a timeout when too little is left. The sign-in check is remembered for 5 minutes and cleared when a run reports an expired session.
 - The CLI process group is always stopped when a call ends, and output is read with a size limit. A descendant that keeps the pipe open can no longer hang the call.
 - The unavailable message now tells a non-admin to ask a System Manager to open Optimus Settings and click Connect, and does not mention Connect while AI is off.
+- The Optimus Codex home is always an absolute path, so the CLI child (which runs in a scratch folder) finds the sign-in; before, Frappe's relative site path made Connect and every run fail on a real bench.
+- The CLI's real refresh-failure messages ("refresh token was already used", "token was revoked", "access token could not be refreshed", "log out and sign in") are an expired-session error with the `codex login` hint. Because parallel runs share one sign-in, a run that gets that error is tried once more after 2 seconds (when the time limit allows) before it fails.
+- The capability filter also turns off `goals`, `mentions`, `worktrees`, `write_stdin` and `collab` features. A corrupt `auth.json` ("Error checking login status") reads as signed out, and the Connect message says the token is checked on first use.
 
 ---
 
