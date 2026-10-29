@@ -327,6 +327,7 @@ def _lock_caller_frames() -> list:
 def job_retry_state(create: bool = True) -> dict | None:
 	"""Per-RQ-job dict that outlives ``frappe.destroy()`` across Frappe's in-process retry."""
 	# execute_job destroys frappe.local and re-runs on a deadlock; the RQ job object survives.
+	# Relies on rq.Job accepting arbitrary attributes.
 	try:
 		from rq import get_current_job
 

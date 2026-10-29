@@ -16,7 +16,7 @@ versions may contain breaking changes see migration notes below).
 - Findings are raised only for contention at a callsite in your own code (same app classification as the Redundant Call and N+1 analyzers). Lock errors Frappe catches itself (session touch, change-log write, dashboard refresh) are dropped even when your code is above them in the stack, deliberate `NOWAIT` probes are skipped, and a Postgres statement timeout is not reported as a lock wait.
 - The finding is actionable, names the callsite, lists every distinct contended query, shows the wall time the query waited before failing, and gives a fix hint. Within a root-cause group it outranks timed findings of the same severity. It is not sent to the LLM; it shows only its canned fix hint.
 - Stored events are bounded: at most 200 per recording (a truncation marker is added past that), the callsite plus a short tail of frames, and the error cut to its first line.
-- A background job that Frappe retries in the same worker after a deadlock or lock-wait timeout keeps its session and its lock events across the retry, so the deadlock that caused the retry is reported.
+- A background job that Frappe retries in the same worker after a deadlock or lock-wait timeout keeps its session and its lock events across the retry, so the deadlock that caused the retry is reported. If the session ends or the user is skipped before the retry starts, the retry runs unprofiled and the first attempt's lock events are not reported.
 
 ### Fixed
 
