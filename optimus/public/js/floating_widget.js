@@ -240,7 +240,7 @@
 		_diag("[optimus] body has child count:", document.body.children.length);
 	}
 
-	function setDisplay(display, label, elapsed) {
+	function setDisplay(display, label, elapsed, tone) {
 		if (!widget) return;
 		widget.classList.remove(
 			"fp-state-inactive",
@@ -248,8 +248,11 @@
 			"fp-state-stopping",
 			"fp-state-analyzing",
 			"fp-state-ready",
+			"fp-tone-failed",
+			"fp-tone-stale",
 		);
 		widget.classList.add(`fp-state-${display}`);
+		if (tone) widget.classList.add(`fp-tone-${tone}`);
 		widget.querySelector(".fp-label").textContent = label;
 		widget.querySelector(".fp-elapsed").textContent = elapsed || "";
 		if (display !== "recording") stopElapsedTimer();
@@ -260,7 +263,7 @@
 	function applyResult(res) {
 		if (!res) return;
 		currentState = res.state;
-		if (res.ui) setDisplay(res.ui.display, res.ui.label, res.ui.elapsed);
+		if (res.ui) setDisplay(res.ui.display, res.ui.label, res.ui.elapsed, res.ui.tone);
 		if (res.alert) {
 			frappe.show_alert({ message: __(res.alert.message), indicator: res.alert.indicator });
 		}
@@ -341,7 +344,10 @@
 				}
 				if (done) done();
 			},
-			error: () => { if (done) done(); },
+			error: (xhr) => {
+					_diag("[optimus] pill_state poll failed:", xhr && xhr.status);
+					if (done) done();
+				},
 		});
 	}
 
@@ -375,6 +381,7 @@
 	function stopPhase2() {
 		const run_uuid = currentState.run_uuid;
 		if (!run_uuid) return;
+		resyncEpoch += 1;
 		// Optimistic UI: the realtime phase_2_run_analyzing event will
 		// arrive within ~1s and confirm the transition.
 		currentState.display = "stopping";
@@ -598,6 +605,7 @@
 		// API fires, so analyze can join them to recordings. Best-effort
 		// a failed flush never blocks stop.
 		_diag("[optimus] confirmAndStop: click received");
+		resyncEpoch += 1;
 		setDisplay("stopping", "Stopping…", "");
 		currentState.display = "stopping";
 		stopElapsedTimer();
@@ -650,7 +658,7 @@
 					currentState.display = "ready";
 					currentState.docname = data.docname;
 					if (data.status === "Failed") {
-						setDisplay("ready", "Analyze failed", "click to view");
+						setDisplay("ready", "Analyze failed", "click to view", "failed");
 						frappe.show_alert({
 							message: __("Profiler analyze failed click the pill to see details"),
 							indicator: "red",

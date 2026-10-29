@@ -21,6 +21,7 @@ test("failed event clears analyzing", () => {
 	const r = ev(analyzing(), "optimus_session_failed");
 	assert.strictEqual(r.ui.label, "Analyze failed");
 	assert.strictEqual(r.alert.indicator, "red");
+	assert.strictEqual(r.ui.tone, "failed");
 });
 
 test("phase 2 ready/failed clear analyzing and drop the run", () => {
@@ -99,6 +100,7 @@ test("duplicate ready (event then poll) toasts once", () => {
 
 test("hard stop clears a transient pill", () => {
 	assert.strictEqual(Pill.reduceHardStop(analyzing()).ui.label, "Check report");
+	assert.strictEqual(Pill.reduceHardStop(analyzing()).ui.tone, "stale");
 	const noDoc = Pill.reduceHardStop(analyzing({ docname: null }));
 	assert.strictEqual(noDoc.state.display, "inactive");
 	assert.strictEqual(Pill.reduceHardStop(analyzing({ display: "ready" })), null);

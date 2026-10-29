@@ -101,7 +101,7 @@
 				docname: data.docname || data.parent || state.docname,
 				terminal: markTerminal(state, key, now),
 			}),
-			ui: { display: "ready", label: terminalLabel(kind, phase2), elapsed: "click to view" },
+			ui: { display: "ready", label: terminalLabel(kind, phase2), elapsed: "click to view", tone: failed ? "failed" : null },
 			alert: already ? null : {
 				message: failed
 					? (phase2 ? "Phase 2 analyze failed" + (data.error ? ": " + data.error : ", open the session for details") : "Profiler analyze failed check Error Log")
@@ -207,7 +207,7 @@
 		if (state.docname) {
 			return {
 				state: withState(state, { display: "ready", phase2: false, run_uuid: null }),
-				ui: { display: "ready", label: "Check report", elapsed: "click to view" },
+				ui: { display: "ready", label: "Check report", elapsed: "click to view", tone: "stale" },
 				alert: { message: "Profiler is taking unusually long open the session to check its status", indicator: "orange" },
 			};
 		}

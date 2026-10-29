@@ -39,7 +39,7 @@ function load() {
 	vm.runInContext(fs.readFileSync(path.join(JS, "optimus_pill_state.js"), "utf8"), ctx);
 	const code = fs.readFileSync(path.join(JS, "floating_widget.js"), "utf8").replace(
 		/\}\)\(\);\s*$/,
-		"widget = makeWidget();\nglobalThis.t = { applyResult, refreshStatus, onClick, startElapsedTimer," +
+		"widget = makeWidget();\nglobalThis.t = { applyResult, refreshStatus, onClick, confirmAndStop, stopPhase2, get widget() { return widget; }, startElapsedTimer," +
 		" get state() { return currentState; }, set state(v) { currentState = v; }, Pill };})();"
 	);
 	ctx.makeWidget = makeWidget;
@@ -72,6 +72,36 @@ test("entering analyzing schedules a poll at the base delay", () => {
 	enterAnalyzing(env);
 	assert.strictEqual(env.live().length, 1);
 	assert.strictEqual(env.live()[0].ms, env.t.Pill.POLL.baseMs);
+});
+
+test("a stop click drops an in-flight resync reply", () => {
+	const env = load();
+	env.t.state = Object.assign(env.t.state, { display: "recording", session_uuid: "s1" });
+	env.t.refreshStatus();
+	const pending = env.calls[0];
+	env.t.confirmAndStop();
+	pending.callback({ message: { phase: "ready", session_uuid: "s1", scope: "session", docname: "OS-1" } });
+	assert.strictEqual(env.t.state.display, "stopping");
+});
+
+test("a phase-2 stop click drops an in-flight resync reply", () => {
+	const env = load();
+	env.t.state = Object.assign(env.t.state, { display: "recording", phase2: true, run_uuid: "r1", session_uuid: "s1" });
+	env.t.refreshStatus();
+	const pending = env.calls[0];
+	env.t.stopPhase2();
+	pending.callback({ message: { phase: "ready", session_uuid: "s1", scope: "session", docname: "OS-1" } });
+	assert.strictEqual(env.t.state.display, "stopping");
+});
+
+test("failed and check-report states get their own tone class", () => {
+	const env = load();
+	env.t.applyResult({ state: env.t.state, ui: { display: "ready", label: "Analyze failed", elapsed: "", tone: "failed" } });
+	assert.ok(env.t.widget.classes.has("fp-tone-failed"));
+	env.t.applyResult({ state: env.t.state, ui: { display: "ready", label: "Check report", elapsed: "", tone: "stale" } });
+	assert.ok(env.t.widget.classes.has("fp-tone-stale") && !env.t.widget.classes.has("fp-tone-failed"));
+	env.t.applyResult({ state: env.t.state, ui: { display: "ready", label: "Report ready", elapsed: "" } });
+	assert.ok(!env.t.widget.classes.has("fp-tone-stale"));
 });
 
 test("a ready reply clears the pill and stops the poll", () => {
