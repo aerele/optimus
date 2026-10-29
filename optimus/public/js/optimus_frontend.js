@@ -261,7 +261,8 @@
 		// which doesn't match the signature and fails with
 		// TypeError. Earlier versions shipped without this wrap
 		// and the beacon path silently dropped every payload.
-		var beaconBody = JSON.stringify({ payload: body });
+		// A beacon cannot set headers, so the CSRF token rides in the body.
+		var beaconBody = JSON.stringify({ payload: body, csrf_token: frappe.csrf_token });
 
 		if (opts.sync && typeof navigator !== "undefined" && navigator.sendBeacon) {
 			try {

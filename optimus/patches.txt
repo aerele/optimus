@@ -17,4 +17,5 @@ optimus.patches.v0_12_0.scrub_ai_keys_from_error_log
 optimus.patches.v0_12_0.initialize_ai_refresh_store
 optimus.patches.v0_12_0.seed_ai_refresh_max_findings
 optimus.patches.v0_12_0.warn_ai_endpoint_policy
-optimus.patches.v0_12_101.add_background_job_parent_field
+optimus.patches.v0_12_0.seed_ignored_apps_for_existing_installs
+optimus.patches.v0_12_112.add_background_job_parent_field
