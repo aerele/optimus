@@ -48,6 +48,18 @@ test("phase 2 ready with the report update owed says results saved", () => {
 	assert.strictEqual(first.ui.label, "Report ready");
 });
 
+test("normal ready with no requests recorded says no data", () => {
+	const empty = ev(analyzing(), "optimus_session_ready", { empty: true });
+	assert.strictEqual(empty.ui.label, "No data");
+	assert.strictEqual(empty.alert.message, "Profiling finished, but no requests were recorded");
+	assert.strictEqual(empty.alert.indicator, "orange");
+	const p2 = ev(analyzing({ phase2: true, run_uuid: "r1" }), "phase_2_run_ready", { run_uuid: "r1", parent: "OS-1", render_pending: true, empty: true });
+	assert.strictEqual(p2.ui.label, "Phase 2 results saved");
+	const plain = ev(analyzing(), "optimus_session_ready", { empty: false });
+	assert.strictEqual(plain.ui.label, "Report ready");
+	assert.strictEqual(plain.alert.indicator, "blue");
+});
+
 test("late analyzing event after ready is ignored (reordered delivery)", () => {
 	const done = ev(analyzing(), "optimus_session_ready", {}, T0).state;
 	assert.strictEqual(ev(done, "optimus_session_analyzing", {}, T0 + 100), null);

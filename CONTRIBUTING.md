@@ -116,6 +116,10 @@ without a separate design discussion:
 - **Public API surface** in `api.py` - whitelisted endpoints are
   load-bearing for the floating widget and external CLIs.
 
+## The local Codex CLI transport
+
+The local Codex CLI is a transport, not a provider. `_provider_config` returns a synthetic `protocol == "subscription"` provider that is deliberately not in `_PROVIDER_DEFAULTS` or the `ai_provider` Select. It is chosen through `ai_connection_type`, routed by `_dispatch_call` to `_call_local_cli`, and gated by `developer_mode` plus the `optimus_allow_subscription_cli` site flag. This is the one exception to "never add per-provider branches": keep its branch inside provider resolution, availability and the connectivity test, the dispatch layer, `_call_local_cli` and the helpers they call, and the Settings validator.
+
 ## Areas that welcome contribution
 
 - `renderer.py` UX polish (panels, layout, accessibility).

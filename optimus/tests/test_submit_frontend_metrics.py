@@ -395,7 +395,8 @@ def test_metrics_rate_limit_precedes_parse_and_redis_appends(mock_frappe, monkey
 @pytest.mark.parametrize('xhr', [{'wrong': 'container'}, ['not an entry']])
 def test_invalid_metrics_shapes_never_append(mock_frappe, xhr):
     from optimus import api
-    assert not api.submit_frontend_metrics({'session_uuid': 's', 'xhr': xhr})['accepted']
+    # a JSON string, as the endpoint's `payload: str` contract (and Frappe's type check) requires
+    assert not api.submit_frontend_metrics(json.dumps({'session_uuid': 's', 'xhr': xhr}))['accepted']
     assert not mock_frappe['list_store']
 
 
@@ -403,5 +404,8 @@ def test_cyclic_internal_metrics_are_bounded(mock_frappe):
     from optimus import api
     data = {'session_uuid': 's'}
     data['cycle'] = data
-    assert not api.submit_frontend_metrics(data)['accepted']
+    # A cyclic object cannot be a JSON string, so it goes past the whitelist wrapper, whose type
+    # check (real Frappe, not the stub) rejects a dict before the body; the body is what is tested.
+    endpoint = getattr(api.submit_frontend_metrics, '__wrapped__', api.submit_frontend_metrics)
+    assert not endpoint(data)['accepted']
     assert not mock_frappe['list_store']

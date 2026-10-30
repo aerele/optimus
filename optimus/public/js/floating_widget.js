@@ -664,10 +664,13 @@
 							indicator: "red",
 						});
 					} else {
-						setDisplay("ready", "Report ready", "click to view");
+						const empty = !!data.empty;
+						setDisplay("ready", empty ? "No data" : "Report ready", "click to view");
 						frappe.show_alert({
-							message: __("Profiler report ready"),
-							indicator: "blue",
+							message: empty
+								? __("Profiling finished, but no requests were recorded")
+								: __("Profiler report ready"),
+							indicator: empty ? "orange" : "blue",
 						});
 					}
 				} else if (currentState.display === "ready") {
@@ -743,7 +746,160 @@
 		});
 	}
 
+	// Completion popups: one claim per run (localStorage) across tabs, queued, shown in a visible tab when not typing.
+	const popupQueue = [];
+	const popupClaimed = new Set();
+	const POPUP_TAB_ID = Math.random().toString(36).slice(2);
+	let popupBusy = false;
+	let popupTimer = null;
+	let popupDeferrals = 0;
+	const POPUP_MAX_DEFERRALS = 30;
+	const TEXT_INPUT_TYPES = /^(text|search|email|url|tel|password|number)?$/i;
+
+	// Write our id, then read it back: the last writer wins, so only one tab proceeds.
+	function claimPopup(key, token) {
+		const mine = token + "|" + POPUP_TAB_ID;
+		try {
+			const current = localStorage.getItem(key);
+			if (current && current.split("|")[0] === token) return false;
+			localStorage.setItem(key, mine);
+			return localStorage.getItem(key) === mine;
+		} catch (e) {
+			if (popupClaimed.has(key + token)) return false;
+			popupClaimed.add(key + token);
+			return true;
+		}
+	}
+
+	function releasePopup(key, token) {
+		try {
+			if (localStorage.getItem(key) === token + "|" + POPUP_TAB_ID) localStorage.removeItem(key);
+		} catch (e) { /* storage unavailable */ }
+		popupClaimed.delete(key + token);
+	}
+
+	function isTyping() {
+		const el = document.activeElement;
+		if (!el) return false;
+		if (el.isContentEditable || el.tagName === "TEXTAREA") return true;
+		return el.tagName === "INPUT" && TEXT_INPUT_TYPES.test(el.type || "");
+	}
+
+	function isOtherDialogOpen() {
+		const open = frappe.ui && frappe.ui.open_dialogs;
+		if (open && open.length) return true;
+		return !!(document.querySelector && document.querySelector(".modal.show:not(.optimus-session-popup)"));
+	}
+
+	function openPopup(item) {
+		const messages = {
+			ready: __("Profiling is complete. Your Optimus Session is ready."),
+			empty: __("Profiling finished, but no requests were recorded in this session."),
+			failed: __("Analysis failed for this session. Open it to review the error and retry."),
+		};
+		const titles = {
+			ready: __("Optimus Session ready"),
+			empty: __("Optimus Session has no data"),
+			failed: __("Optimus analysis failed"),
+		};
+		const d = new frappe.ui.Dialog({
+			title: titles[item.kind],
+			fields: [{
+				fieldtype: "HTML",
+				fieldname: "body",
+				options: "<p>" + frappe.utils.escape_html(messages[item.kind]) + "</p>"
+					+ "<p><b>" + frappe.utils.escape_html(__("Session ID: {0}", [item.docname])) + "</b></p>",
+			}],
+			primary_action_label: item.kind === "failed" ? __("Review and Retry") : __("Open Session"),
+			primary_action: () => {
+				d.hide();
+				frappe.set_route("Form", "Optimus Session", item.docname);
+			},
+		});
+		if (d.$wrapper && d.$wrapper.addClass) d.$wrapper.addClass("optimus-session-popup");
+		d.onhide = () => {
+			popupBusy = false;
+			flushPopups();
+		};
+		d.show();
+	}
+
+	function flushPopups() {
+		clearTimeout(popupTimer);
+		popupTimer = null;
+		if (popupBusy || !popupQueue.length) return;
+		// A hidden tab must not win the claim; it flushes again on visibilitychange.
+		if (document.visibilityState !== "visible") return;
+		// Don't steal focus or stack on another dialog; re-check, then open anyway after the cap.
+		if ((isTyping() || isOtherDialogOpen()) && popupDeferrals < POPUP_MAX_DEFERRALS) {
+			popupDeferrals += 1;
+			popupTimer = setTimeout(flushPopups, 1000);
+			return;
+		}
+		popupDeferrals = 0;
+		const item = popupQueue.shift();
+		if (!claimPopup(item.key, item.token)) {
+			flushPopups();
+			return;
+		}
+		popupBusy = true;
+		try {
+			openPopup(item);
+		} catch (e) {
+			popupBusy = false;
+			releasePopup(item.key, item.token);
+			console.warn("[optimus] session popup failed", e);
+			flushPopups();
+		}
+	}
+
+	if (typeof document !== "undefined" && document.addEventListener) {
+		document.addEventListener("visibilitychange", flushPopups);
+	}
+
+	function isOnSessionForm(docname) {
+		const route = frappe.get_route ? frappe.get_route() : [];
+		return !!route && route[0] === "Form" && route[1] === "Optimus Session" && route[2] === docname;
+	}
+
+	// Never throws: a popup problem must not break the widget's own state handling.
+	function showSessionPopup(data, kind) {
+		try {
+			const docname = data && data.docname;
+			if (!docname || !frappe.ui || !frappe.ui.Dialog) return;
+			if (data.recording_user && data.recording_user !== frappe.session.user) return;
+			if (isOnSessionForm(docname)) return;
+			const key = "optimus_popup_shown:" + docname + ":" + kind;
+			const token = String(data.event_id || data.session_uuid || "");
+			popupQueue.push({ docname, kind, key, token });
+			flushPopups();
+		} catch (e) {
+			console.warn("[optimus] session popup failed", e);
+		}
+	}
+
+	let realtimeSubscribed = false;
+	let realtimeAttempts = 0;
+	const REALTIME_RETRY_MS = 250;
+	const REALTIME_MAX_ATTEMPTS = 120;
+
 	function subscribeRealtime() {
+		// Frappe creates the socket after this bootstrap runs, and
+		// frappe.realtime.on is a silent no-op until it exists: retry
+		// until it does, then register once.
+		if (realtimeSubscribed) return;
+		if (!frappe.realtime || !frappe.realtime.on) return;
+		if (!frappe.realtime.socket) {
+			if (++realtimeAttempts < REALTIME_MAX_ATTEMPTS) {
+				setTimeout(subscribeRealtime, REALTIME_RETRY_MS);
+			}
+			return;
+		}
+		realtimeSubscribed = true;
+		registerRealtimeHandlers();
+	}
+
+	function registerRealtimeHandlers() {
 		// v0.5.1: realtime is now the PRIMARY state-transition channel
 		// (polling is gone). Server emits:
 		//
@@ -756,10 +912,6 @@
 		// The widget rehydrates state from these events so a session
 		// driven from tab A is visible in tabs B, C, D without any tab
 		// issuing an HTTP poll.
-		if (!frappe.realtime || !frappe.realtime.on) {
-			return;
-		}
-
 		// A socket can receive the same event through its user and document
 		// rooms. Shared-form events must never take over this user's widget.
 		const seenEvents = new Set();
@@ -818,6 +970,10 @@
 		// analyzing / progress / ready / failed for both phases.
 		Pill.EVENT_NAMES.forEach((name) => {
 			frappe.realtime.on(name, (data) => {
+				// The popup is independent of the pill: it also fires for
+				// sessions this tab is not tracking.
+				if (name === "optimus_session_failed") showSessionPopup(data, "failed");
+				if (name === "optimus_session_ready") showSessionPopup(data, data && data.empty ? "empty" : "ready");
 				if (!matchesCurrentSession(data, name.indexOf("phase_2_") === 0)) return;
 				applyResult(Pill.reduceEvent(currentState, name, data, Date.now()));
 			});

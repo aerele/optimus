@@ -57,10 +57,13 @@
 		return (data && data.run_uuid) || (data && data.session_uuid) || state.run_uuid || state.session_uuid;
 	}
 
-	function terminalLabel(kind, phase2, pending) {
+	function terminalLabel(kind, phase2, pending, empty) {
 		if (kind === "ready") {
 			if (phase2 && pending) {
 				return "Phase 2 results saved";
+			}
+			if (empty) {
+				return "No data";
 			}
 			return phase2 ? "Phase 2 report ready" : "Report ready";
 		}
@@ -106,14 +109,15 @@
 				docname: data.docname || data.parent || state.docname,
 				terminal: markTerminal(state, key, now),
 			}),
-			ui: { display: "ready", label: terminalLabel(kind, phase2, pending), elapsed: "click to view", tone: failed ? "failed" : null },
+			ui: { display: "ready", label: terminalLabel(kind, phase2, pending, !!data.empty), elapsed: "click to view", tone: failed ? "failed" : null },
 			alert: already ? null : {
 				message: failed
 					? (phase2 ? (data.error ? "Phase 2 analyze failed: {0}" : "Phase 2 analyze failed, open the session for details") : "Profiler analyze failed, check Error Log")
 					: (pending ? "Phase 2 results saved. Use Regenerate Reports to update the report."
-						: (phase2 ? "Phase 2 line-profile report ready" : "Profiler report ready")),
+						: (data.empty ? "Profiling finished, but no requests were recorded"
+							: (phase2 ? "Phase 2 line-profile report ready" : "Profiler report ready"))),
 				args: failed && phase2 && data.error ? [data.error] : undefined,
-				indicator: failed ? "red" : (pending ? "orange" : "blue"),
+				indicator: failed ? "red" : (pending || data.empty ? "orange" : "blue"),
 			},
 		};
 	}

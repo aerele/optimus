@@ -546,6 +546,36 @@ enabled scheduler are required for execution and recovery. See
 [background refresh operations](AI-REFRESH.md) for deployment, cancellation,
 uncertain usage, resume limits, report recovery and API response changes.
 
+### 6.4a Subscription mode (local Codex CLI)
+
+Instead of an API key you can use the Codex CLI that is signed in with ChatGPT on the bench machine. It is meant for developer benches only.
+
+1. Install the `codex` CLI for the bench user and sign in once to the Codex home that Optimus owns, `sites/<site>/private/optimus-codex` (Optimus creates it, mode 0700, and uses it for nothing else; your own `~/.codex` is never touched):
+
+```bash
+CODEX_HOME=<bench path>/sites/<site>/private/optimus-codex codex login
+```
+
+Choose "Sign in with ChatGPT"; an API-key login is refused. The Connect button and the "not signed in" message show this command with your real path. Optimus reads the file-based sign-in (`auth.json`) in that folder: if your codex keeps credentials in the OS keyring instead, set its file-based credential store before you sign in.
+2. Enable the site flags, then restart the bench (or run `bench clear-cache`) so running workers see them:
+
+```bash
+bench --site <site> set-config developer_mode 1
+bench --site <site> set-config optimus_allow_subscription_cli 1
+```
+
+3. In Optimus Settings > AI set Connection to "Subscription (local CLI)", save, and click Connect. Connect only checks the CLI and the sign-in; it never logs in and shows when it last checked.
+
+What to know:
+
+- The prompt leaves the host: Codex sends it to OpenAI. Section 2 applies as for an API call.
+- Each call runs `codex exec` read-only with the file, command and browser tools turned off. Calls are not serialised by Optimus: the codex CLI refreshes its own sign-in inside the Optimus Codex home, and concurrent runs in that one folder are codex's own business.
+- A call can take longer than 60 seconds. Raise `ai_request_timeout_seconds` (180 is a good start). The check of the CLI comes out of the same limit.
+- If `codex features list` cannot be read, the call is refused with "refused for safety". Check that the command works for the bench user.
+- The guardrail re-ask is not used with this mode, because the CLI takes one flat prompt.
+- Tested with codex 0.164 to 0.165. See SECURITY.md for the residual risks (denylist of tools, pattern based output scrub).
+- A killed worker: on Linux the kernel stops the codex child with the worker (`PR_SET_PDEATHSIG`), but the signal reaches the direct child only, and other platforms do not have it. A run that is abandoned (timeout, interrupt) is logged as `exec_abandoned`, and stale scratch folders are swept (logged as `stale_sandbox_removed`). If the next call says the session expired, run the `codex login` command above again.
+
 ### 6.5 Troubleshooting
 
 - **"The model's context window (N tokens) is too small for the Optimus prompt."** The window cannot hold the system prompt plus a minimal answer (about 2,760 tokens for a fix suggestion, 2,168 for the Steps to Reproduce rewrite). Raise the server's window and the Context window (tokens) setting together.

@@ -8,7 +8,7 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.123] - 2026-10-30
+## [0.12.125] - 2026-10-30
 
 ### Fixed
 
@@ -33,6 +33,61 @@ versions may contain breaking changes see migration notes below).
 - The Session form and floating widget agree with the report: a saved run is not
   offered Retry, and the floating pill (in `optimus_pill_state.js`) says "results
   saved" with an orange alert when the report update is owed.
+
+## [0.12.124] - 2026-10-30
+
+### Added
+
+- AI fix suggestions can now use the local Codex CLI signed in with ChatGPT instead of a cloud API key. In Optimus Settings > AI set Connection to "Subscription (local CLI)" and click Connect to check the CLI and the sign-in. The default stays "API Key", so existing setups are unchanged. Codex is the only CLI supported.
+- Subscription mode needs `developer_mode` and the `optimus_allow_subscription_cli` site flag: run `bench --site <site> set-config optimus_allow_subscription_cli 1`, then restart the bench (or run `bench clear-cache`). The blocked message and the field description now say so.
+- Subscription mode uses a Codex home that only Optimus uses, `<site>/private/optimus-codex` (created mode 0700). Sign in once with `CODEX_HOME=<bench>/sites/<site>/private/optimus-codex codex login`; the Connect button, the "not signed in" message, the settings field description, SECURITY.md and docs/AI-FIXING.md show the exact command. Your own `~/.codex` is never read, copied or written.
+- The analyze-time auto-suggest and the "Refresh AI suggestions" button both run through the CLI. A queued refresh re-reads the saved settings before every call, so turning AI off or switching the connection stops the rest of the job. A terminal CLI failure (missing CLI, signed out, usage limit, a rejected flag) stops a refresh at the first failure; a timeout, a rate limit or a network error does not.
+- The Connect button shows when it last checked, cannot be double clicked, and does not change the modified time of Optimus Settings.
+
+### Security
+
+- The CLI runs as a read-only, ephemeral agent with an allow-listed environment. `HOME` and `TMPDIR` point into a private scratch directory that is deleted afterwards (stale ones left by a killed worker are removed on the next run, with one log line), and `CODEX_HOME` is the Optimus-owned Codex home. The codex CLI refreshes its own sign-in there; Optimus copies, locks and writes back nothing.
+- On Linux the CLI child is started with `PR_SET_PDEATHSIG` so the kernel stops it when the worker dies (the direct child only), and a run that is abandoned is logged (`exec_abandoned`).
+- The reply file is opened without following links and must be a regular file. The capability filter also turns off features named like `daemon`, `skill` or `realtime` that the CLI reports as on.
+- Only the tool features the installed CLI lists are turned off (`--disable`), plus every capability-looking feature it reports as on. Before, a fixed list was always passed and one unknown name made every call fail. If `codex features list` cannot be read, the call is refused instead of running with a guess.
+- The CLI path (or the `PATH` hit) must be a `codex` launcher or a Node entrypoint owned by the bench user or root and not writable by group or others. A path that fails now says which check failed.
+- A CLI send marks the raw-value request as sent, so a re-ask after raw-value consent is revoked is refused. The guardrail re-ask is skipped for this mode because the CLI takes one flat prompt.
+- The reply goes through a pattern scrub for secrets. Known limits: the tool list is a denylist and the scrub is pattern based. Use this mode only on a developer bench with data you trust. Tested with codex 0.164 to 0.165; Connect warns outside that range. See SECURITY.md.
+
+### Fixed
+
+- A failure is read from the last lines of the CLI's error output only. A rate limit is a temporary "rate limited" error, a usage limit is the fatal "quota" error, and a bare `401` in echoed text is no longer a sign-out. A login check that fails without saying "not logged in", a process killed by the system, or a CLI or Node that cannot start is a temporary error, not a sign-out.
+- A failed run that may have reached OpenAI is recorded as "sent, outcome unknown" so it is not repeated automatically. Only a rejection before any answer counts as a known outcome.
+- A reply cut at the output limit ends with a "(truncated)" marker and is treated as incomplete by the guardrails.
+- A call stays inside its time limit: the sign-in check and the feature check come out of it, and the run stops with a timeout when too little is left. The sign-in check is remembered for 5 minutes and cleared when a run reports an expired session.
+- The CLI process group is always stopped when a call ends, and output is read with a size limit. A descendant that keeps the pipe open can no longer hang the call.
+- The unavailable message now tells a non-admin to ask a System Manager to open Optimus Settings and click Connect, and does not mention Connect while AI is off.
+- The Optimus Codex home is always an absolute path, so the CLI child (which runs in a scratch folder) finds the sign-in; before, Frappe's relative site path made Connect and every run fail on a real bench.
+- The CLI's real refresh-failure messages ("refresh token was already used", "token was revoked", "access token could not be refreshed", "log out and sign in") are an expired-session error with the `codex login` hint. Because parallel runs share one sign-in, a run that gets that error is tried once more after 2 seconds (when the time limit allows) before it fails.
+- The capability filter also turns off `goals`, `mentions`, `worktrees`, `write_stdin` and `collab` features. A corrupt `auth.json` ("Error checking login status") reads as signed out, and the Connect message says the token is checked on first use.
+
+---
+
+## [0.12.123] - 2026-10-29
+
+### Changed
+
+- The "Call chain" block on a finding card is now labelled "Drill-down", matching the existing Drill-down block. When a card has both, they sit together under a single "Drill-down" heading: the line-profiling chain first, then the sampled call path without a second heading, each keeping its own footer line. The Hint box now renders above both trees so it no longer separates them.
+- The message shown for framework-code lines that skip the AI now says "Follow the drill-down above" instead of "call chain".
+
+---
+
+## [0.12.122] - 2026-10-30
+
+### Added
+
+- When a profiling session finishes, fails or ends with no recorded requests, a popup shows the Optimus Session ID with a button that opens the record. It appears once per run even with several tabs open, only in a visible tab, wherever you are in Desk, except when you are already on that session's form.
+- The popup waits while you type in a text field or another dialog is open, and opens anyway after about 30 seconds. If it fails to open, the error goes to the browser console and it can still show on the next attempt or in another tab.
+- The pill and alert for a session with no recorded requests say "No data" instead of "Report ready", and so does the alert on the session form. The inline stop response carries `empty` so the widget can tell. The session form shows a red "Analysis failed" alert when analysis fails.
+
+### Fixed
+
+- The widget never received the session events on a fresh page load: it subscribed before Frappe had created the realtime socket, where `frappe.realtime.on` does nothing, so no popup, pill or alert update arrived. The widget now waits for the socket (checking every 250 ms, for up to 30 seconds) and registers its handlers exactly once.
 
 ---
 

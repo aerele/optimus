@@ -238,6 +238,28 @@ def test_widget_css_has_print_safety():
 	assert len(src) > 100
 
 
+SETTINGS_JS = os.path.join(
+	APP_DIR, "optimus", "doctype", "optimus_settings", "optimus_settings.js"
+)
+
+
+def _settings_js_before_button(label: str, window: int = 260) -> str:
+	with open(SETTINGS_JS) as f:
+		src = f.read()
+	idx = src.index(f'__("{label}")')
+	return src[max(0, idx - window):idx]
+
+
+def test_settings_connect_button_only_in_subscription_mode():
+	guard = _settings_js_before_button("Connect (check Codex CLI)")
+	assert 'frm.doc.ai_connection_type === "Subscription (local CLI)"' in guard
+
+
+def test_settings_test_ai_connection_gated_to_api_mode():
+	guard = _settings_js_before_button("Test AI connection")
+	assert 'frm.doc.ai_connection_type !== "Subscription (local CLI)"' in guard
+
+
 def test_form_status_banner_selectors_exist_in_css():
 	"""The compact strip classes used by the form banners are defined in the widget CSS."""
 	with open(WIDGET_CSS) as f:
