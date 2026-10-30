@@ -8,6 +8,22 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.117] - 2026-10-29
+
+### Changed
+
+- A line-level (phase 2) run now rechecks the phase 1 findings against the newest ready run. When a finding's function was line-profiled, the finding shows the measured function time and the hottest line with its time, hit count and code. If the measured function time is under a quarter of the estimate, the finding is downgraded one severity step; a measurement is never used to raise severity. The finding's impact stays the phase 1 estimate, with the measured time shown beside it.
+- The recheck only judges when the numbers are comparable. Findings whose estimate is summed over many calls (N+1, repeated calls), and functions from a time-budgeted run, are shown as measured with no change to severity.
+- A finding is matched to a profiled function by file name, parent folder and function name; names shared by several profiled functions are not guessed. Findings the line profile did not cover say why they were not rechecked.
+- The recheck and the Line-Level Drilldown now use the same function index, so both show the same hottest line from the newest run.
+
+### Fixed
+
+- Running phase 2 again no longer adds a second Hot Line row for the same function. The row is updated in place, and old duplicate rows are removed.
+- A failure while rechecking no longer stops the phase 2 results from being saved. If a row cannot be written, the rows already rechecked are put back, so the findings table is never left half rechecked.
+
+---
+
 ## [0.12.116] - 2026-10-29
 
 ### Changed
