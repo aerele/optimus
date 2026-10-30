@@ -2390,7 +2390,7 @@
 
 {% macro bg_status_badge(status) %}
   {%- set _s = status or "Running" -%}
-  {%- set _cls = {"Completed": "ok", "Failed": "fail", "Timeout": "warn", "Running": "info", "Started": "info", "Stopped": "mute", "Queued": "mute"}.get(_s, "mute") -%}
+  {%- set _cls = {"Completed": "ok", "Failed": "fail", "Timeout": "warn", "Running": "info", "Started": "info", "Stopped": "warn", "Queued": "mute"}.get(_s, "mute") -%}
   <span class="job-status job-status-{{ _cls }}">{{ _s }}</span>
 {%- endmacro %}
 
@@ -2408,6 +2408,9 @@
         <div class="action-meta">
           {% if _cs._abs %}<a href="vscode://file{{ _cs._abs }}:{{ _cs.lineno }}" title="Open in VS Code / Cursor">{{ _cs.filename }}:{{ _cs.lineno }}</a>{% else %}{{ _cs.filename }}:{{ _cs.lineno }}{% endif %}{% if _cs.function %} &middot; {{ _cs.function }}{% endif %}
         </div>
+      {% endif %}
+      {% if job.triggered_by %}
+        <div class="action-meta">Triggered by {{ job.triggered_by.label }}</div>
       {% endif %}
     </td>
     <td>{{ bg_status_badge(job.status) }}</td>
@@ -2437,6 +2440,7 @@
       <div class="small" style="margin: 0 0 8px;">
         {{ bg_status_badge(job.status) }}
         {% if job.error %}<code style="color: var(--accent); margin-left: 6px; word-break: break-word;">{{ job.error }}</code>{% endif %}
+        {% if job.status in ("Queued", "Running") %}<span class="muted" style="margin-left: 6px;">Still {{ job.status | lower }} when this report was prepared. Regenerate the report later to see its result.</span>{% endif %}
       </div>
       {% endif %}
       {# v0.7.x: mirror the action_row trim - drop the entry-callsite
