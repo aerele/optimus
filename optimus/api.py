@@ -715,6 +715,106 @@ def status() -> dict:
 	}
 
 
+# Older in-flight sessions are treated as dead and not shown on reload.
+_PILL_RESYNC_WINDOW_MINUTES = 60
+_PILL_TRANSIENT_STATUSES = ("Stopping", "Capturing Background Jobs", "Analyzing")
+
+
+@frappe.whitelist()
+def pill_state(session_uuid: str | None = None, run_uuid: str | None = None) -> dict:
+	"""State of the caller's own tracked session (or latest in-flight analyze) for the pill."""
+	user = _require_profiler_user()
+	if not all(isinstance(v, str) or v is None for v in (session_uuid, run_uuid)):
+		frappe.throw(_("Invalid session reference"), frappe.ValidationError)
+	active = session.get_active_session_for(user)
+	# A tracked session other than the active one is looked up exactly.
+	if active and (not session_uuid or session_uuid == active):
+		meta = session.get_session_meta(active) or {}
+		return {
+			"phase": "recording",
+			"scope": "session",
+			"session_uuid": active,
+			"docname": meta.get("docname"),
+			"label": meta.get("label"),
+			"started_at": meta.get("started_at"),
+		}
+	if session_uuid:
+		return _pill_state_for(user, session_uuid, run_uuid)
+	return _pill_state_in_flight(user)
+
+
+def _pill_state_for(user: str, session_uuid: str, run_uuid: str | None) -> dict:
+	row = frappe.get_all(
+		"Optimus Session",
+		filters={"session_uuid": session_uuid, "user": user},
+		fields=["name", "status"],
+		limit=1,
+	)
+	if not row:
+		return {"phase": "idle"}
+	docname, status = row[0]["name"], row[0]["status"]
+	if not run_uuid:
+		return _pill_payload("session", session_uuid, docname, status)
+	run = frappe.get_all(
+		"Optimus Phase Two Run",
+		filters={"parent": docname, "parenttype": "Optimus Session", "run_uuid": run_uuid},
+		fields=["status"],
+		limit=1,
+	)
+	if not run:
+		return {"phase": "idle"}
+	return _pill_payload("phase2", session_uuid, docname, run[0]["status"], run_uuid)
+
+
+def _pill_state_in_flight(user: str) -> dict:
+	"""Latest own session still analyzing, else an own phase-2 run still analyzing."""
+	cutoff = add_to_date(now_datetime(), minutes=-_PILL_RESYNC_WINDOW_MINUTES)
+	rows = frappe.get_all(
+		"Optimus Session",
+		filters={"user": user, "modified": [">", cutoff]},
+		fields=["name", "session_uuid", "status"],
+		order_by="modified desc",
+		limit=20,
+	)
+	if not rows:
+		return {"phase": "idle"}
+	for row in rows:
+		if row["status"] in _PILL_TRANSIENT_STATUSES:
+			return _pill_payload("session", row["session_uuid"], row["name"], row["status"])
+	runs = frappe.get_all(
+		"Optimus Phase Two Run",
+		filters={
+			"parenttype": "Optimus Session",
+			"parent": ["in", [r["name"] for r in rows]],
+			"status": "Analyzing",
+		},
+		fields=["parent", "run_uuid"],
+		limit=1,
+	)
+	if not runs:
+		return {"phase": "idle"}
+	parent = next(r for r in rows if r["name"] == runs[0]["parent"])
+	return _pill_payload(
+		"phase2", parent["session_uuid"], parent["name"], "Analyzing", runs[0]["run_uuid"]
+	)
+
+
+def _pill_payload(scope: str, session_uuid, docname, status, run_uuid=None) -> dict:
+	if status == "Ready":
+		phase = "ready"
+	elif status == "Failed":
+		phase = "failed"
+	elif status == "Recording":
+		# The pill tracks analyze only, not phase-2 recording.
+		phase = "idle"
+	else:
+		phase = "analyzing"
+	out = {"phase": phase, "scope": scope, "session_uuid": session_uuid, "docname": docname}
+	if run_uuid:
+		out["run_uuid"] = run_uuid
+	return out
+
+
 @frappe.whitelist()
 def get_active_session() -> dict | None:
 	"""Return full metadata for the calling user's active session, or None."""

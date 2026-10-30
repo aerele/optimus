@@ -927,11 +927,7 @@ def render(
 	# (shape: ``"<short_path>::<func>"`` from _redacted_module_key), which
 	# `build_hot_frames_table` strips on the way to `display_name`. So split
 	# the raw rows first, then build each table separately.
-	_hf_raw_custom, _hf_raw_framework = _split_by_framework_app(
-		_hot_frames_raw,
-		lambda r: (r.get("function") or "").split("::", 1)[0],
-		tracked_apps,
-	)
+	_hf_raw_custom, _hf_raw_framework = _split_hot_frames(_hot_frames_raw, tracked_apps)
 	hot_frames_rows = build_hot_frames_table(_hf_raw_custom, is_hot=True)
 	hot_frames_rows_framework = build_hot_frames_table(_hf_raw_framework, is_hot=False)
 
@@ -1325,6 +1321,21 @@ def _tracked_row_get(row, key, default=None):
 	return getattr(row, key, default)
 
 
+def _triggered_by(tracked_row, action_by_uuid, recordings_by_uuid) -> dict | None:
+	"""The action that enqueued a job as ``{label}``, or None if unknown."""
+	parent = (_tracked_row_get(tracked_row, "parent_recording_uuid") or "").strip()
+	action = action_by_uuid.get(parent) if parent else None
+	if not action:
+		return None
+	if action.get("event_type") == "RQ Job":
+		rec = recordings_by_uuid.get(parent) if recordings_by_uuid else None
+		label = "job " + _clean_job_method(action.get("action_label"), action.get("path"), rec)
+	else:
+		label = action.get("action_label") or action.get("path") or ""
+	label = label.strip()
+	return {"label": label} if label else None
+
+
 def build_background_jobs(actions, recordings_by_uuid, findings=None, tracked_jobs=None) -> dict:
 	"""Build the "RQ Jobs" section payload from the action dicts, merged with
 	the persisted per-job terminal-status rows so failed / timed-out /
@@ -1355,6 +1366,7 @@ def build_background_jobs(actions, recordings_by_uuid, findings=None, tracked_jo
 		if ruuid:
 			tracked_by_uuid[ruuid] = row
 
+	action_by_uuid = {a.get("recording_uuid"): a for a in (actions or []) if a.get("recording_uuid")}
 	jobs: list[dict] = []
 	matched_uuids: set[str] = set()
 	for a in (actions or []):
@@ -1407,6 +1419,7 @@ def build_background_jobs(actions, recordings_by_uuid, findings=None, tracked_jo
 			"idx": idx,
 			"status": (_tracked_row_get(trow, "status") or "Completed") if trow else "Completed",
 			"error": _tracked_row_get(trow, "error") if trow else None,
+			"triggered_by": _triggered_by(trow, action_by_uuid, recordings_by_uuid),
 		})
 
 	# Append every tracked job that produced no captured action (failed, timed
@@ -1431,6 +1444,7 @@ def build_background_jobs(actions, recordings_by_uuid, findings=None, tracked_jo
 			"idx": None,
 			"status": _tracked_row_get(row, "status") or "Running",
 			"error": _tracked_row_get(row, "error"),
+			"triggered_by": _triggered_by(row, action_by_uuid, recordings_by_uuid),
 		})
 
 	jobs.sort(key=lambda j: -(j.get("duration_ms") or 0))
@@ -1499,6 +1513,7 @@ _CATEGORY_FOR_FINDING_TYPE: dict[str, str] = {
 	"Filesort": "filesort",
 	"Temporary Table": "temp_table",
 	"Low Filter Ratio": "low_filter",
+	"Lock Contention": "lock_contention",
 }
 
 # Ascending order for sorted() High first. NOT the same as the
@@ -1531,6 +1546,7 @@ _ACTION_VERB_FOR_FINDING_TYPE: dict[str, str] = {
 	"Low Filter Ratio": "Narrow the WHERE clause",
 	"Redundant Call": "Cache the repeated call",
 	"Repeated Hot Frame": "Investigate the recurring hot frame",
+	"Lock Contention": "Resolve the lock contention",
 }
 
 
@@ -1943,6 +1959,9 @@ def _compose_tldr(
 				"<span class=\"hot\">{impact}</span> in redundant work "
 				"{title}"
 			).format(impact=impact_html, title=title)
+	elif category == "lock_contention":
+		# No ms to reclaim, so no "0ms" badge.
+		headline = Markup("{title}").format(title=title)
 	else:
 		# Fallback verbatim title with the impact called out.
 		headline = Markup(
@@ -2178,6 +2197,25 @@ def _is_framework_app(filename_or_app, tracked_apps: tuple[str, ...] = ()) -> bo
 	return is_framework_callsite(val, tracked_apps=tracked_apps or None)
 
 
+def _split_hot_frames(rows, tracked_apps: tuple[str, ...] = ()):
+	"""Split hot-frame rows into ``(custom, framework)``; rows without ``is_framework`` use the key."""
+	custom, framework = [], []
+	legacy = []
+	for r in rows or []:
+		flag = r.get("is_framework") if isinstance(r, dict) else None
+		if flag is None:
+			legacy.append(r)
+		else:
+			(framework if flag else custom).append(r)
+	if legacy:
+		l_custom, l_framework = _split_by_framework_app(
+			legacy, lambda r: (r.get("function") or "").split("::", 1)[0], tracked_apps
+		)
+		custom += l_custom
+		framework += l_framework
+	return custom, framework
+
+
 def _split_by_framework_app(rows, app_key, tracked_apps: tuple[str, ...] = ()):
 	"""Split a list into ``(custom, framework)`` preserving order within each.
 	``app_key`` is a callable ``row → str | None`` that returns either a
@@ -2335,6 +2373,7 @@ _ACTIONABLE_FINDING_TYPES = frozenset({
 	"Heavy Response",
 	# v0.6.0 phase-2 line profiler
 	"Hot Line",            # one source line concentrates the function's time
+	"Lock Contention",     # user callsites only
 })
 # Observation-only finding types (informational, no direct fix):
 #   Framework N+1 loop inside frappe/*
