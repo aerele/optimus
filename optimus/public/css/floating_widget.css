@@ -71,6 +71,22 @@
 	background: #2563eb;
 }
 
+#frappe-profiler-widget.fp-tone-failed {
+	border-color: #dc2626;
+	color: #b91c1c;
+}
+#frappe-profiler-widget.fp-tone-failed .fp-dot {
+	background: #dc2626;
+}
+
+#frappe-profiler-widget.fp-tone-stale {
+	border-color: #d97706;
+	color: #b45309;
+}
+#frappe-profiler-widget.fp-tone-stale .fp-dot {
+	background: #d97706;
+}
+
 @keyframes fp-pulse {
 	0%, 100% { opacity: 1; transform: scale(1); }
 	50% { opacity: 0.6; transform: scale(0.85); }
