@@ -27,8 +27,12 @@ versions may contain breaking changes see migration notes below).
 - The report's drill-down panel and run list read one shared rule: a run with
   persisted results reads as Ready. An AI report refresh no longer clears the
   owed-report flag of a run that is still Analyzing.
+- Line profiling results are saved while the run is still "Analyzing"; the
+  phase-1 recheck counts that run as the newest one, so findings are judged
+  against it.
 - The Session form and floating widget agree with the report: a saved run is not
-  offered Retry, and the widget says "results saved" when the report update is owed.
+  offered Retry, and the floating pill (in `optimus_pill_state.js`) says "results
+  saved" with an orange alert when the report update is owed.
 
 ---
 

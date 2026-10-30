@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 
+from optimus.analyzers.base import phase2_run_display_status
 from optimus.line_profile import recheck
 from optimus.line_profile.function_index import build_function_index
 
@@ -90,8 +91,9 @@ def _update_hot_line_row(row, finding: dict) -> None:
 
 
 def _recheck_phase1_rows(parent) -> None:
-	ready = [c for c in (parent.phase_2_runs or []) if c.status == "Ready"]
-	ready.sort(key=lambda c: (c.ended_at is not None, c.ended_at or 0))  # oldest first, newest wins
+	# The run being saved is still Analyzing but already holds results; it counts as Ready.
+	ready = [c for c in (parent.phase_2_runs or []) if phase2_run_display_status(c) == "Ready"]
+	ready.sort(key=_run_time)  # oldest first, newest wins
 	runs, truncated = [], set()
 	for child in ready:
 		results = _loads(child.results_json)
@@ -115,6 +117,12 @@ def _recheck_phase1_rows(parent) -> None:
 		if row.get(key) != view[key]
 	]
 	_apply_all_or_none(changes)
+
+
+def _run_time(child):
+	# A run still being saved has no ended_at yet; its start time keeps it the newest.
+	stamp = child.ended_at or getattr(child, "started_at", None)
+	return (stamp is not None, stamp or 0)
 
 
 def _apply_all_or_none(changes: list) -> None:

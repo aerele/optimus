@@ -35,6 +35,19 @@ test("phase 2 ready/failed clear analyzing and drop the run", () => {
 	assert.deepStrictEqual(bad.alert.args, ["boom"]);
 });
 
+test("phase 2 ready with the report update owed says results saved", () => {
+	const s = analyzing({ phase2: true, run_uuid: "r1" });
+	const owed = ev(s, "phase_2_run_ready", { run_uuid: "r1", parent: "OS-1", render_pending: true });
+	assert.strictEqual(owed.ui.label, "Phase 2 results saved");
+	assert.strictEqual(owed.alert.message, "Phase 2 results saved. Use Regenerate Reports to update the report.");
+	assert.strictEqual(owed.alert.indicator, "orange");
+	const done = ev(s, "phase_2_run_ready", { run_uuid: "r1", parent: "OS-1", render_pending: false });
+	assert.strictEqual(done.ui.label, "Phase 2 report ready");
+	assert.strictEqual(done.alert.indicator, "blue");
+	const first = ev(analyzing(), "optimus_session_ready", { render_pending: true });
+	assert.strictEqual(first.ui.label, "Report ready");
+});
+
 test("late analyzing event after ready is ignored (reordered delivery)", () => {
 	const done = ev(analyzing(), "optimus_session_ready", {}, T0).state;
 	assert.strictEqual(ev(done, "optimus_session_analyzing", {}, T0 + 100), null);
