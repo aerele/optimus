@@ -8,6 +8,20 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.120] - 2026-10-29
+
+### Fixed
+
+- The Hot frames section now reliably separates your app's code from framework code. Before, the split guessed the app from a shortened file name, so frappe frames could appear under your app and, with Tracked Apps set, your own tracked app's frames could be pushed into the framework group. Each frame is now classified from its full file path, using the same rules as the rest of the report. Optimus's own code and frames with no file name are never shown as your app.
+- Hot frames no longer lose framework rows on large sessions: when the working set is trimmed, app frames are ranked by self time and framework frames by cumulative time, each in its own group.
+
+### Changed
+
+- Hot frames now has two labelled groups, "Your app's code" first and "Framework code" second, each showing its own top 20.
+- Rows are totalled by app-relative file path plus function, so two files whose shortened names match (a framework `user/user.py` and your app's `user/user.py`) stay separate rows with their own times, while the same file reached by a relative or absolute path is one row. Labels are lengthened only when two rows would otherwise read the same. If two rows still read the same at every length, each shows its last three path segments plus a short hash, never the full path.
+
+---
+
 ## [0.12.119] - 2026-10-29
 
 ### Added

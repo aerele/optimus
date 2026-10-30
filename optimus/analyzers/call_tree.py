@@ -14,7 +14,7 @@ Findings emitted:
   - Repeated Hot Frame (F2): same redacted frame in ≥3 actions, ≥500ms total
 
 Aggregates:
-  - hot_frames_json: top-20 leaderboard of hottest frames in the session
+  - hot_frames_json: top-20 hottest frames per app/framework group
   - session_time_breakdown_json: SQL ms + per-app Python ms for the donut
 
 Terminology gotcha: internal field names use ``cumulative_ms`` (pyinstrument's
@@ -23,13 +23,16 @@ self_time + descendant time); the user-facing report tags the same value as
 other without a project-owner sign-off.
 """
 
+import hashlib
 import json
 from collections import defaultdict
 
 from optimus.analyzers.base import (
 	_THIRD_PARTY_LIB_NAMES,
 	AnalyzerResult,
+	_extract_app_segment,
 	_last_app_segment,
+	cut_at_bench_apps,
 	dur,
 	installed_apps_allowlist,
 	is_error_log_hook_query,
@@ -1310,6 +1313,61 @@ def _redacted_module_key(function: str, filename: str = "") -> str | None:
 	return function
 
 
+def _frame_identity(function: str, filename: str) -> tuple[str, str] | None:
+	"""Aggregation key: app-relative path plus function; None for synthetic nodes."""
+	if _redacted_module_key(function, filename) is None:
+		return None
+	norm = (filename or "").replace("\\", "/")
+	return ((cut_at_bench_apps(norm) or norm).lstrip("/"), function)
+
+
+def _identity_label(identity: tuple[str, str], depth: int = 2) -> str:
+	"""Display label for an identity, keeping the last ``depth`` path segments."""
+	path, function = identity
+	parts = [p for p in path.split("/") if p]
+	short = "/".join(parts[-depth:]) if depth else "/".join(parts)
+	return f"{short}::{function}" if short else function
+
+
+def _hashed_label(identity: tuple[str, str]) -> str:
+	"""Last 3 path segments plus a short stable hash, so a full path is never shown."""
+	digest = hashlib.sha1("\0".join(identity).encode("utf-8", "replace")).hexdigest()[:6]
+	return f"{_identity_label(identity, 3)}#{digest}"
+
+
+def _row_labels(identities) -> dict:
+	"""Map each identity to a display label, lengthening only labels that collide."""
+	labels = {i: _identity_label(i) for i in identities}
+	by_label: dict = defaultdict(list)
+	for ident, label in labels.items():
+		by_label[label].append(ident)
+	for group in by_label.values():
+		if len(group) < 2:
+			continue
+		max_depth = max(len([p for p in i[0].split("/") if p]) for i in group)
+		for depth in range(3, max_depth + 1):
+			candidate = {i: _identity_label(i, depth) for i in group}
+			if len(set(candidate.values())) == len(group):
+				labels.update(candidate)
+				break
+		else:
+			labels.update({i: _hashed_label(i) for i in group})
+	return labels
+
+
+def _trim_occurrences(occurrences: dict, frame_class: dict) -> dict:
+	"""Keep the top rows per group (app by self time, framework by cumulative) and prune frame_class."""
+	keep = HOT_FRAMES_INTERMEDIATE_CAP // 2
+	kept: dict = defaultdict(list)
+	for is_framework, col in ((False, 1), (True, 2)):
+		group = [kv for kv in occurrences.items() if frame_class.get(kv[0], False) is is_framework]
+		group.sort(key=lambda kv: sum(o[col] for o in kv[1]), reverse=True)
+		kept.update(group[:keep])
+	for k in [k for k in frame_class if k not in kept]:
+		del frame_class[k]
+	return kept
+
+
 def _aggregate_hot_frames(
 	per_action_trees: list,
 	tracked_apps: tuple[str, ...] | None = None,
@@ -1322,24 +1380,23 @@ def _aggregate_hot_frames(
 	               no action_ref)
 	  leaderboard list of top-N dicts for hot_frames_json
 	"""
-	# {function_key: [(action_idx, self_ms, cumulative_ms), ...]}
+	# {(full_path, function): [(action_idx, self_ms, cumulative_ms), ...]}
 	occurrences: dict = defaultdict(list)
+	# {(full_path, function): is_framework}
+	frame_class: dict = {}
 
 	for action_idx, tree in enumerate(per_action_trees):
-		_walk_for_aggregation(tree, action_idx, occurrences, tracked_apps, installed_apps)
+		_walk_for_aggregation(tree, action_idx, occurrences, tracked_apps, installed_apps, frame_class)
 		# Cap intermediate map size to bound memory.
 		if len(occurrences) > HOT_FRAMES_INTERMEDIATE_CAP * 2:
-			by_total = sorted(
-				occurrences.items(),
-				key=lambda kv: sum(self_ms for _, self_ms, _ in kv[1]),
-				reverse=True,
-			)[:HOT_FRAMES_INTERMEDIATE_CAP]
-			occurrences = defaultdict(list, dict(by_total))
+			occurrences = _trim_occurrences(occurrences, frame_class)
 
 	findings = []
 	leaderboard_rows = []
 
-	for key, occs in occurrences.items():
+	labels = _row_labels(occurrences)
+	for ident, occs in occurrences.items():
+		key = labels[ident]
 		distinct_actions = {idx for idx, _, _ in occs}
 		total_self_ms = sum(self_ms for _, self_ms, _ in occs)
 		total_cum_ms = sum(cum_ms for _, _, cum_ms in occs)
@@ -1355,6 +1412,7 @@ def _aggregate_hot_frames(
 			"occurrences": len(occs),
 			"distinct_actions": len(distinct_actions),
 			"action_refs": sorted(distinct_actions),
+			"is_framework": frame_class.get(ident, False),
 		}
 		leaderboard_rows.append(row)
 		total_ms = total_self_ms  # alias for downstream Repeated Hot Frame logic
@@ -1387,8 +1445,16 @@ def _aggregate_hot_frames(
 				"action_ref": None,
 			})
 
-	leaderboard_rows.sort(key=lambda r: r["total_ms"], reverse=True)
-	leaderboard = leaderboard_rows[:HOT_FRAMES_LEADERBOARD_SIZE]
+	# Cap each group separately so app frames cannot crowd out the framework group.
+	custom_rows = sorted(
+		(r for r in leaderboard_rows if not r["is_framework"]),
+		key=lambda r: r["total_ms"], reverse=True,
+	)[:HOT_FRAMES_LEADERBOARD_SIZE]
+	framework_rows = sorted(
+		(r for r in leaderboard_rows if r["is_framework"]),
+		key=lambda r: r["total_cumulative_ms"], reverse=True,
+	)[:HOT_FRAMES_LEADERBOARD_SIZE]
+	leaderboard = sorted(custom_rows + framework_rows, key=lambda r: r["total_ms"], reverse=True)
 
 	return findings, leaderboard
 
@@ -1397,6 +1463,7 @@ def _walk_for_aggregation(
 	node: dict, action_idx: int, occurrences: dict,
 	tracked_apps: tuple[str, ...] | None = None,
 	installed_apps: frozenset[str] | None = None,
+	frame_class: dict | None = None,
 ) -> None:
 	if node.get("kind") == "python":
 		# v0.5.1: skip PURE HELPER frames only, not all framework code.
@@ -1413,11 +1480,12 @@ def _walk_for_aggregation(
 		# and blinded the analyzer to real application-layer bottlenecks
 		# inside Frappe that users could act on.
 		if not _is_pure_helper_frame(node, tracked_apps, installed_apps):
-			key = _redacted_module_key(
-				node.get("function", ""),
-				node.get("filename", ""),
-			)
+			key = _frame_identity(node.get("function", ""), node.get("filename", ""))
 			if key:
+				if frame_class is not None and key not in frame_class:
+					frame_class[key] = _is_framework_frame_file(
+						node.get("filename", ""), tracked_apps, installed_apps
+					)
 				# v0.7.x A.AE1: track self_ms (immune to recursion
 				# double-counting) for the user-app variant that's
 				# the exact "time in this function's body across the
@@ -1437,7 +1505,19 @@ def _walk_for_aggregation(
 					(action_idx, node.get("self_ms", 0), node.get("cumulative_ms", 0))
 				)
 	for child in node.get("children", []):
-		_walk_for_aggregation(child, action_idx, occurrences, tracked_apps, installed_apps)
+		_walk_for_aggregation(
+			child, action_idx, occurrences, tracked_apps, installed_apps, frame_class
+		)
+
+
+def _is_framework_frame_file(filename: str, tracked_apps, installed_apps) -> bool:
+	"""True for framework or third-party code; Optimus's own code always counts."""
+	norm = (filename or "").replace("\\", "/")
+	if not norm:
+		return True
+	if is_framework_callsite(norm, tracked_apps, installed_apps):
+		return True
+	return _extract_app_segment(norm) == "optimus"
 
 
 # ---------------------------------------------------------------------------
