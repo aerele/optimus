@@ -12,6 +12,8 @@ import pytest
 
 WIDGET_JS = Path(__file__).resolve().parents[1] / "public/js/floating_widget.js"
 
+PILL_JS = WIDGET_JS.with_name("optimus_pill_state.js")
+
 HARNESS = r"""
 const vm=require('node:vm'),fs=require('node:fs'),assert=require('node:assert/strict');
 function desk(opts = {}) {
@@ -37,18 +39,19 @@ function desk(opts = {}) {
   __sd:(display,label)=>pills.push({display,label}),
   frappe:{session:{user:'owner'},set_route:()=>{},get_route:()=>opts.route||[],
    ui:{Dialog,open_dialogs:opts.openDialogs||[]},utils:{escape_html:s=>String(s)},
-   realtime:{socket:opts.noSocket?undefined:{},on:(n,fn)=>handlers[n]=fn},show_alert:a=>alerts.push(a)}};
+   realtime:{socket:opts.noSocket?undefined:{},on:(n,fn)=>{handlers[n]=fn;(opts.onCalls||[]).push(n);}},show_alert:a=>alerts.push(a)}};
  vm.createContext(ctx);
+ vm.runInContext(fs.readFileSync(process.argv[2],'utf8'),ctx);
  let code=fs.readFileSync(process.argv[1],'utf8');
- const tail=/\}\)\(\);\s*$/, hook='function setDisplay(display, label, elapsed) {';
+ const tail=/\}\)\(\);\s*$/, hook='function setDisplay(display, label, elapsed, tone) {';
  assert.ok(tail.test(code) && code.includes(hook), 'widget source shape changed: update the harness');
- code=code.replace(tail,`globalThis.w={subscribeRealtime,state:currentState,realtime:frappe.realtime};})();`);
+ code=code.replace(tail,`globalThis.w={subscribeRealtime,getState:()=>currentState,realtime:frappe.realtime};})();`);
  code=code.replace(hook,hook+' globalThis.__sd(display,label);');
  vm.runInContext(code,ctx);ctx.w.subscribeRealtime();
  const realtime=ctx.w.realtime;
  const tick=()=>{ const fns=[...timers.values()]; timers.clear(); fns.forEach(f=>f()); };
  const setVisibility=v=>{ doc.visibilityState=v; (docListeners.visibilitychange||[]).forEach(f=>f()); };
- return {realtime,subscribeRealtime:ctx.w.subscribeRealtime,handlers,dialogs,alerts,pills,store,doc,tick,timers,setVisibility,state:ctx.w.state};
+ return {realtime,subscribeRealtime:ctx.w.subscribeRealtime,handlers,dialogs,alerts,pills,store,doc,tick,timers,setVisibility,get state(){return ctx.w.getState();}};
 }
 const ev=(o={})=>({session_uuid:'s1',docname:'OS-1',recording_user:'owner',event_id:'e1',...o});
 """
@@ -60,7 +63,7 @@ def _run(body: str) -> None:
 			pytest.fail("node is required in CI")
 		pytest.skip("node not installed")
 	result = subprocess.run(
-		["node", "-e", HARNESS + body, str(WIDGET_JS)], capture_output=True, text=True
+		["node", "-e", HARNESS + body, str(WIDGET_JS), str(PILL_JS)], capture_output=True, text=True
 	)
 	assert result.returncode == 0, result.stderr
 
@@ -387,4 +390,21 @@ const d = desk({noSocket: true});
 for (let i = 0; i < 200; i++) d.tick();
 assert.equal(d.timers.size, 0);
 assert.equal(Object.keys(d.handlers).length, 0);
+""")
+
+
+def test_each_event_is_registered_exactly_once_and_popup_fires_once():
+	_run(r"""
+const calls = [];
+const d = desk({noSocket: true, onCalls: calls});
+d.realtime.socket = {};
+d.tick();
+d.subscribeRealtime();
+d.tick();
+for (const n of new Set(calls)) assert.equal(calls.filter(c => c === n).length, 1, n);
+assert.ok(calls.includes('optimus_session_ready') && calls.includes('optimus_session_failed'));
+d.handlers.optimus_session_ready(ev({empty: true}));
+assert.equal(d.dialogs.length, 1);
+assert.equal(d.alerts.length, 1);
+assert.deepEqual(d.pills, [{display: 'ready', label: 'No data'}]);
 """)
