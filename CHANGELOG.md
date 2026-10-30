@@ -8,6 +8,14 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.116] - 2026-10-29
+
+### Changed
+
+- The "Preparing report" and "Capturing background jobs" banners on the Optimus Session form are now a slim one-line strip with a thin progress bar instead of a large block, so they no longer push the form content down. They stay aligned and wrap cleanly on narrow screens and follow the Desk dark theme. The strip text is announced politely to screen readers, its contrast is higher, the drain text is escaped, and the bar and spinner animations stop when the user prefers reduced motion.
+
+---
+
 ## [0.12.115] - 2026-10-29
 
 ### Fixed

@@ -236,3 +236,12 @@ def test_widget_css_has_print_safety():
 	# Widget is for Desk, not print, but it should be hidden in print mode
 	# OR have sane fallbacks. Minimum: the file should not be empty.
 	assert len(src) > 100
+
+
+def test_form_status_banner_selectors_exist_in_css():
+	"""The compact strip classes used by the form banners are defined in the widget CSS."""
+	with open(WIDGET_CSS) as f:
+		css = f.read()
+	for selector in (".optimus-status", ".optimus-status-warn", ".optimus-status-bar"):
+		assert selector in css, f"Missing CSS: {selector}"
+	assert "prefers-reduced-motion: reduce" in css
