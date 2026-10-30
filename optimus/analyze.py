@@ -900,8 +900,14 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 				raise SnapshotUnavailable("snapshot_inputs_missing")
 			if not _with_active_analysis(docname, lambda: _finalize_with_empty_session(docname)):
 				return
+			if not _with_active_analysis(docname, lambda: _render_and_attach_reports(docname, [])):
+				return
+			if not _with_active_analysis(docname, lambda: frappe.db.set_value("Optimus Session", docname, "status", "Ready")):
+				return
 			_run_ai_step(lambda: session.delete_session_state(session_uuid), title="optimus ai empty recording cleanup", session_uuid=session_uuid)
 			_publish_progress(100, "Complete (no data)", session_uuid)
+			_run_ai_step(lambda: _publish_session_event("optimus_session_ready", session_uuid=session_uuid, docname=docname),
+				title="optimus ai ready notification", session_uuid=session_uuid)
 			return
 
 		_touch_singleflight(session_uuid)  # M2 heartbeat before the EXPLAIN burst
@@ -3362,9 +3368,8 @@ def _build_summary_html(
 
 
 def _finalize_with_empty_session(docname: str) -> None:
-	"""Mark a session Ready when it had no recordings."""
+	"""Save the empty-session summary; the caller renders the report, then marks Ready."""
 	doc = frappe.get_doc("Optimus Session", docname)
-	doc.status = "Ready"
 	doc.total_requests = 0
 	doc.total_queries = 0
 	# v0.7.x: same bullet shape as the populated Summary for visual

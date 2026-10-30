@@ -2060,6 +2060,23 @@
         {% endif %}
       {% endif %}
 
+      {# Phase-2 recheck of this phase-1 finding (see line_profile/recheck.py). #}
+      {% set _rc = (f.technical_detail or {}).get("phase2_recheck") if f.technical_detail else None %}
+      {% if _rc and f.finding_type != "Hot Line" %}
+      <div class="phase2-line">
+        <strong>Line-Level Recheck:</strong>
+        {% if _rc.status == "not_rechecked" %}
+        not rechecked, {{ {"not_profiled": "this function was not line-profiled", "ambiguous": "several profiled functions share this name", "not_exercised": "the profiled function did not run", "no_callsite": "the finding has no function location", "no_function": "the finding names a file and line but no function", "cap": "too many findings to recheck"}.get(_rc.reason, "no line evidence") }}.
+        {% else %}
+        {% set _rc_basis = fmt_ms(_rc.function_total_ms) ~ " measured vs " ~ fmt_ms(_rc.phase1_impact_ms) ~ " estimated" %}
+        {{ {"confirmed": "confirmed (" ~ _rc_basis ~ ")", "downgraded": "downgraded from " ~ _rc.phase1_severity ~ " to " ~ f.severity ~ " (" ~ _rc_basis ~ ")", "measured": "measured " ~ fmt_ms(_rc.function_total_ms) ~ ", not comparable with the estimate, severity unchanged"}.get(_rc.status, _rc.status) }}.
+        {% if _rc.hot_line and _rc.hot_line.lineno is not none and not p2_hot %}
+        Hottest line {{ _rc.hot_line.lineno }}, {{ fmt_ms(_rc.hot_line.total_ms) }} / {{ _rc.hot_line.hits }} hit{{ "s" if _rc.hot_line.hits != 1 else "" }}{% if _rc.hot_line.content %}: <code>{{ _rc.hot_line.content | trim }}</code>{% endif %}
+        {% endif %}
+        {% endif %}
+      </div>
+      {% endif %}
+
       {# Call chain (Phase 2 instrumented chain). Nested-call tree, terminal red. #}
       {% set _phase2_chain = (f.technical_detail or {}).get("call_chain") if f.technical_detail else None %}
       {% if _phase2_chain and _phase2_chain | length > 1 %}
