@@ -1984,7 +1984,14 @@
         {# The scope tag is analyzer-declared: a finding whose estimated_impact_ms
            is not the session-wide total sets detail.impact_scope_label (e.g. N+1 →
            "recoverable"). Everything else falls back to "consolidated". #}
+        {# No ms to reclaim (Lock Contention): show the wait instead of "0ms". #}
+        {% if f.estimated_impact_ms %}
         <span class="big">{{ fmt_ms(f.estimated_impact_ms) }}</span><small class="scope-tag">{{ detail.impact_scope_label or "consolidated" }}</small>
+        {% elif detail.total_wait_ms %}
+        <span class="big">{{ fmt_ms(detail.total_wait_ms) }}</span><small class="scope-tag">waited</small>
+        {% else %}
+        <small class="scope-tag">reliability issue</small>
+        {% endif %}
         {% if f.affected_count and f.affected_count > 1 %}
         {% set _per_hit_ms = f.estimated_impact_ms / f.affected_count %}
         <div class="small">{{ f.affected_count }}× hits{% if _per_hit_ms >= 0.05 %} &middot; {{ fmt_ms(_per_hit_ms, 1) }}<small class="scope-tag">per hit</small>{% endif %}</div>
@@ -2058,6 +2065,23 @@
           &#9888; <strong>Self-time hot path:</strong> sampling can&rsquo;t pinpoint a single line inside this function. Run a <strong>Line-Level Drilldown</strong> on <code>{{ callsite.function or "this function" }}</code> to see which line(s) are hot.
         </div>
         {% endif %}
+      {% endif %}
+
+      {# Phase-2 recheck of this phase-1 finding (see line_profile/recheck.py). #}
+      {% set _rc = (f.technical_detail or {}).get("phase2_recheck") if f.technical_detail else None %}
+      {% if _rc and f.finding_type != "Hot Line" %}
+      <div class="phase2-line">
+        <strong>Line-Level Recheck:</strong>
+        {% if _rc.status == "not_rechecked" %}
+        not rechecked, {{ {"not_profiled": "this function was not line-profiled", "ambiguous": "several profiled functions share this name", "not_exercised": "the profiled function did not run", "no_callsite": "the finding has no function location", "no_function": "the finding names a file and line but no function", "cap": "too many findings to recheck"}.get(_rc.reason, "no line evidence") }}.
+        {% else %}
+        {% set _rc_basis = fmt_ms(_rc.function_total_ms) ~ " measured vs " ~ fmt_ms(_rc.phase1_impact_ms) ~ " estimated" %}
+        {{ {"confirmed": "confirmed (" ~ _rc_basis ~ ")", "downgraded": "downgraded from " ~ _rc.phase1_severity ~ " to " ~ f.severity ~ " (" ~ _rc_basis ~ ")", "measured": "measured " ~ fmt_ms(_rc.function_total_ms) ~ ", not comparable with the estimate, severity unchanged"}.get(_rc.status, _rc.status) }}.
+        {% if _rc.hot_line and _rc.hot_line.lineno is not none and not p2_hot %}
+        Hottest line {{ _rc.hot_line.lineno }}, {{ fmt_ms(_rc.hot_line.total_ms) }} / {{ _rc.hot_line.hits }} hit{{ "s" if _rc.hot_line.hits != 1 else "" }}{% if _rc.hot_line.content %}: <code>{{ _rc.hot_line.content | trim }}</code>{% endif %}
+        {% endif %}
+        {% endif %}
+      </div>
       {% endif %}
 
       {# Call chain (Phase 2 instrumented chain). Nested-call tree, terminal red. #}
@@ -2373,7 +2397,7 @@
 
 {% macro bg_status_badge(status) %}
   {%- set _s = status or "Running" -%}
-  {%- set _cls = {"Completed": "ok", "Failed": "fail", "Timeout": "warn", "Running": "info", "Started": "info", "Stopped": "mute", "Queued": "mute"}.get(_s, "mute") -%}
+  {%- set _cls = {"Completed": "ok", "Failed": "fail", "Timeout": "warn", "Running": "info", "Started": "info", "Stopped": "warn", "Queued": "mute"}.get(_s, "mute") -%}
   <span class="job-status job-status-{{ _cls }}">{{ _s }}</span>
 {%- endmacro %}
 
@@ -2391,6 +2415,9 @@
         <div class="action-meta">
           {% if _cs._abs %}<a href="vscode://file{{ _cs._abs }}:{{ _cs.lineno }}" title="Open in VS Code / Cursor">{{ _cs.filename }}:{{ _cs.lineno }}</a>{% else %}{{ _cs.filename }}:{{ _cs.lineno }}{% endif %}{% if _cs.function %} &middot; {{ _cs.function }}{% endif %}
         </div>
+      {% endif %}
+      {% if job.triggered_by %}
+        <div class="action-meta">Triggered by {{ job.triggered_by.label }}</div>
       {% endif %}
     </td>
     <td>{{ bg_status_badge(job.status) }}</td>
@@ -2420,6 +2447,7 @@
       <div class="small" style="margin: 0 0 8px;">
         {{ bg_status_badge(job.status) }}
         {% if job.error %}<code style="color: var(--accent); margin-left: 6px; word-break: break-word;">{{ job.error }}</code>{% endif %}
+        {% if job.status in ("Queued", "Running") %}<span class="muted" style="margin-left: 6px;">Still {{ job.status | lower }} when this report was prepared. Regenerate the report later to see its result.</span>{% endif %}
       </div>
       {% endif %}
       {# v0.7.x: mirror the action_row trim - drop the entry-callsite
