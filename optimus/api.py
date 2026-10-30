@@ -419,8 +419,9 @@ def stop() -> dict:
 
 	Returns a dict with ``stopped``, ``session_uuid``, ``docname``,
 	``ran_inline`` and, only when ran_inline is True, the final ``status``
-	(``Ready`` or ``Failed``). The widget uses ran_inline + status to pick its
-	terminal state (Analyzing / Report ready / Analyze failed).
+	(``Ready`` or ``Failed``) and ``empty`` (a Ready session with no recorded
+	requests). The widget uses ran_inline + status + empty to pick its
+	terminal state (Analyzing / Report ready / No data / Analyze failed).
 	"""
 	user = _require_profiler_user()
 	active = session.get_active_session_for(user)
@@ -437,11 +438,13 @@ def stop() -> dict:
 	# inline analyze would show "Report ready" to the user despite the
 	# session being marked Failed server-side.
 	final_status = None
+	empty = False
 	if ran_inline and docname:
 		try:
-			final_status = frappe.db.get_value(
-				"Optimus Session", docname, "status"
+			final_status, total_requests = frappe.db.get_value(
+				"Optimus Session", docname, ["status", "total_requests"]
 			)
+			empty = final_status == "Ready" and not total_requests
 		except Exception:
 			final_status = None
 
@@ -451,6 +454,7 @@ def stop() -> dict:
 		"docname": docname,
 		"ran_inline": ran_inline,
 		"status": final_status,
+		"empty": empty,
 	}
 
 

@@ -106,6 +106,17 @@ def test_genuine_empty_capture_still_finalizes(delivery):
 	assert ("_finalize_with_empty_session",) in state.events
 
 
+def test_empty_capture_publishes_ready_event_flagged_empty(delivery, monkeypatch):
+	state = delivery
+	state.requested, state.recordings = [], []
+	published = []
+	monkeypatch.setattr(analyze, "_publish_session_event", lambda *a, **kw: published.append((a, kw)))
+	analyze.run("s")
+	assert published[-1] == (
+		("optimus_session_ready",), {"session_uuid": "s", "docname": "doc", "empty": True}
+	)
+
+
 def test_empty_capture_renders_report_before_ready(delivery):
 	state = delivery
 	state.requested, state.recordings = [], []

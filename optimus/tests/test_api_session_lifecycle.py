@@ -54,6 +54,8 @@ class FakeDB:
 	def get_value(self, doctype, filters, fieldname=None, *a, **kw):
 		if isinstance(filters, str):  # lookup by docname
 			row = next((r for r in self.rows.values() if r["name"] == filters), None)
+			if isinstance(fieldname, list):  # Frappe returns a tuple for a field list
+				return tuple(row.get(f) for f in fieldname) if row else None
 			return row.get(fieldname) if row else None
 		row = self.rows.get(filters.get("session_uuid"))
 		if row is None:
@@ -192,6 +194,7 @@ class TestStop:
 			"docname": "OPT-1",
 			"ran_inline": False,
 			"status": None,
+			"empty": False,
 		}
 		assert "alice@example.com" not in env.store.active
 		assert env.db.rows["u1"]["status"] == "Stopping"

@@ -18,7 +18,7 @@ function widget(user) {
  const handlers={},alerts=[],displays=[];
  const ctx={window:{},document:{readyState:'loading',addEventListener:()=>{}},
   setTimeout:()=>{},clearInterval:()=>{},displays,
-  __:text=>text,frappe:{session:{user},set_route:()=>{},realtime:{on:(name,fn)=>handlers[name]=fn},
+  __:text=>text,frappe:{session:{user},set_route:()=>{},realtime:{socket:{},on:(name,fn)=>handlers[name]=fn},
    show_alert:a=>alerts.push(a)}};
  vm.createContext(ctx);
  let code=fs.readFileSync(process.argv[1],'utf8');
