@@ -892,6 +892,8 @@
 		if (!frappe.realtime.socket) {
 			if (++realtimeAttempts < REALTIME_MAX_ATTEMPTS) {
 				setTimeout(subscribeRealtime, REALTIME_RETRY_MS);
+			} else {
+				_diag("[optimus] realtime socket never appeared, giving up; widget updates need a page reload");
 			}
 			return;
 		}

@@ -48,5 +48,5 @@ For the deeper data-flow and hook-ordering detail read the docstrings in `analyz
 ## Conventions
 
 - Keep analyzers pure functions over recording dicts, with no Frappe or DB access, so they stay fixture-testable.
-- Adding an AI provider is data only: extend `_PROVIDER_DEFAULTS` and the `ai_provider` Select in `optimus/optimus/doctype/optimus_settings/optimus_settings.json` together (they must match exactly, guarded by `test_ai_aerele_provider.py`), and never add per-provider branches in code.
+- Adding an AI provider is data only: extend `_PROVIDER_DEFAULTS` and the `ai_provider` Select in `optimus/optimus/doctype/optimus_settings/optimus_settings.json` together (they must match exactly, guarded by `test_ai_aerele_provider.py`), and never add per-provider branches in code. The local Codex CLI transport is the single exception; see CONTRIBUTING.md, The local Codex CLI transport.
 - A new finding type goes in the enum in `optimus/optimus/doctype/optimus_finding/optimus_finding.json` with a doctype-reloading patch under `optimus/patches/v0_X_Y/`.

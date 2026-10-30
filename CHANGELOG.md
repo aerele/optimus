@@ -8,6 +8,16 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.126] - 2026-10-30
+
+### Fixed
+
+- The local Codex CLI auth retry now runs only after a plain non-zero exit (not a signal exit such as 137, nor 126/127) and only for the token-refresh failure texts ("refresh token was already used or revoked", "token was revoked", "access token could not be refreshed"), not for any line containing "unauthorized". The 2-second wait now has +/- 50% jitter so parallel runs do not retry in step.
+- A relative Codex home path now raises a configuration error instead of an assertion.
+- The floating widget now logs (with `window.OPTIMUS_DEBUG = true`) when its 30-second wait for the realtime socket gives up.
+
+---
+
 ## [0.12.124] - 2026-10-30
 
 ### Added

@@ -267,3 +267,11 @@ def test_form_status_banner_selectors_exist_in_css():
 	for selector in (".optimus-status", ".optimus-status-warn", ".optimus-status-bar"):
 		assert selector in css, f"Missing CSS: {selector}"
 	assert "prefers-reduced-motion: reduce" in css
+
+
+def test_widget_logs_when_the_realtime_socket_wait_gives_up():
+	"""After REALTIME_MAX_ATTEMPTS the widget must say it stopped waiting, not go silent."""
+	with open(WIDGET_JS) as f:
+		src = f.read()
+	body = src[src.index("function subscribeRealtime()"):src.index("function registerRealtimeHandlers()")]
+	assert "} else {" in body and "_diag(" in body and "giving up" in body

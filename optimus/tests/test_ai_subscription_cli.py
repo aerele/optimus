@@ -916,8 +916,9 @@ class TestCallLocalCli:
 
 	def test_a_relative_codex_home_is_refused(self, monkeypatch):
 		monkeypatch.setattr(ai_fix, "_codex_home_path", lambda: "site1/private/optimus-codex")
-		with pytest.raises(AssertionError):
+		with pytest.raises(ai_fix.AiFixError) as err:
 			ai_fix._ensure_codex_home()
+		assert err.value.kind == "config"
 
 	@pytest.mark.parametrize("stderr", [
 		"Your access token could not be refreshed. Please log out and sign in again.",
@@ -940,6 +941,30 @@ class TestCallLocalCli:
 		))
 		assert self._call().startswith("RETRIED")
 		assert len(count.read_text().split()) == 2
+
+	def _count_runs(self, fake_codex, monkeypatch, tmp_path, line, code):
+		monkeypatch.setattr(ai_fix, "_CLI_AUTH_RETRY_WAIT", 0)
+		count = tmp_path / "rec" / "n"
+		fake_codex(exec_body=f'echo x >> "{count}"; echo "{line}" >&2; exit {code}')
+		with pytest.raises(ai_fix.AiFixError):
+			self._call()
+		return len(count.read_text().split())
+
+	def test_a_signal_exit_with_auth_text_is_not_retried(self, fake_codex, monkeypatch, tmp_path):
+		assert self._count_runs(fake_codex, monkeypatch, tmp_path, "refresh token was already used", 137) == 1
+
+	def test_an_unrelated_unauthorized_line_is_not_retried(self, fake_codex, monkeypatch, tmp_path):
+		assert self._count_runs(fake_codex, monkeypatch, tmp_path, "tool call unauthorized by policy", 1) == 1
+
+	def test_the_retry_wait_is_jittered(self, fake_codex, monkeypatch):
+		monkeypatch.setattr(ai_fix, "_CLI_AUTH_RETRY_WAIT", 2)
+		monkeypatch.setattr(ai_fix.random, "uniform", lambda lo, hi: hi)
+		slept = []
+		monkeypatch.setattr(ai_fix.time, "sleep", slept.append)
+		fake_codex(exec_body='echo "refresh token was already used" >&2; exit 1')
+		with pytest.raises(ai_fix.AiFixError):
+			self._call()
+		assert 3.0 in slept
 
 	def test_a_second_auth_failure_is_not_retried_again(self, fake_codex, monkeypatch, tmp_path):
 		monkeypatch.setattr(ai_fix, "_CLI_AUTH_RETRY_WAIT", 0)

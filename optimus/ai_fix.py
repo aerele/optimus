@@ -31,6 +31,7 @@ import errno
 import ipaddress
 import json
 import os
+import random
 import re
 import shlex
 import shutil
@@ -3603,7 +3604,8 @@ def _ensure_codex_home() -> str:
 	"""Create the Optimus-owned Codex home (mode 0700) when missing and return its path.
 	It must be a real directory owned by this user, never a link."""
 	path = _codex_home_path()
-	assert os.path.isabs(path), "the Codex home must be an absolute path"
+	if not os.path.isabs(path):
+		raise AiFixError("The Codex home must be an absolute path.", kind="config")
 	os.makedirs(path, mode=0o700, exist_ok=True)
 	st = os.lstat(path)
 	if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid():
@@ -3968,6 +3970,12 @@ _CLI_STDERR_PATTERNS = (
 	("unknown_flag", re.compile(r"unexpected argument|unrecognized|unknown option|unknown feature", re.IGNORECASE)),
 	("network", re.compile(r"network|connection|timeout|\bdns\b|\btls\b|\bssl\b|certificate", re.IGNORECASE)),
 )
+# The texts of a lost token-refresh race: the only auth failure one retry can cure. A plain
+# "unauthorized" or "not logged in" means the sign-in is gone and a retry cannot help.
+_CLI_REFRESH_FAILURE = re.compile(
+	r"refresh token (was|has been) (already used|revoked)|token was revoked|access token could not be refreshed",
+	re.IGNORECASE,
+)
 _CLI_STDERR_TAIL_LINES = 5
 _CLI_STDERR_TAIL_CHARS = 1000
 
@@ -4106,11 +4114,23 @@ _CLI_KNOWN_FAILURES = frozenset({"auth_expired", "usage_limit", "rate_limited", 
 
 
 _CLI_AUTH_RETRY_WAIT = 2
+_CLI_AUTH_RETRY_JITTER = 0.5  # the wait varies by up to +/- this fraction, so parallel runs spread out
+
+
+def _auth_retry_wait() -> float:
+	"""The seconds to wait before the auth retry: the base wait with jitter."""
+	return _CLI_AUTH_RETRY_WAIT * (1 + random.uniform(-_CLI_AUTH_RETRY_JITTER, _CLI_AUTH_RETRY_JITTER))
 
 
 def _auth_retry_fits(deadline: float) -> bool:
-	"""True when enough time is left to wait and run the exec once more."""
-	return deadline - time.monotonic() - _CLI_AUTH_RETRY_WAIT >= _CLI_MIN_EXEC_SECONDS
+	"""True when enough time is left to wait (at most the jittered maximum) and run the exec once more."""
+	longest = _CLI_AUTH_RETRY_WAIT * (1 + _CLI_AUTH_RETRY_JITTER)
+	return deadline - time.monotonic() - longest >= _CLI_MIN_EXEC_SECONDS
+
+
+def _auth_retry_applies(code: int, err: str | None) -> bool:
+	"""A plain non-zero exit (not a signal, not 126/127) whose stderr is a token-refresh failure."""
+	return 0 < code < 126 and bool(err) and _CLI_REFRESH_FAILURE.search(err) is not None
 
 
 def _exec_cli_once(path: str, prompt: str, deadline: float, total_seconds: int):
@@ -4199,12 +4219,12 @@ def _call_local_cli(
 		usage_out.observe(True)  # nothing is billed per token, so the cost is a known zero
 	ai_privacy.before_http_send()  # a CLI send discloses the prompt like an HTTP one
 	code, text, truncated, err = _exec_cli_once(path, prompt, deadline, total_seconds)
-	if code != 0 and _classify_cli_stderr(err) == "auth_expired" and _auth_retry_fits(deadline):
+	if _auth_retry_applies(code, err) and _auth_retry_fits(deadline):
 		# Parallel runs share one sign-in: a lost refresh race is rejected before any answer
 		# and the winner has rewritten auth.json, so one retry cures it.
 		_LOGIN_CACHE.pop(path, None)
 		_log_cli_diagnostic("auth_retry", label="auth_expired", code=code)
-		time.sleep(_CLI_AUTH_RETRY_WAIT)
+		time.sleep(_auth_retry_wait())
 		code, text, truncated, err = _exec_cli_once(path, prompt, deadline, total_seconds)
 	if code < 0 or code >= 128:
 		# Killed by a signal (OOM, SIGSEGV) after the prompt was sent: an uncertain outcome.
