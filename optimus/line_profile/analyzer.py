@@ -18,6 +18,7 @@ import re
 
 from optimus import safe_call
 from optimus.analyzers.base import AnalyzerResult, dur
+from optimus.line_profile import persist
 
 try:
 	import frappe  # type: ignore[import-not-found]
@@ -550,50 +551,13 @@ def _compute_run(parent_docname: str, run_uuid: str):
 	result = analyze(results_json, call_trees=call_trees or None)
 	if capture.budget_was_hit(run_uuid):
 		result.warnings.append(
-			"Line profiling was time-budgeted to avoid freezing the flow, so "
+			persist.BUDGET_WARNING_PREFIX + " to avoid freezing the flow, so "
 			"results are partial for the longest-running call(s). Tune "
 			"optimus_phase2_overhead_budget_seconds in site_config "
 			"(lower = snappier flow, higher = fuller data; 0 = unlimited)."
 		)
 	total_ms = sum(s.get("total_ms") or 0 for s in result.aggregate.get("phase2_functions", []))
 	return results_json, result, total_ms
-
-
-# Reserved technical_detail_json key: a re-persist of a run replaces the findings tagged with its run_uuid.
-_PHASE2_RUN_TAG = "_phase2_run_uuid"
-
-
-def _tag_phase2_finding(finding: dict, run_uuid: str) -> None:
-	"""Stamp the owning run_uuid into the finding's technical_detail_json."""
-	detail: dict = {}
-	if finding.get("technical_detail_json"):
-		try:
-			loaded = json.loads(finding["technical_detail_json"])
-			if isinstance(loaded, dict):
-				detail = loaded
-		except (TypeError, ValueError):
-			detail = {}
-	detail[_PHASE2_RUN_TAG] = run_uuid
-	finding["technical_detail_json"] = json.dumps(detail, default=str)
-
-
-def _drop_prior_run_findings(parent, run_uuid: str) -> None:
-	"""Drop findings an earlier persist of this run left, so a retry never doubles them."""
-	existing = list(getattr(parent, "findings", None) or [])
-	kept = []
-	for row in existing:
-		owned = False
-		raw = getattr(row, "technical_detail_json", None) or ""
-		try:
-			# Cheap substring check first: most findings never mention this run.
-			detail = json.loads(raw) if run_uuid in raw else None
-			owned = isinstance(detail, dict) and detail.get(_PHASE2_RUN_TAG) == run_uuid
-		except (TypeError, ValueError):
-			owned = False
-		if not owned:
-			kept.append(row)
-	if len(kept) != len(existing):
-		parent.findings = kept
 
 
 def _persist_run(
@@ -615,23 +579,8 @@ def _persist_run(
 	else:
 		raise ValueError("Phase 2 result row is missing")
 
-	_drop_prior_run_findings(parent, run_uuid)
-
-	# Promote findings into the unified Session.findings table so the
-	# existing finding rendering / filtering picks them up alongside
-	# phase-1 findings.
-	for original in result.findings:
-		finding = dict(original)
-		# Optimus Finding.title is a Data(140) field. Phase-2 findings are
-		# appended directly here (bypassing analyze._truncate_finding_titles),
-		# so clamp defensively a long title must not trip Frappe's truncation
-		# warning while stopping phase 2. Full context lives in the description /
-		# technical_detail_json.
-		_title = finding.get("title") or ""
-		if len(_title) > 140:
-			finding["title"] = _title[:137].rstrip() + "..."
-		_tag_phase2_finding(finding, run_uuid)
-		parent.append("findings", finding)
+	# Merge Hot Lines and recheck phase-1 findings.
+	persist.merge_phase2_findings(parent, result)
 
 	parent.flags.ignore_validate_update_after_submit = True
 	from optimus.managed import save_session

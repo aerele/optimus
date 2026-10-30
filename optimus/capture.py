@@ -20,8 +20,11 @@ only when the session has ``capture_python_tree=True``), so the wraps' hot-path
 check is a single attribute lookup and never reads Redis.
 """
 
+import functools
 import hashlib
+import re
 import sys as _sys
+import time
 
 # Optional dependency capture degrades gracefully if pyinstrument is
 # not installed (e.g. air-gapped environments, broken pip cache).
@@ -226,6 +229,296 @@ def _make_wrap(orig, fn_name: str, local_proxy=None):
 	return wrapped
 
 
+# ----- DB lock-contention capture (deadlocks / lock-wait timeouts) ---------
+
+# Patched at CLASS level because the recorder swaps db.sql per instance and may be off.
+LOCK_EVENTS_CAP_PER_RECORDING = 200
+
+_LOCK_STACK_TAIL_FRAMES = 10
+
+# Frappe code that catches a lock error itself: (path suffix, function). Not dead: user_callsite
+# picks the deepest user frame even when Frappe frames sit below it.
+_FRAPPE_HANDLED_LOCK_SITES = (
+	("frappe/sessions.py", "update_user_metadata"),  # savepoint(QueryDeadlockError)
+	("frappe/utils/change_log.py", "update_last_known_versions"),  # suppress(...)
+	("frappe/utils/dashboard.py", "generate_and_cache_results"),  # suppress(...)
+)
+
+_QUOTED_OR_COMMENT_RE = re.compile(
+	r"'(?:[^'\\]|\\.|'')*'|\"(?:[^\"\\]|\\.|\"\")*\"|`[^`]*`|/\*.*?\*/|--[^\n]*",
+	re.DOTALL,
+)
+
+# NOWAIT probes fail fast by design (and surface as QueryTimeoutError on Postgres), so skip them.
+_NOWAIT_RE = re.compile(r"\bnowait\b", re.IGNORECASE)
+
+_PG_QUERY_CANCELED = "57014"  # Postgres SQLSTATE for a statement timeout
+
+
+def _is_nowait_probe(query) -> bool:
+	"""True for a ``... NOWAIT`` lock probe, judged on the raw text."""
+	return bool(_NOWAIT_RE.search(_QUOTED_OR_COMMENT_RE.sub(" ", str(query or ""))))
+
+
+def _is_statement_timeout(exc) -> bool:
+	"""True when a QueryTimeoutError wraps a Postgres statement timeout (not a lock wait)."""
+	cause = exc.__cause__ or next((a for a in exc.args if isinstance(a, BaseException)), None)
+	return getattr(cause, "pgcode", None) == _PG_QUERY_CANCELED
+
+
+def _lock_event_kind(exc) -> str | None:
+	"""``"deadlock"`` / ``"lock_wait_timeout"`` for a Frappe lock error, else None."""
+	# getattr: older Frappe and the unit-test stub may lack these classes.
+	import frappe
+
+	deadlock = getattr(frappe, "QueryDeadlockError", None)
+	if deadlock is not None and isinstance(exc, deadlock):
+		return "deadlock"
+	timeout = getattr(frappe, "QueryTimeoutError", None)
+	if timeout is not None and isinstance(exc, timeout) and not _is_statement_timeout(exc):
+		return "lock_wait_timeout"
+	return None
+
+
+def _handled_by_frappe(frames) -> bool:
+	"""True when a frame is one of Frappe's own lock-error handlers."""
+	for frame in frames:
+		filename = (frame.get("filename") or "").replace("\\", "/")
+		function = frame.get("function")
+		if any(filename.endswith(path) and function == fn for path, fn in _FRAPPE_HANDLED_LOCK_SITES):
+			return True
+	return False
+
+
+def _normalize_sql_safe(query, keep_quoted_identifiers=False) -> str:
+	"""``query`` with literals and comments replaced or dropped, or "" on any failure."""
+	# Not frappe.recorder.normalize_query: on a parse failure it returns the raw query, leaking values.
+	try:
+		import sqlparse
+		from sqlparse import tokens as T
+
+		text = str(query) if query is not None else ""
+		if not text:
+			return ""
+		parsed = sqlparse.parse(text)[0]
+		for token in parsed.flatten():
+			if token.ttype in T.Comment:
+				token.value = ""
+			elif token.ttype in T.Literal and not (
+				keep_quoted_identifiers and token.ttype in T.String.Symbol
+			):
+				token.value = "?"
+		return re.sub(r"( IN )\(\?[\s\n\?,]*\)", r"\1(?)", str(parsed), flags=re.IGNORECASE)
+	except Exception:
+		# Store nothing rather than risk raw literals.
+		return ""
+
+
+def _lock_caller_frames() -> list:
+	"""App and Server Script frames above the failed query, outermost first."""
+	try:
+		from frappe.recorder import get_current_stack_frames
+
+		return list(get_current_stack_frames())
+	except Exception:
+		return []
+
+
+def job_retry_state(create: bool = True) -> dict | None:
+	"""Per-RQ-job dict that outlives ``frappe.destroy()`` across Frappe's in-process retry."""
+	# execute_job destroys frappe.local and re-runs on a deadlock; the RQ job object survives.
+	# Relies on rq.Job accepting arbitrary attributes.
+	try:
+		from rq import get_current_job
+
+		job = get_current_job()
+		if job is None:
+			return None
+		state = getattr(job, "_optimus_retry_state", None)
+		if state is None and create:
+			state = job._optimus_retry_state = {}
+		return state
+	except Exception:
+		return None
+
+
+_lock_capture_warned = False
+_installed_lock_wrap = None
+
+
+def _warn_lock_capture_once(what: str, exc: BaseException) -> None:
+	"""Log the first lock-capture failure of this process; later ones stay silent."""
+	global _lock_capture_warned
+	if _lock_capture_warned:
+		return
+	_lock_capture_warned = True
+	try:
+		import frappe
+
+		frappe.logger("optimus").warning(
+			f"optimus: lock capture {what} failed ({type(exc).__name__}); "
+			"Lock Contention findings may be missing"
+		)
+	except Exception:
+		pass
+
+
+def _log_lock_skipped(reason: str) -> None:
+	"""Leave a debug trace for a lock error that is deliberately not reported."""
+	try:
+		import frappe
+
+		frappe.logger("optimus").debug(f"optimus: lock error not reported ({reason})")
+	except Exception:
+		pass
+
+
+def _append_lock_event(
+	local_proxy, kind, exc, query, duration_ms=None, keep_quoted_identifiers=False
+) -> None:
+	events = getattr(local_proxy, "optimus_lock_events", None)
+	if events is not None and len(events) >= LOCK_EVENTS_CAP_PER_RECORDING:
+		# Checked before the stack walk so a lock storm stays cheap.
+		_mark_lock_events_truncated(local_proxy)
+		return
+	if _is_nowait_probe(query):
+		_log_lock_skipped("NOWAIT probe")
+		return
+	frames = _lock_caller_frames()
+	if _handled_by_frappe(frames):
+		_log_lock_skipped("handled by Frappe")
+		return
+
+	from optimus.analyzers.base import installed_apps_allowlist, user_callsite
+	from optimus.settings import get_config
+
+	callsite = user_callsite(
+		frames, tracked_apps=get_config().tracked_apps, installed_apps=installed_apps_allowlist()
+	)
+	if callsite is None:
+		_log_lock_skipped("no callsite in tracked apps")
+		return
+
+	at = next(i for i, frame in enumerate(frames) if frame is callsite)
+	if events is None:
+		events = local_proxy.optimus_lock_events = []
+		state = job_retry_state()
+		if state is not None:
+			# Shared list: a Frappe retry restores it after frappe.local is wiped.
+			state["lock_events"] = events
+	events.append({
+		"kind": kind,
+		"normalized_query": _normalize_sql_safe(query, keep_quoted_identifiers)[:2000],
+		"error": (str(exc).splitlines() or [""])[0][:200],
+		"caller_stack": [callsite, *frames[at + 1 :][-_LOCK_STACK_TAIL_FRAMES:]],
+		"duration_ms": round(duration_ms, 2) if duration_ms is not None else None,
+		"time": time.time(),
+	})
+
+
+def _mark_lock_events_truncated(local_proxy) -> None:
+	local_proxy.optimus_lock_events_truncated = True
+	state = job_retry_state(create=False)
+	if state is not None:
+		state["lock_events_truncated"] = True
+
+
+def _record_lock_event(
+	local_proxy, kind, exc, query, duration_ms=None, keep_quoted_identifiers=False
+) -> None:
+	"""Append one lock event to ``local_proxy.optimus_lock_events``; only an RQ timeout escapes."""
+	from optimus.safe_call import InterruptGuard
+
+	guard = InterruptGuard()
+	failure = None
+	try:
+		with guard:
+			_append_lock_event(local_proxy, kind, exc, query, duration_ms, keep_quoted_identifiers)
+	except Exception as err:  # must never mask the DB exception the caller re-raises
+		failure = err
+	if guard.pending():
+		raise guard.interrupt()
+	if failure is not None:
+		_warn_lock_capture_once("recording", failure)
+
+
+def _record_in_wrap(db, local_proxy, exc, args, kwargs, start) -> None:
+	"""Record ``exc`` if it is a lock error; only an RQ job timeout escapes."""
+	from optimus.safe_call import InterruptGuard
+
+	local_proxy._optimus_recording_lock = True
+	guard = InterruptGuard()
+	failure = None
+	try:
+		with guard:
+			kind = _lock_event_kind(exc)
+			if kind:
+				_record_lock_event(
+					local_proxy, kind, exc,
+					args[0] if args else kwargs.get("query"),
+					duration_ms=(time.monotonic() - start) * 1000.0,
+					keep_quoted_identifiers=getattr(db, "db_type", None) == "postgres",
+				)
+	except Exception as err:  # must never mask the DB exception the caller re-raises
+		failure = err
+	finally:
+		local_proxy._optimus_recording_lock = False
+	if guard.pending():
+		raise guard.interrupt()
+	if failure is not None:
+		_warn_lock_capture_once("wrapper", failure)
+
+
+def _make_lock_wrap(orig, local_proxy):
+	"""Wrap ``Database.sql`` to record lock errors, then re-raise them unchanged."""
+
+	@functools.wraps(orig)
+	def wrapped(self, *args, **kwargs):
+		if not getattr(local_proxy, "optimus_session_id", None):
+			return orig(self, *args, **kwargs)
+		start = time.monotonic()
+		try:
+			return orig(self, *args, **kwargs)
+		except Exception as exc:
+			# The flag stops the settings read inside recording from re-entering.
+			if not getattr(local_proxy, "_optimus_recording_lock", False):
+				_record_in_wrap(self, local_proxy, exc, args, kwargs, start)
+			raise
+
+	wrapped._optimus_lock_wrap = True
+	wrapped._optimus_original = orig
+	return wrapped
+
+
+def _database_class():
+	"""``frappe.database.database.Database``, or None where it is unavailable."""
+	try:
+		from frappe.database.database import Database
+	except ImportError:
+		return None
+	return Database
+
+
+def install_lock_capture(local_proxy) -> None:
+	"""Patch ``Database.sql`` once to record lock errors (idempotent; no-op without Database)."""
+	database = _database_class()
+	if database is None or getattr(database.sql, "_optimus_lock_wrap", False):
+		return
+	global _installed_lock_wrap
+	try:
+		database.sql = _installed_lock_wrap = _make_lock_wrap(database.sql, local_proxy)
+	except Exception as exc:
+		_warn_lock_capture_once("install", exc)  # no lock capture beats a broken app load
+
+
+def uninstall_lock_capture() -> None:
+	"""Restore the original ``Database.sql``."""
+	database = _database_class()
+	# Only our own wrapper is unwrapped; a later wrapper stacked on top is left alone.
+	if database is not None and database.sql is _installed_lock_wrap:
+		database.sql = _installed_lock_wrap._optimus_original
+
+
 # Default pyinstrument sample interval in milliseconds. Overridable via
 # site_config.json: optimus_sampler_interval_ms. 1ms is pyinstrument's
 # default and balances fidelity vs overhead well.
@@ -276,6 +569,8 @@ def _force_stop_inflight_capture(local_proxy):
 		"_profiler_active_session_id",
 		"optimus_sidecar",
 		"optimus_sidecar_truncated",
+		"optimus_lock_events",
+		"optimus_lock_events_truncated",
 		"_profiler_in_wrap",
 	):
 		try:
@@ -330,9 +625,12 @@ def install_wraps():
 		new_wrap._profiler_is_our_wrap = True
 		setattr(module, attr, new_wrap)
 
+	install_lock_capture(frappe.local)
+
 
 def uninstall_wraps():
 	"""Restore originals. Used by before_uninstall and tests."""
+	uninstall_lock_capture()
 	for module, attr, _fn_name in _wrap_targets():
 		current = getattr(module, attr)
 		if getattr(current, "_profiler_is_our_wrap", False):

@@ -932,7 +932,7 @@ class TestTemperature:
 def test_eligible_finding_types_is_a_frozenset_of_known_types():
 	assert isinstance(ai_fix.AI_ELIGIBLE_FINDING_TYPES, frozenset)
 	# Spot-check: the high-context types are in, the infra ones are out.
-	for t in ("N+1 Query", "Slow Query", "Hot Line", "Redundant Call"):
+	for t in ("N+1 Query", "Slow Query", "Hot Line", "Redundant Call", "Slow Background Job"):
 		assert t in ai_fix.AI_ELIGIBLE_FINDING_TYPES
 	for t in ("Memory Pressure", "Background Queue Backlog", "Slow Frontend Render", "Function Not Invoked", "Missing Index", "Framework N+1", "Full Table Scan", "Filesort", "Temporary Table", "Low Filter Ratio"):
 		assert t not in ai_fix.AI_ELIGIBLE_FINDING_TYPES

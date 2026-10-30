@@ -12,6 +12,7 @@
 - ``format_loop_facts``: those facts as sentences for the shown lines.
 - ``hot_line_gate``: why a Hot Line gets no AI call, decided by Phase 2's measured time
   per hit or Phase 1's named callee.
+- ``slow_job_gate``: why a Slow Background Job gets no AI call (no concrete frame, or a framework one).
 - ``analyzed_before_callsite_fix``: Redundant Call findings built by the older stack walk.
 """
 
@@ -575,6 +576,16 @@ GATE_CHECK_FAILED_NOTE = (
 	"\"optimus: hot-line gate failed\" to the Optimus maintainers."
 )
 
+JOB_GATE_CHECK_FAILED_NOTE = (
+	"Optimus could not check this Slow Background Job, so it does not ask the AI about it. Open the "
+	"Line-Level Drilldown for the job's hot function. If it keeps happening, send the bench log line "
+	"\"optimus: slow-job gate failed\" to the Optimus maintainers."
+)
+JOB_NO_FRAME_NOTE = (
+	"This Slow Background Job finding names no source line of your app, so there is nothing concrete "
+	"for the AI to reason about. Open the Line-Level Drilldown for the job to see where the time goes."
+)
+
 # A line whose Phase 2 time per hit reaches this, and whose statement calls a
 # non-builtin, spends its time inside that callee.
 HOT_LINE_CALLEE_US = 1000.0
@@ -604,7 +615,6 @@ def finding_detail(finding: dict) -> dict:
 	if isinstance(detail, dict):
 		return detail
 	try:
-		# The dict may hold the reserved _phase2_run_uuid key; readers pick keys by name.
 		parsed = json.loads(finding.get("technical_detail_json") or "{}")
 	except (TypeError, ValueError):
 		return {}
@@ -877,6 +887,32 @@ def hot_line_gate(
 		return _own_loop_note(per_item)
 	scope = _callee_scope(shape.callee, tracked_apps=scope_apps, from_phase1=False) if shape.callee else "unknown"
 	return _callee_note(shape.callee, scope)
+
+
+def slow_job_gate(
+	finding: dict,
+	*,
+	tracked_apps: tuple[str, ...] = (),
+	installed_apps: frozenset[str] | None = None,
+) -> str | None:
+	"""Why a Slow Background Job must not go to the AI, as a report-ready note, or None.
+
+	Gated when the finding names no file and line (nothing concrete to send) or when that
+	frame is framework or library code, which your app cannot change."""
+	if (finding.get("finding_type") or "") != "Slow Background Job":
+		return None
+	detail = finding_detail(finding)
+	filename = str(detail.get("filename") or detail.get("file") or "")
+	lineno = detail.get("lineno")
+	if not filename or not isinstance(lineno, int) or isinstance(lineno, bool) or lineno <= 0:
+		return JOB_NO_FRAME_NOTE
+	if is_framework_callsite(filename, tracked_apps or None, installed_apps):
+		return (
+			f"This job's hot frame is in framework or library code ({_short_path(filename)}), which your "
+			"app cannot change, so Optimus does not ask the AI about it. Open the Line-Level Drilldown "
+			"for the job and reduce how often that path runs."
+		)
+	return None
 
 
 def analyzed_before_callsite_fix(finding: dict) -> bool:
