@@ -1325,6 +1325,21 @@ def _tracked_row_get(row, key, default=None):
 	return getattr(row, key, default)
 
 
+def _triggered_by(tracked_row, action_by_uuid, recordings_by_uuid) -> dict | None:
+	"""The action that enqueued a job as ``{label}``, or None if unknown."""
+	parent = (_tracked_row_get(tracked_row, "parent_recording_uuid") or "").strip()
+	action = action_by_uuid.get(parent) if parent else None
+	if not action:
+		return None
+	if action.get("event_type") == "RQ Job":
+		rec = recordings_by_uuid.get(parent) if recordings_by_uuid else None
+		label = "job " + _clean_job_method(action.get("action_label"), action.get("path"), rec)
+	else:
+		label = action.get("action_label") or action.get("path") or ""
+	label = label.strip()
+	return {"label": label} if label else None
+
+
 def build_background_jobs(actions, recordings_by_uuid, findings=None, tracked_jobs=None) -> dict:
 	"""Build the "RQ Jobs" section payload from the action dicts, merged with
 	the persisted per-job terminal-status rows so failed / timed-out /
@@ -1355,6 +1370,7 @@ def build_background_jobs(actions, recordings_by_uuid, findings=None, tracked_jo
 		if ruuid:
 			tracked_by_uuid[ruuid] = row
 
+	action_by_uuid = {a.get("recording_uuid"): a for a in (actions or []) if a.get("recording_uuid")}
 	jobs: list[dict] = []
 	matched_uuids: set[str] = set()
 	for a in (actions or []):
@@ -1407,6 +1423,7 @@ def build_background_jobs(actions, recordings_by_uuid, findings=None, tracked_jo
 			"idx": idx,
 			"status": (_tracked_row_get(trow, "status") or "Completed") if trow else "Completed",
 			"error": _tracked_row_get(trow, "error") if trow else None,
+			"triggered_by": _triggered_by(trow, action_by_uuid, recordings_by_uuid),
 		})
 
 	# Append every tracked job that produced no captured action (failed, timed
@@ -1431,6 +1448,7 @@ def build_background_jobs(actions, recordings_by_uuid, findings=None, tracked_jo
 			"idx": None,
 			"status": _tracked_row_get(row, "status") or "Running",
 			"error": _tracked_row_get(row, "error"),
+			"triggered_by": _triggered_by(row, action_by_uuid, recordings_by_uuid),
 		})
 
 	jobs.sort(key=lambda j: -(j.get("duration_ms") or 0))

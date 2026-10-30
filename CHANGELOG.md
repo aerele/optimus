@@ -8,7 +8,7 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.114] - 2026-10-29
+## [0.12.119] - 2026-10-29
 
 ### Added
 
@@ -23,6 +23,100 @@ versions may contain breaking changes see migration notes below).
 
 - The session summary no longer calls a finding with no measured impact "the biggest issue this session".
 - Lock capture no longer swallows an RQ job timeout raised while a lock event is being recorded.
+
+---
+
+## [0.12.118] - 2026-10-29
+
+### Fixed
+
+- Profiling a flow that calls `frappe.enqueue(..., now=True)`, `is_async=False` or the legacy `async=False` no longer passes Optimus's internal markers to your method, which crashed methods that do not accept extra keyword arguments. Positional flags are read from frappe's own signature.
+- Background jobs queued with `enqueue_after_commit=True` are now tracked like any other job, so the report waits for them and includes their recording. A job whose transaction has not committed yet (up to two minutes after it was queued) is kept waiting and shown as "Queued" instead of "Stopped / Never ran". Jobs frappe skips as duplicates are not tracked.
+- Jobs started by another background job after you press Stop (while the report is still collecting jobs) are now captured and attributed to the same session. A job chain no longer revives a session that is already finished, and the job keys expire 24 hours after they are created.
+- A job that is still waiting in the queue when the wait ends is shown as "Queued" instead of "Running". A job that finishes after the report was saved now replaces a "Queued" row or a "Never ran" placeholder with its real result. A job RQ has no record of is shown as "Stopped" with an explanation, in a warning colour. A job still Queued or Running when the report was prepared gets a note saying so.
+
+### Added
+
+- Each background job in the report now says which action (or parent job) triggered it ("Triggered by POST ..."). Existing sessions are unaffected; a migration adds the column.
+
+---
+
+## [0.12.117] - 2026-10-29
+
+### Changed
+
+- A line-level (phase 2) run now rechecks the phase 1 findings against the newest ready run. When a finding's function was line-profiled, the finding shows the measured function time and the hottest line with its time, hit count and code. If the measured function time is under a quarter of the estimate, the finding is downgraded one severity step; a measurement is never used to raise severity. The finding's impact stays the phase 1 estimate, with the measured time shown beside it.
+- The recheck only judges when the numbers are comparable. Findings whose estimate is summed over many calls (N+1, repeated calls), and functions from a time-budgeted run, are shown as measured with no change to severity.
+- A finding is matched to a profiled function by file name, parent folder and function name; names shared by several profiled functions are not guessed. Findings the line profile did not cover say why they were not rechecked.
+- The recheck and the Line-Level Drilldown now use the same function index, so both show the same hottest line from the newest run.
+
+### Fixed
+
+- Running phase 2 again no longer adds a second Hot Line row for the same function. The row is updated in place, and old duplicate rows are removed.
+- A failure while rechecking no longer stops the phase 2 results from being saved. If a row cannot be written, the rows already rechecked are put back, so the findings table is never left half rechecked.
+
+---
+
+## [0.12.116] - 2026-10-29
+
+### Changed
+
+- The "Preparing report" and "Capturing background jobs" banners on the Optimus Session form are now a slim one-line strip with a thin progress bar instead of a large block, so they no longer push the form content down. They stay aligned and wrap cleanly on narrow screens and follow the Desk dark theme. The strip text is announced politely to screen readers, its contrast is higher, the drain text is escaped, and the bar and spinner animations stop when the user prefers reduced motion.
+
+---
+
+## [0.12.115] - 2026-10-29
+
+### Fixed
+
+- The small pill in the bottom-right corner no longer stays on "Analyzing" after the report is ready. It now checks the server when the page loads, when you come back to the tab, when the live connection returns and while it is waiting. It covers both the normal analyze after stopping and the second-pass analyze, and a page reload while a report is still being built brings the "Analyzing" pill back.
+- While waiting, the pill checks with a growing delay and gives up 15 minutes after the wait began, even if the server keeps answering "still analyzing". It then shows "Check report" instead of polling forever.
+- A late "analyzing" update can no longer replace a "Report ready" pill, and a slow server reply can no longer undo a click on the pill or a newly started recording.
+- A failed analyze and the "Check report" give-up state now have their own red and amber colours instead of the blue "ready" look, and a stop click discards any status reply that was already on its way.
+- These background checks no longer pop an error dialog when they fail, a failed second-pass analyze found after a reload no longer shows placeholder text, and a stuck "Phase 2 recording" is rechecked after a failed stop. The failed-analyze alert text is now translatable as a whole sentence.
+
+---
+
+## [0.12.114] - 2026-10-29
+
+### Fixed
+
+- A session with no recordings is now marked Ready only after its (empty) report is rendered and attached, like every other session. If the report cannot be produced, the session is marked Failed instead of showing Ready with no report. The Ready notification is now also sent for such sessions.
+
+## [0.12.113] - 2026-10-29
+
+### Fixed
+
+- A "Slow Background Job" finding in the Findings section now gets an AI fix suggestion like the other findings. Before, it was skipped and the card said it "does not carry enough code or SQL context". The prompt carries the last part of the job method name, the deepest hot frame with its share of the job's time, the source around it and the job's slowest queries (taken from the job's recording when the prompt is built). A job whose hot frame is framework code, or that names no source line, gets no AI call; the card shows a note saying why, and any older stored suggestion is hidden.
+
+### Action needed
+
+- This type is now eligible with no opt-in. To keep it away from the AI provider, add `Slow Background Job` to Excluded finding types in Optimus Settings.
+
+---
+
+## [0.12.112] - 2026-10-29
+
+### Fixed
+
+- Missing-index suggestions no longer propose an index that an existing index already serves for the same query. A composite index such as (a, b) counts for a query that filters `a` and `b` by equality, a FULLTEXT index no longer hides a real missing index, and a column used only inside a function (such as `DATE(col)` or Frappe's `ifnull(col, '')`) gets no suggestion because a plain index cannot serve it. The warning for that case lists the real options: a range rewrite, a functional index, or avoiding the code path that wraps the column.
+- `NOT (col = ...)`, `NOT EXISTS (...)`, `ANY`, `ALL` and `IN (...)` are no longer mistaken for function calls. `LIKE` with anything but a plain prefix literal, such as `LIKE CONCAT('%', x)`, counts as a scan, `IS NOT NULL` is not treated as a weak negation, and a top-level `UNION` is treated as ambiguous so a real suggestion is kept.
+- When a column leads an existing index but the only filter on it is `!=`, `NOT IN` or `NOT LIKE`, the warning says the index exists but may not be able to serve that filter.
+- Many leading `/* ... */` comments, deep parenthesis nesting or unterminated quotes in a recorded statement can no longer stall the analyze worker; the statement and write parsers now run in linear time.
+- The savings floor and the example queries are computed from the queries that still need the index, the first known column cardinality is kept (numeric strings and Decimal values count), and a non-string query or a parser error fails open instead of dropping every index finding. An RQ job timeout is no longer swallowed while reading table aliases.
+
+### Changed
+
+- Before suggesting an index, Optimus checks the other queries in the same session. It drops the suggestion when the column is updated, or the table is written, far more often than the index would help reads (`HOT_COLUMN_MIN_UPDATES` 5, `WRITE_HEAVY_MIN_WRITES` 50, ratio 10), and says why in the warning. Otherwise it adds a "Before adding, check:" note with the write counts and the flows that write, a table with at least `CAUTION_MIN_WRITES` (10) writes, a column with at most `LOW_CARDINALITY_MAX` (10) distinct values, and an existing composite index that already holds the column. The finding's JSON gains `cautions` and `write_impact`.
+- Write detection also reads aliased UPDATE statements and double-quoted table names; `UPDATE ... JOIN` and multi-table `UPDATE a, b SET` are not counted (stated in the module docstring), which only means fewer suppressions. A failed alias parse is logged at debug level.
+
+---
+
+## [0.12.111] - 2026-10-29
+
+### Changed
+
+- The Optimus Session form is reorganised so the most useful things come first. An Overview tab shows the status, top severity and report links, then the totals, the summary, the session details and your notes. Findings, the recorded actions and background jobs, line-profiling runs and the technical and AI usage details each get their own tab or collapsed section. Existing sessions pick this up on the next migrate, and no session data changes.
 
 ---
 
@@ -142,6 +236,9 @@ versions may contain breaking changes see migration notes below).
 - Normalized EXPLAIN rows are coerced with `to_int` / `to_float`, so a string or
   `Decimal` value no longer drops that row's findings. `to_int` / `to_float` also
   treat `nan` / `inf` as missing instead of passing them to threshold checks.
+- Test coverage is now configured for the unit suite (line and branch; tests, integration tests and data patches excluded). Run `python -m pytest optimus/tests/ --cov --cov-report=term-missing:skip-covered`.
+- New behaviour tests for the session start/stop/retry endpoints, the request and background-job hooks, install/uninstall, the AI settings warning, the janitor and the Redis schema sentinel.
+- Removed an unused test fixture (`sidecar_with_pii.json`).
 
 
 

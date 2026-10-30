@@ -767,62 +767,34 @@ def _clear_capture_locals() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Background-job status tracking authoritative writes from the worker
+# Background-job status tracking: authoritative writes from the worker
 # ---------------------------------------------------------------------------
-# Pre-fix, the bg-job tracking pipeline relied on analyze re-reading each
-# enqueued job's terminal status from RQ at persist time
-# (``analyze._capture_job_terminal_status`` → ``rq.Job.fetch``). Two failure
-# modes left rows wrong on the report:
+# The worker knows things analyze cannot recover from RQ later (a GC'd job
+# record, the method of an ``enqueue_after_commit`` job), so the hooks write
+# the job's status from inside the job:
 #
-#   1. ``enqueue_after_commit=True`` jobs: ``frappe.enqueue`` returns None
-#      for deferred dispatch (see ``frappe/utils/background_jobs.py`` 's
-#      ``if enqueue_after_commit: ... return``), so the enqueue patch's
-#      ``record_job`` call in ``optimus/__init__.py`` is skipped (its
-#      ``if job is not None`` guard fails). The method name was never
-#      written to the jobs hash → blank ``method`` column on the row.
+#   * The enqueue wrapper pre-assigns a ``job_id`` to ``enqueue_after_commit``
+#     jobs (frappe returns None for those) and records the job as "Queued"
+#     with its method and parent recording.
+#   * before_job calls ``_track_bg_job_started``: method (set-if-absent),
+#     status "Running" and started_at.
+#   * after_job calls ``_track_bg_job_finished`` in its finally block while the
+#     RQ record is still alive: terminal status, ended_at and duration_ms.
 #
-#   2. Short jobs whose RQ record was GC'd before analyze persisted:
-#      ``Job.fetch`` raises ``NoSuchJobError``, which the ``except
-#      Exception: pass`` in ``_capture_job_terminal_status`` swallows.
-#      No status/times were written → row defaulted to status=Running
-#      with NULL started_at/ended_at.
+# analyze's ``_capture_job_terminal_status`` stays as the fallback for jobs the
+# hooks could not cover (worker SIGKILL on timeout). Its persist-time loop only
+# runs for rows still without a status or still "Queued".
 #
-# These two helpers move the authoritative writes into the hooks, where:
-#   * before_job calls ``_track_bg_job_started`` right after popping the
-#     marker has access to the method arg (fixes #1) and the worker's
-#     wall-clock time (fixes the "no started_at" half of #2).
-#   * after_job calls ``_track_bg_job_finished`` in its finally block
-#     RQ record is still alive, so we capture status + ended_at +
-#     duration_ms ourselves (fixes the other half of #2).
-#
-# analyze's existing ``_capture_job_terminal_status`` stays as the fallback
-# for jobs the hooks couldn't cover (worker SIGKILL on timeout, crash before
-# after_job fires frappe runs after_job in a try/finally so this is rare
-# but possible). Its persist-time loop only fires for jobs whose status the
-# hooks did NOT already write (``if not _jm.get("status"):``), so no
-# double-work and no overwrite churn.
-#
-# Late-finish DocType fallback (v0.7.x+):
-# ``analyze._bg_wait_for_pending_jobs`` is hard-capped at
-# ``_MAX_BG_JOB_WAIT_SECONDS = 300`` (analyze.py:215). A job that runs longer
-# than 5 min ALWAYS exceeds the cap; at the cap, ``_finalize_pending_statuses``
-# marks the still-active job as ``status="Running"`` (no end times analyze
-# can't predict when it'll finish), ``_persist`` writes the Optimus
-# Background Job child row from that snapshot and ``_cleanup_redis`` then
-# DELETES the jobs hash. When the long job actually finishes minutes later,
-# the worker's ``_track_bg_job_finished`` writes to a deleted Redis key
-# (orphan) and the persisted row stays ``Running`` forever there's no
-# in-band path to update it because re-analyze isn't viable (recordings /
-# meta / jobs hash are all gone).
-#
-# Closing the gap: after ``set_job_status`` writes to the Redis hash,
-# ``_track_bg_job_finished`` ALSO checks the Optimus Session DocType row;
-# if the session has finalized (status in {"Ready", "Failed"}) and a child
-# row exists at ``status="Running"``, it writes the terminal status +
-# ended_at + duration_ms + error directly via ``frappe.db.set_value`` +
-# commit. Guarded by an idempotency check (only updates Running placeholders
-# never clobbers a fresher Completed) and a SEPARATE try/except from the
-# Redis path so neither failure suppresses the other.
+# Late-finish DocType fallback:
+# ``analyze._bg_wait_for_pending_jobs`` is capped at ``_MAX_BG_JOB_WAIT_SECONDS``.
+# At the cap, ``_finalize_pending_statuses`` labels a still-active job "Running"
+# (started) or "Queued" (waiting), ``_persist`` writes the Optimus Background
+# Job rows from that snapshot and ``_cleanup_redis`` deletes the jobs hash.
+# When the job finishes later, ``_track_bg_job_finished`` also updates the
+# persisted row if the session is Ready/Failed and the row is still
+# None/"Queued"/"Running" (or a Stopped "Never ran" placeholder), via
+# ``frappe.db.set_value`` + commit. It never overwrites a terminal status and
+# runs in a separate try/except from the Redis write.
 #
 # Both helpers are best-effort: any failure is swallowed so a tracking bug
 # can never break the user's actual job.
@@ -941,8 +913,11 @@ def _track_bg_job_finished(session_uuid: str, job_id: str) -> None:
 		)
 		if not child_name:
 			return  # no row was persisted for this job don't INSERT a phantom
-		cur_status = frappe.db.get_value("Optimus Background Job", child_name, "status")
-		if cur_status not in (None, "Running"):
+		cur_status, cur_error = frappe.db.get_value(
+			"Optimus Background Job", child_name, ["status", "error"]
+		)
+		never_ran = cur_status == "Stopped" and (cur_error or "").startswith("Never ran")
+		if cur_status not in (None, "", "Queued", "Running") and not never_ran:
 			return  # idempotency: don't clobber a fresher Completed / Failed
 		frappe.db.set_value(
 			"Optimus Background Job",

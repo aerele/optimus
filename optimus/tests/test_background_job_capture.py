@@ -225,14 +225,14 @@ class TestBgWaitForPendingJobs:
 
 	def test_proceeds_when_all_jobs_finished(self, monkeypatch):
 		analyze = self._patch_common(monkeypatch, pending=["j1", "j2"], wait_seconds=60)
-		monkeypatch.setattr(analyze, "_rq_job_active", lambda jid: False)
+		monkeypatch.setattr(analyze, "_rq_status", lambda jid: "finished")
 		assert analyze._bg_wait_for_pending_jobs("s1", "PS-1", None) == 0
 
 	def test_cap_hit_returns_count_of_still_running(self, monkeypatch):
 		import time
 
 		analyze = self._patch_common(monkeypatch, pending=["j1", "j2"], wait_seconds=60)
-		monkeypatch.setattr(analyze, "_rq_job_active", lambda jid: True)
+		monkeypatch.setattr(analyze, "_rq_status", lambda jid: "started")
 		# Deadline already in the past → proceed, reporting 2 still running.
 		assert analyze._bg_wait_for_pending_jobs("s1", "PS-1", time.time() - 1) == 2
 
@@ -242,7 +242,7 @@ class TestBgWaitForPendingJobs:
 		import frappe
 
 		analyze = self._patch_common(monkeypatch, pending=["j1"], wait_seconds=60)
-		monkeypatch.setattr(analyze, "_rq_job_active", lambda jid: True)
+		monkeypatch.setattr(analyze, "_rq_status", lambda jid: "started")
 		monkeypatch.setattr(analyze, "_publish_progress", lambda *a, **k: None)
 		monkeypatch.setattr(analyze.time, "sleep", lambda *a, **k: None)
 		# The status-set is best-effort (try/except in the SUT frappe.db
