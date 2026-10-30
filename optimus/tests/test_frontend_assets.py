@@ -258,3 +258,12 @@ def test_settings_connect_button_only_in_subscription_mode():
 def test_settings_test_ai_connection_gated_to_api_mode():
 	guard = _settings_js_before_button("Test AI connection")
 	assert 'frm.doc.ai_connection_type !== "Subscription (local CLI)"' in guard
+
+
+def test_form_status_banner_selectors_exist_in_css():
+	"""The compact strip classes used by the form banners are defined in the widget CSS."""
+	with open(WIDGET_CSS) as f:
+		css = f.read()
+	for selector in (".optimus-status", ".optimus-status-warn", ".optimus-status-bar"):
+		assert selector in css, f"Missing CSS: {selector}"
+	assert "prefers-reduced-motion: reduce" in css

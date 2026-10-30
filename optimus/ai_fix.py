@@ -274,13 +274,14 @@ def _private_ai_frames(function):
 # Table, Low Filter Ratio) get a deterministic recipe from
 # optimus.renderer.index_recipes instead of an LLM answer, and Framework N+1
 # findings point at a loop inside framework code the app cannot change, so
-# none of them reaches the LLM. A Hot Line and a Redundant Call are further
-# gated per finding by ``llm_gate_note``.
+# none of them reaches the LLM. A Hot Line, a Redundant Call and a Slow
+# Background Job are further gated per finding by ``llm_gate_note``.
 AI_ELIGIBLE_FINDING_TYPES: frozenset[str] = frozenset({
 	"N+1 Query",
 	"Slow Query",
 	"Redundant Call",
 	"Hot Line",
+	"Slow Background Job",
 })
 
 
@@ -499,11 +500,17 @@ def llm_gate_note(finding: dict) -> str | None:
 		if ai_grounding.analyzed_before_callsite_fix(finding):
 			return ai_grounding.UNSTAMPED_REDUNDANT_CALL_NOTE
 		return None
-	if ftype != "Hot Line":
+	if ftype not in ("Hot Line", "Slow Background Job"):
 		return None
 	tracked, installed = _app_scope()
 	# A gate that raises fails CLOSED (no AI call, a neutral note), so analyze's and
 	# Refresh's selection never abort on it; an RQ job timeout still escapes fresh.
+	if ftype == "Slow Background Job":
+		return safe_call.best_effort(
+			lambda: ai_grounding.slow_job_gate(finding, tracked_apps=tracked, installed_apps=installed),
+			ai_grounding.JOB_GATE_CHECK_FAILED_NOTE,
+			on_error=lambda kind: safe_call.log_error_line(f"optimus: slow-job gate failed: {kind}"),
+		)
 	return safe_call.best_effort(
 		lambda: ai_grounding.hot_line_gate(finding, tracked_apps=tracked, installed_apps=installed),
 		ai_grounding.GATE_CHECK_FAILED_NOTE,
@@ -3188,7 +3195,11 @@ def _build_fix_request(
 			"Callsite (the closest non-framework frame to the cost; the loop or call may be in a function it calls):\n"
 			+ block("callsite", ai_budget.clip(f"{callsite['filename']}:{callsite['lineno']}{fn}", 400)),
 		))
+	job_method = str(detail.get("job_method") or "").strip()
+	if ftype == "Slow Background Job" and job_method:
+		fixed.append((0, "Background job (last component of the method the queue ran):\n" + block("job", ai_budget.clip(job_method, 300))))
 	hot_fn = (detail.get("function") or "").strip()
+	hot_label = "deepest hot frame" if ftype == "Slow Background Job" else "dominates this action"
 	cum_ms = detail.get("cumulative_ms")
 	wall_ms = detail.get("action_wall_time_ms")
 	if hot_fn and cum_ms:
@@ -3203,7 +3214,7 @@ def _build_fix_request(
 			share = ""
 		fixed.append((
 			1,
-			f"Hot function (dominates this action): ~{humanize_duration_ms(float(cum_ms), threshold_ms=threshold_ms)}"
+			f"Hot function ({hot_label}): ~{humanize_duration_ms(float(cum_ms), threshold_ms=threshold_ms)}"
 			f"{share}. Point at the lines inside it that cost the time.\n" + block("function", hot_fn),
 		))
 

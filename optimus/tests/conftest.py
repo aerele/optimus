@@ -162,6 +162,8 @@ except ImportError:
 		PermissionError=type("PermissionError", (Exception,), {}),
 		ValidationError=_StubValidationError,
 		DoesNotExistError=type("DoesNotExistError", (Exception,), {}),
+		QueryDeadlockError=type("QueryDeadlockError", (Exception,), {}),
+		QueryTimeoutError=type("QueryTimeoutError", (Exception,), {}),
 		RateLimitExceededError=type("RateLimitExceededError", (_StubValidationError,), {}),
 	)
 	_mk_module(
@@ -202,6 +204,7 @@ except ImportError:
 		mark_duplicates=lambda *a, **kw: None,
 		record=lambda *a, **kw: None,
 		dump=lambda *a, **kw: None,
+		get_current_stack_frames=lambda: iter(()),
 	)
 	_mk_module("frappe.model")
 	_mk_module("frappe.model.document", Document=type("Document", (object,), {}))
