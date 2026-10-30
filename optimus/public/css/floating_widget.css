@@ -71,6 +71,22 @@
 	background: #2563eb;
 }
 
+#frappe-profiler-widget.fp-tone-failed {
+	border-color: #dc2626;
+	color: #b91c1c;
+}
+#frappe-profiler-widget.fp-tone-failed .fp-dot {
+	background: #dc2626;
+}
+
+#frappe-profiler-widget.fp-tone-stale {
+	border-color: #d97706;
+	color: #b45309;
+}
+#frappe-profiler-widget.fp-tone-stale .fp-dot {
+	background: #d97706;
+}
+
 @keyframes fp-pulse {
 	0%, 100% { opacity: 1; transform: scale(1); }
 	50% { opacity: 0.6; transform: scale(0.85); }
@@ -92,5 +108,66 @@
 		right: 12px;
 		bottom: 12px;
 		font-size: 0.72rem;
+	}
+}
+
+/* Compact status strip for the in-form analyze and drain banners. */
+.optimus-status {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 2px 8px;
+	margin: 0 0 8px;
+	padding: 4px 10px;
+	box-sizing: border-box;
+	max-width: 100%;
+	border-left: 3px solid var(--blue-500, #2563eb);
+	border-radius: var(--border-radius-sm, 4px);
+	background: var(--bg-blue, #eff6ff);
+	color: var(--text-color, #1f2937);
+	font-size: var(--text-sm, 0.8rem);
+	line-height: 1.4;
+}
+
+.optimus-status.optimus-status-warn {
+	border-left-color: var(--orange-500, #d97706);
+	background: var(--bg-orange, #fff7ed);
+}
+
+.optimus-status .optimus-status-text {
+	flex: 1 1 12rem;
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+
+.optimus-status .optimus-status-bar {
+	flex: 0 1 140px;
+	height: 3px;
+	min-width: 60px;
+	border-radius: 2px;
+	background: var(--control-bg, rgba(128, 128, 128, 0.3));
+	overflow: hidden;
+}
+
+.optimus-status .optimus-status-bar > span {
+	display: block;
+	height: 100%;
+	background: var(--blue-500, #2563eb);
+	transition: width 0.3s ease;
+}
+
+@media (max-width: 600px) {
+	.optimus-status .optimus-status-bar {
+		flex: 1 1 100%;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.optimus-status .optimus-status-bar > span {
+		transition: none;
+	}
+
+	.optimus-status .fa-spin {
+		animation: none;
 	}
 }
