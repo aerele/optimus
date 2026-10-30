@@ -8,7 +8,7 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.126] - 2026-10-30
+## [0.12.124] - 2026-10-30
 
 ### Added
 
@@ -39,6 +39,29 @@ versions may contain breaking changes see migration notes below).
 - The Optimus Codex home is always an absolute path, so the CLI child (which runs in a scratch folder) finds the sign-in; before, Frappe's relative site path made Connect and every run fail on a real bench.
 - The CLI's real refresh-failure messages ("refresh token was already used", "token was revoked", "access token could not be refreshed", "log out and sign in") are an expired-session error with the `codex login` hint. Because parallel runs share one sign-in, a run that gets that error is tried once more after 2 seconds (when the time limit allows) before it fails.
 - The capability filter also turns off `goals`, `mentions`, `worktrees`, `write_stdin` and `collab` features. A corrupt `auth.json` ("Error checking login status") reads as signed out, and the Connect message says the token is checked on first use.
+
+---
+
+## [0.12.123] - 2026-10-29
+
+### Changed
+
+- The "Call chain" block on a finding card is now labelled "Drill-down", matching the existing Drill-down block. When a card has both, they sit together under a single "Drill-down" heading: the line-profiling chain first, then the sampled call path without a second heading, each keeping its own footer line. The Hint box now renders above both trees so it no longer separates them.
+- The message shown for framework-code lines that skip the AI now says "Follow the drill-down above" instead of "call chain".
+
+---
+
+## [0.12.122] - 2026-10-30
+
+### Added
+
+- When a profiling session finishes, fails or ends with no recorded requests, a popup shows the Optimus Session ID with a button that opens the record. It appears once per run even with several tabs open, only in a visible tab, wherever you are in Desk, except when you are already on that session's form.
+- The popup waits while you type in a text field or another dialog is open, and opens anyway after about 30 seconds. If it fails to open, the error goes to the browser console and it can still show on the next attempt or in another tab.
+- The pill and alert for a session with no recorded requests say "No data" instead of "Report ready", and so does the alert on the session form. The inline stop response carries `empty` so the widget can tell. The session form shows a red "Analysis failed" alert when analysis fails.
+
+### Fixed
+
+- The widget never received the session events on a fresh page load: it subscribed before Frappe had created the realtime socket, where `frappe.realtime.on` does nothing, so no popup, pill or alert update arrived. The widget now waits for the socket (checking every 250 ms, for up to 30 seconds) and registers its handlers exactly once.
 
 ---
 
