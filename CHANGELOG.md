@@ -8,6 +8,18 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.115] - 2026-10-29
+
+### Fixed
+
+- The small pill in the bottom-right corner no longer stays on "Analyzing" after the report is ready. It now checks the server when the page loads, when you come back to the tab, when the live connection returns and while it is waiting. It covers both the normal analyze after stopping and the second-pass analyze, and a page reload while a report is still being built brings the "Analyzing" pill back.
+- While waiting, the pill checks with a growing delay and gives up 15 minutes after the wait began, even if the server keeps answering "still analyzing". It then shows "Check report" instead of polling forever.
+- A late "analyzing" update can no longer replace a "Report ready" pill, and a slow server reply can no longer undo a click on the pill or a newly started recording.
+- A failed analyze and the "Check report" give-up state now have their own red and amber colours instead of the blue "ready" look, and a stop click discards any status reply that was already on its way.
+- These background checks no longer pop an error dialog when they fail, a failed second-pass analyze found after a reload no longer shows placeholder text, and a stuck "Phase 2 recording" is rechecked after a failed stop. The failed-analyze alert text is now translatable as a whole sentence.
+
+---
+
 ## [0.12.114] - 2026-10-29
 
 ### Fixed
