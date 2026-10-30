@@ -42,7 +42,8 @@ the highest-value security considerations:
    admin-only.
 2. **AI fix sends source code to an LLM.** When the AI fix feature
    is enabled (Optimus Settings ▸ AI Fix), code snippets +
-   normalised SQL are POSTed to the configured `ai_base_url`. The
+   normalised SQL are POSTed to the configured `ai_base_url`
+   (or, in Subscription mode, passed to the local Codex CLI, see below). The
    site operator chooses the endpoint (typically OpenAI / Anthropic
    / a self-hosted Ollama instance). The URL policy below rejects unsafe
    syntax and literal metadata addresses. Operators still control the
@@ -61,7 +62,7 @@ the highest-value security considerations:
    Frappe applies its CSRF protection. AI and report actions count per-user
    fixed-window limits (`optimus/ratelimit.py`) after permission checks. Defaults:
    `refill_ai_suggestions` 6 per hour; `regenerate_reports` 30 per minute;
-   `retry_analyze` 5 per minute; `test_ai_connection` 10 per minute;
+   `retry_analyze` 5 per minute; `test_ai_connection` and `check_cli_session` 10 per minute;
    `download_pdf` and `export_session` 20 per minute. Session and Phase 2
    starts allow 10 per minute, their stops allow 20 per minute, and
    `retry_phase2_analyze` allows 5 per minute. A batch contains at most 5
@@ -79,6 +80,56 @@ the highest-value security considerations:
    Dotted paths import installed apps only; other paths may inspect already
    loaded modules. Server Script bodies require both the acting user and
    the session owner or refresh requester to have read permission.
+
+## Subscription (local CLI) mode
+
+Off by default. It needs `developer_mode` and the `optimus_allow_subscription_cli`
+site-config flag, and Optimus Settings > AI > Connection set to "Subscription
+(local CLI)". Instead of an API key, each AI call runs `codex exec` on the bench
+machine and uses the bench user's ChatGPT subscription. The prompt (normalised SQL,
+source snippets, URLs, parameters) goes to OpenAI through that CLI, so it leaves the
+host like an API-key call does. The Connect button (`check_cli_session`) is limited to
+10 per minute per user and System Manager only.
+
+What Optimus does to contain the CLI:
+
+- The child process gets an allow-listed environment and a private scratch `HOME` and
+  `TMPDIR`, removed afterwards (stale trees left by a killed worker are deleted on the next
+  run and the removal is logged). Its `CODEX_HOME` is a folder owned by Optimus,
+  `<site>/private/optimus-codex` (created mode 0700), that is used by nothing else. The
+  operator's own `~/.codex` is never read, copied or written. The operator signs in once with
+  `CODEX_HOME=<that folder> codex login` (Connect shows the exact command), and the codex
+  CLI refreshes its own sign-in inside that folder. Optimus does not copy, merge or write
+  back tokens, and takes no lock; concurrent codex runs in that one folder are codex's own
+  business.
+- It runs `--sandbox read-only --ephemeral` with the tool features that could read a file
+  or run a command turned off (`--disable`). Only the feature names the installed CLI
+  lists are passed, and every capability-looking feature it reports as on is turned off too.
+- If `codex features list` cannot be read, the run is refused. Nothing is guessed.
+- On Linux the child is started with `PR_SET_PDEATHSIG` (SIGKILL), so the kernel stops it when
+  the worker that started it dies, and the whole process group is killed when a call ends or
+  times out. Limits: the signal reaches the direct child only, not what it spawned, and other
+  platforms have no such call. An abandoned run is logged (`exec_abandoned`).
+- The reply goes through a pattern scrub for secrets before it is stored.
+
+Residual risk, in plain words:
+
+- The Optimus-owned Codex home holds the live sign-in, and the agent runs with
+  `CODEX_HOME` pointing at it, so a prompt injection that gets past the tool list can read or
+  replace that sign-in. It is the Optimus ChatGPT sign-in only, never the operator's own, and
+  `codex login` restores it.
+- The tool list is a denylist. A new capability that the installed CLI adds under a name
+  the floor and the regex do not match stays reachable, and `--sandbox read-only` limits
+  writes, not reads. A prompt injection hidden in profiled data could then ask the agent to
+  read a file the bench user can read (the Optimus sign-in, `site_config.json`, private files).
+- The output scrub is pattern based. Encoding or splitting a secret defeats it, and it can
+  also rewrite legitimate code that looks like a secret.
+- Use this mode only on a developer bench and only with data you trust.
+- Tested with codex 0.164 to 0.165. Connect warns when the installed version is outside
+  that range; re-check the isolation (run the opt-in `OPTIMUS_LIVE_CODEX=1` test) before
+  moving to a newer one.
+
+Follow-up under discussion: OS-level confinement (bwrap/landlock) instead of the denylist.
 
 ## API key handling
 
