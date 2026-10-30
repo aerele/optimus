@@ -1517,6 +1517,7 @@ _CATEGORY_FOR_FINDING_TYPE: dict[str, str] = {
 	"Filesort": "filesort",
 	"Temporary Table": "temp_table",
 	"Low Filter Ratio": "low_filter",
+	"Lock Contention": "lock_contention",
 }
 
 # Ascending order for sorted() High first. NOT the same as the
@@ -1549,6 +1550,7 @@ _ACTION_VERB_FOR_FINDING_TYPE: dict[str, str] = {
 	"Low Filter Ratio": "Narrow the WHERE clause",
 	"Redundant Call": "Cache the repeated call",
 	"Repeated Hot Frame": "Investigate the recurring hot frame",
+	"Lock Contention": "Resolve the lock contention",
 }
 
 
@@ -1961,6 +1963,9 @@ def _compose_tldr(
 				"<span class=\"hot\">{impact}</span> in redundant work "
 				"{title}"
 			).format(impact=impact_html, title=title)
+	elif category == "lock_contention":
+		# No ms to reclaim, so no "0ms" badge.
+		headline = Markup("{title}").format(title=title)
 	else:
 		# Fallback verbatim title with the impact called out.
 		headline = Markup(
@@ -2353,6 +2358,7 @@ _ACTIONABLE_FINDING_TYPES = frozenset({
 	"Heavy Response",
 	# v0.6.0 phase-2 line profiler
 	"Hot Line",            # one source line concentrates the function's time
+	"Lock Contention",     # user callsites only
 })
 # Observation-only finding types (informational, no direct fix):
 #   Framework N+1 loop inside frappe/*

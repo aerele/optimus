@@ -39,6 +39,7 @@ from optimus.analyzers import (
 	frontend_timings,  # v0.5.0
 	index_suggestions,
 	infra_pressure,  # v0.5.0
+	lock_contention,
 	n_plus_one,
 	per_action,
 	redundant_calls,
@@ -98,6 +99,7 @@ _BUILTIN_ANALYZERS = [
 	table_breakdown.analyze,
 	call_tree.analyze,        # v0.3.0 must run after per_action
 	redundant_calls.analyze,  # v0.3.0 independent
+	lock_contention.analyze,  # reads rec["lock_events"]
 	infra_pressure.analyze,   # v0.5.0 reads rec["infra"]
 	frontend_timings.analyze, # v0.5.0 reads context.frontend_data
 ]
@@ -1385,8 +1387,25 @@ def _fetch_recordings(recording_uuids: list[str]):
 		if failed:
 			log_ai_failure("optimus ai recording sidecar read", reason="sidecar_read_failed")
 
+		# Load the DB lock-contention events (best-effort)
+		lock_events = []
+		failed = False
+		try:
+			with guard:
+				loaded = frappe.cache.get_value(_redis_keys.lock_events(uuid))
+				if isinstance(loaded, list):
+					lock_events = loaded
+		except Exception:
+			failed = True
+		if guard.pending():
+			loaded = lock_events = sidecar = rec = tree_blob = None
+			raise guard.interrupt()
+		if failed:
+			log_ai_failure("optimus ai recording lock events read", reason="lock_events_read_failed")
+
 		rec["pyi_session"] = pyi_session
 		rec["sidecar"] = sidecar
+		rec["lock_events"] = lock_events
 		strip_profiler_own_calls(rec)
 		yield rec
 
@@ -3284,7 +3303,9 @@ def _build_summary_html(
 				title = title[len(prefix):]
 			pri = _PRIORITY_WORD.get(f.get("severity") or "", "")
 			impact = f.get("estimated_impact_ms") or 0
-			tail = f" (~{dur(impact)}" + (f" - {pri} priority" if pri else "") + ")"
+			# No "~0ms" for a finding with no measured impact (Lock Contention).
+			bits = ([f"~{dur(impact)}"] if impact else []) + ([f"{pri} priority"] if pri else [])
+			tail = f" ({' - '.join(bits)})" if bits else ""
 			return f"<strong>{html.escape(title)}</strong>{tail}"
 
 		# Prefer a finding tied to this specific action (via action_ref);
@@ -3298,16 +3319,20 @@ def _build_summary_html(
 					tied_finding.get("estimated_impact_ms") or 0
 				):
 					tied_finding = f
+		# A finding with no measured impact (Lock Contention) is never "the biggest issue".
+		timed_findings = [f for f in findings if f.get("estimated_impact_ms")]
 		overall_finding = max(
-			findings, key=lambda f: f.get("estimated_impact_ms") or 0
-		) if findings else None
+			timed_findings, key=lambda f: f.get("estimated_impact_ms") or 0
+		) if timed_findings else None
 
 		if tied_finding:
 			# v0.7.x: the "See the Findings section below …" pointer lives once,
 			# on the issue-count sentence below don't repeat it here.
+			# A reliability finding has no time to attribute.
+			lead = "most of its time went into" if tied_finding.get("estimated_impact_ms") else "it also hit"
 			parts.append(
 				f"The slowest one was <strong>{slowest_label_esc}</strong> at "
-				f"{dur(slowest_ms)} - and most of its time went into "
+				f"{dur(slowest_ms)} - and {lead} "
 				f"{_finding_phrase(tied_finding)}."
 			)
 		elif overall_finding:
@@ -3463,6 +3488,9 @@ def _persist_recordings_file(docname: str, session_uuid: str, recording_uuids: l
 				resolved_doc = frappe.cache.get_value(_redis_keys.resolved_doc(uuid))
 				if isinstance(resolved_doc, dict):
 					rec["resolved_target_doc"] = resolved_doc
+				lock_events = frappe.cache.get_value(_redis_keys.lock_events(uuid))
+				if isinstance(lock_events, list):
+					rec["lock_events"] = lock_events
 				recordings[uuid] = entry
 
 			if not recordings:
@@ -3508,7 +3536,7 @@ def _persist_recordings_file(docname: str, session_uuid: str, recording_uuids: l
 		recordings = rec = bundle = payload = None
 		raise guard.interrupt()
 	if failed:
-		recordings = rec = entry = sparse = infra_blob = resolved_doc = bundle = payload = existing = None
+		recordings = rec = entry = sparse = infra_blob = resolved_doc = lock_events = bundle = payload = existing = None
 		log_ai_failure("optimus ai persist recordings", reason="snapshot_write_failed")
 		raise recording_bundle.SnapshotUnavailable("snapshot_write_failed")
 
@@ -3583,6 +3611,10 @@ def _cleanup_redis(session_uuid: str, recording_uuids: list[str]) -> None:
 			frappe.cache.delete_value(_redis_keys.sidecar(uuid))
 		except Exception:
 			pass
+		try:
+			frappe.cache.delete_value(_redis_keys.lock_events(uuid))
+		except Exception:
+			pass  # best-effort cleanup
 		try:
 			frappe.cache.delete_value(_redis_keys.resolved_doc(uuid))
 		except Exception:
