@@ -8,12 +8,26 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.124] - 2026-10-29
+## [0.12.123] - 2026-10-29
 
 ### Changed
 
 - The "Call chain" block on a finding card is now labelled "Drill-down", matching the existing Drill-down block. When a card has both, they sit together under a single "Drill-down" heading: the line-profiling chain first, then the sampled call path without a second heading, each keeping its own footer line. The Hint box now renders above both trees so it no longer separates them.
 - The message shown for framework-code lines that skip the AI now says "Follow the drill-down above" instead of "call chain".
+
+---
+
+## [0.12.122] - 2026-10-30
+
+### Added
+
+- When a profiling session finishes, fails or ends with no recorded requests, a popup shows the Optimus Session ID with a button that opens the record. It appears once per run even with several tabs open, only in a visible tab, wherever you are in Desk, except when you are already on that session's form.
+- The popup waits while you type in a text field or another dialog is open, and opens anyway after about 30 seconds. If it fails to open, the error goes to the browser console and it can still show on the next attempt or in another tab.
+- The pill and alert for a session with no recorded requests say "No data" instead of "Report ready", and so does the alert on the session form. The inline stop response carries `empty` so the widget can tell. The session form shows a red "Analysis failed" alert when analysis fails.
+
+### Fixed
+
+- The widget never received the session events on a fresh page load: it subscribed before Frappe had created the realtime socket, where `frappe.realtime.on` does nothing, so no popup, pill or alert update arrived. The widget now waits for the socket (checking every 250 ms, for up to 30 seconds) and registers its handlers exactly once.
 
 ---
 
@@ -148,6 +162,7 @@ versions may contain breaking changes see migration notes below).
 ### Changed
 
 - The Optimus Session form is reorganised so the most useful things come first. An Overview tab shows the status, top severity and report links, then the totals, the summary, the session details and your notes. Findings, the recorded actions and background jobs, line-profiling runs and the technical and AI usage details each get their own tab or collapsed section. Existing sessions pick this up on the next migrate, and no session data changes.
+
 ---
 
 ## [0.12.103] - 2026-10-29
