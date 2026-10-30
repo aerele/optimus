@@ -476,3 +476,14 @@ class TestDrilldownHeadingWithBothBlocks:
 		assert html.count(self.LABEL) == 1
 		assert html.find(self.LABEL) < html.find("deepest line is where")
 		assert "no deeper user-code frame" in html
+
+
+def test_card_order_is_recheck_then_hint_then_drilldown():
+	"""#103's recheck block stays above the Hint box, which sits above the Drill-down chain."""
+	from pathlib import Path
+
+	src = (Path(__file__).resolve().parent.parent / "templates" / "report.html").read_text(encoding="utf-8")
+	recheck = src.index("Line-Level Recheck:")
+	hint = src.index("<strong>Hint:</strong>")
+	chain = src.index('<div class="chain-label">Drill-down</div>')
+	assert recheck < hint < chain
