@@ -1,4 +1,4 @@
-"""AI admission and Phase 2 serialize on the same SQL mutex and parent."""
+"""AI admission and line profiling serialize on the same SQL mutex and parent."""
 
 import pytest
 
@@ -26,7 +26,7 @@ def test_phase2_lock_leaves_parent_unchanged_until_admission_writes(journal):
 	journal.db.rows[journal.mod.RUN] = {}
 	with journal.db.transaction():
 		assert journal.mod.lock_phase2_parent("fake-session-doc", now=50) is None
-		assert journal.db.active  # caller still owns the locks until its phase-2 row commits
+		assert journal.db.active  # caller still owns the locks until its line profiling row commits
 	assert journal.db.rows["Optimus Session"]["fake-session-doc"].get("modified") is None
 
 

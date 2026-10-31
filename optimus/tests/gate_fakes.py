@@ -162,7 +162,7 @@ def make_fake_frappe(
 	"""A ``frappe`` stand-in for optimus.api and optimus.ratelimit.
 
 	sessions: session_uuid -> row (keys name, owner, user, status, title).
-	runs: run_uuid -> Phase 2 Run row (keys name, parent, status).
+	runs: run_uuid -> line profiling run row (keys name, parent, status).
 	perms: (ptype, docname, user) -> bool. A missing key is False: deny by default.
 	has_permission: optional ``(doctype, ptype, doc, user) -> bool`` replacing the keyed lookup
 	(use it to make the permission engine raise).

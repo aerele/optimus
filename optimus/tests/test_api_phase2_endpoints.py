@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Phase 2 endpoints behind the session gate (PR-1): a run_uuid is resolved to its parent
+"""Line profiling endpoints behind the session gate (PR-1): a run_uuid is resolved to its parent
 session and gated there; the run instruments the caller's own requests."""
 
 import datetime

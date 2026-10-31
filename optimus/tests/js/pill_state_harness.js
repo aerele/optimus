@@ -31,18 +31,18 @@ test("phase 2 ready/failed clear analyzing and drop the run", () => {
 	assert.strictEqual(ok.state.run_uuid, null);
 	const bad = ev(s, "phase_2_run_failed", { run_uuid: "r1", error: "boom" });
 	assert.strictEqual(bad.state.display, "ready");
-	assert.strictEqual(bad.alert.message, "Phase 2 analyze failed: {0}");
+	assert.strictEqual(bad.alert.message, "Line profiling analyze failed: {0}");
 	assert.deepStrictEqual(bad.alert.args, ["boom"]);
 });
 
 test("phase 2 ready with the report update owed says results saved", () => {
 	const s = analyzing({ phase2: true, run_uuid: "r1" });
 	const owed = ev(s, "phase_2_run_ready", { run_uuid: "r1", parent: "OS-1", render_pending: true });
-	assert.strictEqual(owed.ui.label, "Phase 2 results saved");
-	assert.strictEqual(owed.alert.message, "Phase 2 results saved. Use Regenerate Reports to update the report.");
+	assert.strictEqual(owed.ui.label, "Line profiling results saved");
+	assert.strictEqual(owed.alert.message, "Line profiling results saved. Use Regenerate Reports to update the report.");
 	assert.strictEqual(owed.alert.indicator, "orange");
 	const done = ev(s, "phase_2_run_ready", { run_uuid: "r1", parent: "OS-1", render_pending: false });
-	assert.strictEqual(done.ui.label, "Phase 2 report ready");
+	assert.strictEqual(done.ui.label, "Line profiling report ready");
 	assert.strictEqual(done.alert.indicator, "blue");
 	const first = ev(analyzing(), "optimus_session_ready", { render_pending: true });
 	assert.strictEqual(first.ui.label, "Report ready");
@@ -54,7 +54,7 @@ test("normal ready with no requests recorded says no data", () => {
 	assert.strictEqual(empty.alert.message, "Profiling finished, but no requests were recorded");
 	assert.strictEqual(empty.alert.indicator, "orange");
 	const p2 = ev(analyzing({ phase2: true, run_uuid: "r1" }), "phase_2_run_ready", { run_uuid: "r1", parent: "OS-1", render_pending: true, empty: true });
-	assert.strictEqual(p2.ui.label, "Phase 2 results saved");
+	assert.strictEqual(p2.ui.label, "Line profiling results saved");
 	const plain = ev(analyzing(), "optimus_session_ready", { empty: false });
 	assert.strictEqual(plain.ui.label, "Report ready");
 	assert.strictEqual(plain.alert.indicator, "blue");
@@ -90,7 +90,7 @@ test("server ready clears a stuck analyzing pill (missed event)", () => {
 test("server failed and phase 2 ready are mapped", () => {
 	assert.strictEqual(Pill.reduceServer(analyzing(), { phase: "failed", scope: "session", session_uuid: "s1" }, T0).ui.label, "Analyze failed");
 	const p2 = Pill.reduceServer(analyzing({ phase2: true }), { phase: "ready", scope: "phase2", session_uuid: "s1", run_uuid: "r1" }, T0);
-	assert.strictEqual(p2.ui.label, "Phase 2 report ready");
+	assert.strictEqual(p2.ui.label, "Line profiling report ready");
 });
 
 test("server idle clears analyzing, leaves stopping and phase 2 recording alone", () => {
@@ -108,7 +108,7 @@ test("reload recovery: inactive pill adopts an in-flight analyze, phase 2 includ
 	const r = Pill.reduceServer(Pill.initialState(), { phase: "analyzing", scope: "phase2", session_uuid: "s1", docname: "OS-1", run_uuid: "r1" }, T0);
 	assert.strictEqual(r.state.display, "analyzing");
 	assert.strictEqual(r.state.run_uuid, "r1");
-	assert.strictEqual(r.ui.label, "Phase 2 analyzing…");
+	assert.strictEqual(r.ui.label, "Line profiling analyzing…");
 });
 
 test("stale recording snapshot is ignored once stopping/analyzing/ready", () => {

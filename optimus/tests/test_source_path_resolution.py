@@ -122,7 +122,7 @@ class TestAiPayloadForFinding:
 			}),
 			llm_fix_json=None,
 		)
-		# v0.10.0: the phase-2 index keys on the file's basename. The
+		# v0.10.0: the line profiling index keys on the file's basename. The
 		# function "render" now lives in renderer/_internal.py the index
 		# key becomes ("_internal.py", "render").
 		phase2_index = {("_internal.py", "render"): {

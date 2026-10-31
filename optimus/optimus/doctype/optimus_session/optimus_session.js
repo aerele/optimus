@@ -306,7 +306,7 @@ function _ai_end_message(run) {
 	if (run.end_reason === "history_limit") return __("Refresh history reached its safety limit. Ask an administrator to review the retained attempts.");
 	if (run.end_reason === "not_ready") return __("The session changed and is no longer Ready for AI work.");
 	if (run.end_reason === "permission") return __("The requesting user no longer has permission.");
-	if (run.end_reason === "phase2") return __("A Phase 2 run prevented further AI work.");
+	if (run.end_reason === "phase2") return __("A line profiling run prevented further AI work.");
 	return "";
 }
 
@@ -451,7 +451,7 @@ function subscribe_session_progress(frm) {
 		frappe.show_alert(
 			{
 				message: __(
-					"Line profiling armed for {0} hot path(s){1}. Re-run your flow, then click Stop Phase 2 Run to capture the exact lines.",
+					"Line profiling armed for {0} hot path(s){1}. Re-run your flow, then click Stop Line Profiling Run to capture the exact lines.",
 					[p.count || 0, fns ? " (" + frappe.utils.escape_html(fns) + ")" : ""]
 				),
 				indicator: "orange",
@@ -565,8 +565,8 @@ function _refill_ai_call(frm, state, options) {
 // Clicking opens a dialog that fetches curated candidates (top hot frames
 // from phase-1) plus a free-form textbox for dotted paths the user types.
 // Submission posts to api.start_line_profile_pass; realtime events drive
-// the form's Phase-2 history child table updates.
-// The Phase 2 "line profiling is armed" banner. Same in-place mechanism as the
+// the form's line profiling history child table updates.
+// The "armed" banner. Same in-place mechanism as the
 // analyze banner (see _single_banner); frm.set_intro appended a duplicate on every
 // refresh while a pass was Recording. Uses Frappe's native orange form-message
 // theme. Pass html=null to remove it.
@@ -591,17 +591,17 @@ function render_phase2_button(frm) {
 
 	if (recording) {
 		var stop_btn = frm.add_custom_button(
-			__("Stop Phase 2 Run"),
+			__("Stop Line Profiling Run"),
 			function () {
 				frappe.call({
 					method: "optimus.api.stop_line_profile_pass",
 					args: { run_uuid: recording.run_uuid },
 					freeze: true,
-					freeze_message: __("Stopping phase 2..."),
+					freeze_message: __("Stopping line profiling..."),
 					callback: function () {
 						frappe.show_alert({
 							message: __(
-								"Phase 2 stopped. Analyzing now the report section will refresh when ready."
+								"Line profiling stopped. Analyzing now the report section will refresh when ready."
 							),
 							indicator: "blue",
 						});
@@ -609,7 +609,7 @@ function render_phase2_button(frm) {
 					},
 				});
 			},
-			__("Phase 2")
+			__("Line Profiling")
 		);
 		// Visually emphasize the stop action while a run is live.
 		try {
@@ -624,7 +624,7 @@ function render_phase2_button(frm) {
 		_phase2_armed_banner(
 			frm,
 			__(
-				"🔬 Line profiling is armed. Re-run your flow now so the hot path(s) execute again, then click \"Stop Phase 2 Run\" above the report will then pinpoint the exact hot line(s). (Profiling has to re-execute your code; it can't replay the original run.)"
+				"🔬 Line profiling is armed. Re-run your flow now so the hot path(s) execute again, then click \"Stop Line Profiling Run\" above the report will then pinpoint the exact hot line(s). (Profiling has to re-execute your code; it can't replay the original run.)"
 			)
 		);
 	} else {
@@ -632,8 +632,8 @@ function render_phase2_button(frm) {
 		const rows = frm.doc.phase_2_runs || [];
 		const saving = rows.some(row => row.status === "Analyzing" && row.analyze_render_pending);
 		const pending = rows.some(row => row.status === "Ready" && row.analyze_render_pending);
-		_phase2_armed_banner(frm, saving ? __("Phase 2 results are saved. Saving the report...")
-			: pending ? __("Phase 2 results are saved. Use Regenerate Reports to update the report.") : null);
+		_phase2_armed_banner(frm, saving ? __("Line profiling results are saved. Saving the report...")
+			: pending ? __("Line profiling results are saved. Use Regenerate Reports to update the report.") : null);
 	}
 
 	// Retrying attaches to live work or queues a bounded new generation.
@@ -642,12 +642,12 @@ function render_phase2_button(frm) {
 		(row.status === "Analyzing" && !row.analyze_render_pending) || row.status === "Failed");
 	const clean_form = () => {
 		if (!frm.is_dirty()) return true;
-		frappe.msgprint(__("Save or discard your changes before queueing Phase 2 analysis."));
+		frappe.msgprint(__("Save or discard your changes before queueing line profiling analysis."));
 		return false;
 	};
 	if (stuck_runs.length >= 2) {
 		const batch = stuck_runs.slice(0, 5);
-		frm.add_custom_button(__("Retry next {0} Phase 2 runs", [batch.length]), () => {
+		frm.add_custom_button(__("Retry next {0} line profiling runs", [batch.length]), () => {
 			if (!clean_form()) return;
 			frappe.call({
 				method: "optimus.api.retry_phase2_analyzes_batch",
@@ -656,17 +656,17 @@ function render_phase2_button(frm) {
 					const tally = ((r && r.message) || {}).tallies || {};
 					const refused = (tally.Failed || 0) + (tally.Skipped || 0) + (tally.Refused || 0);
 					frappe.show_alert({
-						message: __("Phase 2: {0} queued or running; {1} refused or failed.",
+						message: __("Line profiling: {0} queued or running; {1} refused or failed.",
 							[tally.Analyzing || 0, refused]),
 						indicator: refused ? "orange" : "blue",
 					});
 					_reload_clean_form(frm);
 				},
 			});
-		}, __("Phase 2"));
+		}, __("Line Profiling"));
 	}
 	stuck_runs.forEach(row => {
-		frm.add_custom_button(__("Retry Phase 2 Analyze ({0})", [row.run_uuid.slice(0, 8)]), () => {
+		frm.add_custom_button(__("Retry Line Profiling Analyze ({0})", [row.run_uuid.slice(0, 8)]), () => {
 			if (!clean_form()) return;
 			frappe.call({
 				method: "optimus.api.retry_phase2_analyze",
@@ -674,19 +674,19 @@ function render_phase2_button(frm) {
 				callback(r) {
 					const accepted = r && r.message && r.message.status === "Analyzing";
 					frappe.show_alert({
-						message: accepted ? __("Phase 2 analysis is queued or running. Results will appear when it finishes.")
-							: frappe.utils.escape_html((r && r.message && r.message.message) || __("Phase 2 admission was not confirmed. Reload the session to check its status.")),
+						message: accepted ? __("Line profiling analysis is queued or running. Results will appear when it finishes.")
+							: frappe.utils.escape_html((r && r.message && r.message.message) || __("Line profiling admission was not confirmed. Reload the session to check its status.")),
 						indicator: accepted ? "blue" : "orange",
 					});
 					_reload_clean_form(frm);
 				},
 			});
-		}, __("Phase 2"));
+		}, __("Line Profiling"));
 	});
 
 	frm.add_custom_button(__("Run Line-Profile Pass"), function () {
 		open_phase2_picker(frm);
-	}, __("Phase 2"));
+	}, __("Line Profiling"));
 
 	// Recovery hatch: force-clear a stuck phase-2 active flag if a
 	// previous run never reached Stop (worker crash, tab close, etc.).
@@ -694,7 +694,7 @@ function render_phase2_button(frm) {
 	frm.add_custom_button(__("Force Stop Stuck Run"), function () {
 		frappe.confirm(
 			__(
-				"Clear any in-flight phase-2 active flag for your user and mark stuck Recording rows as Failed? Use this if the picker keeps reporting 'phase-2 already active'."
+				"Clear any in-flight line profiling active flag for your user and mark stuck Recording rows as Failed? Use this if the picker keeps reporting 'line profiling already active'."
 			),
 			function () {
 				frappe.call({
@@ -702,13 +702,9 @@ function render_phase2_button(frm) {
 					callback: function (r) {
 						var msg = r && r.message ? r.message : {};
 						frappe.show_alert({
-							message: __(
-								"Phase 2 cleared flag was " +
-								(msg.cleared_active_flag ? "set" : "already clear") +
-								"; " +
-								(msg.rows_marked_failed || 0) +
-								" rows marked Failed."
-							),
+							message: msg.cleared_active_flag
+								? __("Line profiling flag was set; {0} rows marked Failed.", [msg.rows_marked_failed || 0])
+								: __("Line profiling flag was already clear; {0} rows marked Failed.", [msg.rows_marked_failed || 0]),
 							indicator: "blue",
 						});
 						frm.reload_doc();
@@ -716,7 +712,7 @@ function render_phase2_button(frm) {
 				});
 			}
 		);
-	}, __("Phase 2"));
+	}, __("Line Profiling"));
 }
 
 function open_phase2_picker(frm) {
@@ -727,14 +723,14 @@ function open_phase2_picker(frm) {
 		method: "optimus.api.get_phase2_candidates",
 		args: { session_uuid: frm.doc.session_uuid },
 		freeze: true,
-		freeze_message: __("Loading phase-1 hot frames..."),
+		freeze_message: __("Loading hot frames from the profile..."),
 		callback: function (r) {
 			var data = r.message || {};
 			if (!data.line_profiler_available) {
 				frappe.msgprint({
 					title: __("line_profiler not installed"),
 					message: __(
-						"Phase 2 needs the line_profiler package. Install it via <code>bench pip install line_profiler</code> and restart."
+						"Line profiling needs the line_profiler package. Install it via <code>bench pip install line_profiler</code> and restart."
 					),
 					indicator: "red",
 				});
@@ -875,9 +871,9 @@ function show_phase2_dialog(frm, data) {
 			fieldname: "intro_html",
 			fieldtype: "HTML",
 			options:
-				"<p style='margin-bottom:8px;'>Tick functions from phase-1's " +
+				"<p style='margin-bottom:8px;'>Tick functions from the profile's " +
 				"top hot frames, or paste a dotted path below. " +
-				"Phase 2 will instrument <strong>only</strong> these " +
+				"Line profiling will instrument <strong>only</strong> these " +
 				"functions during your next reproduction of the flow.</p>",
 		},
 	];
@@ -962,7 +958,7 @@ function show_phase2_dialog(frm, data) {
 		fieldtype: "Small Text",
 		label: __("One dotted path per line"),
 		description: __(
-			"e.g. <code>my_app.tasks.heavy_helper</code>. Paths that can't be imported are rejected before phase 2 starts. Use this when the curated list above doesn't surface the function you want, or to disambiguate a class method."
+			"e.g. <code>my_app.tasks.heavy_helper</code>. Paths that can't be imported are rejected before line profiling starts. Use this when the curated list above doesn't surface the function you want, or to disambiguate a class method."
 		),
 	});
 	fields.push({
@@ -979,12 +975,12 @@ function show_phase2_dialog(frm, data) {
 		label: __("Auto-expand hot chain (recommended)"),
 		default: auto_expand_default,
 		description: __(
-			"For each curated pick, walks phase-1's call tree downward following the hottest user-code child until it hits an ORM call or framework wrapper. The run instruments the entire chain so you see exactly which descendant line is the time sink no need to re-pick and re-record level by level."
+			"For each curated pick, walks the profile's call tree downward following the hottest user-code child until it hits an ORM call or framework wrapper. The run instruments the entire chain so you see exactly which descendant line is the time sink no need to re-pick and re-record level by level."
 		),
 	});
 
 	var d = new frappe.ui.Dialog({
-		title: __("Phase 2: Pick Functions to Line-Profile"),
+		title: __("Line Profiling: Pick Functions to Line-Profile"),
 		size: "large",
 		fields: fields,
 		primary_action_label: __("Run Line-Profile Pass"),
@@ -1040,12 +1036,9 @@ function start_phase2(frm, picks, auto_expand) {
 			var instrumented = resolved.filter(function (p) { return p.eligible; }).length;
 			var expansions = r.message.expansions || [];
 
-			var msg = __(
-				"Phase 2 recording started instrumenting " +
-				instrumented +
-				" function" + (instrumented === 1 ? "" : "s") +
-				". Reproduce your flow now, then click Stop on the floating widget."
-			);
+			var msg = (instrumented === 1
+				? __("Line profiling recording started instrumenting 1 function. Reproduce your flow now, then click Stop on the floating widget.")
+				: __("Line profiling recording started instrumenting {0} functions. Reproduce your flow now, then click Stop on the floating widget.", [instrumented]));
 			if (expansions.length) {
 				// Show the first expansion inline so the dev sees what was
 				// added; remaining expansions appear in the form's run row.
@@ -1058,7 +1051,7 @@ function start_phase2(frm, picks, auto_expand) {
 			}
 			frappe.show_alert({ message: msg, indicator: "blue" });
 			frm.dashboard.add_indicator(
-				__("Phase 2 recording run " + run_uuid.slice(0, 8) + "..."),
+				__("Line profiling recording run {0}...", [run_uuid.slice(0, 8)]),
 				"blue"
 			);
 		},
@@ -1070,7 +1063,7 @@ function start_phase2(frm, picks, auto_expand) {
 }
 
 // Listen for phase-2 realtime events on this session and refresh the form
-// so the Phase 2 Runs child table picks up status transitions without the
+// so the Line Profiling Runs child table picks up status transitions without the
 // user having to reload manually.
 function subscribe_phase2_events(frm) {
 	if (frm.is_new()) return;
@@ -1085,13 +1078,13 @@ function subscribe_phase2_events(frm) {
 				if (event === "phase_2_run_ready") {
 					frappe.show_alert({
 						message: payload.render_pending
-							? __("Phase 2 results saved. Use Regenerate Reports to update the report.")
-							: __("Phase 2 report ready"),
+							? __("Line profiling results saved. Use Regenerate Reports to update the report.")
+							: __("Line profiling report ready"),
 						indicator: payload.render_pending ? "orange" : "green",
 					});
 				} else if (event === "phase_2_run_failed") {
 					frappe.show_alert({
-						message: __("Phase 2 analyze failed: " + (payload.error || "unknown")),
+						message: __("Line profiling analyze failed: {0}", [payload.error || "unknown"]),
 						indicator: "red",
 					});
 				}
@@ -1196,7 +1189,7 @@ function render_regenerate_report_button(frm) {
 // Parent-level, NON-status hint that an additive phase-2 line-profile drill-down
 // is still computing. The session's own `status` intentionally stays "Ready" (the
 // phase-1 report is rendered and available and a session can have many phase-2
-// passes) this just resolves the "parent Ready but a Phase 2 run says Analyzing"
+// passes) this just resolves the "parent Ready but a line profiling run says Analyzing"
 // confusion without flapping the real status. Driven by the already-loaded child
 // rows, so no extra round-trip; cleared automatically on the next refresh once the
 // run finishes (the phase_2_run_ready realtime event reloads the form).
@@ -1207,7 +1200,7 @@ function render_phase2_progress(frm) {
 	);
 	if (!in_flight.length) return;
 	frm.dashboard.add_indicator(
-		__("Phase 2 analyzing… ({0} run{1} in progress)", [
+		__("Line profiling analyzing… ({0} run{1} in progress)", [
 			in_flight.length,
 			in_flight.length === 1 ? "" : "s",
 		]),

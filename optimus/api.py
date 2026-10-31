@@ -267,7 +267,7 @@ def _ai_session_gate(session_uuid: str, *, section: str | None, action: str) -> 
 def _phase2_run_gate(
 	run_uuid: str, *, action: str, run_statuses: tuple[str, ...] = ()
 ) -> tuple[SessionRef, dict]:
-	"""Resolve a Phase 2 Run to its parent session and run ``_session_action_gate`` on it (a
+	"""Resolve a line profiling run to its parent session and run ``_session_action_gate`` on it (a
 	run_uuid is not self-authorizing). The parent's status is not constrained (develop never
 	constrained it); ``run_statuses`` constrains the run row and is checked after permission.
 	Returns the session ref and the run row ``{name, parent, status}``."""
@@ -280,14 +280,14 @@ def _phase2_run_gate(
 	session_uuid = frappe.db.get_value("Optimus Session", run["parent"], "session_uuid") if run else None
 	if not run or not session_uuid:
 		frappe.throw(
-			_("Phase 2 run {0} was not found.").format(html.escape(str(run_uuid))),
+			_("Line profiling run {0} was not found.").format(html.escape(str(run_uuid))),
 			frappe.DoesNotExistError,
 			title=_("Optimus"),
 		)
 	ref = _session_action_gate(session_uuid, action=action, statuses=())
 	if run_statuses and run["status"] not in run_statuses:
 		frappe.throw(
-			_("This Phase 2 run is {0}. This action needs it to be {1}.").format(
+			_("This line profiling run is {0}. This action needs it to be {1}.").format(
 				run["status"], ", ".join(run_statuses)
 			),
 			frappe.ValidationError,
@@ -297,7 +297,7 @@ def _phase2_run_gate(
 
 
 def _save_parent_bypassing_perms(parent) -> None:
-	"""Persist a phase-2 line-profile parent Optimus Session. Ownership is
+	"""Persist a line-profile parent Optimus Session. Ownership is
 	enforced by the caller's _session_action_gate / _phase2_run_gate before this runs,
 	so the DocType write-perm is bypassed here."""
 	parent.flags.ignore_validate_update_after_submit = True
@@ -308,7 +308,7 @@ def _save_parent_bypassing_perms(parent) -> None:
 
 
 def _lock_phase2_for_write(docname: str, *, allow_failed: bool = False) -> None:
-	"""Serialize Phase 2 admission with AI until the caller saves its run row."""
+	"""Serialize line profiling admission with AI until the caller saves its run row."""
 	from optimus import ai_refresh_store
 
 	# End the permission/configuration snapshot before taking current locks.
@@ -317,8 +317,8 @@ def _lock_phase2_for_write(docname: str, *, allow_failed: bool = False) -> None:
 	if reason:
 		frappe.db.rollback()
 		frappe.throw(
-			_("Wait for the AI refresh to finish or cancel it before starting Phase 2.")
-			if reason == "ai_refresh" else _("The session is no longer ready for Phase 2."),
+			_("Wait for the AI refresh to finish or cancel it before starting line profiling.")
+			if reason == "ai_refresh" else _("The session is no longer ready for line profiling."),
 			frappe.ValidationError,
 		)
 
@@ -1693,16 +1693,16 @@ def get_config_profiles() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Phase-2 line profiler API
+# Line profiler API
 # ---------------------------------------------------------------------------
-# Three whitelisted endpoints that the Optimus Session form's "Phase 2:
+# Three whitelisted endpoints that the Optimus Session form's "Line profiling:
 # Line Profile" section calls into:
 #
 #   get_phase2_candidates(session_uuid) populate the curated picker
-#   start_line_profile_pass(session_uuid, picks) begin a phase-2 run
+#   start_line_profile_pass(session_uuid, picks) begin a line profiling run
 #   stop_line_profile_pass(run_uuid) end the run, enqueue analyze
 #
-# Phase-2 implementation lives in optimus.line_profile.*
+# Line profiling implementation lives in optimus.line_profile.*
 # this surface is the thin transport layer.
 
 
@@ -1751,7 +1751,7 @@ def _picker_empty_hint(action_count, with_tree, parsed_ok, candidate_count, igno
 
 @frappe.whitelist()
 def get_phase2_candidates(session_uuid: str) -> dict:
-	"""Return the curated candidate list for the phase-2 picker UI.
+	"""Return the curated candidate list for the line profiling picker UI.
 
 	Parses each action's ``call_tree_json`` and builds a top-30 list of
 	user-app frames (framework apps surfaced separately as "observations").
@@ -1764,7 +1764,7 @@ def get_phase2_candidates(session_uuid: str) -> dict:
 	from optimus.line_profile import picker as _lp_picker
 
 	_require_profiler_user()
-	# SECURITY: ownership gate a phase-2 read exposes the session's captured
+	# SECURITY: ownership gate a line profiling read exposes the session's captured
 	# call-tree internals (function names, file paths). Without this, any Optimus
 	# User holding another user's session_uuid could read it.
 	parent_docname = _require_session_permission(session_uuid, "read")
@@ -1845,7 +1845,7 @@ def get_phase2_candidates(session_uuid: str) -> dict:
 
 @frappe.whitelist(methods=["POST"])
 def start_line_profile_pass(session_uuid: str, picks: str | list, auto_expand: bool = True) -> dict:
-	"""Begin a phase-2 line-profile run on a finished session.
+	"""Begin a line-profile run on a finished session.
 
 	``picks`` is a JSON-encoded (or parsed) list of ``{dotted_path, source}``
 	entries. When ``auto_expand`` is true (default), each curated pick is
@@ -1889,19 +1889,19 @@ def start_line_profile_pass(session_uuid: str, picks: str | list, auto_expand: b
 		auto_expand = auto_expand.lower() in ("true", "1", "yes")
 	auto_expand = bool(auto_expand)
 
-	# Phase-1 must not be active for the same user phase 1 and phase 2
+	# Phase-1 must not be active for the same user phase 1 and line profiling
 	# read separate Redis flags but only one can be active at a time.
 	if session.get_active_session_for(user):
 		frappe.throw(
-			_("You currently have a phase-1 session recording. Stop it before starting a phase-2 line-profile run."),
+			_("You currently have a profiling session recording. Stop it before starting a line profiling run."),
 			frappe.ValidationError,
 			title=_("Optimus"),
 		)
 
 
-	# Reject if the user already has a phase-2 run in flight elsewhere.
+	# Reject if the user already has a line profiling run in flight elsewhere.
 	if _lp_capture.is_active(user, fresh=True):
-		frappe.throw(_("You already have a phase-2 line-profile run active."), frappe.ValidationError, title=_("Optimus"))
+		frappe.throw(_("You already have a line profiling run active."), frappe.ValidationError, title=_("Optimus"))
 
 	# Auto-expand curated picks via phase-1's call tree. Curated picks come
 	# in as {dotted_path, source: "curated"}; the expansion adds their hot
@@ -2001,7 +2001,7 @@ def start_line_profile_pass(session_uuid: str, picks: str | list, auto_expand: b
 	parent = frappe.get_doc("Optimus Session", parent_docname)
 	cap = get_config().phase2_max_runs_per_session
 	if cap > 0 and len(parent.phase_2_runs or []) >= cap:
-		frappe.throw(_("The Phase 2 run limit for this session has been reached."),
+		frappe.throw(_("The line profiling run limit for this session has been reached."),
 			frappe.ValidationError, title=_("Optimus"))
 	resolved = _persist_phase2_capture(parent, parent_docname, session_uuid, run_uuid, user, prepared)
 
@@ -2079,7 +2079,7 @@ def _cleanup_failed_capture(run_uuid, user, guard):
 		if failure_type:
 			try:
 				with guard:
-					_ai_fix.log_ai_failure("optimus ai Phase 2 admission cleanup", RuntimeError(failure_type))
+					_ai_fix.log_ai_failure("optimus ai line profiling admission cleanup", RuntimeError(failure_type))
 			except Exception:
 				pass  # The caller still reports the admission failure.
 
@@ -2096,7 +2096,7 @@ def force_stop_phase2() -> dict:
 
 @frappe.whitelist(methods=["POST"])
 def stop_line_profile_pass(run_uuid: str) -> dict:
-	"""Stop capture and queue durable Phase 2 analysis; never compute inline."""
+	"""Stop capture and queue durable line profiling analysis; never compute inline."""
 	ref, _run = _phase2_run_gate(run_uuid, action="stop_line_profile_pass", run_statuses=("Recording",))
 	ratelimit.enforce_user_rate_limit("stop_line_profile_pass", **_ACTION_LIMITS["stop_line_profile_pass"])
 	from optimus.line_profile import capture as _lp_capture
@@ -2125,15 +2125,15 @@ def retry_phase2_analyze(run_uuid: str) -> dict:
 def _phase2_admission_result(out: dict) -> dict:
 	if out["status"] == "Refused":
 		messages = {
-			"no_worker": _("Phase 2 needs a worker listening on the long queue. Start a worker and retry analysis."),
-			"queue_unavailable": _("Phase 2 worker availability could not be checked. Check Redis and the long queue worker, then retry analysis."),
-			"ai_refresh": _("Wait for the AI refresh to finish or cancel it before retrying Phase 2."),
-			"not_ready": _("Phase 2 requires a Ready session. Wait for profiling analysis to finish."),
-			"not_retryable": _("This Phase 2 run is no longer retryable. Reload the session."),
-			"retry_limit": _("Phase 2 retry limit reached. Record a new line-profile pass."),
+			"no_worker": _("Line profiling needs a worker listening on the long queue. Start a worker and retry analysis."),
+			"queue_unavailable": _("Line profiling worker availability could not be checked. Check Redis and the long queue worker, then retry analysis."),
+			"ai_refresh": _("Wait for the AI refresh to finish or cancel it before retrying line profiling."),
+			"not_ready": _("Line profiling requires a Ready session. Wait for profiling analysis to finish."),
+			"not_retryable": _("This line profiling run is no longer retryable. Reload the session."),
+			"retry_limit": _("Line profiling retry limit reached. Record a new line-profile pass."),
 			"permission": _("Session permissions changed. Reload the session before retrying."),
 		}
-		frappe.throw(messages.get(out.get("reason"), _("The Phase 2 run is unavailable. Reload the session.")),
+		frappe.throw(messages.get(out.get("reason"), _("The line profiling run is unavailable. Reload the session.")),
 			frappe.ValidationError, title=_("Optimus"))
 	return out
 
@@ -2165,7 +2165,7 @@ def retry_phase2_analyzes_batch(run_uuids: str | list) -> dict:
 		frappe.throw(_("run_uuids must be a non-empty list of run-uuid strings."), frappe.ValidationError, title=_("Optimus"))
 
 	if len(run_uuids) > 5:
-		frappe.throw(_("Retry at most 5 Phase 2 runs per request."), frappe.ValidationError, title=_("Optimus"))
+		frappe.throw(_("Retry at most 5 line profiling runs per request."), frappe.ValidationError, title=_("Optimus"))
 
 	seen: set[str] = set()
 	results: list[dict] = []
@@ -2190,12 +2190,12 @@ def retry_phase2_analyzes_batch(run_uuids: str | list) -> dict:
 			results.append({
 				"run_uuid": run_uuid,
 				"status": "Failed",
-				"error": _("Phase 2 retry could not be confirmed. Reload the run before retrying; ask your administrator if it keeps failing."),
+				"error": _("Line profiling retry could not be confirmed. Reload the run before retrying; ask your administrator if it keeps failing."),
 			})
 		if guard.pending():
 			raise guard.interrupt()
 		if failure_kind and failure_kind not in {"ValidationError", "PermissionError", "DoesNotExistError"}:
-			safe_call.log_error_line(f"Optimus Phase 2 retry failed ({failure_kind}).")
+			safe_call.log_error_line(f"Optimus line profiling retry failed ({failure_kind}).")
 
 	# Quick aggregate for the UI to render a single message.
 	tallies = {"Ready": 0, "Failed": 0, "Analyzing": 0, "Skipped": 0}

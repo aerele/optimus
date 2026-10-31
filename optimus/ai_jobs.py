@@ -616,7 +616,7 @@ def _begin_attempt(run, item, *, run_id, docname, worker_token, signals=None):
 	"""The send-intent transaction: write the Calling attempt, or None to yield.
 
 	Every lock comes before the first plain read: the session and run (``store.lock_run``),
-	then the item's rows and the Phase 2 rows (``item.valid()``, which rechecks the input
+	then the item's rows and the line profiling rows (``item.valid()``, which rechecks the input
 	and runs ``_check_run``), and only then the requester's plain User read. A read view
 	opened earlier would turn the Finding lock into a 1020 on MariaDB 11.8 when a Finding
 	writer that skips the session lock (#72's write of a zero-token answer) committed in
@@ -694,14 +694,14 @@ def _yield(run_id, docname, worker_token, *, progressed=True):
 
 
 def _check_run(run, *, locked=False, kind=None):
-	"""Recheck the session, the requester and Phase 2 activity; raise ``StopRefresh``.
+	"""Recheck the session, the requester and line profiling activity; raise ``StopRefresh``.
 
-	With ``locked`` the session and Phase 2 rows are read with locks, and both locking reads
+	With ``locked`` the session and line profiling rows are read with locks, and both locking reads
 	come before the first plain read, so a read view opened by a plain read never precedes a
 	lock (a 1020 on MariaDB 11.8). The requester's User row is a plain read: a lock on it
-	would block the user's own User writes while the journal locks are held. The Phase 2
+	would block the user's own User writes while the journal locks are held. The line profiling
 	read is a FOR UPDATE by filter, the engine's one gap-locking read (not on a journal
-	table): on MariaDB another session's Phase 2 insert can wait for this short
+	table): on MariaDB another session's line profiling insert can wait for this short
 	transaction."""
 	from optimus.permissions import may_act_on_session, refresh_worker_permissions
 
@@ -872,7 +872,7 @@ def _valid_item(run, doc, row, fingerprint):
 		return False
 	# A fix item is guarded by its fingerprint (the finding's own fields and the session's
 	# recordings) and the Finding row lock, so an unrelated save of the session during the HTTP
-	# call (a Desk edit, a counter, a Phase 2 save) does not discard a paid answer. The
+	# call (a Desk edit, a counter, a line profiling save) does not discard a paid answer. The
 	# Steps item rewrites the session's ``notes``, which the Desk form edits, so any session
 	# save since the item was prepared makes it stale.
 	if row is None and parent.get("modified") != doc.get("modified"):
@@ -910,8 +910,8 @@ def _build_payload(row, file_cache, grounding, *, principal):
 
 
 def _grounding(doc, row, memo, run_id=None):
-	"""The fix prompt's grounding for one finding: the Phase 2 hottest-line index and the Slow Query index
-	evidence. The slice's ``memo`` builds each once, not once per finding: a Phase 2
+	"""The fix prompt's grounding for one finding: the line profiling hottest-line index and the Slow Query index
+	evidence. The slice's ``memo`` builds each once, not once per finding: a line profiling
 	index failure is logged once per slice, with the session, and the slice goes on without it."""
 	from optimus import analyze
 
@@ -1094,7 +1094,7 @@ def _next_item(run, memo):
 	must end. It publishes the run's progress before it returns.
 
 	``memo`` is the slice's own scratch dict, one per ``_drive`` call, shared by every item of
-	the slice: the source-file cache (``source``), the Phase 2 index and the Slow Query evidence
+	the slice: the source-file cache (``source``), the line profiling index and the Slow Query evidence
 	(built once, ``_grounding``), and ``recordings``, the one entry that is #72's recordings-only
 	memo (``analyze.load_recordings_light``), kept apart so it holds nothing else."""
 	from optimus import analyze
@@ -1282,7 +1282,7 @@ def start_refresh(
 	This commits its own short transactions. Analyze may call it only after
 	persisting the profiling result. A missing worker never selects inline work.
 
-	A session that is not Ready, a requester without access or a Phase 2 run in progress is a
+	A session that is not Ready, a requester without access or a line profiling run in progress is a
 	refusal (``not_ready``, ``permission``, ``phase2``), answered before any progress is shown.
 	"""
 	if any(not isinstance(v, str) or not v or len(v) > 140 for v in (docname, session_uuid, requested_by)):

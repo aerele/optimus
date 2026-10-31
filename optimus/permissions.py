@@ -156,7 +156,7 @@ def refresh_worker_permissions(user, *, framework):
 
 def may_act_on_session(*, user: str, owner: str, can_read: bool, can_write: bool) -> bool:
 	"""Decide whether ``user`` may run an action on an Optimus Session: an AI action, Regenerate
-	Reports, Retry Analyze or a Phase 2 start, stop or retry (design decision D1).
+	Reports, Retry Analyze or a line profiling start, stop or retry (design decision D1).
 
 	Allowed when the user can read the session AND is its owner or holds write on it. Write comes
 	from the System Manager role (Optimus Session DocPerm) or an explicit write share; Administrator

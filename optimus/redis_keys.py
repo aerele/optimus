@@ -40,7 +40,7 @@ APP_KEY_PREFIX = "optimus:"
 
 
 # ---------------------------------------------------------------------------
-# Phase-1 session lifecycle
+# Session lifecycle
 # ---------------------------------------------------------------------------
 
 
@@ -153,7 +153,7 @@ def frontend_legacy(session_uuid: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Phase-2 line-profile run state
+# Line profiling run state
 # ---------------------------------------------------------------------------
 
 
@@ -181,7 +181,7 @@ def lp_source(run_uuid: str) -> str:
 
 def lp_samples(run_uuid: str) -> str:
 	"""List of per-line samples flushed from each request/job under the
-	active Phase-2 pass. Each entry is a dict
+	active line profiling pass. Each entry is a dict
 	(``lineno``, ``count``, ``wall_ms``, ``function``). No TTL cleaned
 	by ``cleanup_run``."""
 	return f"profiler:lp:{run_uuid}:samples"

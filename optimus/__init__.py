@@ -1,4 +1,4 @@
-__version__ = "0.12.125"
+__version__ = "0.12.126"
 
 
 def safe_commit() -> None:
@@ -356,7 +356,7 @@ _patch_recorder()
 # sys.monitoring tool-2 startup probe (v0.7.x+) Critical Risk #3
 # ---------------------------------------------------------------------------
 # On Python 3.12+ line_profiler claims sys.monitoring.PROFILER_ID (tool 2).
-# If a worker died mid-Phase-2 without running its after_request finally
+# If a worker died mid line profiling without running its after_request finally
 # (or hit the pre-6f66a43 teardown bug), tool 2 stays owned by
 # "line_profiler" process-globally and the next request to that worker
 # inherits the orphan AND gets line-traced. The pre-arm self-heal in
@@ -407,8 +407,8 @@ def _startup_probe_tool2() -> None:
 		if owner == "line_profiler":
 			log(
 				"optimus._startup_probe_tool2: reclaiming line_profiler "
-				"orphan on sys.monitoring tool 2 (worker died mid-Phase-2). "
-				"Auto-released; next Phase 2 run starts clean."
+				"orphan on sys.monitoring tool 2 (worker died mid line profiling). "
+				"Auto-released; next line profiling run starts clean."
 			)
 			try:
 				mon.set_events(pid, 0)
@@ -418,7 +418,7 @@ def _startup_probe_tool2() -> None:
 		else:
 			log(
 				f"optimus._startup_probe_tool2: sys.monitoring tool 2 is "
-				f"already owned by {owner!r} at app-import. Phase 2 will "
+				f"already owned by {owner!r} at app-import. Line profiling will "
 				f"conflict; check for a third-party profiler / debugger."
 			)
 	except Exception:

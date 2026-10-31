@@ -183,7 +183,7 @@ def _compute_phase1_hint(
 		"next_hot_callee": callee_dotted,
 		"phase1_cumulative_ms": round(float(hottest.get("cumulative_ms") or 0), 2),
 		"suggested_action": (
-			f"Re-run Phase 2 with {callee_dotted} picked for line-level breakdown."
+			f"Re-run line profiling with {callee_dotted} picked for line-level breakdown."
 		),
 	}
 
@@ -341,7 +341,7 @@ def _attach_phase1_hint(finding: dict, hint: dict) -> None:
 	finding["technical_detail_json"] = json.dumps(td, default=str)
 
 	finding["customer_description"] = finding["customer_description"] + (
-		f"\n\nIn phase 1, this descendant **{hint['next_hot_callee']}** "
+		f"\n\nIn the normal profile, this descendant **{hint['next_hot_callee']}** "
 		f"accumulated {dur(hint['phase1_cumulative_ms'])} across all calls "
 		f"of the parent function (not a single-action wall time). "
 		f"{hint['suggested_action']}"
@@ -577,7 +577,7 @@ def _persist_run(
 			child.total_ms = round(total_ms, 2)
 			break
 	else:
-		raise ValueError("Phase 2 result row is missing")
+		raise ValueError("Line profiling result row is missing")
 
 	# Merge Hot Lines and recheck phase-1 findings.
 	persist.merge_phase2_findings(parent, result)

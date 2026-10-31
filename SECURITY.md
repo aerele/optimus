@@ -55,7 +55,7 @@ the highest-value security considerations:
    inject a malicious pickle - signature verification fires on
    read.
 4. **Session actions share a permission gate and mutating endpoints require POST.**
-   Refresh AI suggestions, Regenerate Reports, Retry Analyze and Phase 2
+   Refresh AI suggestions, Regenerate Reports, Retry Analyze and line profiling
    actions use `api._session_action_gate`: the caller needs the profiler
    role, read access, and ownership or write permission. Read-only sharing
    does not permit these actions. Mutating endpoints require POST, so
@@ -63,7 +63,7 @@ the highest-value security considerations:
    fixed-window limits (`optimus/ratelimit.py`) after permission checks. Defaults:
    `refill_ai_suggestions` 6 per hour; `regenerate_reports` 30 per minute;
    `retry_analyze` 5 per minute; `test_ai_connection` and `check_cli_session` 10 per minute;
-   `download_pdf` and `export_session` 20 per minute. Session and Phase 2
+   `download_pdf` and `export_session` 20 per minute. Session and line profiling
    starts allow 10 per minute, their stops allow 20 per minute, and
    `retry_phase2_analyze` allows 5 per minute. A batch contains at most 5
    entries, retries each distinct run once, and uses the same per-run limit.
@@ -420,7 +420,7 @@ installed on the site.
   unless the site enables raw-value consent. Capture-time redaction remains
   best effort; sharing a session can disclose its captured business data.
 - A write share also permits Refresh AI suggestions, Regenerate Reports,
-  Retry Analyze and Phase 2. Normal document edits are limited to title and
+  Retry Analyze and line profiling. Normal document edits are limited to title and
   notes. Session creation, identities, status, generated attachments, accounting
   and child rows belong to Optimus's internal writers. Generated File changes
   are guarded before core can move bytes; URL and content-hash aliases are
@@ -632,7 +632,7 @@ Already sent requests cannot be recalled. Settings consent changes are versioned
 
 ## Capture ownership and journal retention
 
-Phase 2 prepares bounded picks/source before SQL admission, records its actual
+Line profiling prepares bounded picks/source before SQL admission, records its actual
 capturing user, and reserves Redis input and the active flag atomically. Stops
 compare the exact active generation. Retry Analyze and Force Stop commit their
 SQL fence before stopping only the corresponding capture. A failed or interrupted
@@ -689,7 +689,7 @@ Code suggestions are saved for human review and are never automatically applied
 or executed. Automatic AI work may update suggestions and Steps to Reproduce;
 explicit user edits revoke automatic Steps replacement provenance.
 
-Before an AI request, source windows and Phase 2 line text are checked for the
+Before an AI request, source windows and line-profile line text are checked for the
 configured key, credential-shaped text and sensitive literal assignments.
 Detected credentials or a failed check withhold source grounding and require
 prose-only advice. This is a bounded minimization check, not a general proof that
@@ -703,7 +703,7 @@ cleartext key transport. Private LAN endpoints remain supported.
 
 Frontend metrics accept at most 512 KiB, with bounded depth/node counts and a
 per-user request limit (default 120/minute). Permission checks run first. PDF
-generation requires POST and the normal permission and rate checks. Batch Phase 2
+generation requires POST and the normal permission and rate checks. Batch line profiling
 retry failures return a fixed recovery message; exception text is not returned.
 
 Migrate automatically attempts the bounded historical Error Log key scrub. Large

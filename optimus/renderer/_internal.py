@@ -420,7 +420,7 @@ def render(
 	# from the Executive Summary, severity counts and observations
 	# so there's no phantom-row inconsistency between sections.
 	all_findings = [f for f in all_findings if _has_renderable_callsite(f)]
-	# v0.7.x: "X was picked but never invoked during phase 2" is non-actionable
+	# v0.7.x: "X was picked but never invoked during line profiling" is non-actionable
 	# noise it just means the replay didn't exercise that pick. The Line-Level
 	# Drilldown already notes uninvoked picks in one concise line. Drop these
 	# globally at render so existing reports declutter on regenerate too (the
@@ -1199,7 +1199,7 @@ def render(
 
 
 def _e(text: object) -> str:
-	"""HTML-escape small alias to keep the phase-2 builder readable."""
+	"""HTML-escape small alias to keep the line profiling builder readable."""
 	import html as _html
 	return _html.escape("" if text is None else str(text))
 
@@ -2371,7 +2371,7 @@ _ACTIONABLE_FINDING_TYPES = frozenset({
 	# Frontend user can trim responses / optimize JS
 	"Slow Frontend Render",
 	"Heavy Response",
-	# v0.6.0 phase-2 line profiler
+	# v0.6.0 line profiler
 	"Hot Line",            # one source line concentrates the function's time
 	"Lock Contention",     # user callsites only
 })

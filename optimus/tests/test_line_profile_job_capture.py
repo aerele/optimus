@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""End-to-end reproduction of phase-2 line capture for a background-job
+"""End-to-end reproduction of line capture for a background-job
 function.
 
 Drives the real capture functions in-process (no bench/worker): arm a pass, run
@@ -59,7 +59,7 @@ def test_bg_job_line_capture_end_to_end(lp_env):
 	)
 	assert any(r.get("eligible") for r in resolved), resolved
 
-	# 2. Simulate the job running with phase-2 active.
+	# 2. Simulate the job running with line profiling active.
 	import ugly_hot
 	job_kwargs = {"_lp_session_id": run_uuid, "doc_name": "X"}
 	lp_hooks.before_job_line_profile(method="ugly_hot.bg_recheck_users", kwargs=job_kwargs)
@@ -76,7 +76,7 @@ def test_bg_job_line_capture_end_to_end(lp_env):
 	lines = results[0]["lines"]
 	hot = [ln for ln in lines if (ln["hits"] or 0) > 0 and (ln["total_ms"] or 0) > 0]
 	assert hot, (
-		"Phase-2 captured NO per-line timing for the bg-job function "
+		"Line profiling captured NO per-line timing for the bg-job function "
 		f"samples={samples!r} results={results!r}"
 	)
 

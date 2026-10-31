@@ -1,4 +1,4 @@
-"""Phase 2 delivery uses SQL ownership, never an HTTP inline fallback."""
+"""Line profiling delivery uses SQL ownership, never an HTTP inline fallback."""
 
 from copy import deepcopy
 from importlib import import_module
@@ -367,7 +367,7 @@ def test_parent_save_cannot_forge_or_erase_phase2_journal(mutation):
 	elif mutation == "change":
 		row["analyze_attempts"] = -1
 	doc = SimpleNamespace(phase_2_runs=[] if mutation == "remove" else [row], get_doc_before_save=lambda: old)
-	with pytest.raises(Exception, match="Phase 2 analysis state is managed by the server"):
+	with pytest.raises(Exception, match="Line profiling analysis state is managed by the server"):
 		validate_parent_journal(doc)
 
 
@@ -432,7 +432,7 @@ def test_missing_child_cannot_promote_orphaned_phase2_findings(monkeypatch):
 	parent = SimpleNamespace(phase_2_runs=[], flags=SimpleNamespace(),
 		append=lambda *a: writes.append(a), save=lambda **kw: writes.append("save"))
 	monkeypatch.setattr(analyzer, "frappe", SimpleNamespace(get_doc=lambda *a: parent))
-	with pytest.raises(ValueError, match="Phase 2 result row is missing"):
+	with pytest.raises(ValueError, match="Line profiling result row is missing"):
 		analyzer._persist_run("fake-parent", "fake-run", [], SimpleNamespace(findings=[{"title": "fake"}], warnings=[]), 0)
 	assert not writes
 
@@ -555,14 +555,14 @@ def test_direct_rest_child_save_cannot_change_journal_or_finished_results(field,
 		"status": "Ready", "run_uuid": "fake-run", "parent": "fake-parent"}
 	values = {**before, field: value}
 	doc = SimpleNamespace(get=values.get, get_doc_before_save=lambda: before)
-	with pytest.raises(Exception, match="Phase 2 analysis state is managed by the server"):
+	with pytest.raises(Exception, match="Line profiling analysis state is managed by the server"):
 		OptimusPhaseTwoRun.validate(doc)
 
 
 def test_direct_rest_child_delete_cannot_erase_retry_accounting():
 	from optimus.optimus.doctype.optimus_phase_two_run.optimus_phase_two_run import OptimusPhaseTwoRun
 	doc = SimpleNamespace(get={"analyze_generation": "fake-generation"}.get)
-	with pytest.raises(Exception, match="Phase 2 analysis state is managed by the server"):
+	with pytest.raises(Exception, match="Line profiling analysis state is managed by the server"):
 		OptimusPhaseTwoRun.on_trash(doc)
 
 
@@ -571,7 +571,7 @@ def test_parent_save_cannot_force_a_finished_run_back_into_retry():
 	row = {"name": "fake-child", "analyze_generation": "fake-generation", "status": "Ready"}
 	old = SimpleNamespace(phase_2_runs=[dict(row)])
 	doc = SimpleNamespace(phase_2_runs=[{**row, "status": "Failed"}], get_doc_before_save=lambda: old)
-	with pytest.raises(Exception, match="Phase 2 analysis state is managed by the server"):
+	with pytest.raises(Exception, match="Line profiling analysis state is managed by the server"):
 		validate_parent_journal(doc)
 
 
@@ -584,7 +584,7 @@ def test_only_fenced_result_transaction_can_change_managed_results(phase2):
 		get_doc_before_save=lambda: old)
 	with phase2.db.transaction():
 		assert phase2.mod._complete(run, now=102, persist=lambda: phase2.mod.validate_parent_journal(doc))
-	with pytest.raises(Exception, match="Phase 2 analysis state is managed by the server"):
+	with pytest.raises(Exception, match="Line profiling analysis state is managed by the server"):
 		phase2.mod.validate_parent_journal(doc)
 
 

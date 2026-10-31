@@ -3,8 +3,8 @@
 
 """ai_grounding.hot_line_gate: a Hot Line gets no AI call when it
 sits in framework code, when Phase 1 named the callee that holds its time, or when
-Phase 2 measured at least HOT_LINE_CALLEE_US per hit and the line's statement calls a
-non-builtin. The note names the right callee and advises a Phase 2 re-run only for a
+Line profiling measured at least HOT_LINE_CALLEE_US per hit and the line's statement calls a
+non-builtin. The note names the right callee and advises a line profiling re-run only for a
 function that can be the developer's. Also the Redundant Call callsite stamp."""
 
 import json
@@ -84,7 +84,7 @@ class TestMeasuredGate:
 			"bin = get_bin(item, wh)", phase1_hint={"next_hot_callee": "myapp.stock.utils.get_bin"},
 		))
 		assert "inside myapp.stock.utils.get_bin," in note
-		assert "Re-run Phase 2 with myapp.stock.utils.get_bin picked" in note
+		assert "Re-run line profiling with myapp.stock.utils.get_bin picked" in note
 
 	def test_technical_detail_json_string_is_accepted(self):
 		finding = {"finding_type": "Hot Line", "technical_detail_json": json.dumps(
@@ -251,45 +251,45 @@ class TestStatementShapes:
 			_hot_line("x = get_rate(d)", phase1_hint={"next_hot_callee": callee}), tracked_apps=tracked,
 		)
 		assert f"inside {callee}," in note
-		assert ("Re-run Phase 2 with " + callee + " picked" in note) is phase2_offered
+		assert ("Re-run line profiling with " + callee + " picked" in note) is phase2_offered
 		assert ("is standard library, framework or third-party code" in note) is not phase2_offered
 
 	def test_a_phase1_method_on_self_stays_conditional_with_tracked_apps(self):
 		note = g.hot_line_gate(
 			_hot_line("self.set_rate(d)", phase1_hint={"next_hot_callee": "self.set_rate"}), tracked_apps=("myapp",),
 		)
-		assert "If self.set_rate is defined in your app, re-run Phase 2 with it picked" in note
+		assert "If self.set_rate is defined in your app, re-run line profiling with it picked" in note
 
 
 class TestCalleeAdvice:
 	def test_a_stdlib_callee_is_never_sent_to_phase_2(self):
-		"""The Phase 2 picker cannot pick json.loads."""
+		"""The line profiling picker cannot pick json.loads."""
 		note = g.hot_line_gate(_hot_line("\t\tdata = json.loads(blob)", per_hit_us=250000.0))
 		assert "json.loads is standard library, framework or third-party code" in note
-		assert "re-run phase 2" not in note.lower() and "call it less often" in note
+		assert "re-run line profiling" not in note.lower() and "call it less often" in note
 
 	def test_a_framework_callee_is_never_sent_to_phase_2(self):
 		note = g.hot_line_gate(_hot_line("\t\tn = frappe.db.count('GL Entry')", per_hit_us=450000.0))
-		assert "re-run phase 2" not in note.lower()
+		assert "re-run line profiling" not in note.lower()
 
 	def test_an_erpnext_phase1_callee_is_framework(self):
 		note = g.hot_line_gate(_hot_line(
 			"bin = get_bin(item, wh)", phase1_hint={"next_hot_callee": "erpnext.stock.utils.get_bin"},
 		))
-		assert "inside erpnext.stock.utils.get_bin," in note and "re-run phase 2" not in note.lower()
+		assert "inside erpnext.stock.utils.get_bin," in note and "re-run line profiling" not in note.lower()
 
 	def test_a_method_on_self_is_conditional(self):
 		note = g.hot_line_gate(_hot_line("\t\t\tself.set_rate(d)", per_hit_us=4000.0))
-		assert "If self.set_rate is defined in your app, re-run Phase 2 with it picked" in note
+		assert "If self.set_rate is defined in your app, re-run line profiling with it picked" in note
 
 	def test_a_parent_class_method_is_conditional(self):
 		"""super() is a builtin name, but the method it reaches can be the developer's."""
 		note = g.hot_line_gate(_hot_line("\t\tsuper().validate()", per_hit_us=132809.5))
-		assert "If super().validate is defined in your app, re-run Phase 2 with it picked" in note
+		assert "If super().validate is defined in your app, re-run line profiling with it picked" in note
 
 	def test_a_tracked_apps_module_call_is_yours(self):
 		note = g.hot_line_gate(_hot_line("\t\tmyapp.pricing.compute(d)", per_hit_us=4000.0), tracked_apps=("myapp",))
-		assert "Re-run Phase 2 with myapp.pricing.compute picked" in note
+		assert "Re-run line profiling with myapp.pricing.compute picked" in note
 
 
 class TestFrameworkGate:

@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Phase-2 line-profiler capture core.
+"""Line-profiler capture core.
 
 Two layers:
   * Pure: ``aggregate_samples(samples, picks)`` merges per-request
@@ -71,7 +71,7 @@ def _require_line_profiler() -> None:
 	if not _LP_AVAILABLE:
 		raise RuntimeError(
 			"line_profiler is not installed run "
-			"`bench pip install line_profiler` to enable phase 2."
+			"`bench pip install line_profiler` to enable line profiling."
 		)
 
 
@@ -213,7 +213,7 @@ def _decode_capture_json(raw):
 	from optimus.recording_bundle import _constant, _pairs
 
 	if not isinstance(raw, (str, bytes)) or not raw or len(raw) > MAX_CAPTURE_BYTES:
-		raise CaptureInputError("Phase 2 capture input is missing or exceeds its size limit")
+		raise CaptureInputError("Line profiling capture input is missing or exceeds its size limit")
 	guard = _InterruptGuard(base=True)
 	invalid = False
 	try:
@@ -229,51 +229,51 @@ def _decode_capture_json(raw):
 		raise guard.interrupt()
 	if invalid:
 		raw = None
-		raise CaptureInputError("Phase 2 capture input is malformed or exceeds its size limit") from None
+		raise CaptureInputError("Line profiling capture input is malformed or exceeds its size limit") from None
 
 
 def _validate_captured_picks(picks):
 	if not isinstance(picks, list) or not 1 <= len(picks) <= MAX_PICKS:
-		raise CaptureInputError("Phase 2 captured picks are missing or malformed")
+		raise CaptureInputError("Line profiling captured picks are missing or malformed")
 	seen, total_lines = set(), 0
 	for pick in picks:
 		if (not isinstance(pick, dict) or not _bounded_text(pick.get("dotted_path"), 500)
 			or not _bounded_text(pick.get("qualname"), 500) or not _bounded_text(pick.get("file"), 4096)
 			or not _uint(pick.get("first_lineno"), positive=True)):
-			raise CaptureInputError("Phase 2 captured function metadata is malformed")
+			raise CaptureInputError("Line profiling captured function metadata is malformed")
 		if pick["dotted_path"] in seen:
-			raise CaptureInputError("Phase 2 captured functions are duplicated")
+			raise CaptureInputError("Line profiling captured functions are duplicated")
 		seen.add(pick["dotted_path"])
 		lines = pick.get("source_lines")
 		if not isinstance(lines, list) or not lines:
-			raise CaptureInputError("Phase 2 source snapshot is missing")
+			raise CaptureInputError("Line profiling source snapshot is missing")
 		total_lines += len(lines)
 		if total_lines > MAX_SOURCE_LINES:
-			raise CaptureInputError("Phase 2 source snapshot exceeds its line limit")
+			raise CaptureInputError("Line profiling source snapshot exceeds its line limit")
 		previous = 0
 		for line in lines:
 			if (not isinstance(line, dict) or not _uint(line.get("lineno"), positive=True)
 				or line["lineno"] <= previous or not isinstance(line.get("content"), str)
 				or len(line["content"]) > 20_000):
-				raise CaptureInputError("Phase 2 source snapshot is malformed")
+				raise CaptureInputError("Line profiling source snapshot is malformed")
 			previous = line["lineno"]
 
 
 def _validate_samples(samples):
 	if not isinstance(samples, list) or len(samples) > MAX_SAMPLE_BATCHES:
-		raise CaptureInputError("Phase 2 sample batches are malformed or excessive")
+		raise CaptureInputError("Line profiling sample batches are malformed or excessive")
 	count = 0
 	for batch in samples:
 		if not isinstance(batch, list):
-			raise CaptureInputError("Phase 2 sample batch is malformed")
+			raise CaptureInputError("Line profiling sample batch is malformed")
 		count += len(batch)
 		if count > MAX_SAMPLE_RECORDS:
-			raise CaptureInputError("Phase 2 samples exceed their record limit")
+			raise CaptureInputError("Line profiling samples exceed their record limit")
 		for record in batch:
 			if (not isinstance(record, dict) or not _bounded_text(record.get("file"), 4096)
 				or not _bounded_text(record.get("qualname"), 500) or not _uint(record.get("lineno"), positive=True)
 				or not _uint(record.get("hits")) or not _uint(record.get("total_us"))):
-				raise CaptureInputError("Phase 2 sample record is malformed")
+				raise CaptureInputError("Line profiling sample record is malformed")
 
 
 def aggregate_samples(samples: list[list[dict]], picks: list[dict]) -> list[dict]:
@@ -530,9 +530,9 @@ def stop_line_profile_pass(run_uuid: str, user: str) -> bool:
 
 
 def is_active(user: str, *, fresh: bool = False) -> str | None:
-	"""Return the active phase-2 run_uuid for the user, or None.
+	"""Return the active line profiling run_uuid for the user, or None.
 
-	Hot-path predicate from the phase-2 request hook must be cheap. The
+	Hot-path predicate from the line profiling request hook must be cheap. The
 	value is cached on ``frappe.local._lp_active`` for the request lifetime
 	to avoid repeated Redis hits inside one request.
 	"""
@@ -602,7 +602,7 @@ _active_profiler_count = 0
 
 
 def incr_active_profilers() -> int:
-	"""Register an enabled phase-2 profiler; return the new process-wide count."""
+	"""Register an enabled line profiling profiler; return the new process-wide count."""
 	global _active_profiler_count
 	with _active_profiler_lock:
 		_active_profiler_count = _active_profiler_count + 1
@@ -624,7 +624,7 @@ def active_profiler_count() -> int:
 
 @_interrupt_boundary
 def release_monitoring_tool() -> None:
-	"""Guarantee phase-2 leaves no ``sys.monitoring`` line-trace hook behind.
+	"""Guarantee line profiling leaves no ``sys.monitoring`` line-trace hook behind.
 
 	On Python 3.12+ line_profiler drives the process-global ``PROFILER_ID``
 	(tool id 2). If a per-request teardown fails, tool 2's line events stay
@@ -764,7 +764,7 @@ def start_overhead_watchdog(run_uuid: str, budget_seconds):
 def make_profiler(run_uuid: str):
 	"""Build a fresh ``LineProfiler`` with the run's picks attached. Returns
 	None if line_profiler is unavailable, the run has no resolvable picks,
-	or any other defensive failure phase 2 then becomes a no-op for this
+	or any other defensive failure line profiling then becomes a no-op for this
 	request rather than breaking the host flow."""
 	if not _LP_AVAILABLE:
 		return None
@@ -858,7 +858,7 @@ def flush_samples(run_uuid: str, samples: list[dict]) -> None:
 	_validate_samples([samples])
 	payload = json.dumps(samples).encode("utf-8")
 	if _append_samples(run_uuid, payload) == -1:
-		raise CaptureInputError("Phase 2 sample capture is incomplete or exceeds its limit")
+		raise CaptureInputError("Line profiling sample capture is incomplete or exceeds its limit")
 
 
 # ---------------------------------------------------------------------------
@@ -878,28 +878,28 @@ def read_all_samples(run_uuid: str) -> list[list[dict]]:
 		except (ValueError, TypeError):
 			valid = False
 		if not valid:
-			raise CaptureInputError("Phase 2 sample capture is incomplete")
+			raise CaptureInputError("Line profiling sample capture is incomplete")
 	batches, total_bytes = [], 0
 	for start in range(0, MAX_SAMPLE_BATCHES + 1, 8):
 		end = min(start + 7, MAX_SAMPLE_BATCHES)
 		raw_list = frappe.cache.lrange(_redis_keys.lp_samples(run_uuid), start, end) or []
 		if len(batches) + len(raw_list) > MAX_SAMPLE_BATCHES:
-			raise CaptureInputError("Phase 2 sample batches exceed their limit")
+			raise CaptureInputError("Line profiling sample batches exceed their limit")
 		for raw in raw_list:
 			if not isinstance(raw, (str, bytes)):
-				raise CaptureInputError("Phase 2 sample batch is malformed")
+				raise CaptureInputError("Line profiling sample batch is malformed")
 			total_bytes += len(raw.encode("utf-8") if isinstance(raw, str) else raw)
 			if total_bytes > MAX_CAPTURE_BYTES:
-				raise CaptureInputError("Phase 2 samples exceed their size limit")
+				raise CaptureInputError("Line profiling samples exceed their size limit")
 			batches.append(_decode_capture_json(raw))
 		if len(raw_list) < end - start + 1:
 			break
 	if state is not None:
 		after = frappe.cache.get(frappe.cache.make_key(_redis_keys.lp_sample_state(run_uuid)))  # nosemgrep: frappe-cache-breaks-multitenancy
 		if after != state:
-			raise CaptureChanged("Phase 2 samples changed. Retry after capture ends")
+			raise CaptureChanged("Line profiling samples changed. Retry after capture ends")
 		if total_bytes != int(state):
-			raise CaptureInputError("Phase 2 sample byte accounting is incomplete")
+			raise CaptureInputError("Line profiling sample byte accounting is incomplete")
 	_validate_samples(batches)
 	return batches
 
@@ -911,11 +911,11 @@ def read_picks_meta(run_uuid: str) -> list[dict]:
 	picks = _decode_capture_json(frappe.cache.get_value(_redis_keys.lp_picks(run_uuid)))
 	sources = _decode_capture_json(frappe.cache.get_value(_redis_keys.lp_source(run_uuid)))
 	if not isinstance(picks, list) or not isinstance(sources, dict) or len(sources) > MAX_PICKS:
-		raise CaptureInputError("Phase 2 source metadata is malformed")
+		raise CaptureInputError("Line profiling source metadata is malformed")
 	out = []
 	for pick in picks:
 		if not isinstance(pick, dict) or not isinstance(pick.get("dotted_path"), str):
-			raise CaptureInputError("Phase 2 captured function metadata is malformed")
+			raise CaptureInputError("Line profiling captured function metadata is malformed")
 		out.append({**pick, "source_lines": sources.get(pick["dotted_path"])})
 	_validate_captured_picks(out)
 	return out

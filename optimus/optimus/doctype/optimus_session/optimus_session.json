@@ -287,10 +287,10 @@
    "label": "Line Profiling"
   },
   {
-   "description": "The Phase 2 line-profiling runs attached to this session. Each row is one drill-down pass into the hot lines.",
+   "description": "The line profiling runs attached to this session. Each row is one drill-down pass into the hot lines.",
    "fieldname": "phase_2_runs",
    "fieldtype": "Table",
-   "label": "Phase 2 Runs",
+   "label": "Line Profiling Runs",
    "options": "Optimus Phase Two Run",
    "read_only": 1
   },
@@ -417,7 +417,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-27 12:00:00.000000",
+ "modified": "2026-10-31 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Optimus",
  "name": "Optimus Session",

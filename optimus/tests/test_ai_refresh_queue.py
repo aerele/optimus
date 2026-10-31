@@ -792,7 +792,7 @@ def test_an_invalid_setting_refuses_before_admission_and_names_the_fix(admitting
 def test_a_session_or_requester_that_cannot_refresh_is_a_refusal(
 	admitting, monkeypatch, rows, reason, existing
 ):
-	"""A session that is not Ready, a requester without access or a Phase 2 run in progress is
+	"""A session that is not Ready, a requester without access or a line profiling run in progress is
 	answered like every other refusal, not raised: nothing is admitted, counted, sent or
 	logged, and a live run's progress is not shown to a requester who may not see it."""
 	queue = admitting

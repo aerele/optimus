@@ -8,6 +8,17 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.126] - 2026-10-31
+
+### Changed
+
+- The "Phase 2" feature is now called "Line profiling" in what you see: the Optimus Session form buttons and dialogs (Line Profiling > Run Line-Profile Pass, Stop Line Profiling Run, Retry Line Profiling Analyze), the floating widget and status pill text, notifications and error messages, the Optimus Settings labels, and the report text. Reports now say "in the normal profile" instead of "in phase 1" in the line profiling fallback hint.
+- Error Log titles for the line profiling workers were renamed too (for example `optimus ai phase 2 worker availability` is now `optimus ai line profiling worker availability`), so saved Error Log filters on the old titles stop matching.
+- Messages that were built by joining strings now use placeholders so they can be translated. Site Translation overrides keyed on the old strings stop matching, and findings or reports stored by earlier runs keep the old wording until re-analysed.
+- No DocType name, fieldname, event, API method or setting key changed.
+
+---
+
 ## [0.12.125] - 2026-10-30
 
 ### Fixed
