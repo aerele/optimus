@@ -274,4 +274,4 @@ def test_widget_logs_when_the_realtime_socket_wait_gives_up():
 	with open(WIDGET_JS) as f:
 		src = f.read()
 	body = src[src.index("function subscribeRealtime()"):src.index("function registerRealtimeHandlers()")]
-	assert "} else {" in body and "_diag(" in body and "giving up" in body
+	assert "} else {" in body and "console.warn(" in body and "giving up" in body and "_diag(" not in body

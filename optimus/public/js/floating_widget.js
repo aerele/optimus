@@ -893,7 +893,8 @@
 			if (++realtimeAttempts < REALTIME_MAX_ATTEMPTS) {
 				setTimeout(subscribeRealtime, REALTIME_RETRY_MS);
 			} else {
-				_diag("[optimus] realtime socket never appeared, giving up; widget updates need a page reload");
+				// Always visible (not _diag): without the socket the widget never updates.
+				try { console.warn("[optimus] realtime socket never appeared, giving up; widget updates need a page reload"); } catch (e) { /* noop */ }
 			}
 			return;
 		}
