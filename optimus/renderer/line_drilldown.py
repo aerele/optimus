@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Line-Level Drilldown panel: the phase-2 per-line profiling section.
+"""Line-Level Drilldown panel: the per-line profiling section.
 
 Sourced from the session's ``phase_2_runs`` child table (one row per
 line-profile pass); each row carries a ``results_json`` blob
@@ -14,7 +14,7 @@ Two public surfaces (called from the render orchestrator in ``_internal.py``):
   "Line-Level Drilldown hot line: ..." callout. Returns a
   ``(basename, function_name) → hottest-line`` dict.
 * ``_render_line_drilldown_panel(session_doc)``: the section HTML, or "" when
-  the session has no phase-2 runs.
+  the session has no line profiling runs.
 
 Internal helpers: ``_make_line_drilldown_lookup`` (Jinja tuple-key adapter),
 ``_phase2_invoked`` (did-it-run check), ``_render_phase2_function_table`` and
@@ -27,7 +27,12 @@ import json
 import os
 from typing import Any
 
-from optimus.analyzers.base import DEFAULT_DISPLAY_THRESHOLD_MS, humanize_duration_ms
+from optimus.analyzers.base import (
+	DEFAULT_DISPLAY_THRESHOLD_MS,
+	humanize_duration_ms,
+	phase2_run_display_status,
+)
+from optimus.line_profile.function_index import build_function_index
 from optimus.renderer.syntax import _highlight_python_snippet
 from optimus.renderer.time_format import _format_duration_ms
 
@@ -47,60 +52,24 @@ def _e(text: object) -> str:
 
 def _build_line_drilldown_callsite_index(session_doc: Any) -> dict:
 	"""Build a (basename, function_name) → hottest-line lookup from the
-	session's phase-2 runs, for ``finding_card``'s "Line-Level Drilldown hot
+	session's line profiling runs, for ``finding_card``'s "Line-Level Drilldown hot
 	line: ..." callout.
 
 	Keyed by file basename (not absolute path) so it survives dev-vs-deploy
-	path differences. When a function appears in multiple runs, the entry with
-	the largest single-line ``total_ms`` wins. Per-function only: reports the
+	path differences. When a function appears in multiple runs, its newest
+	run wins (shared builder with the line-level recheck). Per-function only: reports the
 	function's own hottest line, never a cross-function redirect. Returns an
-	empty dict when there are no phase-2 runs or the blobs are empty/malformed.
+	empty dict when there are no line profiling runs or the blobs are empty/malformed.
 	"""
-	runs = list(getattr(session_doc, "phase_2_runs", None) or [])
-	index: dict[tuple, dict] = {}
-	for child in runs:
+	runs = []
+	for child in getattr(session_doc, "phase_2_runs", None) or []:
 		try:
 			results = json.loads(getattr(child, "results_json", None) or "[]")
 		except Exception:
 			continue
-		run_uuid = getattr(child, "run_uuid", "") or ""
-
-		for fn in results:
-			file_path = fn.get("file") or ""
-			dotted = fn.get("dotted_path") or ""
-			qualname = fn.get("qualname") or (dotted.rsplit(".", 1)[-1] if dotted else "")
-			lines = fn.get("lines") or []
-			if not file_path or not qualname or not lines:
-				continue
-			hot_line = max(
-				lines,
-				key=lambda ln: ln.get("total_ms", 0) or 0,
-				default=None,
-			)
-			if not hot_line or not hot_line.get("total_ms"):
-				continue
-			candidate_ms = hot_line.get("total_ms", 0) or 0
-			entry = {
-				"lineno": hot_line.get("lineno"),
-				"content": hot_line.get("content") or "",
-				"total_ms": candidate_ms,
-				"hits": hot_line.get("hits") or 0,
-				"run_uuid": run_uuid,
-				"dotted_path": dotted,
-			}
-			# v0.7.x: key under BOTH the full qualname and its bare last
-			# segment. resolve_freeform may emit a prefixed qualname
-			# (``common.bg_recheck_users`` / ``SalesInvoice.validate``) while a
-			# call_tree finding's callsite carries the bare function name the
-			# callout silently missed when the two disagreed on the prefix even
-			# though the function was profiled (and showing in the panel).
-			basename = os.path.basename(file_path)
-			bare = qualname.rsplit(".", 1)[-1]
-			for k in {(basename, qualname), (basename, bare)}:
-				existing = index.get(k)
-				if existing is None or candidate_ms > (existing.get("total_ms") or 0):
-					index[k] = entry
-	return index
+		runs.append((getattr(child, "run_uuid", "") or "", results))
+	index = build_function_index(runs)
+	return {key: entry for key, entry in index.items() if entry["total_ms"]}
 
 
 # Back-compat alias pre-v0.7.x name.
@@ -135,7 +104,7 @@ _make_phase2_lookup = _make_line_drilldown_lookup
 
 
 def _phase2_invoked(fn: dict) -> bool:
-	"""Whether a picked phase-2 function actually ran (≥1 line with hits or
+	"""Whether a picked line profiling function actually ran (≥1 line with hits or
 	time). Reuses the analyzer's canonical check so render + analyze agree."""
 	from optimus.line_profile.analyzer import _function_invoked
 
@@ -143,7 +112,7 @@ def _phase2_invoked(fn: dict) -> bool:
 
 
 def _render_phase2_function_table(fn: dict, threshold_ms: float = DEFAULT_DISPLAY_THRESHOLD_MS) -> str:
-	"""Per-function line table inside one phase-2 run.
+	"""Per-function line table inside one line profiling run.
 
 	Columns: line number, hit count, total ms, per-hit µs, source. When ``fn``
 	carries a ``source == "auto_expand"`` marker, the function header is
@@ -313,7 +282,7 @@ def _render_phase2_diff_table(diff_rows: list[dict], threshold_ms: float = DEFAU
 
 def _render_line_drilldown_panel(session_doc: Any, threshold_ms: float = DEFAULT_DISPLAY_THRESHOLD_MS) -> str:
 	"""Build the Line-Level Drilldown section HTML, or "" when the session has
-	no phase-2 runs (the template's ``{% if line_drilldown_html %}`` guard then
+	no line profiling runs (the template's ``{% if line_drilldown_html %}`` guard then
 	skips the section)."""
 	from optimus.line_profile import diff as _lp_diff
 
@@ -347,10 +316,12 @@ def _render_line_drilldown_panel(session_doc: Any, threshold_ms: float = DEFAULT
 					"source": picks_source.get(fn.get("dotted_path"), "curated"),
 				}
 			)
+		# Stored status flips to Ready only after this render, so derive it from persisted results.
+		display_status = phase2_run_display_status(child)
 		parsed_runs.append(
 			{
 				"run_uuid": child.run_uuid,
-				"status": child.status,
+				"status": display_status,
 				"started_at": child.started_at,
 				"ended_at": child.ended_at,
 				"total_ms": child.total_ms or 0,

@@ -169,3 +169,23 @@ class TestAiConfigResolution:
 		with patch.object(settings, "_read_doctype_row", return_value=row2), \
 		     patch.object(settings, "_site_conf_fallback", return_value=None):
 			assert settings._resolve().ai_suggest_indexes is True
+
+
+# --------------------------------------------------------------------------
+# ai_context_tokens (#54): the OpenAI-compatible server's context window
+# --------------------------------------------------------------------------
+
+
+
+class TestAiContextTokens:
+	def test_default_zero_means_provider_default(self):
+		assert settings.OptimusConfig().ai_context_tokens == 0
+		assert settings._DEFAULTS["ai_context_tokens"] == 0
+
+	def test_resolves_from_the_row_and_floors_negatives(self):
+		base = TestAiConfigResolution()._row
+		for stored, want in ((8192, 8192), (-5, 0), (None, 0)):
+			row = base(ai_context_tokens=stored)
+			with patch.object(settings, "_read_doctype_row", return_value=row), \
+			     patch.object(settings, "_site_conf_fallback", return_value=None):
+				assert settings._resolve().ai_context_tokens == want, stored
