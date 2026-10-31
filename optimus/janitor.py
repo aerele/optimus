@@ -53,7 +53,7 @@ def sweep_stale_sessions():
 	except Exception:
 		frappe.log_error(title="optimus janitor sweep_stale_stopping")
 
-	# v0.6.0: phase-2 line-profile runs follow the same staleness model
+	# v0.6.0: line-profile runs follow the same staleness model
 	# but live on the Optimus Phase Two Run child rows. Reuses the same
 	# thresholds (recording → 11min, analyzing → 30min).
 	try:
@@ -69,6 +69,10 @@ def sweep_old_sessions():
 	to the 5-minute janitor.
 	"""
 	try:
+		_sweep_failed_snapshot_inputs()
+	except Exception:
+		frappe.log_error(title="optimus janitor failed recording inputs")
+	try:
 		_sweep_old_sessions()
 	except Exception:
 		frappe.log_error(title="optimus janitor sweep_old_sessions")
@@ -77,6 +81,37 @@ def sweep_old_sessions():
 		_sweep_orphan_redis_state()
 	except Exception:
 		frappe.log_error(title="optimus janitor sweep_orphan_redis_state")
+
+
+def _sweep_failed_snapshot_inputs():
+	"""Bound retained Recorder input to a seven-day manual recovery window.
+
+	Only terminal snapshot failures qualify; session retention may keep the
+	report longer. Recheck under the parent lock so Retry Analyze cannot race
+	Redis deletion. Work in batches, independently of normal session retention.
+	"""
+	from optimus import analyze
+	from optimus.recording_bundle import SNAPSHOT_FAILURE_WARNING
+	cutoff = add_to_date(now_datetime(), days=-7)
+	rows = frappe.get_all("Optimus Session", filters={"status": "Failed", "modified": ["<", cutoff],
+		"analyzer_warnings": SNAPSHOT_FAILURE_WARNING}, fields=["name"], limit_page_length=100)
+	for row in rows:
+		def expire():
+			try:
+				doc = frappe.get_doc("Optimus Session", row["name"], for_update=True)
+				if doc.status != "Failed" or doc.modified >= cutoff or doc.analyzer_warnings != SNAPSHOT_FAILURE_WARNING:
+					return
+				uuids = sorted({a.recording_uuid for a in doc.actions or [] if a.recording_uuid}
+					| set(session.get_recordings(doc.session_uuid)))
+				marker = "Recording snapshot recovery window expired. Record a new session."
+				doc.db_set("analyzer_warnings", marker)
+				safe_commit()  # Expiration must be durable before irreversible deletion.
+				doc = frappe.get_doc("Optimus Session", row["name"], for_update=True)
+				if doc.status == "Failed" and doc.analyzer_warnings == marker:
+					analyze._cleanup_redis(doc.session_uuid, uuids)
+			finally:
+				frappe.db.rollback()
+		analyze._run_ai_step(expire, title="optimus recording expiry")
 
 
 def _sweep_orphan_redis_state():
@@ -259,70 +294,36 @@ def _sweep_old_sessions():
 		except Exception:
 			pass
 
-	# v0.6.x: preload File names for every candidate URL in ONE bulk fetch
-	# (was a per-URL get_value inside the outer loop → O(rows × urls/row)
-	# round-trips). Map url → File doc name; missing entries simply yield
-	# None and the deletion path skips them.
-	all_urls = {
-		u for r in old
-		for u in (r.get("raw_report_file"), r.get("raw_report_pdf_file"), r.get("recordings_file"))
-		if u
-	}
-	file_name_by_url: dict[str, str] = {}
-	if all_urls:
-		try:
-			file_name_by_url = {
-				f["file_url"]: f["name"]
-				for f in frappe.db.get_all(
-					"File",
-					filters={"file_url": ("in", list(all_urls))},
-					fields=["name", "file_url"],
-				)
-			}
-		except Exception:
-			# Defensive: if the bulk fetch fails (DB hiccup, perm), the
-			# loop below still runs it just won't find any File docs to
-			# delete and the orphans-cleanup is a no-op for this pass.
-			file_name_by_url = {}
-
+	# End candidate selection's snapshot. Each parent owns its transaction;
+	# normal deletion checks links before core removes attached files.
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- end selection snapshot before per-parent transactions
 	deleted = 0
 	for row in old:
+		failure = False
 		try:
-			# Delete attached report files first so we don't leave
-			# orphaned File docs behind. v0.6.0 Round 7: dropped the
-			# safe_report_file / safe_report_pdf_file slots single
-			# raw report + lazy PDF.
-			for file_url in (
-				row.get("raw_report_file"),
-				row.get("raw_report_pdf_file"),
-				row.get("recordings_file"),
-			):
-				if not file_url:
-					continue
-				file_doc = file_name_by_url.get(file_url)
-				if file_doc:
-					try:
-						frappe.delete_doc(
-							"File",
-							file_doc,
-							ignore_permissions=True,
-							delete_permanently=True,
-						)
-					except Exception:
-						pass
+			from optimus import sql_work
 
-			frappe.delete_doc(
-				"Optimus Session",
-				row["name"],
-				ignore_permissions=True,
-				delete_permanently=True,
-			)
+			def remove():
+				frappe.delete_doc(
+					"Optimus Session", row["name"], ignore_permissions=True, delete_permanently=True,
+				)
+
+			sql_work.transaction(remove, commit=frappe.db.commit, rollback=frappe.db.rollback)
 			deleted += 1
+		except sql_work.TransactionFailed:
+			raise  # A failed rollback cannot safely share this connection with a sibling.
 		except Exception:
-			frappe.log_error(title=f"optimus retention delete {row['name']}")
+			failure = True
+		if failure:
+			# Rollback completed, including clearing after_commit callbacks. Persist
+			# only a fixed diagnostic, outside the exception's traceback context.
+			sql_work.transaction(
+				lambda: frappe.log_error(title="optimus retention delete",
+					message="Session retention failed; rolled back the parent transaction."),
+				commit=frappe.db.commit, rollback=frappe.db.rollback,
+			)
 
 	if deleted:
-		safe_commit()
 		frappe.logger().info(
 			f"optimus retention janitor deleted {deleted} session(s) "
 			f"older than {retention_days} days"
@@ -409,10 +410,10 @@ def _sweep_stuck_analyzing():
 	# v0.6.x: single batched UPDATE.
 	frappe.db.set_value(
 		"Optimus Session",
-		{"name": ("in", [r["name"] for r in stuck])},
+		{"name": ("in", [r["name"] for r in stuck]), "status": "Analyzing", "modified": ["<", cutoff]},
 		{
 			"status": "Failed",
-			"analyzer_warnings": "Analyze job timed out or crashed. Manually retry from a Frappe console: optimus.analyze.run('<session_uuid>')",
+			"analyzer_warnings": "Analyze job timed out, crashed, or its analyze heartbeat lapsed (the optimus log names a failed or yielded heartbeat). Use Retry Analyze on this session; saved reports and retained input are kept.",
 		},
 	)
 	safe_commit()
@@ -440,7 +441,7 @@ def _sweep_stale_stopping():
 	# window before re-enqueuing the same row.
 	frappe.db.set_value(
 		"Optimus Session",
-		{"name": ("in", [r["name"] for r in stale])},
+		{"name": ("in", [r["name"] for r in stale]), "status": ["in", ["Stopping", "Capturing Background Jobs"]], "modified": ["<", cutoff]},
 		{"status": "Stopping"},
 	)
 	safe_commit()
@@ -459,72 +460,28 @@ def _sweep_stale_stopping():
 
 
 def _sweep_stale_phase2_runs():
-	"""Force-stop Optimus Phase Two Run child rows stuck in Recording (>11min)
-	or Analyzing (>30min): mark them Failed and clean up their Redis
-	picks/source/samples keys via line_profile.capture.cleanup_run.
+	"""Expire old captures/legacy jobs with a current locked status check.
+
+	The durable queue scheduler owns upgraded jobs. Failed analyses retain
+	input for explicit retry; never erase samples merely because a job died.
 	"""
+	from optimus import ai_jobs
 	from optimus.line_profile import capture as _lp_capture
+	from optimus.line_profile import jobs as _lp_jobs
 
-	rec_cutoff = add_to_date(now_datetime(), minutes=-STALE_RECORDING_MINUTES)
-	rec_stale = frappe.db.get_all(
-		"Optimus Phase Two Run",
-		filters={"status": "Recording", "modified": ["<", rec_cutoff]},
-		fields=["name", "parent", "run_uuid"],
-	)
-	if rec_stale:
-		# v0.6.x: single batched UPDATE; the per-row Redis cleanup stays
-		# per-row below since it touches Redis, not the DB.
-		try:
-			frappe.db.set_value(
-				"Optimus Phase Two Run",
-				{"name": ("in", [r["name"] for r in rec_stale])},
-				{
-					"status": "Failed",
-					"warnings_json": frappe.as_json([
-						"Phase 2 run expired before any line data was captured "
-						"(no flow re-run within the window) auto-stopped by "
-						"janitor. To retry: click \"Run Line-Profile Pass\", "
-						"re-run your flow, then \"Stop Phase 2 Run\".",
-					]),
-					"ended_at": now_datetime(),
-				},
-			)
-			safe_commit()
-		except Exception:
-			frappe.log_error(title="optimus janitor stale phase-2 recording")
-		for row in rec_stale:
-			try:
-				_lp_capture.cleanup_run(row["run_uuid"])
-			except Exception:
-				frappe.log_error(title="optimus janitor stale phase-2 recording cleanup")
-
-	ana_cutoff = add_to_date(now_datetime(), minutes=-STALE_ANALYZING_MINUTES)
-	ana_stuck = frappe.db.get_all(
-		"Optimus Phase Two Run",
-		filters={"status": "Analyzing", "modified": ["<", ana_cutoff]},
-		fields=["name", "parent", "run_uuid"],
-	)
-	if ana_stuck:
-		try:
-			frappe.db.set_value(
-				"Optimus Phase Two Run",
-				{"name": ("in", [r["name"] for r in ana_stuck])},
-				{
-					"status": "Failed",
-					"warnings_json": frappe.as_json([
-						"Phase 2 analyze timed out or crashed. Retry from a "
-						"Frappe console: "
-						"optimus.line_profile.analyzer.run_analyze("
-						"'<session_uuid>', '<run_uuid>')",
-					]),
-					"ended_at": now_datetime(),
-				},
-			)
-			safe_commit()
-		except Exception:
-			frappe.log_error(title="optimus janitor stuck phase-2 analyzing")
-		for row in ana_stuck:
-			try:
-				_lp_capture.cleanup_run(row["run_uuid"])
-			except Exception:
-				frappe.log_error(title="optimus janitor stuck phase-2 analyzing cleanup")
+	for status, age in (("Recording", STALE_RECORDING_MINUTES), ("Analyzing", STALE_ANALYZING_MINUTES)):
+		cutoff = add_to_date(now_datetime(), minutes=-age)
+		rows = frappe.db.get_all(
+			"Optimus Phase Two Run", filters={"status": status, "modified": ["<", cutoff]},
+			fields=["name", "parent", "run_uuid"], limit_page_length=100,
+		)
+		ai_jobs._transaction(lambda: None)
+		for row in rows:
+			def expire():
+				changed = ai_jobs._retry_sql(lambda: _lp_jobs.expire_legacy(
+					row["parent"], row["run_uuid"], status=status, cutoff=cutoff,
+				))
+				if changed and status == "Recording":
+					_lp_capture.cleanup_run(row["run_uuid"])
+			from optimus.analyze import _run_ai_step
+			_run_ai_step(expire, title="optimus ai stale line profiling recovery", docname=row["parent"])

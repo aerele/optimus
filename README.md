@@ -61,11 +61,11 @@ bench --site <your-site> install-app optimus
 bench restart
 ```
 
-Tested on **Frappe v16** with MariaDB and Redis. The app declares `required_apps = ["frappe"]`. Runtime dependencies (installed automatically by `bench get-app`) are listed in [`pyproject.toml`](./pyproject.toml) currently `pyinstrument`, `line_profiler`, `requests`, `sqlparse` and `Jinja2`, all pure-Python with no compiled extensions (`line_profiler` ships a small C extension; pre-built wheels exist for cpython 3.10–3.14).
+Tested on **Frappe v16** with MariaDB and Redis. The app declares `required_apps = ["frappe"]`. Runtime dependencies are listed in [`pyproject.toml`](./pyproject.toml) and installed by `bench get-app` or `bench setup requirements`: `pyinstrument`, `line_profiler`, `requests`, `sqlparse`, `Jinja2`, `nh3` and `markdown2`. Some include compiled extensions with pre-built wheels; `nh3` is the Rust HTML sanitizer used for AI suggestions. Frappe v16 already installs `nh3` and `markdown2`. On Frappe v15, run `bench setup requirements` after pulling Optimus to install `nh3`; without it, AI suggestions safely fall back to escaped plain text in a `<pre>` block.
 
 After install, an **Optimus User** role is created automatically. All existing System Managers are granted this role and new System Managers get it automatically via a `User.validate` hook.
 
-> **After every upgrade:** run `bench restart` so the new sign / verify code loads. Sessions captured **before** the restart have null call trees on their actions their Phase-2 picker dialog opens with a yellow "No curated functions available" callout pointing this out. Capture a fresh session after the restart for a working picker.
+> **After every upgrade:** run `bench restart` so the new sign / verify code loads. Sessions captured **before** the restart have null call trees on their actions their line profiling picker dialog opens with a yellow "No curated functions available" callout pointing this out. Capture a fresh session after the restart for a working picker.
 
 ---
 
@@ -126,8 +126,11 @@ read-only sections:
    - **Download Safe Report** / **Open Safe Report**: the customer-
      safe HTML. Email-shareable.
    - **Download Raw Report** / **Open Raw Report**: the un-redacted
-     version. Hidden from non-admins; the link itself is permission-
-     gated server-side, so guessing the file name does not bypass it.
+     version. A `File.has_permission` hook runs in Frappe's permission
+     checks (the File form, REST, `frappe.has_permission`) and lets
+     only a System Manager or the recording user through; a direct
+     download URL bypasses the hook and grants access to anyone who
+     can read the parent Optimus Session, including a read-sharee.
    - **Re-analyze**: re-runs the analyze pipeline from the captured
      recordings (which live in Redis for 10 minutes after Stop).
      Useful when a session ends `Failed` because of a transient
@@ -136,8 +139,12 @@ read-only sections:
      but cannot recompute findings.
    - **Regenerate Reports**: re-renders both HTML files from the
      persisted Action/Finding rows. Cheaper than a full re-analyze;
-     useful after an Optimus upgrade that improves the renderer.
-   - **Phase 2 → Line Profile**: opens the picker dialog (see
+     useful after an Optimus upgrade that improves the renderer. It
+     does not re-run the analyzer and does not call the AI provider;
+     saved AI suggestions are kept as they are. For new or updated
+     suggestions use **AI > Refresh AI suggestions** (Ready sessions,
+     with AI enabled).
+   - **Line Profiling → Run Line-Profile Pass**: opens the picker dialog (see
      below).
    - **Pin as Baseline** / **Unpin Baseline**: see _Baseline
      comparison_ below.
@@ -161,31 +168,36 @@ Both reports render from the same `templates/report.html` and the same
 persisted data Safe mode is a renderer-time redaction pass, not a
 separate capture.
 
-### Phase 2: Line profiling
+### Line profiling
 
-The default capture (Phase 1) tells you _which functions_ are hot. Phase
-2 tells you _which lines inside those functions_ are hot. Use it when
-Phase 1 surfaces a hot path and you can't tell from reading the function
+The default capture (the normal profile) tells you _which functions_ are hot. Line
+profiling tells you _which lines inside those functions_ are hot. Use it when
+the normal profile surfaces a hot path and you can't tell from reading the function
 which line is doing the work.
 
 Workflow:
 
-1. Open a Ready session, click **Phase 2 → Line Profile**.
-2. The picker dialog shows curated candidates from Phase 1's call tree.
+1. Open a Ready session, click **Line Profiling → Run Line-Profile Pass**.
+2. The picker dialog shows curated candidates from the profile's call tree.
    Functions consuming ≥ 50 ms are pre-ticked as `recommended`.
 3. **Auto-expand hot chain** (ticked by default) walks each pick down
    the call tree to instrument the full chain, not just the entry
    frame.
-4. Click **Start Phase 2**: the widget switches back to recording mode.
-5. Re-execute the same flow you profiled in Phase 1.
-6. Click Stop. Phase 2 analyze runs; the report adds a **Line-Level
+4. Click **Run Line-Profile Pass**: the widget switches back to recording mode.
+5. Re-execute the same flow you profiled in the normal profile.
+6. Click Stop. Line profiling analyze runs; the report adds a **Line-Level
    Drilldown** section with per-line hit-count and time.
 
-Phase 2 has a per-request overhead budget (default 10s; tunable via
+Line profiling has a per-request overhead budget (default 10s; tunable via
 `optimus_phase2_overhead_budget_seconds` in site_config). If the budget
 expires mid-request, line profiling disengages so the request finishes
 at natural speed and the run is flagged "partial data". This stops a
 hot-loop pick from freezing the UI.
+
+Line profiling does not ask the AI for fixes for its new Hot Line findings; run
+**AI > Refresh AI suggestions** on the Ready session to fill them in. If
+the report re-render after a line profiling run fails, the run stays Ready with
+a warning; use **Regenerate Reports**.
 
 ### AI fix suggestions (optional)
 
@@ -194,22 +206,30 @@ compatible endpoint including local ones like Ollama or LM Studio) to
 suggest concrete fixes for each finding. Off by default no traffic
 leaves your bench until you enable it.
 
-Three feature toggles, all under **Optimus Settings → AI Fix
+Feature controls, all under **Optimus Settings → AI Fix
 Suggestions → Use the LLM for**:
 
-- **Fix suggestions on findings**: adds a "Suggest a fix (AI)" button
-  per finding and an auto-suggest pass during analyze (when the
-  auto-suggest checkbox below is on).
-- **Index recommendations**: adds a "Suggest an index (AI)" button to
-  the per-table breakdown.
+- **Fix suggestions on findings**: enables eligible finding fixes through
+  **Refresh AI suggestions** and the automatic pass during analysis.
+- **Index recommendations**: retired. The report builds index advice from the
+  DocType metadata, the real column types and the table's existing indexes,
+  without calling the AI: tick Search Index for one column of a field you
+  control on MariaDB, otherwise one generated `ensure_indexes()` for your app,
+  registered on `after_install`, `after_sync` and `after_migrate` (see
+  [`docs/AI-FIXING.md`](./docs/AI-FIXING.md) section 2.3).
 - **Humanized "Steps to Reproduce"**: rewrites the auto-captured
   action list into a friendly flow ("Open Sales Invoice list, click
   New, …").
 
-Turning any one of these off is a hard disable the button is hidden,
-the API refuses and re-rendered reports omit the AI block. See
+Turning an active AI section off disables generation for that section;
+re-rendered reports omit its stored AI block. Deterministic index advice
+is independent of the AI controls. See
 [`docs/AI-FIXING.md`](./docs/AI-FIXING.md) for the per-pathway data
 inventory and local-LLM recipes.
+
+**Refresh AI suggestions** regenerates missing and outdated suggestions first and says
+how many findings got deterministic advice or a note instead (gated), and how many
+were skipped because their type is excluded.
 
 ### Baseline comparison
 
@@ -283,6 +303,7 @@ v0.5.1 emits 18 finding types across 10 analyzers. Every finding has a severity 
 | **Temporary Table** | `EXPLAIN.Extra` contains "Using temporary" | Query + recommendation |
 | **Low Filter Ratio** | `EXPLAIN.filtered < 10%` AND `rows > 100` | Query + *"WHERE clause selectivity is low"* |
 | **Missing Index** | `DBOptimizer` suggests an index AND the column exists AND is not already indexed AND is btree-compatible (v0.5.1 verifies against `information_schema` before emitting) | Table, column, verified DDL (with prefix length for TEXT/BLOB), example queries |
+| **Lock Contention** | A query failed with a deadlock or lock-wait timeout at a callsite in your own code (Frappe-handled errors and `NOWAIT` probes are skipped) | Callsite, the failed queries, time waited, *"keep transactions short, lock rows in a consistent order"* |
 
 ### Python call tree (4 types: v0.3.0)
 
@@ -342,7 +363,7 @@ Deliberately minimal. **Only one non-Frappe dependency is declared** in `pyproje
 |---|---|
 | **`frappe.recorder`** | Frappe's built-in SQL recorder. Captures every query + Python stack during a request. We reuse it unchanged for SQL capture; session tracking and analyze pipeline live on top. |
 | **[`sqlparse`](https://pypi.org/project/sqlparse/)** | SQL tokenizer / pretty-printer. Formats queries in the Raw report and normalizes whitespace for the **Top Queries** leaderboard. |
-| **[`sql_metadata`](https://pypi.org/project/sql-metadata/)** | SQL parser used only by `index_suggestions.py` to extract WHERE/JOIN columns for the **Missing Index** finding's suggested DDL. Parser limitations are caught and downgraded to Analyzer Notes warnings never a hard failure. |
+| **[`sql_metadata`](https://pypi.org/project/sql-metadata/)** | SQL parser used by `index_suggestions.py` to extract WHERE/JOIN columns for the **Missing Index** finding's suggested DDL, and by the table breakdown and index-recipe code. Parser limitations are caught and downgraded to Analyzer Notes warnings never a hard failure. |
 | **[`psutil`](https://pypi.org/project/psutil/)** | CPU %, worker RSS, load average, swap. Powers the **Server Resource** panel + **Memory Pressure** / **Resource Contention** findings. |
 | **[`rq`](https://pypi.org/project/rq/)** | Redis Queue reads queue depth (default/short/long) for the **Background Queue Backlog** finding. |
 | **`redis`** (via `frappe.cache`) | Storage of recordings, sidecar argument logs, pyinstrument session pickles. |
@@ -451,9 +472,7 @@ When a session moves to `Ready`, the source recordings in Redis (`RECORDER_REQUE
 ### Two report modes
 
 - **`safe_report_file`**: Normalized SQL, redacted URLs/headers/form data, sanitized notes, redacted custom-app function names. Safe to email to a third-party.
-- **`raw_report_file`**: Full data: raw SQL with literals, request headers, form data, complete stack traces. **Gated at two layers:**
-  1. The "Download Raw Report" button is hidden in the form UI unless the user has `System Manager` role or recorded the session themselves.
-  2. A `File.has_permission` hook (`optimus.permissions.file_has_permission`) blocks direct URL access even if the user guesses the file name.
+- **`raw_report_file`**: Full data: raw SQL with literals, request headers, form data, complete stack traces. A `File.has_permission` hook (`optimus.permissions.file_has_permission`) runs in Frappe's permission checks (the File form, REST, `frappe.has_permission`) and lets only a System Manager or the recording user through. Direct `/private/files` downloads bypass this hook and allow a parent Session read-sharee access to raw HTML, PDF and recordings. The hidden `recordings_file` field remains at permlevel 0, so its URL can be returned when the parent is read through REST. A Session read share does not restrict the recipient to sanitized output; share a separately reviewed safe export when raw access is inappropriate.
 
 ---
 
@@ -552,7 +571,7 @@ or analyzed.
 
 | Field | Default | Purpose |
 |---|---|---|
-| **Sensitivity Profile** | `Recommended` | One-knob preset for the 9 detection thresholds below. **Strict** catches more (lower thresholds, more findings, more noise). **Relaxed** catches less. **Recommended** is the shipped default and automatically tracks future tuning across upgrades. **Custom** lets you hand-tune the individual fields they stay locked under the named presets. Display filters, Phase-2, capture, retention and AI settings are **not** affected by the profile. |
+| **Sensitivity Profile** | `Recommended` | One-knob preset for the 9 detection thresholds below. **Strict** catches more (lower thresholds, more findings, more noise). **Relaxed** catches less. **Recommended** is the shipped default and automatically tracks future tuning across upgrades. **Custom** lets you hand-tune the individual fields they stay locked under the named presets. Display filters, line profiling, capture, retention and AI settings are **not** affected by the profile. |
 
 #### Analyzer Thresholds section
 
@@ -577,18 +596,18 @@ sites with strict latency budgets want lower numbers.
 | **Slow Query Threshold (ms)** | `200` | A single query slower than this is flagged as a Slow Query finding. _Strict 100 · Recommended 200 · Relaxed 500._ |
 | **Slow Hot Path Threshold (% of action wall time)** | `25` | A Python subtree consuming ≥ this % AND ≥ the min-ms below qualifies. _Strict 15 · Recommended 25 · Relaxed 40._ |
 | **Slow Hot Path Minimum (ms)** | `200` | Absolute minimum for Slow Hot Path. _Strict 100 · Recommended 200 · Relaxed 500._ |
-| **Hot Line High Severity (% of function time)** | `50` | Phase 2: a single line consuming ≥ this % of the function's total AND ≥ the min-ms below is High. _Strict 35 · Recommended 50 · Relaxed 70._ |
-| **Hot Line High Severity Min (ms)** | `100` | Phase 2 Hot Line absolute minimum for High. _Strict 50 · Recommended 100 · Relaxed 250._ |
+| **Hot Line High Severity (% of function time)** | `50` | Line profiling: a single line consuming ≥ this % of the function's total AND ≥ the min-ms below is High. _Strict 35 · Recommended 50 · Relaxed 70._ |
+| **Hot Line High Severity Min (ms)** | `100` | Line profiling Hot Line absolute minimum for High. _Strict 50 · Recommended 100 · Relaxed 250._ |
 
-#### Phase 2 Defaults section
+#### Line Profiling Defaults section
 
 Defaults for the line-profile picker dialog. The dialog still lets the
 user override these per run.
 
 | Field | Default | Purpose |
 |---|---|---|
-| **Max Runs per Session** | `10` | Cap on how many Phase 2 runs are retained per Optimus Session. When exceeded, the oldest run's full results are archived to a private `File` and only row metadata is kept. _Strict 25 · Recommended 10 · Relaxed 5._ |
-| **Default Auto-Expand Hot Chain** | ✓ on | When on, the picker dialog's `Auto-expand hot chain` checkbox starts ticked. Auto-expansion walks each pick down phase-1's call tree to instrument the full hot chain in one shot. |
+| **Max Runs per Session** | `10` | Cap on how many line profiling runs are retained per Optimus Session. When exceeded, the oldest run's full results are archived to a private `File` and only row metadata is kept. _Strict 25 · Recommended 10 · Relaxed 5._ |
+| **Default Auto-Expand Hot Chain** | ✓ on | When on, the picker dialog's `Auto-expand hot chain` checkbox starts ticked. Auto-expansion walks each pick down the profile's call tree to instrument the full hot chain in one shot. |
 | **Auto-Expand: Max Depth** | `10` | How many levels deep auto-expand will follow. _Strict 15 · Recommended 10 · Relaxed 5._ |
 | **Auto-Expand: Minimum Child Time (ms)** | `50` | Auto-expand stops descending when the next-hottest child consumes less than this. Lower = follow deeper into smaller hot spots. _Strict 25 · Recommended 50 · Relaxed 100._ |
 
@@ -605,33 +624,41 @@ Off by default no traffic leaves your bench until you turn it on.
 | **Enable AI Fix Suggestions** | ✗ off | Master switch for the entire AI feature. When off, every AI button on the Session form is hidden and the API refuses. |
 | **Provider** | `Anthropic` | Wire format. `Anthropic`, `OpenAI`, `Kimi`, `DeepSeek` and `OpenAI-compatible` (which requires Base URL + Model covers Ollama, LM Studio, vLLM, OpenRouter, Together, Groq). |
 | **Base URL** | _empty_ | Leave blank to use the hosted default. Required for `OpenAI-compatible`: e.g. `http://localhost:11434/v1` (Ollama), `http://localhost:1234/v1` (LM Studio). |
-| **Model** | _empty_ | Leave blank for the provider default. Examples: `claude-sonnet-4-6` (Anthropic), `gpt-4.1-mini` (OpenAI), `kimi-k2-0905-preview` (Kimi), `deepseek-chat` (DeepSeek), or your local model name. |
+| **Model** | _empty_ | Leave blank for the provider default. Examples: `claude-sonnet-4-6` (Anthropic), `gpt-4.1-mini` (OpenAI), `kimi-k2-0905-preview` (Kimi), `deepseek-flash` (DeepSeek), or your local model name. |
 | **API Key** | _empty_ | Per-site, stored encrypted (Frappe `Password` field). Most local OpenAI-compatible endpoints don't need one; hosted ones do. |
 
 #### Use the LLM for (section toggles)
 
-Three independent on/off switches. Turning any one off is a **hard
-disable**: the section is never auto-generated, the matching button is
-hidden, the API refuses and re-rendered reports omit the block.
+The findings and humanized-steps switches control their respective AI
+sections. The index setting is read-only and has no effect.
 
 | Field | Default | Purpose |
 |---|---|---|
-| **Fix suggestions on findings** | ✓ on | "Suggest a fix (AI)" / "Generate AI fixes" / "Re-evaluate AI fixes" buttons on findings. |
-| **Index recommendations (DB-tables breakdown)** | ✓ on | "Suggest an index (AI)" button in the per-table breakdown. |
-| **Humanized "Steps to Reproduce"** | ✓ on | LLM rewrites the auto-captured action list into a friendly flow at analyze time (and on demand). Falls back to the raw action list on any failure. |
+| **Fix suggestions on findings** | ✓ on | Eligible finding fixes through Refresh AI suggestions and the automatic pass. |
+| **Index recommendations (DB-tables breakdown, retired)** | read-only | No effect: index advice is deterministic and never uses the AI. |
+| **Humanized "Steps to Reproduce"** | ✓ on | Manual background Refresh AI suggestions may rewrite the action list. Failure preserves saved results; captured actions remain available. |
 
 #### Automatic Suggestions section
 
 | Field | Default | Purpose |
 |---|---|---|
-| **Suggest AI fixes in the report by default** | ✗ off | When on, the analyze pipeline auto-generates a fix for each eligible finding so suggestions are already in the report no need to click per finding. Costs LLM tokens (and a little analyze time) on every session. Keep off unless you want suggestions baked in. |
-| **Max auto-suggested findings per session** | `5` | Cap on how many findings get an automatic suggestion highest-severity, highest-impact first. `0` = every eligible finding (can be slow + costly on big sessions). _Strict 10 · Recommended 5 · Relaxed 3._ |
+| **Suggest AI fixes in the report by default** | ✓ on | When AI is enabled, queue optional fixes after profiling is Ready. Requires an AI worker and uses provider tokens; saved profiling results survive AI failure. |
+| **Max auto-suggested findings per session** | `5` | Cap on how many findings get an automatic suggestion highest-severity, highest-impact first. `0` = every eligible finding (can be slow + costly on big sessions). _Strict 0 · Recommended 5 · Relaxed 3._ |
 
 #### Privacy & Operations section
 
+**Send raw values to the AI provider** is off by default. SQL literals/comments
+and Steps document names/session title are omitted unless explicitly enabled.
+Code, finding titles and schema names can still contain private information.
+Use type exclusions or disable AI when sharing that context is unacceptable.
+Settings changes are recorded in Version history. Provider URLs are validated,
+and changing the destination clears an unchanged stored key. See the
+[security boundaries and deployment limits](SECURITY.md) and
+[background refresh operations](docs/AI-REFRESH.md).
+
 | Field | Default | Purpose |
 |---|---|---|
-| **Excluded finding types** | _empty_ | One finding type per line. Those types are skipped in both auto-suggest and on-demand the payload is never built (no data ever sent for them). Exact-match, case-sensitive. `#` comments. Canonical names: `Filesort`, `Framework N+1`, `Full Table Scan`, `Hot Line`, `Low Filter Ratio`, `Missing Index`, `N+1 Query`, `Redundant Call`, `Slow Query`, `Temporary Table`. |
+| **Excluded finding types** | _empty_ | One finding type per line. Those types are skipped in both auto-suggest and on-demand the payload is never built (no data ever sent for them). Exact-match, case-sensitive. `#` comments. Canonical names: `Hot Line`, `N+1 Query`, `Redundant Call`, `Slow Query`. Index findings and Framework N+1 never call the AI. Refresh AI suggestions reports how many findings it skipped this way. |
 | **Request timeout (seconds)** | `60` | HTTP timeout for outbound LLM calls. `60s` fits hosted providers (Anthropic / OpenAI reply in 2–10s typically). For local LLMs (Ollama / LM Studio / vLLM) first-token cold-start can exceed 60s start at `180` and tune once warm-call P99 is known. Clamped to `10–600`. |
 
 ---
@@ -652,6 +679,7 @@ as pre-DocType fallbacks. The DocType row wins if both are set.
 
 | Key | Default | Purpose |
 |---|---|---|
+| `optimus_ai_reask` | `True` | When an AI fix suggestion breaks a block rule the guardrail checks (code not copied from the shown source, new raw SQL or DDL, a removed permission check, ...), send the model ONE follow-up turn listing the broken rules; the rewrite is kept only if it has the four headings and breaks fewer block rules. Advise rules (conventions no pinned semgrep rule checks) never cost a follow-up turn. Skipped when the first answer was cut off, when half the timeout budget is used or when the follow-up would not fit the context window. Set `False` to avoid the extra round-trip on a slow local model. |
 | `optimus_max_recordings_per_session` | `200` | Soft cap on HTTP requests + bg jobs per session. When hit, further recordings are silently dropped and the report shows a truncation banner. |
 | `optimus_inline_analyze_limit` | `50` | Max recordings allowed for inline analyze on scheduler-disabled sites. Sessions larger than this are refused with an actionable error pointing at `bench enable-scheduler` + the Retry Analyze button. |
 
@@ -666,18 +694,19 @@ as pre-DocType fallbacks. The DocType row wins if both are set.
 | `optimus_enrich_throttle_every` | `0` | Sleep every N enriched queries during analyze (for EXPLAIN). `0` = no throttle (default). Raise to e.g. `200` on shared MariaDB instances where back-to-back EXPLAINs cause noisy-neighbor issues. |
 | `optimus_enrich_throttle_sleep_ms` | `5` | Sleep length when the throttle above fires. |
 
-### Phase 2
+### Line profiling
 
 | Key | Default | Purpose |
 |---|---|---|
 | `optimus_phase2_overhead_budget_seconds` | `10` | Per-request line-profile overhead budget. On expiry, line tracing disengages and the run is flagged "partial data". Stops a hot-loop pick from freezing the UI. `0` = unbounded (NOT recommended on production). |
-| `optimus_phase2_auto_arm` | `False` | When set, after each Ready session the analyze pipeline auto-arms a Phase 2 pass on the recommended hot paths. Opt-in + admin-only by design (the next user-flow gets instrumented automatically). |
+| `optimus_phase2_auto_arm` | `False` | When set, after each Ready session the analyze pipeline auto-arms a line profiling pass on the recommended hot paths. Opt-in + admin-only by design (the next user-flow gets instrumented automatically). |
 
 ### Security / signing
 
 | Key | Default | Purpose |
 |---|---|---|
-| `optimus_allow_unsigned_pickles` | `True` | Whether to accept legacy un-signed pyinstrument blobs in Redis during analyze. Defaults to `True` to keep pre-v0.7 sessions analyzable. Set `False` on hardened sites to refuse unsigned blobs entirely (requires `encryption_key` in site_config). |
+| `optimus_allow_unsigned_pickles` | `False` with an encryption key | Legacy live-Redis compatibility only. Explicit true weakens HMAC protection; sites without an encryption key retain the legacy default. Persisted JSON bundles never unpickle. |
+| `optimus_ai_allow_key_over_http` | `False` | Explicitly allow credentials over non-loopback plain HTTP on a trusted network. Prefer HTTPS; this does not encrypt prompts or credentials. |
 
 ### Infra-pressure analyzer
 

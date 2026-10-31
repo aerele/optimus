@@ -28,7 +28,7 @@ class TestOptimusConfigDefaults:
 		# Capture
 		assert cfg.pyinstrument_sampler_interval_ms == 1.0
 		assert cfg.min_action_duration_ms == 0.0
-		# Phase 2
+		# Line profiling
 		assert cfg.phase2_max_runs_per_session == 10
 		assert cfg.phase2_default_auto_expand is True
 		assert cfg.auto_expand_max_depth == 10

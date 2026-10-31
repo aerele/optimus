@@ -217,13 +217,16 @@ class TestGrouping:
 
 	def test_subs_carry_compact_payload_only(self):
 		"""sub_findings entries are a compact dict (type, severity, title,
-		description, impact, count, plus the drill-down rows a nested finding
-		needs), not the full technical_detail or llm_fix."""
+		description, impact, count, drill-down, identity and safe AI view),
+		not the full technical_detail or retained provider payloads."""
 		shp = _shp(
 			drilldown_leaf_function="_check_user_exists",
 			impact_ms=500.0, severity="High",
 		)
 		hot = _hot_line(impact_ms=300.0, severity="High")
+		hot["llm_fix"] = {"suggestion_html": "<p>Safe display view</p>"}
+		hot["llm_fix_json"] = "PRIVATE_RETAINED_RESPONSE"
+		hot["technical_detail"]["private"] = "PRIVATE_RETAINED_RESPONSE"
 		result = _group_findings_by_root_cause([shp, hot])
 		primary = result[0]
 		sub = primary["sub_findings"][0]
@@ -233,7 +236,10 @@ class TestGrouping:
 			"finding_type", "severity", "title",
 			"customer_description", "estimated_impact_ms", "affected_count",
 			"drill_rows",
+			"finding_id", "action_ref", "llm_fix", "impact_scope_label", "observed_query_ms",
 		}
+		assert sub["llm_fix"] == {"suggestion_html": "<p>Safe display view</p>"}
+		assert "PRIVATE_RETAINED_RESPONSE" not in str(sub)
 
 	def test_nested_sub_finding_carries_drill_rows(self):
 		"""A demoted sub-finding that is in a nested function carries its own
