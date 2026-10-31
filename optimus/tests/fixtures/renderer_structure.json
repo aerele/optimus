@@ -87,6 +87,7 @@
     "masthead-brand-contact": 1,
     "masthead-brand-contact-row": 2,
     "masthead-brand-name": 1,
+    "masthead-brand-phone": 1,
     "masthead-brand-text": 1,
     "masthead-brand-tool": 1,
     "masthead-eyebrow": 1,
@@ -174,7 +175,7 @@
     "waterfall"
   ],
   "tag_counts": {
-    "a": 29,
+    "a": 28,
     "aside": 2,
     "b": 1,
     "body": 1,
@@ -200,7 +201,7 @@
     "pre": 3,
     "section": 11,
     "small": 41,
-    "span": 85,
+    "span": 86,
     "strong": 41,
     "style": 1,
     "summary": 3,
