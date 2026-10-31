@@ -8,6 +8,21 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.127] - 2026-10-31
+
+### Fixed
+
+- The local Codex CLI auth retry now runs only after a plain non-zero exit (not a signal exit such as 137, nor 126/127) and only when the last lines of stderr are a token-refresh failure ("refresh token was already used or revoked", "token was revoked", "access token could not be refreshed"), not for any line containing "unauthorized". These texts are now their own stderr label, `auth_refresh_race`, checked before `auth_expired`, so the retry and the classifier use one pattern list and the same stderr tail. The user still gets an auth error with the `codex login` hint; after a retry the message says "Codex session expired after a retry.". The 2-second wait has +/- 50% jitter so parallel runs do not retry in step, and the retry is skipped when the longest wait would leave less than 5 seconds to run.
+- The Optimus log now records `auth_retry`, `auth_retry_ok` and `auth_retry_skipped` with the wait in seconds.
+- A relative Codex home path now raises a translatable configuration error that names the path, instead of an assertion.
+- The floating widget now always writes one console warning when its 30-second wait for the realtime socket gives up (the other widget traces still need `window.OPTIMUS_DEBUG = true`).
+
+### Tests
+
+- Also adds two assertions on the "Line profiling results saved" alert in the pill state harness (`optimus/tests/js/pill_state_harness.js`), which were outside the original scope of this PR.
+
+---
+
 ## [0.12.126] - 2026-10-31
 
 ### Changed

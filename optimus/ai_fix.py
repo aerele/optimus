@@ -31,6 +31,7 @@ import errno
 import ipaddress
 import json
 import os
+import random
 import re
 import shlex
 import shutil
@@ -3602,8 +3603,14 @@ def _codex_login_command() -> str:
 def _ensure_codex_home() -> str:
 	"""Create the Optimus-owned Codex home (mode 0700) when missing and return its path.
 	It must be a real directory owned by this user, never a link."""
+	from frappe import _
+
 	path = _codex_home_path()
-	assert os.path.isabs(path), "the Codex home must be an absolute path"
+	if not os.path.isabs(path):
+		raise AiFixError(
+			_("The Codex home must be an absolute path, but it is {0}. Check the bench sites folder and the site's private folder.").format(path),
+			kind="config",
+		)
 	os.makedirs(path, mode=0o700, exist_ok=True)
 	st = os.lstat(path)
 	if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid():
@@ -3842,7 +3849,7 @@ def _cli_version_cached(cli_path: str, *, probe: bool = True) -> str | None:
 
 
 def _log_cli_diagnostic(event: str, *, version: str | None = None, label: str | None = None,
-	code: int | None = None) -> None:
+	code: int | None = None, wait: float | None = None) -> None:
 	"""One ERROR line in the ``optimus`` log naming a CLI event, so a codex reword or crash
 	is diagnosable. It carries ONLY the fixed event name, the sanitized version, a fixed
 	stderr label and the exit code: never stderr, stdout or any part of the prompt. Never
@@ -3854,6 +3861,8 @@ def _log_cli_diagnostic(event: str, *, version: str | None = None, label: str | 
 		parts.append(f"label={label}")
 	if isinstance(code, int):
 		parts.append(f"code={code}")
+	if isinstance(wait, (int, float)):
+		parts.append(f"wait={wait:.1f}")
 	_note_line(" ".join(parts))
 
 
@@ -3953,13 +3962,21 @@ def _cli_session_status() -> dict:
 
 
 _CLI_STDERR_PATTERNS = (
+	# The texts of a lost token-refresh race: the only auth failure one retry can cure. Before
+	# "auth_expired", whose plain "unauthorized" or "not logged in" means the sign-in is gone.
+	(
+		"auth_refresh_race",
+		re.compile(
+			r"refresh token (was|has been) (already used|revoked)|token was revoked|access token could not be refreshed",
+			re.IGNORECASE,
+		),
+	),
 	(
 		"auth_expired",
 		re.compile(
 			r"\bHTTP 401\b|status:? ?401\b|\b401 unauthori[sz]ed|unauthori[sz]ed|not logged in|please (log|sign) ?in"
 			r"|sign in with|(session|token|credentials?|api key) (has |have )?expired"
-			r"|refresh token (was|has been) (already used|revoked)|token was revoked"
-			r"|access token could not be refreshed|log out and sign in",
+			r"|log out and sign in",
 			re.IGNORECASE,
 		),
 	),
@@ -3989,6 +4006,7 @@ def _classify_cli_stderr(stderr: str | None) -> str:
 # built at the call site. Only the kinds in ``AI_FATAL_KINDS`` stop a refresh.
 _CLI_EXEC_ERRORS = {
 	"auth_expired": ("Codex session expired.", "auth"),
+	"auth_refresh_race": ("Codex session expired.", "auth"),
 	"usage_limit": ("Codex usage limit reached. Try again later.", "quota"),
 	"rate_limited": ("Codex is rate limiting requests. Wait a few minutes and try again.", "rate_limited"),
 	"unknown_flag": ("Codex rejected a command-line flag. Update the codex CLI.", "config"),
@@ -4102,15 +4120,28 @@ def _out_of_time() -> AiFixError:
 
 
 # Labels where the CLI rejected the call before any answer was produced: the outcome is known.
-_CLI_KNOWN_FAILURES = frozenset({"auth_expired", "usage_limit", "rate_limited", "unknown_flag"})
+_CLI_KNOWN_FAILURES = frozenset({"auth_expired", "auth_refresh_race", "usage_limit", "rate_limited", "unknown_flag"})
 
 
+_CLI_AUTH_LABELS = frozenset({"auth_expired", "auth_refresh_race"})
 _CLI_AUTH_RETRY_WAIT = 2
+_CLI_AUTH_RETRY_JITTER = 0.5  # the wait varies by up to +/- this fraction, so parallel runs spread out
+
+
+def _auth_retry_wait() -> float:
+	"""The seconds to wait before the auth retry: the base wait with jitter."""
+	return _CLI_AUTH_RETRY_WAIT * (1 + random.uniform(-_CLI_AUTH_RETRY_JITTER, _CLI_AUTH_RETRY_JITTER))
 
 
 def _auth_retry_fits(deadline: float) -> bool:
-	"""True when enough time is left to wait and run the exec once more."""
-	return deadline - time.monotonic() - _CLI_AUTH_RETRY_WAIT >= _CLI_MIN_EXEC_SECONDS
+	"""True when enough time is left to wait (at most the jittered maximum) and run the exec once more."""
+	longest = _CLI_AUTH_RETRY_WAIT * (1 + _CLI_AUTH_RETRY_JITTER)
+	return deadline - time.monotonic() - longest >= _CLI_MIN_EXEC_SECONDS
+
+
+def _auth_retry_applies(code: int, err: str | None) -> bool:
+	"""A plain non-zero exit (not a signal, not 126/127) whose stderr tail is a token-refresh failure."""
+	return 0 < code < 126 and _classify_cli_stderr(err) == "auth_refresh_race"
 
 
 def _exec_cli_once(path: str, prompt: str, deadline: float, total_seconds: int):
@@ -4199,13 +4230,21 @@ def _call_local_cli(
 		usage_out.observe(True)  # nothing is billed per token, so the cost is a known zero
 	ai_privacy.before_http_send()  # a CLI send discloses the prompt like an HTTP one
 	code, text, truncated, err = _exec_cli_once(path, prompt, deadline, total_seconds)
-	if code != 0 and _classify_cli_stderr(err) == "auth_expired" and _auth_retry_fits(deadline):
-		# Parallel runs share one sign-in: a lost refresh race is rejected before any answer
-		# and the winner has rewritten auth.json, so one retry cures it.
-		_LOGIN_CACHE.pop(path, None)
-		_log_cli_diagnostic("auth_retry", label="auth_expired", code=code)
-		time.sleep(_CLI_AUTH_RETRY_WAIT)
-		code, text, truncated, err = _exec_cli_once(path, prompt, deadline, total_seconds)
+	retried = False
+	if _auth_retry_applies(code, err):
+		if _auth_retry_fits(deadline):
+			# Parallel runs share one sign-in: a lost refresh race is rejected before any answer
+			# and the winner has rewritten auth.json, so one retry cures it.
+			_LOGIN_CACHE.pop(path, None)
+			wait = _auth_retry_wait()
+			_log_cli_diagnostic("auth_retry", label="auth_refresh_race", code=code, wait=wait)
+			time.sleep(wait)
+			code, text, truncated, err = _exec_cli_once(path, prompt, deadline, total_seconds)
+			retried = True
+			if code == 0:
+				_log_cli_diagnostic("auth_retry_ok", label="auth_refresh_race", wait=wait)
+		else:
+			_log_cli_diagnostic("auth_retry_skipped", label="auth_refresh_race", code=code, wait=_CLI_AUTH_RETRY_WAIT)
 	if code < 0 or code >= 128:
 		# Killed by a signal (OOM, SIGSEGV) after the prompt was sent: an uncertain outcome.
 		ai_transport.observe("sent_unknown")
@@ -4223,13 +4262,13 @@ def _call_local_cli(
 		# acted on, so it is not repeated automatically.
 		ai_transport.observe("known_response" if label in _CLI_KNOWN_FAILURES else "sent_unknown")
 		_log_cli_diagnostic("exec_failed", label=label, code=code, version=_cli_version_cached(path))
-		if label == "auth_expired":
+		if label in _CLI_AUTH_LABELS:
 			_LOGIN_CACHE.pop(path, None)
 		if label in _CLI_EXEC_ERRORS:
 			message, kind = _CLI_EXEC_ERRORS[label]
-			if label == "auth_expired":
-				message = f"{_(message)} {_sign_in_hint()}"
-				raise AiFixError(message, kind=kind)
+			if label in _CLI_AUTH_LABELS:
+				message = _("Codex session expired after a retry.") if retried else _(message)
+				raise AiFixError(f"{message} {_sign_in_hint()}", kind=kind)
 			raise AiFixError(_(message), kind=kind)
 		raise AiFixError(_("Codex CLI could not produce a suggestion (exit {0}).").format(code))
 	ai_transport.observe("known_response")

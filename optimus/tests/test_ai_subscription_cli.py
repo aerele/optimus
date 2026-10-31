@@ -916,8 +916,10 @@ class TestCallLocalCli:
 
 	def test_a_relative_codex_home_is_refused(self, monkeypatch):
 		monkeypatch.setattr(ai_fix, "_codex_home_path", lambda: "site1/private/optimus-codex")
-		with pytest.raises(AssertionError):
+		with pytest.raises(ai_fix.AiFixError) as err:
 			ai_fix._ensure_codex_home()
+		assert err.value.kind == "config"
+		assert "site1/private/optimus-codex" in str(err.value)
 
 	@pytest.mark.parametrize("stderr", [
 		"Your access token could not be refreshed. Please log out and sign in again.",
@@ -941,6 +943,30 @@ class TestCallLocalCli:
 		assert self._call().startswith("RETRIED")
 		assert len(count.read_text().split()) == 2
 
+	def _count_runs(self, fake_codex, monkeypatch, tmp_path, line, code):
+		monkeypatch.setattr(ai_fix, "_CLI_AUTH_RETRY_WAIT", 0)
+		count = tmp_path / "rec" / "n"
+		fake_codex(exec_body=f'echo x >> "{count}"; echo "{line}" >&2; exit {code}')
+		with pytest.raises(ai_fix.AiFixError):
+			self._call()
+		return len(count.read_text().split())
+
+	def test_a_signal_exit_with_auth_text_is_not_retried(self, fake_codex, monkeypatch, tmp_path):
+		assert self._count_runs(fake_codex, monkeypatch, tmp_path, "refresh token was already used", 137) == 1
+
+	def test_an_unrelated_unauthorized_line_is_not_retried(self, fake_codex, monkeypatch, tmp_path):
+		assert self._count_runs(fake_codex, monkeypatch, tmp_path, "tool call unauthorized by policy", 1) == 1
+
+	def test_the_retry_wait_is_jittered(self, fake_codex, monkeypatch):
+		monkeypatch.setattr(ai_fix, "_CLI_AUTH_RETRY_WAIT", 2)
+		monkeypatch.setattr(ai_fix.random, "uniform", lambda lo, hi: hi)
+		slept = []
+		monkeypatch.setattr(ai_fix.time, "sleep", slept.append)
+		fake_codex(exec_body='echo "refresh token was already used" >&2; exit 1')
+		with pytest.raises(ai_fix.AiFixError):
+			self._call()
+		assert 3.0 in slept
+
 	def test_a_second_auth_failure_is_not_retried_again(self, fake_codex, monkeypatch, tmp_path):
 		monkeypatch.setattr(ai_fix, "_CLI_AUTH_RETRY_WAIT", 0)
 		count = tmp_path / "rec" / "n"
@@ -950,9 +976,80 @@ class TestCallLocalCli:
 		assert err.value.kind == "auth"
 		assert len(count.read_text().split()) == 2
 
-	def test_no_retry_when_too_little_time_is_left(self):
-		assert not ai_fix._auth_retry_fits(time.monotonic() + 3)
-		assert ai_fix._auth_retry_fits(time.monotonic() + 60)
+	def test_no_retry_when_too_little_time_is_left(self, monkeypatch):
+		# The longest jittered wait (3 s), not the base wait (2 s), must fit with the 5 s minimum exec.
+		monkeypatch.setattr(ai_fix.time, "monotonic", lambda: 1000.0)
+		assert not ai_fix._auth_retry_fits(1000.0 + 3)
+		assert not ai_fix._auth_retry_fits(1000.0 + 7.5)  # 7.5 - 3 = 4.5 < 5
+		assert ai_fix._auth_retry_fits(1000.0 + 8.5)  # 8.5 - 3 = 5.5 >= 5
+		assert ai_fix._auth_retry_fits(1000.0 + 60)
+
+	def test_the_retry_wait_is_jittered_down_to_the_lower_limit(self, monkeypatch):
+		monkeypatch.setattr(ai_fix, "_CLI_AUTH_RETRY_WAIT", 2)
+		monkeypatch.setattr(ai_fix.random, "uniform", lambda lo, hi: lo)
+		assert ai_fix._auth_retry_wait() == 1.0
+
+	@pytest.mark.parametrize("code, applies", [
+		(0, False), (1, True), (125, True), (126, False), (127, False), (137, False), (-9, False),
+	])
+	def test_the_retry_applies_only_to_a_plain_nonzero_exit(self, code, applies):
+		assert ai_fix._auth_retry_applies(code, "refresh token was already used") is applies
+
+	@pytest.mark.parametrize("stderr", [
+		"Your access token could not be refreshed. Please log out and sign in again.",
+		"refresh token was already used. Please log out and sign in again.",
+		"refresh token has been revoked",
+		"token was revoked. Please log out and sign in again.",
+	])
+	def test_every_refresh_text_classifies_as_the_refresh_race_label(self, stderr):
+		assert ai_fix._classify_cli_stderr(stderr) == "auth_refresh_race"
+		assert ai_fix._auth_retry_applies(1, stderr)
+
+	def test_plain_unauthorized_is_auth_expired_and_not_retried(self):
+		assert ai_fix._classify_cli_stderr("HTTP 401 Unauthorized") == "auth_expired"
+		assert not ai_fix._auth_retry_applies(1, "HTTP 401 Unauthorized")
+
+	def test_a_refresh_phrase_early_in_stderr_with_another_last_line_is_not_retried(self, fake_codex, monkeypatch, tmp_path):
+		monkeypatch.setattr(ai_fix, "_CLI_AUTH_RETRY_WAIT", 0)
+		count = tmp_path / "rec" / "n"
+		fake_codex(exec_body=(
+			f'echo x >> "{count}"; echo "user: the token was revoked" >&2; '
+			'for i in 1 2 3 4 5 6; do echo "line $i" >&2; done; echo "connection reset" >&2; exit 1'
+		))
+		with pytest.raises(ai_fix.AiFixError) as err:
+			self._call()
+		assert err.value.kind == "transport"
+		assert len(count.read_text().split()) == 1
+
+	def test_the_retry_outcome_is_logged_with_the_wait(self, fake_codex, monkeypatch, tmp_path):
+		lines = []
+		monkeypatch.setattr(ai_fix, "_note_line", lines.append)
+		monkeypatch.setattr(ai_fix, "_CLI_AUTH_RETRY_WAIT", 0)
+		count = tmp_path / "rec" / "n"
+		fake_codex(exec_body=(
+			f'echo x >> "{count}"; '
+			f'if [ "$(wc -l < "{count}")" = 1 ]; then echo "refresh token was already used" >&2; exit 1; fi; '
+			'echo RETRIED > "$out"'
+		))
+		self._call()
+		assert "codex cli: auth_retry_ok label=auth_refresh_race wait=0.0" in lines
+
+	def test_a_skipped_retry_is_logged_with_the_wait(self, fake_codex, monkeypatch):
+		lines = []
+		monkeypatch.setattr(ai_fix, "_note_line", lines.append)
+		monkeypatch.setattr(ai_fix, "_auth_retry_fits", lambda deadline: False)
+		fake_codex(exec_body='echo "refresh token was already used" >&2; exit 1')
+		with pytest.raises(ai_fix.AiFixError) as err:
+			self._call()
+		assert "after a retry" not in str(err.value)
+		assert "codex cli: auth_retry_skipped label=auth_refresh_race code=1 wait=2.0" in lines
+
+	def test_the_final_message_says_a_retry_was_made(self, fake_codex, monkeypatch):
+		monkeypatch.setattr(ai_fix, "_CLI_AUTH_RETRY_WAIT", 0)
+		fake_codex(exec_body='echo "token was revoked" >&2; exit 1')
+		with pytest.raises(ai_fix.AiFixError) as err:
+			self._call()
+		assert "after a retry" in str(err.value) and "codex login" in str(err.value)
 
 	def test_an_auth_failure_clears_the_login_memo(self, fake_codex):
 		box = fake_codex(exec_body="echo 'HTTP 401 Unauthorized' >&2; exit 1")

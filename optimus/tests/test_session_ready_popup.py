@@ -386,10 +386,17 @@ assert.equal(d.dialogs.length, 1);
 
 def test_realtime_retry_gives_up_without_a_socket():
 	_run(r"""
-const d = desk({noSocket: true});
+const warns = [];
+const d = desk({noSocket: true, warns});
+for (let i = 0; i < 118; i++) d.tick();
+assert.equal(warns.length, 0);
+assert.equal(d.timers.size, 1);
 for (let i = 0; i < 200; i++) d.tick();
 assert.equal(d.timers.size, 0);
 assert.equal(Object.keys(d.handlers).length, 0);
+assert.equal(warns.length, 1);
+assert.match(warns[0][0], /^\[optimus\] realtime socket never appeared, giving up/);
+assert.ok(!warns[0][0].includes('[optimus] [optimus]'));
 """)
 
 
