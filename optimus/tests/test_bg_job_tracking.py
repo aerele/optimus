@@ -18,6 +18,7 @@ import frappe
 import pytest
 
 pytest.importorskip("rq")
+pytestmark = pytest.mark.rq  # selected by ai-quality.yml, which installs rq
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +107,7 @@ def fake_db(monkeypatch):
 	  1. ("Optimus Session", {"session_uuid": ...}, "name")  → session_name
 	  2. ("Optimus Session", session_name, "status")         → session_status
 	  3. ("Optimus Background Job", {"parent", "job_id"}, "name") → child_name
-	  4. ("Optimus Background Job", child_name, "status")    → child_status
+	  4. ("Optimus Background Job", child_name, ["status", "error"]) → (status, error)
 
 	Tests tweak the four canned values via the returned ``state`` dict, which
 	also captures ``set_value`` + ``commit`` calls.
@@ -118,11 +119,14 @@ def fake_db(monkeypatch):
 		"session_status": "Ready",
 		"child_name": "child-abc",
 		"child_status": "Running",
+		"child_error": None,
 		"set_value_calls": [],
 		"commit_calls": 0,
 	}
 
 	def fake_get_value(doctype, filters, field):
+		if doctype == "Optimus Background Job" and isinstance(field, list):
+			return (state["child_status"], state["child_error"])
 		if doctype == "Optimus Session":
 			if isinstance(filters, dict) and "session_uuid" in filters:
 				return state["session_name"]
@@ -501,6 +505,51 @@ class TestLateFinishDocTypeFallback:
 		assert 400 <= fields["duration_ms"] <= 1500
 		assert fields.get("error") is None
 		assert fake_db["commit_calls"] == 1
+
+	@pytest.mark.parametrize(
+		("status", "error"),
+		[
+			("Queued", None),
+			("", None),
+			("Stopped", "Never ran: no RQ record found (rolled back)"),
+		],
+	)
+	def test_late_finish_replaces_queued_and_never_ran_placeholders(
+		self, captures, fake_local, fake_rq_job, fake_db, status, error
+	):
+		from optimus import hooks_callbacks
+
+		fake_local.optimus_bg_job_start_mono = time.monotonic() - 0.5
+		fake_db["session_status"] = "Ready"
+		fake_db["child_status"] = status
+		fake_db["child_error"] = error
+
+		hooks_callbacks._track_bg_job_finished("S1", "J1")
+
+		assert len(fake_db["set_value_calls"]) == 1
+		assert fake_db["set_value_calls"][0][2]["status"] == "Completed"
+
+	@pytest.mark.parametrize("status", ["Completed", "Failed", "Timeout"])
+	def test_late_finish_keeps_a_terminal_row(self, captures, fake_local, fake_rq_job, fake_db, status):
+		from optimus import hooks_callbacks
+
+		fake_db["session_status"] = "Ready"
+		fake_db["child_status"] = status
+
+		hooks_callbacks._track_bg_job_finished("S1", "J1")
+
+		assert fake_db["set_value_calls"] == []
+
+	def test_late_finish_keeps_a_stopped_row_that_did_run(self, captures, fake_local, fake_rq_job, fake_db):
+		from optimus import hooks_callbacks
+
+		fake_db["session_status"] = "Ready"
+		fake_db["child_status"] = "Stopped"
+		fake_db["child_error"] = "Stopped by an operator"
+
+		hooks_callbacks._track_bg_job_finished("S1", "J1")
+
+		assert fake_db["set_value_calls"] == []
 
 	def test_late_finish_noop_when_session_still_analyzing(self, captures, fake_local, fake_rq_job, fake_db):
 		"""Analyze is still mid-wait → session row not yet Ready → fallback

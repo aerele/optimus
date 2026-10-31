@@ -69,11 +69,16 @@
   "ai_section",
   "ai_description",
   "ai_enabled",
+  "ai_connection_type",
   "ai_provider",
   "ai_base_url",
   "column_break_ai",
   "ai_model",
+  "ai_context_tokens",
   "ai_api_key",
+  "ai_subscription_cli",
+  "ai_cli_path",
+  "ai_subscription_status",
   "ai_sections_break",
   "ai_suggest_findings",
   "ai_suggest_indexes",
@@ -83,9 +88,11 @@
   "ai_auto_suggest",
   "column_break_ai_auto",
   "ai_auto_suggest_max",
+  "ai_refresh_max_findings",
   "ai_privacy_section",
   "ai_privacy_description",
   "ai_excluded_finding_types",
+  "ai_send_raw_values",
   "column_break_ai_privacy",
   "ai_request_timeout_seconds"
  ],
@@ -296,7 +303,7 @@
   {
    "fieldname": "sensitivity_description",
    "fieldtype": "HTML",
-   "options": "<p class=\"text-muted small\">Pick a preset to set every tunable threshold across Optimus in one move analyzer thresholds (the original nine), capture knobs (max queries / sampler interval / background-job wait), retention, display filters, Phase-2 defaults and the AI auto-suggest cap. <b>Strict</b> catches more (more findings, more noise) and keeps data longer; <b>Relaxed</b> catches less and prunes faster; <b>Recommended</b> is the shipped default and automatically tracks future tuning. Choose <b>Custom</b> to edit the individual fields yourself they stay locked under the named presets.</p>"
+   "options": "<p class=\"text-muted small\">Pick a preset to set every tunable threshold across Optimus in one move analyzer thresholds (the original nine), capture knobs (max queries / sampler interval / background-job wait), retention, display filters, line profiling defaults and the AI auto-suggest cap. <b>Strict</b> catches more (more findings, more noise) and keeps data longer; <b>Relaxed</b> catches less and prunes faster; <b>Recommended</b> is the shipped default and automatically tracks future tuning. Choose <b>Custom</b> to edit the individual fields yourself they stay locked under the named presets.</p>"
   },
   {
    "default": "Recommended",
@@ -399,7 +406,7 @@
   },
   {
    "default": "50",
-   "description": "For Phase 2 line profiling: a single line is flagged as High severity when it uses at least this percentage of its function's total time and also at least the minimum milliseconds below. The default is 50% with a 100ms minimum. Reference values: Strict: 35  ·  Recommended: 50  ·  Relaxed: 70.",
+   "description": "For line profiling: a single line is flagged as High severity when it uses at least this percentage of its function's total time and also at least the minimum milliseconds below. The default is 50% with a 100ms minimum. Reference values: Strict: 35  ·  Recommended: 50  ·  Relaxed: 70.",
    "fieldname": "hot_line_high_pct",
    "fieldtype": "Float",
    "label": "Hot Line High Severity (% of function time)",
@@ -408,7 +415,7 @@
   },
   {
    "default": "100",
-   "description": "The smallest absolute time a single line must take to be flagged as High severity in Phase 2 line profiling. Reference values: Strict: 50  ·  Recommended: 100  ·  Relaxed: 250.",
+   "description": "The smallest absolute time a single line must take to be flagged as High severity in line profiling. Reference values: Strict: 50  ·  Recommended: 100  ·  Relaxed: 250.",
    "fieldname": "hot_line_high_min_ms",
    "fieldtype": "Float",
    "label": "Hot Line High Severity Min (ms)",
@@ -418,28 +425,28 @@
   {
    "fieldname": "phase2_section",
    "fieldtype": "Section Break",
-   "label": "Phase 2 Defaults"
+   "label": "Line Profiling Defaults"
   },
   {
    "fieldname": "phase2_description",
    "fieldtype": "HTML",
-   "options": "<p class=\"text-muted small\">Defaults for the phase-2 line-profile pass. The picker dialog still lets the user override these per run.</p>"
+   "options": "<p class=\"text-muted small\">Defaults for the line profiling pass. The picker dialog still lets the user override these per run.</p>"
   },
   {
    "default": "10",
-   "description": "Each session keeps at most this many Phase 2 runs in full. Once there are more, the oldest run's full results are moved to a private file and only its summary row stays on the record. Set it to 0 for no limit, but keep an eye on record size for heavy users. Reference values: Strict: 0  ·  Recommended: 10  ·  Relaxed: 5.",
+   "description": "Each session keeps at most this many line profiling runs in full. Once there are more, the oldest run's full results are moved to a private file and only its summary row stays on the record. Set it to 0 for no limit, but keep an eye on record size for heavy users. Reference values: Strict: 0  ·  Recommended: 10  ·  Relaxed: 5.",
    "fieldname": "phase2_max_runs_per_session",
    "fieldtype": "Int",
-   "label": "Phase 2: Max Runs per Session",
+   "label": "Line Profiling: Max Runs per Session",
    "non_negative": 1,
    "read_only_depends_on": "eval:doc.config_profile != \"Custom\""
   },
   {
    "default": "1",
-   "description": "When ticked, the 'Auto-expand hot chain' box in the picker starts already checked. Auto-expand follows each suggested pick down the Phase 1 call tree so the whole hot chain gets profiled in one go.",
+   "description": "When ticked, the 'Auto-expand hot chain' box in the picker starts already checked. Auto-expand follows each suggested pick down the profile's call tree so the whole hot chain gets profiled in one go.",
    "fieldname": "phase2_default_auto_expand",
    "fieldtype": "Check",
-   "label": "Phase 2: Default Auto-Expand Hot Chain"
+   "label": "Line Profiling: Default Auto-Expand Hot Chain"
   },
   {
    "fieldname": "column_break_phase2",
@@ -476,7 +483,7 @@
   {
    "fieldname": "ai_description",
    "fieldtype": "HTML",
-   "options": "<p class=\"text-muted small\">When enabled, a <b>Suggest a fix (AI)</b> button appears on the Optimus Session form. Clicking it sends the selected finding's context finding type, callsite, a window of surrounding <b>source code</b>, the normalized SQL and EXPLAIN row to the configured LLM and stores the returned fix on the finding (it also shows up in the regenerated HTML report). <b>This sends code and queries to your chosen provider.</b> Point <code>Base URL</code> at a local model (Ollama / LM Studio / vLLM) to keep everything on-box. <a href=\"https://github.com/Aerele-RnD/optimus/blob/main/docs/AI-FIXING.md\" target=\"_blank\">Read the full data-flow documentation</a> what's sent, what isn't and step-by-step local-LLM recipes.</p>"
+   "options": "<p class=\"text-muted small\">Enable optional background AI for eligible findings and Steps to Reproduce. <b>Refresh AI suggestions</b> queues work after profiling is Ready; saved profiling results remain available if AI fails. Requests can include finding titles, metrics, file and function names, source-code windows, schema names and SQL structure. <b>Code and context are sent to your configured provider.</b> A local endpoint keeps requests within the environment you control. <a href=\"https://github.com/aerele/optimus/blob/main/docs/AI-FIXING.md\" target=\"_blank\" rel=\"noopener noreferrer\">Read the data-flow and deployment guide</a> before enabling AI.</p>"
   },
   {
    "default": "0",
@@ -486,8 +493,17 @@
    "label": "Enable AI Fix Suggestions"
   },
   {
-   "default": "Anthropic",
+   "default": "API Key",
    "depends_on": "eval:doc.ai_enabled",
+   "description": "Subscription (local CLI) needs developer_mode and the optimus_allow_subscription_cli site-config flag: run `bench --site <site> set-config optimus_allow_subscription_cli 1`, then restart the bench (or run `bench clear-cache`) so running workers see it. Sign in once to the Codex home Optimus owns: `CODEX_HOME=<bench>/sites/<site>/private/optimus-codex codex login` (Connect shows the exact command); your own ~/.codex is never used. It runs the Codex CLI on this machine as a read-only agent with a private scratch HOME, but it can still read files the bench user can read, so a prompt injection in profiled data is mitigated, not eliminated; use it only on data you trust. A call can take longer than the default request timeout, so raise the AI request timeout. API Key calls a cloud provider over HTTP.",
+   "fieldname": "ai_connection_type",
+   "fieldtype": "Select",
+   "label": "Connection",
+   "options": "API Key\nSubscription (local CLI)"
+  },
+  {
+   "default": "Anthropic",
+   "depends_on": "eval:doc.ai_enabled && doc.ai_connection_type != 'Subscription (local CLI)'",
    "description": "This picks the AI provider's wire format. \"OpenAI-compatible\" needs a Base URL and a Model. Use it for Ollama, LM Studio, vLLM, OpenRouter, Together, Groq and similar.",
    "fieldname": "ai_provider",
    "fieldtype": "Select",
@@ -495,8 +511,8 @@
    "options": "Anthropic\nOpenAI\nKimi (Moonshot)\nDeepSeek\nOpenAI-compatible"
   },
   {
-   "depends_on": "eval:doc.ai_enabled && doc.ai_provider == 'OpenAI-compatible'",
-   "description": "The base address of your OpenAI-compatible endpoint (include /v1). For example http://localhost:11434/v1 (Ollama), http://localhost:1234/v1 (LM Studio) or https://openrouter.ai/api/v1. Hosted providers (Anthropic, OpenAI, Kimi, DeepSeek) use their own built-in address, so this box is hidden for them.",
+   "depends_on": "eval:doc.ai_enabled && doc.ai_provider == 'OpenAI-compatible' && doc.ai_connection_type != 'Subscription (local CLI)'",
+   "description": "The HTTP(S) base address of your OpenAI-compatible endpoint, including /v1 where required. Loopback and LAN models are allowed. URL credentials, query strings, fragments and literal link-local/metadata addresses are refused. Keys are withheld over non-loopback HTTP by default. Hosted providers use their built-in address.",
    "fieldname": "ai_base_url",
    "fieldtype": "Data",
    "label": "Base URL"
@@ -506,22 +522,54 @@
    "fieldtype": "Column Break"
   },
   {
-   "depends_on": "eval:doc.ai_enabled",
-   "description": "Leave this blank to use the provider's default model. Examples: claude-sonnet-4-6 (Anthropic), gpt-4.1-mini (OpenAI), kimi-k2-0905-preview (Kimi), deepseek-chat (DeepSeek) or the name of your local model.",
+   "depends_on": "eval:doc.ai_enabled && doc.ai_connection_type != 'Subscription (local CLI)'",
+   "description": "Leave this blank to use the provider's default model. Examples: claude-sonnet-4-6 (Anthropic), gpt-4.1-mini (OpenAI), kimi-k2-0905-preview (Kimi), deepseek-flash (DeepSeek) or the name of your local model.",
    "fieldname": "ai_model",
    "fieldtype": "Data",
    "label": "Model"
   },
   {
-   "depends_on": "eval:doc.ai_enabled",
-   "description": "The provider's API key, if it needs one. Stored encrypted for this site. Most local endpoints (Ollama, LM Studio, vLLM) do not need a key; hosted ones (OpenAI, Anthropic, Kimi, DeepSeek, OpenRouter, Together, Groq) do.",
+   "depends_on": "eval:doc.ai_enabled && doc.ai_connection_type != 'Subscription (local CLI)'",
+   "fieldname": "ai_context_tokens",
+   "fieldtype": "Int",
+   "label": "AI model context window (tokens)",
+   "default": "0",
+   "description": "0 uses the provider default. Set the model's supported context window so prompts and reserved output fit together."
+  },
+  {
+   "depends_on": "eval:doc.ai_enabled && doc.ai_connection_type != 'Subscription (local CLI)'",
+   "description": "Stored encrypted for this site. Local providers may work without a key. Changing the effective provider or endpoint clears an unchanged stored key; enter a new key explicitly for the new destination. A masked value is never sent as the key.",
    "fieldname": "ai_api_key",
    "fieldtype": "Password",
    "label": "API Key"
   },
   {
+   "default": "Codex CLI",
+   "depends_on": "eval:doc.ai_enabled && doc.ai_connection_type == 'Subscription (local CLI)'",
+   "description": "Which local CLI to drive. Codex (billed to your ChatGPT plan) is the only option in this version.",
+   "fieldname": "ai_subscription_cli",
+   "fieldtype": "Select",
+   "label": "Subscription CLI",
+   "options": "Codex CLI"
+  },
+  {
+   "depends_on": "eval:doc.ai_enabled && doc.ai_connection_type == 'Subscription (local CLI)'",
+   "description": "Absolute path to the `codex` launcher, or a symlink named `codex` (not the `.js` file). It must be owned by the bench user or root and not writable by group or others. Leave blank to auto-detect `codex` on PATH.",
+   "fieldname": "ai_cli_path",
+   "fieldtype": "Data",
+   "label": "CLI path (optional)"
+  },
+  {
+   "depends_on": "eval:doc.ai_enabled && doc.ai_connection_type == 'Subscription (local CLI)'",
+   "description": "Result of the last Connect check. Read-only.",
+   "fieldname": "ai_subscription_status",
+   "fieldtype": "Small Text",
+   "label": "Subscription status",
+   "read_only": 1
+  },
+  {
    "depends_on": "eval:doc.ai_enabled",
-   "description": "Choose which parts of the report are allowed to use the AI. Turning one off disables it completely: that part is never generated automatically, its buttons on the session form are hidden, the API turns down requests for it and re-rendered reports leave it out.",
+   "description": "Choose which sections background AI may generate. Disabling a section prevents new requests for it. Previously saved output is not deleted; regenerate reports to apply current display settings.",
    "fieldname": "ai_sections_break",
    "fieldtype": "Section Break",
    "label": "Use the LLM for"
@@ -529,7 +577,7 @@
   {
    "default": "1",
    "depends_on": "eval:doc.ai_enabled",
-   "description": "When off, findings get no AI-suggested fix: nothing is generated during analyze, the \"Suggest a fix (AI)\", \"Generate AI fixes\" and \"Re-evaluate AI fixes\" buttons are hidden, the API turns down requests and re-rendered reports leave out the AI-fix block.",
+   "description": "Allow background fix suggestions on eligible findings. When off, automatic and manual refresh skip fixes and newly rendered reports omit their AI-fix blocks. Deterministic index advice remains available.",
    "fieldname": "ai_suggest_findings",
    "fieldtype": "Check",
    "label": "Fix suggestions on findings"
@@ -537,10 +585,11 @@
   {
    "default": "1",
    "depends_on": "eval:doc.ai_enabled",
-   "description": "When off, there is no \"Index advice (AI)\" block in the \"Time spent per database table\" section: nothing is generated automatically, the \"Suggest an index (AI)\" button is hidden, the API turns down requests and re-rendered reports leave it out.",
+   "description": "This setting no longer does anything. Index advice (the recipes on Missing Index, Full Table Scan, Filesort, Temporary Table and Low Filter Ratio findings and the per-table index cards) is built by Optimus from the analyzer's data and the DocType metadata, without the AI, so nothing about your tables is sent to the AI provider for it. The field is kept only so existing sites migrate cleanly.",
    "fieldname": "ai_suggest_indexes",
    "fieldtype": "Check",
-   "label": "Index recommendations (DB-tables breakdown)"
+   "label": "Index recommendations (DB-tables breakdown, retired)",
+   "read_only": 1
   },
   {
    "depends_on": "eval:doc.ai_enabled",
@@ -550,7 +599,7 @@
   {
    "default": "1",
    "depends_on": "eval:doc.ai_enabled",
-   "description": "When ticked, the AI rewrites each session's auto-generated \"Steps to Reproduce\" note into a friendly, readable flow (if the AI call fails, the note falls back to the plain list of captured actions; the per-action breakdown lists them either way). When off, the note stays as the plain action list, the \"Humanize Steps (AI)\" button is hidden and the API turns down requests. An older session that was already humanized keeps its note until it is re-analyzed.",
+   "description": "Allow Refresh AI suggestions to rewrite Steps to Reproduce. When automatic suggestions are on, also humanize freshly captured Steps after profiling. Automatic work preserves user-written notes and stops treating captured Steps as unedited after any document save. Provider failure keeps the saved note. When off, no new Steps request is sent.",
    "fieldname": "ai_humanize_steps",
    "fieldtype": "Check",
    "label": "Humanized \"Steps to Reproduce\""
@@ -564,10 +613,10 @@
   {
    "default": "1",
    "depends_on": "eval:doc.ai_enabled",
-   "description": "When ticked, analyze automatically asks the AI for a fix on every eligible finding, so the suggestions are already in the report with no need to click \"Suggest a fix (AI)\" for each one. On by default (takes effect only once AI Fix Suggestions is enabled). It spends AI tokens (and a little extra analyze time) on every session that is analyzed, so untick it if you would rather request a suggestion per finding.",
+   "description": "After profiling is saved as Ready, queue the finding fixes and/or captured Steps selected above. This uses provider tokens and requires a background worker. Turning off stops further queued or running automatic work; an already dispatched call may still finish. If line profiling is armed, its completion can start this work. When off, request AI through Refresh AI suggestions.",
    "fieldname": "ai_auto_suggest",
    "fieldtype": "Check",
-   "label": "Suggest AI fixes in the report by default"
+   "label": "Run AI suggestions automatically after profiling"
   },
   {
    "depends_on": "eval:doc.ai_enabled",
@@ -577,12 +626,19 @@
   {
    "default": "5",
    "depends_on": "eval:doc.ai_enabled && doc.ai_auto_suggest",
-   "description": "Analyze adds an automatic suggestion to at most this many findings per session, taking the highest-severity, highest-impact ones first. Use 0 for every eligible finding, which can be slow and costly on big sessions. Reference values: Strict: 0  ·  Recommended: 5  ·  Relaxed: 3.",
+   "description": "The automatic background run selects at most this many findings, ordered by severity and impact. Use 0 for all eligible findings within the run deadline, which can cost more on large sessions. Reference values: Strict: 0; Recommended: 5; Relaxed: 3.",
    "fieldname": "ai_auto_suggest_max",
    "read_only_depends_on": "eval:doc.config_profile != \"Custom\"",
    "fieldtype": "Int",
    "label": "Max auto-suggested findings per session",
    "non_negative": 1
+  },
+  {
+   "fieldname": "ai_refresh_max_findings",
+   "fieldtype": "Int",
+   "label": "Maximum findings per AI refresh",
+   "default": "20",
+   "description": "Applies to manual refresh and Regenerate all. 0 means no item cap; the background run deadline still applies."
   },
   {
    "depends_on": "eval:doc.ai_enabled",
@@ -594,14 +650,22 @@
    "depends_on": "eval:doc.ai_enabled",
    "fieldname": "ai_privacy_description",
    "fieldtype": "HTML",
-   "options": "<p class=\"text-muted small\">Per-type opt-out and the local-LLM timeout. The exclusion list is the only way (short of disabling AI entirely) to keep a specific finding category from ever being built into a payload useful when a particular type embeds business logic you don't want shared with a hosted provider. The timeout knob exists for local LLMs: hosted providers usually answer in seconds, but a cold-start ollama / vLLM run can take well over a minute on first call.</p>"
+   "options": "<p class=\"text-muted small\"><b>Send raw values</b> is off by default: SQL literals and comments are removed, and document names and the session title are omitted from Steps requests. This does not anonymize source code, finding titles or schema names; they can contain business information. Review what your provider retains, exclude sensitive finding types, or leave AI disabled. Index advice is deterministic and does not contact a provider. Settings changes are recorded in the site history.</p>"
   },
   {
    "depends_on": "eval:doc.ai_enabled",
-   "description": "One finding type per line. These types are skipped by both automatic and on-demand AI suggestions (no request is ever built for them). Matching is exact and case-sensitive. Lines starting with '#' are comments. Use the official names: Filesort, Framework N+1, Full Table Scan, Hot Line, Low Filter Ratio, Missing Index, N+1 Query, Redundant Call, Slow Query, Temporary Table.",
+   "description": "One finding type per line. These types are skipped by both automatic and on-demand AI suggestions (no request is ever built for them). Matching is exact and case-sensitive. Lines starting with '#' are comments. Use the official names: Hot Line, N+1 Query, Redundant Call, Slow Background Job, Slow Query. Index findings and Framework N+1 never call the AI.",
    "fieldname": "ai_excluded_finding_types",
    "fieldtype": "Small Text",
    "label": "Excluded finding types"
+  },
+  {
+   "default": "0",
+   "depends_on": "eval:doc.ai_enabled",
+   "description": "Off by default: captured SQL literals, document names and the session title are omitted from AI requests. Turn on only if sending these business values to the configured provider is acceptable. Sensitive-column redaction still applies. Source code and schema names can still be sent; use type exclusions or disable AI when these are private.",
+   "fieldname": "ai_send_raw_values",
+   "fieldtype": "Check",
+   "label": "Send raw values to the AI provider"
   },
   {
    "depends_on": "eval:doc.ai_enabled",
@@ -621,7 +685,7 @@
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-10-20 10:11:41.945295",
+ "modified": "2026-10-31 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Optimus",
  "name": "Optimus Settings",
@@ -636,5 +700,6 @@
  ],
  "sort_field": "creation",
  "sort_order": "DESC",
- "states": []
+ "states": [],
+ "track_changes": 1
 }

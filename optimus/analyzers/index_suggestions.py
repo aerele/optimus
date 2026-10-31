@@ -7,21 +7,35 @@ Runs frappe's recorder ``_optimize_query`` (DBOptimizer heuristic) over the
 union of unique normalized queries, then dedupes and aggregates by
 (table, column) so each missing index is reported once with the cumulative
 time it would save and the queries that benefit. This is the per-session view
-the per-request optimizer doesn't provide.
+the per-request optimizer doesn't provide. A suggestion is dropped when an existing
+index already serves the query (``index_where``) or when the session's writes outweigh
+the read gain (``index_harm``).
 """
 
 import json
+import logging
 import re
 from collections import Counter, defaultdict
 
 from optimus.analyzers.base import (
 	FRAPPE_METADATA_COLUMNS,
 	SEVERITY_ORDER,
+	TAB_TABLE_RE,
 	AnalyzerResult,
 	dur,
+	is_error_log_hook_query,
 	is_frappe_meta_table,
 )
+from optimus.analyzers.index_harm import assess_harm, collect_writes
+from optimus.analyzers.index_where import (
+	covered_columns,
+	is_served,
+	is_weak_only,
+	parse_where,
+	strip_leading_comments,
+)
 from optimus.dbdialect import get_dialect
+from optimus.safe_call import job_timeout_types
 
 
 def _scrub_literals(text: str) -> str:
@@ -111,13 +125,9 @@ _PARSER_LIMITATION_EXCEPTIONS = (ValueError, TypeError)
 # and connection-state statements, noise the user couldn't act on.
 _OPTIMIZABLE_QUERY_TYPES = frozenset({"SELECT"})
 
-# Leading-keyword regex tolerant of whitespace and C-style /* ... */
-# comments at the start of the statement (Frappe prepends comments in
-# some paths). DOTALL handles multi-line comments.
-_SQL_LEADING_KEYWORD_RE = re.compile(
-	r"^\s*(?:/\*.*?\*/\s*)*(\w+)",
-	re.IGNORECASE | re.DOTALL,
-)
+# Leading keyword after whitespace and C-style /* ... */ comments, which are
+# stripped linearly (a lazy regex backtracks exponentially on many comments).
+_SQL_LEADING_KEYWORD_RE = re.compile(r"^(\w+)")
 
 
 def _get_query_type(sql: str) -> str:
@@ -125,7 +135,7 @@ def _get_query_type(sql: str) -> str:
 	the statement doesn't start with a parseable keyword."""
 	if not sql:
 		return ""
-	m = _SQL_LEADING_KEYWORD_RE.match(sql)
+	m = _SQL_LEADING_KEYWORD_RE.match(strip_leading_comments(sql))
 	if not m:
 		return ""
 	return m.group(1).upper()
@@ -171,13 +181,12 @@ _NEVER_SUGGEST_COLUMNS = FRAPPE_METADATA_COLUMNS
 #      legitimately introspects.
 # Anything else is rejected outright and the index-introspection helper
 # returns an empty set (its "I couldn't read indexes" fall-through).
-_SAFE_TAB_TABLE_RE = re.compile(r"^tab[A-Za-z0-9 _\-]+$")
 _SAFE_INFOSCHEMA_RE = re.compile(r"^information_schema\.[A-Za-z0-9_]+$")
 
 
 def _is_safe_table_name(name) -> bool:
 	"""True iff ``name`` is a table-name shape the indexer may inspect via raw
-	SQL (see ``_SAFE_TAB_TABLE_RE`` / ``_SAFE_INFOSCHEMA_RE``). Any other shape
+	SQL (see ``TAB_TABLE_RE`` / ``_SAFE_INFOSCHEMA_RE``). Any other shape
 	(SQL-injection attempt, stray space, backtick, semicolon, …) returns False
 	so the caller falls back to its empty set."""
 	if not isinstance(name, str) or not name:
@@ -186,16 +195,77 @@ def _is_safe_table_name(name) -> bool:
 	# the regexes wouldn't match them make the intent obvious to readers.
 	if any(c in name for c in ("`", "'", '"', ";", "\\", "\n", "\r", "\x00")):
 		return False
-	return bool(_SAFE_TAB_TABLE_RE.match(name) or _SAFE_INFOSCHEMA_RE.match(name))
+	return bool(TAB_TABLE_RE.fullmatch(name) or _SAFE_INFOSCHEMA_RE.match(name))
 
 
 def _get_indexed_columns(table: str) -> set[str]:
-	"""Return the columns on ``table`` that are the leftmost of at least one
-	index. Non-leftmost composite columns are excluded (a btree can't serve a
-	filter on just that column, so a Missing Index suggestion stays actionable).
-	Returns an empty set on any DB error, conservatively keeping all suggestions.
-	"""
-	return {ix.leftmost for ix in get_dialect().existing_indexes(table) if ix.leftmost}
+	"""Columns that lead at least one usable b-tree index on ``table``; empty on a DB error."""
+	return _usable_leftmost(get_dialect().existing_indexes(table))
+
+
+def _usable_leftmost(indexes: list) -> set[str]:
+	return {ix.leftmost for ix in indexes if ix.leftmost and (ix.eligible or ix.usable_prefix)}
+
+
+def _query_aliases(sql: str) -> dict:
+	"""``{alias: table}`` via sql_metadata; empty if it can't parse the query."""
+	try:
+		from sql_metadata import Parser
+
+		return dict(Parser(sql).tables_aliases)
+	except job_timeout_types():
+		raise
+	except Exception:
+		logging.getLogger(__name__).debug("alias parse failed", exc_info=True)
+		return {}
+
+
+def _entry_aliases(entry: dict) -> dict:
+	"""``_query_aliases`` of an entry's raw query, parsed once."""
+	if "aliases" not in entry:
+		entry["aliases"] = _query_aliases(entry["raw"])
+	return entry["aliases"]
+
+
+def _partition_queries(
+	table: str, column: str, entries: list, indexes: list
+) -> tuple[list, list, list, list]:
+	"""Split queries into ``(kept, served, function_wrapped, weakly_served)``; the last is a subset of served."""
+	kept, served, wrapped, weak = [], [], [], []
+	for entry in entries:
+		try:
+			shape = parse_where(entry["raw"], table, _entry_aliases(entry))
+		except job_timeout_types():
+			raise
+		except Exception:
+			kept.append(entry)
+			continue
+		col = column.lower()
+		if col in shape.wrapped and col not in shape.plain and not shape.ambiguous:
+			wrapped.append(entry)
+		elif is_served(column, shape, indexes):
+			served.append(entry)
+			if is_weak_only(column, shape):
+				weak.append(entry)
+		else:
+			kept.append(entry)
+	return kept, served, wrapped, weak
+
+
+def _all_weakly_served(table: str, column: str, entries: list, indexes: list) -> bool:
+	"""True if every query only negates ``column`` (!=, NOT IN, ...) though an index leads with it."""
+	_, _, _, weak = _partition_queries(table, column, entries, indexes)
+	return bool(entries) and len(weak) == len(entries)
+
+
+def _composite_hint(column: str, indexes: list) -> str | None:
+	"""Describe an existing index holding ``column`` at a non-leading position, if any."""
+	col = column.lower()
+	for ix in indexes:
+		cols = covered_columns(ix)
+		if col in cols[1:]:
+			return f"`{ix.name}` ({', '.join(ix.columns)})"
+	return None
 
 
 def _get_column_types(table: str) -> dict[str, str]:
@@ -328,6 +398,8 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 
 	for recording in recordings:
 		for call in recording.get("calls") or []:
+			if not isinstance(call, dict) or is_error_log_hook_query(call.get("stack")):
+				continue
 			normalized = call.get("normalized_query")
 			if not normalized:
 				continue
@@ -335,15 +407,19 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 			if call.get("past_enrich_cap"):
 				continue
 
-			raw = call.get("query") or normalized
+			raw = call.get("query")
+			if not isinstance(raw, str) or not raw:
+				raw = str(normalized)
 			qtype = _get_query_type(raw) or _get_query_type(normalized)
 			if qtype not in _OPTIMIZABLE_QUERY_TYPES:
 				skipped_by_type += 1
 				continue
 
+			# One group holds every literal variant of a query; its shape (LIKE 'x%' vs '%x') is
+			# taken from the first raw sample.
 			entry = unique_queries.setdefault(
 				normalized,
-				{"duration": 0.0, "count": 0, "raw": raw},
+				{"duration": 0.0, "count": 0, "raw": raw, "normalized": normalized},
 			)
 			entry["duration"] += call.get("duration", 0)
 			entry["count"] += 1
@@ -354,7 +430,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	# customer reads "no index suggestions" as "no missing indexes"
 	# when the real answer might be "we couldn't analyze your queries".
 	suggestion_buckets: dict[tuple, dict] = defaultdict(
-		lambda: {"duration": 0.0, "count": 0, "queries": []}
+		lambda: {"duration": 0.0, "count": 0, "entries": [], "cardinality": None}
 	)
 	parser_limit_failures: Counter = Counter()
 	real_failures: Counter = Counter()
@@ -367,6 +443,10 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	timed_out = 0
 	dialect = get_dialect()
 	for normalized, info in unique_queries.items():
+		from optimus.sql_budget import within_budget
+		if not within_budget(info["raw"]):
+			parser_limit_failures["ParseBudgetExceeded"] += 1
+			continue
 		try:
 			# DBOptimizer parses with sql_metadata which doesn't care about
 			# literal values, so passing the normalized query is fine.
@@ -411,8 +491,9 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 		bucket = suggestion_buckets[key]
 		bucket["duration"] += info["duration"]
 		bucket["count"] += info["count"]
-		if len(bucket["queries"]) < MAX_EXAMPLE_QUERIES:
-			bucket["queries"].append(normalized[:300])
+		bucket["entries"].append(info)
+		if bucket["cardinality"] is None:
+			bucket["cardinality"] = getattr(index, "cardinality", None)
 
 	# v0.5.1: verify each suggested (table, column) against
 	# information_schema before emitting a finding. Pre-v0.5.1 the
@@ -436,6 +517,10 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	drop_never_suggest = 0
 	never_suggest_columns: list[str] = []
 	unindexable_reasons: list[str] = []
+	index_cache: dict[str, list] = {}
+	writes = None
+	targets: dict[str, list[str]] = {reason: [] for reason in _SKIP_WARNINGS}
+	harm_reasons: dict[str, str] = {}
 
 	findings = []
 	for (table, column), bucket in suggestion_buckets.items():
@@ -455,6 +540,13 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 				drop_low_per_query += 1
 				continue
 
+		# One SHOW INDEX per table feeds both checks.
+		never = (column or "").strip().lower() in _NEVER_SUGGEST_COLUMNS
+		if not never and table not in index_cache:
+			index_cache[table] = get_dialect().existing_indexes(table)
+			indexed_cache.setdefault(table, _usable_leftmost(index_cache[table]))
+		indexes = index_cache.get(table, [])
+
 		status, ddl_or_reason = _classify_column(
 			table, column, indexed_cache, type_cache
 		)
@@ -464,19 +556,52 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 			never_suggest_columns.append(f"{table}.{column}")
 			continue
 		if status == "already_indexed":
-			drop_already_indexed += 1
+			if _all_weakly_served(table, column, bucket["entries"], indexes):
+				targets["weak"].append(f"{table}.{column}")
+			else:
+				drop_already_indexed += 1
 			continue
 		if status == "unindexable":
 			drop_unindexable += 1
 			unindexable_reasons.append(ddl_or_reason)
 			continue
 
+		kept, served, wrapped, weak = _partition_queries(table, column, bucket["entries"], indexes)
+		if not kept:
+			if not served:
+				targets["wrapped"].append(f"{table}.{column}")
+			elif len(weak) == len(served):
+				targets["weak"].append(f"{table}.{column}")
+			else:
+				targets["covered"].append(f"{table}.{column}")
+			continue
+		kept_count = sum(e["count"] for e in kept)
+		kept_ms = sum(e["duration"] for e in kept)
+		if kept_count and kept_ms / kept_count < MIN_AVG_SAVINGS_PER_QUERY_MS:
+			drop_low_per_query += 1
+			continue
+
+		if writes is None:
+			writes = _safe_collect_writes(recordings)
+		harm = assess_harm(table, column, kept_count, writes, bucket["cardinality"])
+		if harm.suppress_reason:
+			harm_reasons[f"{table}.{column}"] = harm.suppress_reason
+			continue
+		cautions = list(harm.cautions)
+		if hint := _composite_hint(column, indexes):
+			cautions.append(
+				f"existing index {hint} already contains `{column}`, but these queries do not filter "
+				"by its leading column(s) with equality; changing that index may serve them better "
+				"than a new single-column index."
+			)
+
 		# status is "actionable" or "unknown" both keep the
 		# suggestion. "unknown" uses the legacy plain-DDL template,
 		# matching pre-v0.5.1 behavior for environments without a
 		# live DB connection.
 		suggested_ddl = ddl_or_reason
-		impact_ms = bucket["duration"]
+		impact_ms = kept_ms
+		examples = [e["normalized"][:300] for e in kept[:MAX_EXAMPLE_QUERIES]]
 		findings.append(
 			{
 				"finding_type": "Missing Index",
@@ -484,20 +609,27 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 				"title": f"Add index on {table}({column})",
 				"customer_description": (
 					f"Adding an index to the **{column}** column of the "
-					f"**{table}** table would speed up {bucket['count']} "
+					f"**{table}** table would speed up {kept_count} "
 					f"queries in this session, saving roughly "
 					f"{dur(impact_ms)} total. Ask your developer to add this "
 					"index in a database migration."
+					+ (
+						" Before adding, check: " + "; ".join(c.rstrip(".") for c in cautions) + "."
+						if cautions
+						else ""
+					)
 				),
 				"technical_detail_json": json.dumps(
 					{
 						"table": table,
 						"column": column,
 						"suggested_ddl": suggested_ddl,
-						"affected_query_count": bucket["count"],
+						"affected_query_count": kept_count,
 						"estimated_savings_ms": round(impact_ms, 2),
-						"example_queries": bucket["queries"],
+						"example_queries": examples,
 						"verified_not_indexed": status == "actionable",
+						"cautions": cautions,
+						"write_impact": harm.stats,
 						"validation_note": (
 							"The developer must validate this suggestion against "
 							"the actual schema and production query patterns "
@@ -509,7 +641,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 					default=str,
 				),
 				"estimated_impact_ms": round(impact_ms, 2),
-				"affected_count": bucket["count"],
+				"affected_count": kept_count,
 				"action_ref": "",
 			}
 		)
@@ -596,6 +728,17 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 			"(indexes included) a hand-added index there is pointless and "
 			"would be clobbered on the next migrate."
 		)
+	for reason, template in _SKIP_WARNINGS.items():
+		if targets[reason]:
+			warnings.append(template.format(targets=_sample(targets[reason])))
+	if harm_reasons:
+		shown = list(harm_reasons.values())[:3]
+		more = f" (+{len(harm_reasons) - 3} more)" if len(harm_reasons) > 3 else ""
+		warnings.append(
+			"Suppressed index suggestion(s) whose write cost in this session outweighs the read gain: "
+			+ " ".join(shown)
+			+ more
+		)
 	if drop_already_indexed:
 		warnings.append(
 			f"Suppressed {drop_already_indexed} index suggestion(s) whose "
@@ -622,6 +765,45 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 			pass
 
 	return AnalyzerResult(findings=findings, warnings=warnings)
+
+
+# reason a suggestion was skipped -> warning template taking the sampled ``{targets}``.
+_SKIP_WARNINGS = {
+	"covered": (
+		"Suppressed index suggestion(s) already served by an existing index ({targets}): a single or "
+		"composite index covers the column for the queries that filter it directly (any other query "
+		"uses it only inside a function)."
+	),
+	"wrapped": (
+		"Suppressed index suggestion(s) where the column is only used inside a function ({targets}), "
+		"e.g. DATE(col) or Frappe's ifnull(col, ''); a plain index cannot serve that filter. To make "
+		"it indexable, rewrite the filter as a range on the bare column (for example col >= x AND "
+		"col < x + 1), add a functional index on the expression, or avoid the code path that wraps "
+		"the column. Do not just drop ifnull: that changes how NULLs match."
+	),
+	"weak": (
+		"Index suggestion(s) not made because an existing index contains the column ({targets}), but "
+		"the only filter on it is !=, NOT IN, NOT LIKE or NOT (...), which that index may not be able "
+		"to serve. Check with EXPLAIN whether those queries use it, or rewrite them with a positive "
+		"filter."
+	),
+}
+
+
+def _safe_collect_writes(recordings: list[dict]) -> dict:
+	"""``collect_writes`` that fails open (no write data) except for an RQ job timeout."""
+	try:
+		return collect_writes(recordings)
+	except job_timeout_types():
+		raise
+	except Exception:
+		return {}
+
+
+def _sample(targets: list[str]) -> str:
+	unique = sorted(set(targets))
+	more = f" (+{len(unique) - 5} more)" if len(unique) > 5 else ""
+	return ", ".join(unique[:5]) + more
 
 
 def _severity(impact_ms: float) -> str:

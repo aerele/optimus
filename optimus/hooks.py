@@ -54,8 +54,11 @@ def _asset_version(relative_path: str) -> str:
 _widget_js_v = _asset_version("js/floating_widget.js")
 _frontend_js_v = _asset_version("js/optimus_frontend.js")
 _widget_css_v = _asset_version("css/floating_widget.css")
+_pill_js_v = _asset_version("js/optimus_pill_state.js")
 
 app_include_js = [
+	# Pure pill state logic; must load before floating_widget.js.
+	f"/assets/optimus/js/optimus_pill_state.js?v={_pill_js_v}",
 	f"/assets/optimus/js/floating_widget.js?v={_widget_js_v}",
 	# v0.5.0: browser-side metrics shim (fetch/XHR wrap + Web Vitals).
 	# Loads after floating_widget.js so the widget is already in the DOM
@@ -69,6 +72,8 @@ app_include_css = f"/assets/optimus/css/floating_widget.css?v={_widget_css_v}"
 
 after_install = "optimus.install.after_install"
 before_uninstall = "optimus.install.before_uninstall"
+# Seeds the AI refresh admission mutex again if a rollback removed it (idempotent).
+after_migrate = ["optimus.install.after_migrate"]
 
 # Boot session
 # ------------
@@ -80,7 +85,7 @@ before_uninstall = "optimus.install.before_uninstall"
 # corresponding client-side guard.
 boot_session = "optimus.boot.boot_session"
 
-# Request lifecycle (Phase 1)
+# Request lifecycle (normal profile)
 # ---------------------------
 # These hooks run AFTER frappe's own recorder hooks, so by the time
 # `before_request` runs, frappe.recorder.record() has already been called
@@ -98,7 +103,7 @@ after_request = [
 	"optimus.line_profile.hooks.after_request_line_profile",
 ]
 
-# Background job lifecycle (Phase 2)
+# Background job lifecycle (line profiling)
 # ----------------------------------
 # These mirror the request hooks. The frappe.enqueue monkey-patch in
 # optimus/__init__.py injects `_profiler_session_id` into job
@@ -118,6 +123,9 @@ after_job = [
 	"optimus.line_profile.hooks.after_job_line_profile",
 ]
 
+# Keep live sessions and recordings when a save calls frappe.clear_cache().
+persistent_cache_keys = ["profiler:*"]
+
 # Janitor (Phase 6)
 # -----------------
 # Sweep stale Recording sessions (started but never explicitly stopped)
@@ -125,6 +133,7 @@ after_job = [
 
 scheduler_events = {
 	"cron": {
+		"* * * * *": ["optimus.ai_jobs.recover_pending", "optimus.line_profile.jobs.recover_pending"],
 		"*/5 * * * *": [
 			"optimus.janitor.sweep_stale_sessions",
 		],
@@ -136,10 +145,10 @@ scheduler_events = {
 
 # File permission gate (Phase 6)
 # ------------------------------
-# Server-side double-check that the raw profiler report can only be
-# downloaded by System Manager + the recording user. The UI hides the
-# download button from non-admins, but this gate also blocks direct URL
-# access in case someone guesses the file name.
+# Restrict File permission checks for raw reports and recordings to System
+# Manager + the recording user (form load, REST, frappe.has_permission).
+# Direct /private/files downloads bypass this hook: a parent Session
+# read-sharee can still download the raw artifacts through Frappe's rule.
 
 has_permission = {
 	"File": "optimus.permissions.file_has_permission",
@@ -148,8 +157,25 @@ has_permission = {
 # v0.4.0: doc_events hooks.
 # - User.validate auto-grants Optimus User to any user that has
 #   System Manager. See install.on_user_role_change for the logic.
+# - Error Log.before_insert masks the stored AI API key (and other key
+#   shapes) in the Error Log rows from Optimus's AI code or holding the
+#   key as Frappe inserts them, the rows Frappe's save_to_db takes from the
+#   deferred-insert queue included; every other row is left as it was. See
+#   optimus/error_log_mask.py.
 doc_events = {
+	"File": {
+		"before_validate": "optimus.managed.protect_file",
+		"before_insert": "optimus.managed.protect_file",
+	},
+	**{doctype: {
+		"before_validate": "optimus.managed.protect_child",
+		"before_insert": "optimus.managed.protect_child",
+		"on_trash": "optimus.managed.protect_child",
+	} for doctype in ("Optimus Action", "Optimus Finding", "Optimus Background Job", "Optimus Phase Two Run")},
 	"User": {
 		"validate": "optimus.install.on_user_role_change",
+	},
+	"Error Log": {
+		"before_insert": "optimus.error_log_mask.mask_error_log",
 	},
 }

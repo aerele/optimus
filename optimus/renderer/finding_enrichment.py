@@ -10,7 +10,9 @@ imported lazily to avoid renderer import cycles.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import os
 import re
 
@@ -19,6 +21,75 @@ import re
 # ``SEVERITY_ORDER`` in ``analyzers.base`` but lives here so the
 # renderer doesn't drag an analyzer import into hot paths.
 _GROUPING_SEVERITY_RANK = {"High": 0, "Medium": 1, "Low": 2}
+
+# No measured ms, so they must outrank timed findings within a severity.
+_RELIABILITY_FINDING_TYPES = frozenset({"Lock Contention"})
+
+
+def _action_ref_key(value) -> str:
+	"""Match persisted action indices, including zero; never guess malformed refs."""
+	if isinstance(value, bool) or not isinstance(value, (str, int)):
+		return ""
+	return str(value).strip()
+
+
+def _assign_finding_ids(findings: list[dict], rows) -> None:
+	"""Opaque per-report identities, assigned before filtering or group promotion.
+
+	Stored row names stay private. Legacy rows use their original input position;
+	duplicate names/hash collisions get deterministic suffixes within this report.
+	"""
+	counts: dict[str, int] = {}
+	for idx, (finding, row) in enumerate(zip(findings, rows, strict=True)):
+		name = getattr(row, "name", None)
+		key = (
+			"finding-row-" + hashlib.sha256(name.encode()).hexdigest()[:24]
+			if isinstance(name, str) and name else f"finding-pos-{idx}"
+		)
+		counts[key] = counts.get(key, 0) + 1
+		finding["finding_id"] = key if counts[key] == 1 else f"{key}-{counts[key]}"
+
+
+def _ai_links_by_action(buckets: list[dict]) -> dict[str, list[dict]]:
+	"""Register only final visible answers; the template uses this same render gate.
+
+	The canonical primary and child keep their own identity and action reference.
+	Embedded cards suppress both the answer and its ID. No saved JSON is read here.
+	"""
+	links: dict[str, list[dict]] = {}
+	for bucket in buckets:
+		for primary in bucket.get("findings") or []:
+			for finding in [primary, *(primary.get("sub_findings") or [])]:
+				finding.pop("ai_target_id", None)
+				finding.pop("ai_status_label", None)
+				fix = finding.get("llm_fix")
+				if not isinstance(fix, dict) or not fix.get("suggestion_html") or not finding.get("finding_id"):
+					continue
+				target = "ai-" + finding["finding_id"]
+				status = fix.get("review_status")
+				if not status and fix.get("incomplete"):
+					status = "Incomplete AI response"
+				if not status and fix.get("outdated"):
+					status = "Outdated AI suggestion"
+				finding["ai_target_id"] = target
+				finding["ai_status_label"] = status or "AI suggestion available"
+				ref = _action_ref_key(finding.get("action_ref"))
+				if ref:
+					links.setdefault(ref, []).append({
+						"target_id": target, "title": finding.get("title") or "Finding",
+						"label": "View AI response" if status else "View AI suggestion",
+					})
+	return links
+
+
+def _observed_query_ms(finding: dict):
+	"""A measured query total, kept separate from estimated recoverable impact."""
+	if finding.get("finding_type") not in {"N+1 Query", "Slow Query"}:
+		return None
+	value = (finding.get("technical_detail") or {}).get("total_time_ms")
+	if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0:
+		return value
+	return None
 
 
 def _root_cause_key(finding: dict) -> tuple | None:
@@ -87,8 +158,8 @@ def _group_findings_by_root_cause(findings: list[dict]) -> list[dict]:
 	"""Collapse findings sharing a ``(file, function)`` root-cause anchor into
 	one primary card, the rest attached as ``sub_findings``.
 
-	Returns a NEW list: the primary per group (chosen by severity then
-	``estimated_impact_ms``, higher wins) with sorted ``sub_findings``
+	Returns a NEW list: the primary per group (chosen by severity, then
+	reliability findings first, then ``estimated_impact_ms``, higher wins) with sorted ``sub_findings``
 	attached, grouped non-primaries dropped, ungrouped findings passed through
 	as-is.
 	"""
@@ -97,8 +168,9 @@ def _group_findings_by_root_cause(findings: list[dict]) -> list[dict]:
 
 	def _rank(f: dict) -> tuple:
 		sev_rank = _GROUPING_SEVERITY_RANK.get(f.get("severity") or "Low", 2)
+		timed = f.get("finding_type") not in _RELIABILITY_FINDING_TYPES
 		impact = -(f.get("estimated_impact_ms") or 0)
-		return (sev_rank, impact)
+		return (sev_rank, timed, impact)
 
 	# Bucket by root-cause key. None-key findings stream through as
 	# singletons (no grouping).
@@ -136,12 +208,18 @@ def _group_findings_by_root_cause(findings: list[dict]) -> list[dict]:
 		# standalone cards elsewhere in the bucket.
 		primary["sub_findings"] = [
 			{
+				"finding_id": s.get("finding_id") or "",
+				"action_ref": s.get("action_ref"),
+				# The final sanitized display view, after settings and policy gates.
+				"llm_fix": s.get("llm_fix"),
 				"finding_type": s.get("finding_type") or "",
 				"severity": s.get("severity") or "Low",
 				"title": s.get("title") or "",
 				"customer_description": s.get("customer_description") or "",
 				"estimated_impact_ms": s.get("estimated_impact_ms") or 0,
 				"affected_count": s.get("affected_count") or 0,
+				"impact_scope_label": (s.get("technical_detail") or {}).get("impact_scope_label"),
+				"observed_query_ms": _observed_query_ms(s),
 				# A grouped sub-finding is still a finding in a nested function, so
 				# carry its own drill-down rows onto the compact projection.
 				"drill_rows": _drilldown_display_rows(s.get("technical_detail") or {}),
@@ -689,26 +767,137 @@ def _retarget_phase1_callsites_to_drilldown_leaf(
 		detail["callsite"] = new_callsite
 
 
+# Strict allowlist for AI-generated Markdown rendered into the
+# report. No images, forms, inline styles or ids: the report stays
+# self-contained and an AI answer cannot fetch, overlay or phish.
+_AI_HTML_TAGS = frozenset({
+	"p", "br", "hr", "h1", "h2", "h3", "h4", "h5", "h6", "strong", "b", "em", "i",
+	"code", "pre", "blockquote", "ul", "ol", "li", "table", "thead", "tbody", "tr",
+	"th", "td", "span", "del", "s", "sup", "sub", "a",
+})
+# NEVER add "class" here: nh3 panics (a BaseException the fallback below cannot
+# catch) when "class" is both an allowed attribute and governed by
+# allowed_classes for the same tag.
+_AI_HTML_ATTRIBUTES = {"a": frozenset({"href", "title"}), "th": frozenset({"align"}), "td": frozenset({"align"})}
+_AI_CODE_LANGS = (
+	"python", "py", "sql", "diff", "js", "javascript", "json", "bash", "sh", "shell",
+	"html", "text", "plaintext", "toml", "yaml",
+)
+_AI_HTML_CLASSES = {"code": frozenset(_AI_CODE_LANGS) | frozenset(f"language-{lang}" for lang in _AI_CODE_LANGS)}
+_AI_HTML_URL_SCHEMES = frozenset({"https", "http"})
+# Public link policy shared by rendering and AI guardrails. A link
+# stays live only when ai_link_allowed accepts it: scheme http or https and
+# a host exactly equal to one of these. An entry with a "/" also restricts the
+# path (github.com/frappe allows github.com/frappe/frappe/issues/1, not
+# github.com/someone-else/x). Every other link keeps its text, not its href.
+AI_LINK_HOSTS = ("frappeframework.com", "docs.frappe.io", "docs.erpnext.com", "github.com/frappe")
+# Raw substrings (matched lower-cased) that browsers and urllib.parse read
+# differently. A browser treats "\" as "/", so "https://evil.com\@docs.frappe.io/x"
+# opens evil.com while urlparse reports host docs.frappe.io; "@" and "%40"
+# carry userinfo; "%5c" and "%2e" decode to "\" and "." (a browser resolves
+# "/frappe/%2e%2e/x" to "/x").
+_AI_LINK_BAD_SUBSTRINGS = ("\\", "@", "%5c", "%40", "%2e")
+# The subset of frappe.utils.data.md_to_html's markdown2 extras that survives
+# the allowlist (header ids, toc and table/img classes are stripped anyway).
+_AI_MD_EXTRAS = {"fenced-code-blocks": None, "tables": None, "highlightjs-lang": None}
+
+
+def ai_link_allowed(href: str) -> bool:
+	"""Return whether an AI documentation link may keep its href.
+
+	Reject ambiguous raw characters before parsing. Require http/https, an
+	exact allowed netloc, no dot segments, and any required path prefix.
+	Rendering and AI guardrails share this policy. Invalid URLs return False.
+	"""
+	if not isinstance(href, str) or not href:
+		return False
+	from urllib.parse import urlsplit
+
+	low = href.lower()
+	if any(ord(c) <= 0x20 or ord(c) >= 0x7F for c in href) or any(b in low for b in _AI_LINK_BAD_SUBSTRINGS):
+		return False
+	try:
+		parsed = urlsplit(href)
+	except ValueError:
+		return False
+	netloc = parsed.netloc.lower()
+	if parsed.scheme.lower() not in ("http", "https"):
+		return False
+	segments = parsed.path.split("/")
+	if "." in segments or ".." in segments:
+		return False
+	for allowed in AI_LINK_HOSTS:
+		host, _, prefix = allowed.partition("/")
+		if netloc != host:
+			continue
+		if not prefix or parsed.path == "/" + prefix or parsed.path.startswith("/" + prefix + "/"):
+			return True
+	return False
+
+
+def _ai_html_attribute_filter(tag: str, attr: str, value: str) -> str | None:
+	"""nh3 ``attribute_filter`` callback: every attribute passes through except
+	an anchor's ``href``, which is kept only when ``ai_link_allowed`` accepts
+	it; the anchor's text still renders, just not as a live link."""
+	if tag != "a" or attr != "href":
+		return value
+	return value if ai_link_allowed(value) else None
+
+
+def _md_to_html(raw: str) -> str:
+	"""Markdown to HTML via Frappe's ``md_to_html``; falls back to markdown2
+	with the same extras where Frappe is not importable (the CI runner), so the
+	sanitizer sees the same shape either way."""
+	try:
+		from frappe.utils.data import md_to_html
+	except ImportError:
+		import markdown2
+
+		return str(markdown2.markdown(raw, extras=_AI_MD_EXTRAS))
+	return str(md_to_html(raw) or "")
+
+
 def _markdown_to_safe_html(text) -> str:
-	"""Render Markdown to sanitized HTML for the report (``frappe.utils.markdown``
-	+ ``sanitize_html(always_sanitize=True)``). On any failure, falls back to an
-	HTML-escaped ``<pre>`` block so the report never renders un-sanitized model
-	output. Fenced ``diff`` blocks then get per-line ``dh-add`` / ``dh-del`` /
-	``dh-meta`` span wrappers (added only around already-escaped text) for diff
-	colouring.
+	"""Render Markdown through a strict HTML and documentation-link allowlist.
+
+	Use md_to_html so angle brackets in code do not suppress Markdown
+	conversion. On failure, render escaped text in a pre block. Diff colours
+	are added only after sanitization or escaping.
 	"""
 	from optimus.renderer.syntax import _highlight_diff_html
 
 	raw = "" if text is None else str(text)
+	if not raw.strip():
+		return ""
+	from optimus.ai_responses import MARKDOWN_CHARS
+	if len(raw) > MARKDOWN_CHARS:
+		import html as _html
+
+		# Preserve every character without recursive Markdown or regex highlighting.
+		return '<pre tabindex="0" aria-label="AI suggestion, plain text" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:32rem;overflow:auto">' + _html.escape(raw) + '</pre>'
+
 	try:
-		from frappe.utils import markdown as _md
-		from frappe.utils.html_utils import sanitize_html
-		return _highlight_diff_html(sanitize_html(_md(raw), always_sanitize=True))
+		import nh3
+
+		html = _md_to_html(raw)
+		if not html.strip():
+			raise ValueError("markdown conversion produced no HTML")
+		clean = nh3.clean(
+			html,
+			tags=set(_AI_HTML_TAGS),
+			attributes={tag: set(attrs) for tag, attrs in _AI_HTML_ATTRIBUTES.items()},
+			attribute_filter=_ai_html_attribute_filter,
+			allowed_classes={tag: set(classes) for tag, classes in _AI_HTML_CLASSES.items()},
+			url_schemes=set(_AI_HTML_URL_SCHEMES),
+			link_rel="noopener noreferrer nofollow",
+			strip_comments=True,
+			clean_content_tags={"script", "style"},
+		)
+		return _highlight_diff_html(clean)
 	except Exception:
 		import html as _html
-		return _highlight_diff_html(
-			'<pre style="white-space:pre-wrap;">' + _html.escape(raw) + "</pre>"
-		)
+
+		return _highlight_diff_html("<pre>" + _html.escape(raw) + "</pre>")
 
 
 def _finding_to_dict(child, file_cache: dict | None = None) -> dict:
@@ -785,6 +974,16 @@ def _finding_to_dict(child, file_cache: dict | None = None) -> dict:
 					"source_snippet": _read_source_snippet(_abs, _ln, cache=file_cache),
 				}
 
+	# Stored snippets are also subject to Server Script permissions. A prior
+	# authorized render must not become a cache bypass for a later requester.
+	callsite = detail.get("callsite") or {}
+	from optimus.server_script_source import extract_script_name, get_server_script_record
+
+	script = extract_script_name(callsite.get("filename"))
+	if script and not get_server_script_record(script, cache=file_cache):
+		callsite.pop("source_snippet", None)
+		detail.pop("line_content", None)
+
 	# Hot Line finding line_content windowing keep the profiled text
 	# authoritative for the hot line itself.
 	callsite = detail.get("callsite") or {}
@@ -844,12 +1043,45 @@ def _finding_to_dict(child, file_cache: dict | None = None) -> dict:
 	except Exception:
 		raw_llm = {}
 	if isinstance(raw_llm, dict) and (raw_llm.get("suggestion") or "").strip():
+		from optimus.ai_guardrails import FIX_HEADINGS, render_limited, section, stored_policy_violations
+		from optimus.ai_prompts import FIX_PROCESSING_LIMITED, response_status
+
+		status = response_status(raw_llm)
+		suggestion = raw_llm["suggestion"]
+		policy_violations = stored_policy_violations(suggestion) if status in (None, "complete") else []
+		limited = render_limited(policy_violations)
+		policy_codes = [v.code for v in policy_violations]
+		if policy_violations:
+			# The old explanation describes rejected code; keep only its diagnosis
+			# and the update notice. The original answer remains in llm_fix_json.
+			diagnosis = section(suggestion, "Diagnosis", FIX_HEADINGS).strip()
+			if "raw-sql" in policy_codes:
+				notice = "Code withheld because this saved suggestion needs a Frappe API update."
+			elif "permission-behavior-change" in policy_codes:
+				notice = "Code withheld because this saved suggestion changes permission behavior or its preservation could not be verified."
+			elif "unbounded-write" in policy_codes:
+				notice = "Code withheld because this saved suggestion contains an unbounded or unverifiable database write."
+			elif "sql-semantics-dropped" in policy_codes:
+				notice = "Code withheld because this saved suggestion changes a query limit, offset or explicit ordering."
+			elif "unchecked-permission" in policy_codes:
+				notice = "Code withheld because this saved suggestion ignores a permission result."
+			else:
+				notice = "Code withheld because this saved suggestion could not be checked safely."
+			suggestion = diagnosis + "\n\n**Fix**: " + notice
+
 		llm_fix = {
-			"suggestion_html": _markdown_to_safe_html(raw_llm.get("suggestion")),
+			"suggestion_html": _markdown_to_safe_html(suggestion),
+			"sql_policy_outdated": "raw-sql" in policy_codes,
+			"policy_outdated": bool(policy_violations) and not limited,
+			"policy_codes": policy_codes,
 			"model": raw_llm.get("model") or "",
 			"provider": raw_llm.get("provider") or "",
 			"generated_at": raw_llm.get("generated_at") or "",
 			"source_available": raw_llm.get("source_available", True),
+			"prompt_version": raw_llm.get("prompt_version"),
+			"finish_reason": raw_llm.get("finish_reason"),
+			"completion_status": FIX_PROCESSING_LIMITED if limited else status,
+			"guardrail": raw_llm.get("guardrail"),
 			# Token usage the provider reported (Aerele managed proxy forwards
 			# the real billed count). None when the suggestion predates this or
 			# the provider returned no usage.
@@ -863,7 +1095,7 @@ def _finding_to_dict(child, file_cache: dict | None = None) -> dict:
 		"customer_description": child.customer_description or "",
 		"estimated_impact_ms": child.estimated_impact_ms or 0,
 		"affected_count": child.affected_count or 0,
-		"action_ref": child.action_ref or "",
+		"action_ref": _action_ref_key(child.action_ref),
 		"technical_detail": detail,
 		"llm_fix": llm_fix,
 	}
@@ -932,14 +1164,21 @@ def _attach_representative_callsites(findings, recordings, *, file_cache: dict |
 			continue
 		(filename, lineno, function), _weight = max(w["tally"].items(), key=lambda kv: kv[1])
 		abs_path = _resolve_source_path(filename)
-		w["finding"]["technical_detail"]["callsite"] = {
-			"filename": _bench_relative_display(abs_path) if abs_path else filename,
+		is_script = isinstance(abs_path, tuple) and abs_path[0] == "server_script"
+		callsite = {
+			"filename": _bench_relative_display(abs_path) if abs_path and not is_script else filename,
 			"_abs": abs_path,
 			"lineno": lineno,
 			"function": function,
-			"source_snippet": _read_source_snippet(abs_path or filename, lineno, cache=file_cache),
+			"source_snippet": _read_source_snippet(filename if is_script else (abs_path or filename), lineno, cache=file_cache),
 			"is_representative": True,
 		}
+		if is_script:
+			from optimus.server_script_source import desk_url
+
+			callsite["_abs"] = desk_url(abs_path[1], cache=file_cache)
+			callsite["_link_kind"] = "desk"
+		w["finding"]["technical_detail"]["callsite"] = callsite
 
 
 def _snippet_row(lines: list[str], idx: int, limit: int) -> dict:
@@ -1029,18 +1268,19 @@ def _strip_doctype_suffix(fn: str) -> str:
 
 
 def _pin_slow_hot_path_to_related_hot_line(findings, *, file_cache: dict | None = None) -> None:
-	"""Pin a Slow Hot Path card to the exact hot line inside its deepest
-	user-code frame.
+	"""Show a related finding's source line inside the deepest user-code frame.
 
 	A self-time hot path whose time is spent in DB calls otherwise shows only the
 	function signature (empty chain, e.g. a job that calls framework directly) or
 	a call-to-a-function line (a chain whose leaf calls framework), because the
 	call tree holds framework internals with no user line for the hot work. The
-	frame's related findings DO carry the real line: the N+1 / hot-line / redundant
-	finding for that same frame stores the offending statement's callsite. Pin the
-	card to the hottest such line (by estimated impact), reusing that finding's
+	frame's related findings carry a concrete line: the N+1 / hot-line / redundant
+	finding for that same frame stores its statement's callsite. Pin the
+	card to the highest-impact related line, reusing that finding's
 	already-resolved snippet + abs path (no path re-resolution here). These come
 	from persisted findings, so the pin survives a report re-render.
+	This is a navigation clue, not attribution of the whole function's time to
+	that statement. The template labels both the header and snippet accordingly.
 
 	A compute-bound leaf with no related finding is left untouched, for
 	``_expand_self_time_snippets`` / ``_retarget_phase1_callsites_to_drilldown_leaf``.
@@ -1111,8 +1351,8 @@ def _pin_slow_hot_path_to_related_hot_line(findings, *, file_cache: dict | None 
 		hot = hot_index.get((af, _strip_doctype_suffix(leaf_fn), _base(leaf_file)))
 		if not hot:
 			continue
-		# Keep the origin function for the "entered through <fn> - pinned here to
-		# the actual hot line" banner; move the card's file:line + snippet +
+		# Keep the origin function for the entry-context banner; move the
+		# card's file:line + snippet +
 		# function to the leaf's hot statement (reusing the source finding's
 		# resolved fields). phase2_lookup_* keeps the Line-Level Drilldown crosslink
 		# aimed at the leaf (its keys use the raw pyinstrument function name).

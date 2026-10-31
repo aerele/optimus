@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Profiler Report - {{ session.title or session.session_uuid }}</title>
 <style>
@@ -346,7 +347,21 @@
   table.queries-flat-table col.col-idx      { width: 44px; }
   table.queries-flat-table col.col-num      { width: 110px; }
   table.queries-flat-table col.col-copies   { width: 60px; }
-  table.queries-flat-table col.col-callsite { width: 34%; }
+  table.queries-flat-table col.col-function { width: 16%; }
+  table.queries-flat-table col.col-callsite { width: 28%; }
+  /* One line with an ellipsis; the full name stays in the text and title. */
+  table.queries-flat-table td.fn-cell code {
+    display: block;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    /* Room below the baseline so overflow:hidden doesn't clip underscores. */
+    line-height: 1.5;
+    padding-bottom: 2px;
+  }
+  @media print {
+    table.queries-flat-table td.fn-cell code { white-space: normal; overflow-wrap: anywhere; }
+  }
 
   /* Tight horizontal padding for the # column so 1-3 digit row
      indexes fit inside the narrow col-idx without wrapping. The
@@ -917,7 +932,7 @@
      Editorial card: paper white background, 1px rule border, 6px
      radius. Severity colour moves from a left rail to a small pill
      in the top-left. Title is serif 18px. Impact is large red serif
-     pushed to the right. Body holds the smoking-gun + call chain +
+     pushed to the right. Body holds the smoking-gun + drill-down +
      fix box. The old `.finding-header` / `.severity-badge` /
      `.smoking-gun` / `.ai-fix` rules above are orphaned but left in
      place - clean up in a later phase. */
@@ -1299,18 +1314,50 @@
     .call-tree-children { min-width: 0; }
   }
 
+  /* Saved-answer navigation in action and job rows shares the report's
+     paper, rules and typography; each title stays with its own action. */
+  .ai-suggestion-links {
+    list-style: none; margin: 4px 0 14px; padding: 0;
+    background: var(--bg-paper); border: 1px solid var(--rule);
+    border-radius: 4px;
+  }
+  .ai-suggestion-links > li { margin: 0; padding: 0; }
+  .ai-suggestion-links > li + li { border-top: 1px solid var(--rule); }
+  .ai-suggestion-link {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px;
+    min-height: 44px; box-sizing: border-box; padding: 10px 14px;
+    color: var(--ink); text-decoration: none; border-radius: 3px;
+  }
+  .ai-suggestion-title {
+    flex: 1 1 240px; min-width: 0; overflow-wrap: anywhere;
+    font-size: 13px; font-weight: 500; line-height: 1.5;
+  }
+  .ai-suggestion-action {
+    flex: 0 0 auto; font-size: 11px; font-weight: 600;
+    color: var(--ink-soft); white-space: nowrap;
+    border: 1px solid var(--rule-strong); border-radius: 3px;
+    padding: 3px 8px;
+  }
+  .ai-suggestion-link:hover { background: var(--bg-tint); }
+  .ai-suggestion-link:hover .ai-suggestion-action,
+  .ai-suggestion-link:focus-visible .ai-suggestion-action { text-decoration: underline; }
+  .ai-suggestion-link:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
+
   /* FIX-BOX - AI-suggested fix. Replaces the old `.ai-fix` panel. */
   .fix-box {
     border: 1px solid var(--rule); border-radius: 4px;
     margin-top: 14px; overflow: hidden;
   }
+  /* Fragment links must leave the status visible below the wrapping sticky nav. */
+  .fix-box[id] { scroll-margin-top: 144px; }
   .fix-head {
     background: var(--bg-tint); padding: 8px 14px;
     font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
     font-weight: 600; color: var(--ink-soft);
     border-bottom: 1px solid var(--rule);
-    display: flex; justify-content: space-between; align-items: center;
+    display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; align-items: center;
   }
+  .fix-head > span { min-width: 0; max-width: 100%; }
   .fix-head .ai-tag {
     background: var(--ink); color: var(--bg);
     padding: 2px 7px; border-radius: 2px;
@@ -1326,7 +1373,7 @@
     font-family: var(--sans); font-size: 10px; font-weight: 700;
     background: var(--warn-soft); color: var(--ink);
     border: 1px solid var(--warn); border-radius: 3px;
-    padding: 1px 6px; margin-left: 8px; white-space: nowrap;
+    padding: 1px 6px; margin-left: 8px; white-space: normal; display: inline-block;
   }
   .fix-body { padding: 14px 16px; font-size: 13.5px; line-height: 1.65; color: var(--ink); }
   .fix-body p { margin: 0 0 10px; }
@@ -1401,6 +1448,24 @@
     display: block;
     font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
     color: var(--ink-mute); font-weight: 600; margin-bottom: 6px;
+  }
+  @media screen and (max-width: 600px) {
+    /* Keep titles readable beside the saved-answer links on narrow screens.
+       The desktop severity/title/impact columns otherwise squeeze words into
+       single characters inside an action or job's embedded finding card. */
+    .finding-top { grid-template-columns: minmax(0, 1fr); gap: 8px; padding: 12px; }
+    .finding-top > .severity-pill { justify-self: start; }
+    .finding-top .finding-impact { text-align: left; }
+    .finding-body { padding: 12px; }
+    .sub-finding-row summary { flex-wrap: wrap; align-items: flex-start; }
+    .sub-finding-row .sub-title { flex-basis: 100%; min-width: 0; }
+    .sub-finding-row .sub-impact { flex-basis: 100%; }
+    /* Preserve Python indentation in the narrower grouped answer; scroll code
+       horizontally instead of splitting every expression across several lines. */
+    .sub-finding-row .fix-body pre,
+    .sub-finding-row .fix-body pre.dh .dh-line {
+      white-space: pre; word-break: normal;
+    }
   }
 
   /* DATA TABLES - Phase E.
@@ -1840,14 +1905,6 @@
     background: var(--bg-tint); padding: 1px 5px;
     border-radius: 2px;
   }
-  .sql-snip {
-    font-family: var(--mono); font-size: 12px;
-    background: #1a1a1a; color: #f4ecd6;
-    padding: 10px 14px; border-radius: 4px;
-    overflow-x: auto; margin: 8px 0; line-height: 1.5;
-    white-space: pre-wrap; word-break: break-word;
-  }
-
   /* Print - drop the nav pills (useless on paper). The TL;DR
      headline is already light-wash on screen, so no override
      needed here. */
@@ -1865,13 +1922,45 @@
    when there is a descent (more than one row) so a lone root is never
    reddened. Named for its .chain-tree output, distinct from the separate
    call_tree_renderer that builds the .call-tree panel. Shared by the
-   Drill-down and Call chain blocks so every finding card reads the same way. #}
+   two Drill-down blocks so every finding card reads the same way. #}
 {% macro chain_tree(rows) %}
 <div class="chain-tree">
   {% for row in rows %}
   <div class="ct-node" style="--ctd: {{ loop.index0 }}">{% if not loop.first %}<span class="ct-branch" aria-hidden="true">&#9492;&#9472; </span>{% endif %}<span class="ct-step{% if loop.last and rows | length > 1 %} terminal{% endif %}">{{ row }}</span></div>
   {% endfor %}
 </div>
+{% endmacro %}
+
+{# One canonical body for primary and grouped findings; renderer assigns the gate. #}
+{% macro ai_fix_box(f) %}
+    {% if f.ai_target_id %}
+    <div class="fix-box" id="{{ f.ai_target_id }}" tabindex="-1">
+      <div class="fix-head">
+        <span>{% if f.llm_fix.review_status %}AI response <span class="fix-badge">{{ f.llm_fix.review_status }}</span>{% elif f.llm_fix.incomplete %}Incomplete AI suggestion <span class="fix-badge">Incomplete response</span>{% else %}Suggested fix <span class="fix-badge">Unverified: review before applying</span>{% endif %}</span>
+        <span class="ai-tag">AI{% if f.llm_fix.model %} &middot; {{ f.llm_fix.model }}{% endif %}{% if f.llm_fix.tokens and f.llm_fix.tokens.total_tokens %} &middot; {{ f.llm_fix.tokens.total_tokens }} tokens{% endif %}</span>
+      </div>
+      {% if not f.llm_fix.source_available %}
+      <div class="fix-caution">The profiler couldn&rsquo;t show the AI this finding&rsquo;s source code (or SQL) - treat the suggestion below as directional guidance, not a verified code fix.</div>
+      {% endif %}
+      <div class="fix-body">{{ f.llm_fix.suggestion_html | safe }}</div>
+      <div class="fix-foot">Machine-generated{% if f.llm_fix.generated_at %} &middot; {{ fmt_dt(f.llm_fix.generated_at) }}{% endif %} - review before applying.{% if f.llm_fix.incomplete %} The response was incomplete or its completion could not be confirmed, so unfinished code is not shown.{% if f.llm_fix.refreshable %} Use Refresh AI suggestions to retry; completed current suggestions are kept by default. Retrying uses provider tokens.{% endif %}{% elif f.llm_fix.sql_policy_outdated %} This saved suggestion keeps raw SQL in changed code, so its code is withheld. The original answer is retained.{% if f.llm_fix.refreshable %} Use Refresh AI suggestions to request an updated fix; refreshing uses provider tokens.{% endif %}{% elif f.llm_fix.policy_outdated %} This saved code failed a newer safety check and is withheld. The original answer is retained.{% if f.llm_fix.refreshable %} Use Refresh AI suggestions to request an updated fix; refreshing uses provider tokens.{% endif %}{% elif f.llm_fix.outdated %} Generated with an earlier version of the AI reviewer{% if f.llm_fix.refreshable %}; use Refresh AI suggestions to update{% endif %}.{% endif %}</div>
+    </div>
+    {% endif %}
+{% endmacro %}
+
+{% macro ai_suggestion_links(links) %}
+  {% if links %}
+  <ul class="ai-suggestion-links">
+    {% for link in links %}
+    <li>
+      <a class="ai-suggestion-link" href="#{{ link.target_id }}">
+        <span class="ai-suggestion-title">{{ link.title }}</span>
+        <span class="ai-suggestion-action">{{ link.label }} <span aria-hidden="true">&rarr;</span></span>
+      </a>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
 {% endmacro %}
 
 {# v0.5.2: shared finding-card macro used by both Findings and
@@ -1904,6 +1993,7 @@
         {% if callsite.filename and callsite.lineno %}
         {% set _link = callsite._abs or (callsite.filename if callsite.filename and callsite.filename.startswith("/") else None) %}
         <div class="finding-meta">
+          {% if callsite.self_time_hot_line_pinned %}<span class="muted">related line:</span> {% endif %}
           {% if callsite.is_representative %}<span class="muted">most-called from</span> {% endif %}
           {% if callsite._link_kind == "desk" %}
             {# Server Script: callsite._abs already holds the full Desk URL
@@ -1921,7 +2011,14 @@
         {# The scope tag is analyzer-declared: a finding whose estimated_impact_ms
            is not the session-wide total sets detail.impact_scope_label (e.g. N+1 →
            "recoverable"). Everything else falls back to "consolidated". #}
+        {# No ms to reclaim (Lock Contention): show the wait instead of "0ms". #}
+        {% if f.estimated_impact_ms %}
         <span class="big">{{ fmt_ms(f.estimated_impact_ms) }}</span><small class="scope-tag">{{ detail.impact_scope_label or "consolidated" }}</small>
+        {% elif detail.total_wait_ms %}
+        <span class="big">{{ fmt_ms(detail.total_wait_ms) }}</span><small class="scope-tag">waited</small>
+        {% else %}
+        <small class="scope-tag">reliability issue</small>
+        {% endif %}
         {% if f.affected_count and f.affected_count > 1 %}
         {% set _per_hit_ms = f.estimated_impact_ms / f.affected_count %}
         <div class="small">{{ f.affected_count }}× hits{% if _per_hit_ms >= 0.05 %} &middot; {{ fmt_ms(_per_hit_ms, 1) }}<small class="scope-tag">per hit</small>{% endif %}</div>
@@ -1960,7 +2057,9 @@
       {% if callsite.is_representative %}
       <div class="smoking-label">most-called from this callsite - this query runs from several places; the hottest one shown.</div>
       {% endif %}
-      {% if callsite.original_wrapper %}
+      {% if callsite.self_time_hot_line_pinned %}
+      <div class="smoking-label">Related finding in this function. The function time is not a measurement of this line.{% if callsite.original_wrapper %} Time entered through <code>{{ callsite.original_wrapper.function }}</code>{% if callsite.original_wrapper.lineno %} at line {{ callsite.original_wrapper.lineno }}{% endif %}.{% endif %}</div>
+      {% elif callsite.original_wrapper %}
       <div class="smoking-label">Time entered through <code>{{ callsite.original_wrapper.function }}</code>{% if callsite.original_wrapper.lineno %} at line {{ callsite.original_wrapper.lineno }}{% endif %} - pinned here to the actual hot line.</div>
       {% endif %}
 
@@ -1995,15 +2094,20 @@
         {% endif %}
       {% endif %}
 
-      {# Call chain (Phase 2 instrumented chain). Nested-call tree, terminal red. #}
-      {% set _phase2_chain = (f.technical_detail or {}).get("call_chain") if f.technical_detail else None %}
-      {% if _phase2_chain and _phase2_chain | length > 1 %}
-      <div class="chain">
-        <div class="chain-label">Call chain</div>
-        {% set _cc_rows = [] %}
-        {% for step in _phase2_chain %}{% set _ = _cc_rows.append(step.qualname ~ (":" ~ step.lineno if step.lineno else "")) %}{% endfor %}
-        {{ chain_tree(_cc_rows) }}
-        <div class="chain-foot">deepest line is where the cost is incurred</div>
+      {# Phase-2 recheck of this phase-1 finding (see line_profile/recheck.py). #}
+      {% set _rc = (f.technical_detail or {}).get("phase2_recheck") if f.technical_detail else None %}
+      {% if _rc and f.finding_type != "Hot Line" %}
+      <div class="phase2-line">
+        <strong>Line-Level Recheck:</strong>
+        {% if _rc.status == "not_rechecked" %}
+        not rechecked, {{ {"not_profiled": "this function was not line-profiled", "ambiguous": "several profiled functions share this name", "not_exercised": "the profiled function did not run", "no_callsite": "the finding has no function location", "no_function": "the finding names a file and line but no function", "cap": "too many findings to recheck"}.get(_rc.reason, "no line evidence") }}.
+        {% else %}
+        {% set _rc_basis = fmt_ms(_rc.function_total_ms) ~ " measured vs " ~ fmt_ms(_rc.phase1_impact_ms) ~ " estimated" %}
+        {{ {"confirmed": "confirmed (" ~ _rc_basis ~ ")", "downgraded": "downgraded from " ~ _rc.phase1_severity ~ " to " ~ f.severity ~ " (" ~ _rc_basis ~ ")", "measured": "measured " ~ fmt_ms(_rc.function_total_ms) ~ ", not comparable with the estimate, severity unchanged"}.get(_rc.status, _rc.status) }}.
+        {% if _rc.hot_line and _rc.hot_line.lineno is not none and not p2_hot %}
+        Hottest line {{ _rc.hot_line.lineno }}, {{ fmt_ms(_rc.hot_line.total_ms) }} / {{ _rc.hot_line.hits }} hit{{ "s" if _rc.hot_line.hits != 1 else "" }}{% if _rc.hot_line.content %}: <code>{{ _rc.hot_line.content | trim }}</code>{% endif %}
+        {% endif %}
+        {% endif %}
       </div>
       {% endif %}
 
@@ -2014,12 +2118,27 @@
       <div class="phase2-line">
         <strong>Hint:</strong>
         time flows into <code>{{ _phase1_hint.next_hot_callee }}</code>
-        ({{ fmt_ms(_phase1_hint.phase1_cumulative_ms) }}<small class="scope-tag">consolidated &middot; across hits</small> in phase&nbsp;1).
+        ({{ fmt_ms(_phase1_hint.phase1_cumulative_ms) }}<small class="scope-tag">consolidated &middot; across hits</small> in the normal profile).
         Pick this function for a line-level breakdown.
       </div>
       {% endif %}
 
-      {# Drill-down chain. Renders as a nested-call tree ending in red
+      {# Drill-down from the line-profiling run (data key call_chain). Nested-call
+         tree, terminal red. When the sampled drill-down below also renders, this
+         block owns the single "Drill-down" heading and that one drops its label. #}
+      {% set _phase2_chain = (f.technical_detail or {}).get("call_chain") if f.technical_detail else None %}
+      {% set _show_p2_chain = _phase2_chain and _phase2_chain | length > 1 %}
+      {% if _show_p2_chain %}
+      <div class="chain">
+        <div class="chain-label">Drill-down</div>
+        {% set _cc_rows = [] %}
+        {% for step in _phase2_chain %}{% set _ = _cc_rows.append(step.qualname ~ (":" ~ step.lineno if step.lineno else "")) %}{% endfor %}
+        {{ chain_tree(_cc_rows) }}
+        <div class="chain-foot">deepest line is where the cost is incurred</div>
+      </div>
+      {% endif %}
+
+      {# Sampled drill-down chain. Renders as a nested-call tree ending in red
          (terminal = deepest user-code frame). A finding that sits at a leaf
          user frame has no descent, so it falls back to its ancestry (the
          nested call path that leads to it); only a truly top-level leaf keeps
@@ -2029,7 +2148,7 @@
       {% set _drill_root_fn = callsite.original_wrapper.function if callsite.original_wrapper else callsite.function %}
       {% if _drilldown %}
       <div class="chain">
-        <div class="chain-label">Drill-down</div>
+        {% if not _show_p2_chain %}<div class="chain-label">Drill-down</div>{% endif %}
         {% set _dd_rows = [_drill_root_fn] %}
         {% for level in _drilldown %}{% set _ = _dd_rows.append(level.function ~ (":" ~ level.lineno if level.lineno else "")) %}{% endfor %}
         {{ chain_tree(_dd_rows) }}
@@ -2037,7 +2156,7 @@
       </div>
       {% elif _drill_ancestry %}
       <div class="chain">
-        <div class="chain-label">Drill-down</div>
+        {% if not _show_p2_chain %}<div class="chain-label">Drill-down</div>{% endif %}
         {% set _an_rows = [] %}
         {% for level in _drill_ancestry %}{% set _ = _an_rows.append(level.function ~ (":" ~ level.lineno if level.lineno else "")) %}{% endfor %}
         {{ chain_tree(_an_rows) }}
@@ -2045,7 +2164,7 @@
       </div>
       {% elif _drilldown is not none %}
       <div class="chain">
-        <div class="chain-label">Drill-down</div>
+        {% if not _show_p2_chain %}<div class="chain-label">Drill-down</div>{% endif %}
         <div class="chain-foot">no deeper user-code frame - <code>{{ _drill_root_fn }}</code> calls framework code directly. Check the N+1 Query or related findings for inner-loop details.</div>
       </div>
       {% endif %}
@@ -2107,7 +2226,7 @@
       {% endif %}
 
       {% if detail.suggested_ddl %}
-        <span class="label">Suggested DDL</span>
+        <span class="label">Suggested index</span>
         <pre>{{ detail.suggested_ddl }}</pre>
       {% endif %}
 
@@ -2147,19 +2266,7 @@
        with the existing markdown-rendered HTML, `.fix-foot` with the
        review-disclaimer). suggestion_html is already Markdown-rendered
        + bleach-sanitized; |safe is valid. #}
-    {% if f.llm_fix and f.llm_fix.suggestion_html and not hide_ai_fix %}
-    <div class="fix-box">
-      <div class="fix-head">
-        <span>Suggested fix <span class="fix-badge">Unverified: review before applying</span></span>
-        <span class="ai-tag">AI{% if f.llm_fix.model %} &middot; {{ f.llm_fix.model }}{% endif %}{% if f.llm_fix.tokens and f.llm_fix.tokens.total_tokens %} &middot; {{ f.llm_fix.tokens.total_tokens }} tokens{% endif %}</span>
-      </div>
-      {% if not f.llm_fix.source_available %}
-      <div class="fix-caution">The profiler couldn&rsquo;t show the AI this finding&rsquo;s source code (or SQL) - treat the suggestion below as directional guidance, not a verified code fix.</div>
-      {% endif %}
-      <div class="fix-body">{{ f.llm_fix.suggestion_html | safe }}</div>
-      <div class="fix-foot">Machine-generated{% if f.llm_fix.generated_at %} &middot; {{ fmt_dt(f.llm_fix.generated_at) }}{% endif %} - review before applying.</div>
-    </div>
-    {% endif %}
+    {% if not hide_ai_fix %}{{ ai_fix_box(f) }}{% endif %}
 
     {# v0.7.x: related findings grouped by root cause. v0.7.x Phase D:
        restyled as `.sub-findings` with a left-rule indent and
@@ -2169,15 +2276,18 @@
     {% if f.sub_findings %}
     <div class="sub-findings">
       <p class="sub-findings-label">
-        Related on the same root cause - {{ f.sub_findings | length }} other finding{{ "s" if f.sub_findings | length != 1 else "" }}; one fix resolves all of them.
+        Related findings in this function - {{ f.sub_findings | length }} other finding{{ "s" if f.sub_findings | length != 1 else "" }}.
       </p>
       {% for s in f.sub_findings %}
       <details class="sub-finding-row">
         <summary>
           <span class="severity-pill {{ s.severity | lower }}">{{ s.severity }}</span>
-          <span class="sub-title">{{ s.title }}</span>
-          {% if s.estimated_impact_ms %}<span class="sub-impact">{{ fmt_ms(s.estimated_impact_ms) }}<small class="scope-tag">consolidated</small>{% if s.affected_count %} &middot; {{ s.affected_count }}{% if s.affected_count > 1 and (s.estimated_impact_ms / s.affected_count) >= 0.05 %} &middot; {{ fmt_ms(s.estimated_impact_ms / s.affected_count, 1) }}<small class="scope-tag">per hit</small>{% endif %}{% endif %}</span>{% endif %}
+          <span class="sub-title">{{ s.title }}{% if s.ai_target_id %}<span class="small muted" style="display: block;">{{ s.ai_status_label }}{% if hide_ai_fix %} - view in Findings{% endif %}</span>{% endif %}</span>
+          {% if s.estimated_impact_ms %}<span class="sub-impact">{{ fmt_ms(s.estimated_impact_ms) }}<small class="scope-tag">{{ s.impact_scope_label or "consolidated" }}</small>{% if s.affected_count %} &middot; {{ s.affected_count }}{% if s.affected_count > 1 and (s.estimated_impact_ms / s.affected_count) >= 0.05 %} &middot; {{ fmt_ms(s.estimated_impact_ms / s.affected_count, 1) }}<small class="scope-tag">per hit</small>{% endif %}{% endif %}</span>{% endif %}
         </summary>
+        {% if s.observed_query_ms is not none and s.observed_query_ms is defined %}
+        <div class="sub-desc">Observed query time: {{ fmt_ms(s.observed_query_ms, 2) }} total.</div>
+        {% endif %}
         {% if s.customer_description %}
         <div class="sub-desc">{{ s.customer_description }}</div>
         {% endif %}
@@ -2190,6 +2300,7 @@
           {{ chain_tree(s.drill_rows) }}
         </div>
         {% endif %}
+        {% if not hide_ai_fix %}{{ ai_fix_box(s) }}{% endif %}
       </details>
       {% endfor %}
     </div>
@@ -2302,8 +2413,11 @@
       &#9888; <strong>{{ action.related_findings | length }} finding{{ "s" if action.related_findings | length != 1 else "" }} linked to this action</strong>
     </td>
   </tr>
+  {% endif %}
+  {% if action.related_findings or action.ai_suggestion_links %}
   <tr>
     <td colspan="7" style="background: var(--bg-tint); border-top: none; padding: 8px 16px 14px;">
+      {{ ai_suggestion_links(action.ai_suggestion_links) }}
       {% for f in action.related_findings %}
         {{ finding_card(f, hide_ai_fix=True, hide_source_snippet=True) }}
       {% endfor %}
@@ -2314,7 +2428,7 @@
 
 {% macro bg_status_badge(status) %}
   {%- set _s = status or "Running" -%}
-  {%- set _cls = {"Completed": "ok", "Failed": "fail", "Timeout": "warn", "Running": "info", "Started": "info", "Stopped": "mute", "Queued": "mute"}.get(_s, "mute") -%}
+  {%- set _cls = {"Completed": "ok", "Failed": "fail", "Timeout": "warn", "Running": "info", "Started": "info", "Stopped": "warn", "Queued": "mute"}.get(_s, "mute") -%}
   <span class="job-status job-status-{{ _cls }}">{{ _s }}</span>
 {%- endmacro %}
 
@@ -2332,6 +2446,9 @@
         <div class="action-meta">
           {% if _cs._abs %}<a href="vscode://file{{ _cs._abs }}:{{ _cs.lineno }}" title="Open in VS Code / Cursor">{{ _cs.filename }}:{{ _cs.lineno }}</a>{% else %}{{ _cs.filename }}:{{ _cs.lineno }}{% endif %}{% if _cs.function %} &middot; {{ _cs.function }}{% endif %}
         </div>
+      {% endif %}
+      {% if job.triggered_by %}
+        <div class="action-meta">Triggered by {{ job.triggered_by.label }}</div>
       {% endif %}
     </td>
     <td>{{ bg_status_badge(job.status) }}</td>
@@ -2361,6 +2478,7 @@
       <div class="small" style="margin: 0 0 8px;">
         {{ bg_status_badge(job.status) }}
         {% if job.error %}<code style="color: var(--accent); margin-left: 6px; word-break: break-word;">{{ job.error }}</code>{% endif %}
+        {% if job.status in ("Queued", "Running") %}<span class="muted" style="margin-left: 6px;">Still {{ job.status | lower }} when this report was prepared. Regenerate the report later to see its result.</span>{% endif %}
       </div>
       {% endif %}
       {# v0.7.x: mirror the action_row trim - drop the entry-callsite
@@ -2369,6 +2487,7 @@
          findings. AI fix is suppressed here (it lives in the
          canonical Findings section). The "Slowest queries for this
          job" details block stays - it's job-specific. #}
+      {{ ai_suggestion_links(job.ai_suggestion_links) }}
       {% if job.related_findings %}
       <div class="small muted" style="margin: 0 0 8px;">
         {{ job.related_findings | length }} finding{{ "s" if job.related_findings | length != 1 else "" }} linked to this job
@@ -3351,7 +3470,7 @@
   {% if report_data.hot_frames or report_data.hot_frames_framework %}
   <section class="section">
     <a id="hot-frames"></a>{# v0.7.x Phase I.1: mock-spec ID anchor #}
-    <h2>Hot frames (top {{ (report_data.hot_frames | length) + (report_data.hot_frames_framework | length) }})</h2>
+    <h2>Hot frames</h2>
     {% if report_data.frame_truncation and report_data.frame_truncation.actions_affected > 0 %}
     <div class="warning-banner" style="background:#fff3cd; border-left:4px solid #f0ad4e; padding:10px 14px; margin:8px 0 14px; border-radius:4px;">
       <p class="small" style="margin:0;">
@@ -3367,6 +3486,7 @@
     </div>
     {% endif %}
     {% if report_data.hot_frames %}
+    <h3 class="hot-frames-group-title" id="hot-frames-app">Your app's code ({{ report_data.hot_frames | length }})</h3>
     <table class="data hot-frames-table">
       <thead>
         <tr>
@@ -3386,6 +3506,7 @@
       <p class="small muted">No hot frames in your own app's code - all frames ran in framework code. Expand the block below to see what.</p>
     {% endif %}
     {% if report_data.hot_frames_framework %}
+    <h3 class="hot-frames-group-title" id="hot-frames-framework">Framework code</h3>
     <details class="subsection">
       <summary class="small muted"><strong>{{ report_data.hot_frames_framework | length }}</strong> framework frame{{ "s" if report_data.hot_frames_framework | length != 1 else "" }} (click to expand) - <code>frappe</code>, <code>erpnext</code> and friends; the developer can't easily patch these</summary>
       <p class="small muted" style="margin: 6px 0 8px; font-style: italic;">
@@ -3487,7 +3608,8 @@
   </section>
 
   {# --------------- QUERY BREAKDOWN PER ACTION --------------- #}
-  {% if recordings_by_uuid %}
+  {% set qpa = report_data.get("queries_per_action") or {"rows": [], "total": 0, "hidden_untracked": 0} %}
+  {% if recordings_by_uuid and (qpa.rows or qpa.hidden_untracked) %}
   <section class="section">
     <h2>Queries per action</h2>
     <p class="small muted">
@@ -3495,32 +3617,17 @@
       the callsite so your developer knows where to look. Sorted by duration.
     </p>
 
-    {# Flatten each action's queries into one list, then show the global slowest
-       in a single flat table (like Server Resource). Collecting each action's
-       top-20 bounds the work and still captures the overall top-N a query
-       outside its own action's top-20 can't be in the global top-N. #}
-    {% set ns = namespace(rows=[]) %}
-    {% for action in (report_data.actions + (report_data.actions_framework or [])) %}
-      {% set recording = recordings_by_uuid.get(action.recording_uuid) %}
-      {% if recording and recording.calls %}
-        {% for call in (recording.calls | sort(attribute='duration', reverse=True))[:20] %}
-          {% set _frame = call.stack[-1] if call.stack and call.stack[-1] is mapping else none %}
-          {% set ns.rows = ns.rows + [{
-              "action": action.action_label,
-              "duration": call.duration or 0,
-              "copies": call.normalized_copies or 0,
-              "callsite": ((_frame.filename ~ ":" ~ _frame.lineno) if _frame else ""),
-          }] %}
-        {% endfor %}
-      {% endif %}
-    {% endfor %}
-    {% if ns.rows %}
+    {% if not qpa.rows %}
+      <p class="small muted"><em>No queries from tracked apps.</em></p>
+    {% endif %}
+    {% if qpa.rows %}
     <table class="data tbl-clip queries-flat-table">
       <colgroup>
         <col class="col-idx">
         <col class="col-action">
         <col class="col-num">
         <col class="col-copies">
+        <col class="col-function">
         <col class="col-callsite">
       </colgroup>
       <thead>
@@ -3529,24 +3636,29 @@
           <th>Action</th>
           <th class="num">Duration <small class="scope-tag">per hit</small></th>
           <th class="num">Copies</th>
+          <th>Function</th>
           <th>Callsite</th>
         </tr>
       </thead>
       <tbody>
-      {% for r in (ns.rows | sort(attribute='duration', reverse=True))[:40] %}
+      {% for r in qpa.rows %}
         <tr>
           <td class="num">{{ loop.index }}</td>
           <td>{{ r.action }}</td>
           <td class="num">{{ fmt_ms(r.duration, 1) }}</td>
           <td class="num">{% if r.copies and r.copies > 1 %}{{ r.copies }}×{% endif %}</td>
+          <td class="fn-cell">{% if r.function %}<code class="small" title="{{ r.function }}">{{ r.function }}</code>{% else %}<span class="muted">&mdash;</span>{% endif %}</td>
           <td>{% if r.callsite %}<code class="small">{{ r.callsite }}</code>{% endif %}</td>
         </tr>
       {% endfor %}
       </tbody>
     </table>
-    {% if ns.rows | length > 40 %}
-      <p class="small muted"><em>Showing the 40 slowest queries of {{ ns.rows | length }} collected across actions.</em></p>
+    {% if qpa.total > qpa.rows | length %}
+      <p class="small muted"><em>Showing the {{ qpa.rows | length }} slowest queries of {{ qpa.total }} collected across actions.</em></p>
     {% endif %}
+    {% endif %}
+    {% if qpa.hidden_untracked %}
+      <p class="small muted"><em>{{ qpa.hidden_untracked }} quer{{ "y" if qpa.hidden_untracked == 1 else "ies" }} from apps not listed in Optimus Settings (Tracked Apps) not shown.</em></p>
     {% endif %}
   </section>
   {% endif %}
@@ -3561,8 +3673,8 @@
     {# v0.7.x Phase J.2.5: DB tables read from report_data.db.tables.
        The adapter spreads each original table dict so the rich index-
        recommendation block keeps reading recommended_index /
-       index_candidates / is_meta_table / framework_cols_filtered /
-       ai_index without translation. #}
+       index_candidates / is_meta_table / framework_cols_filtered
+       without translation. #}
     {% if report_data.db and report_data.db.tables %}
       {% set written = report_data.db.tables | selectattr("write_count") | sort(attribute="write_count", reverse=True) | list %}
       {% if written %}
@@ -3610,9 +3722,8 @@
          cards BELOW the data table (lifted out of the colspan sub-rows
          the older markup used). Each card carries the table name, the
          read/write summary in mono, the recommendation prose, the
-         dark SQL snippet for any composite DDL and an amber
-         warn-line when writes are present. Only ACTIONABLE tables
-         get cards: a concrete `recommended_index` (LLM-vetted) or
+         concise index advice and an amber warn-line when writes
+         are present. Tables get cards for a `recommended_index` or
          at least one heuristic `index_candidates` column. The
          "nothing to suggest" branches (Frappe meta tables, framework-
          only filters, full-scan reads) are skipped they took space
@@ -3639,32 +3750,25 @@
 
           {% if t.get("recommended_index") %}
             {% set rec = t.recommended_index %}
-            <div class="index-rec-label">Index candidate - to speed up reads</div>
-            <p>The most-used filter on this table was <code>({% for c in rec.columns %}{{ c }}{% if not loop.last %}, {% endif %}{% endfor %})</code> - those columns were filtered together in <strong>{{ rec.together_count }}</strong> of {{ rec.read_count }} read{{ 's' if rec.read_count != 1 else '' }}. A composite index on them, leftmost-first, would help those reads:</p>
-            <pre class="sql-snip">frappe.db.add_index("{{ rec.doctype }}", [{% for c in rec.columns %}"{{ c }}"{% if not loop.last %}, {% endif %}{% endfor %}])</pre>
-            <p class="note-text">Put that in a patch - Customize&nbsp;Form ▸ field ▸ <em>Search&nbsp;Index</em> only makes single-column indexes. First run <code>SHOW INDEX FROM `{{ t.table }}`</code>: this may already be covered.</p>
-            {% if t.get("write_count", 0) %}
-              <div class="warn-text">&#9888; {{ t.write_count }} write{% if t.write_count != 1 %}s{% endif %} on this table in this session{% if t.get("is_write_hot") %} - and <code>{{ t.table }}</code> is a write-hot core table (many rows inserted per submitted document in production){% endif %} - every index also slows writes, so add it only if a query in the per-action breakdown that filters this way is actually slow.</div>
-            {% elif t.get("is_write_hot") %}
-              <div class="warn-text">&#9888; No writes in this session, but <code>{{ t.table }}</code> is normally write-hot in production (bulk inserts per submitted document) - be conservative about adding indexes here.</div>
+            <div class="index-rec-label">{{ 'Index review' if rec.route == 'no_code' else 'Index candidate' }}</div>
+            <p><code>({% for c in rec.columns %}{{ c }}{% if not loop.last %}, {% endif %}{% endfor %})</code> - these columns were filtered together in <strong>{{ rec.together_count }}</strong> of {{ rec.read_count }} read{{ 's' if rec.read_count != 1 else '' }}.</p>
+            {% if rec.route == 'no_code' %}
+              <p class="note-text">{{ rec.route_note }}</p>
             {% else %}
-              <div class="note-text">No writes recorded - adding an index here is low-risk.</div>
+              <p class="note-text">Check a slow query's <code>EXPLAIN</code> plan and existing indexes before adding an index. These recorded filters alone do not establish a benefit.</p>
+            {% endif %}
+            {% if rec.route != 'no_code' and t.get("write_count", 0) %}
+              <div class="warn-text">&#9888; {{ t.write_count }} write{% if t.write_count != 1 %}s{% endif %} on this table in this session{% if t.get("is_write_hot") %} - and <code>{{ t.table }}</code> is a write-hot core table (many rows inserted per submitted document in production){% endif %} - every index also slows writes, so add it only if a query in the per-action breakdown that filters this way is actually slow.</div>
+            {% elif rec.route != 'no_code' and t.get("is_write_hot") %}
+              <div class="warn-text">&#9888; No writes in this session, but <code>{{ t.table }}</code> is normally write-hot in production (bulk inserts per submitted document) - be conservative about adding indexes here.</div>
+            {% elif rec.route != 'no_code' %}
+              <div class="note-text">No writes recorded in this session; assess the write cost in production.</div>
             {% endif %}
             {% if rec.also_filtered %}
               <div class="note-text">Other columns this session filtered on (in other / fewer queries) - index each only if its own query is slow: {% for c in rec.also_filtered %}<code>{{ c }}</code>{% if not loop.last %}, {% endif %}{% endfor %}.</div>
             {% endif %}
             {% if t.get("framework_cols_filtered") %}
               <div class="note-text">Also filtered on Frappe metadata columns ({% for fc in t.framework_cols_filtered %}<code>{{ fc }}</code>{% if not loop.last %}, {% endif %}{% endfor %}) - never indexed (Frappe writes them on every save, or they're auto-indexed).</div>
-            {% endif %}
-            {% if t.get("ai_index") and t.ai_index.suggestion_html %}
-              <div class="fix-box" style="margin-top: 10px;">
-                <div class="fix-head">
-                  <span>Index advice</span>
-                  <span class="ai-tag">AI{% if t.ai_index.model %} &middot; {{ t.ai_index.model }}{% endif %}{% if t.ai_index.tokens and t.ai_index.tokens.total_tokens %} &middot; {{ t.ai_index.tokens.total_tokens }} tokens{% endif %}</span>
-                </div>
-                <div class="fix-body">{{ t.ai_index.suggestion_html | safe }}</div>
-                <div class="fix-foot">Machine-generated{% if t.ai_index.generated_at %} &middot; {{ fmt_dt(t.ai_index.generated_at) }}{% endif %} - verify against <code>SHOW INDEX</code> before applying.</div>
-              </div>
             {% endif %}
 
           {% elif t.index_candidates %}

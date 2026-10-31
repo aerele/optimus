@@ -43,7 +43,7 @@ class TestAnalyzeEmpty:
 class TestHotLineFinding:
 	def test_hot_line_title_uses_short_qualname_and_fits_140_chars(self):
 		# Regression: a deeply-nested dotted_path must not overflow the
-		# Optimus Finding.title Data(140) field while stopping phase 2.
+		# Optimus Finding.title Data(140) field while stopping line profiling.
 		long_path = (
 			"ajanta_bottles.ajanta_bottles.custom.sales_order.sales_order."
 			"ABSalesOrder.send_sr_sales_manager_alerts"
@@ -358,7 +358,7 @@ class TestLeafPickAndChain:
 		assert hint["phase1_cumulative_ms"] == 340.0
 		# Customer description appended with the hint sentence.
 		# v0.7.x A.AE2: reworded for clarity about cross-call aggregation.
-		assert "In phase 1, this descendant" in hot[0]["customer_description"]
+		assert "In the normal profile, this descendant" in hot[0]["customer_description"]
 		assert "_check_user_exists" in hot[0]["customer_description"]
 
 	def test_no_phase1_hint_when_no_eligible_descendant(self):
@@ -386,24 +386,30 @@ class TestLeafPickAndChain:
 
 
 # ---------------------------------------------------------------------------
-# Realtime targeting phase-2 events must reach the session OWNER's Desk tab.
-# run_analyze runs in an RQ worker with no browser socket, so publish_realtime
-# needs an explicit user (a None target won't reach the form). This pins that
-# _publish forwards the payload's "user" as the target.
+# Line profiling targets the recording user, shared forms, and the authorized actor.
 # ---------------------------------------------------------------------------
 
 
-def test_publish_targets_user_from_payload(monkeypatch):
+def test_publish_targets_recording_user_and_shared_form(monkeypatch):
+	from types import SimpleNamespace
+
 	import frappe
 
 	calls = []
+	monkeypatch.setattr(frappe, "db", SimpleNamespace(get_value=lambda *a, **k: {
+		"name": "session-doc", "user": "recorder@example.com",
+	}), raising=False)
 	monkeypatch.setattr(
 		frappe, "publish_realtime",
-		lambda event, payload=None, user=None, **k: calls.append((event, user)),
+		lambda event, payload=None, **k: calls.append((event, k)),
 		raising=False,
 	)
 	analyzer._publish("phase_2_run_ready", {"session_uuid": "s", "user": "alice@example.com"})
-	assert calls == [("phase_2_run_ready", "alice@example.com")]
+	assert calls == [
+		("phase_2_run_ready", {"room": "user:recorder@example.com"}),
+		("phase_2_run_ready", {"room": "doc:Optimus Session/session-doc"}),
+		("phase_2_run_ready", {"room": "user:alice@example.com"}),
+	]
 
 
 def test_publish_swallows_errors(monkeypatch):
@@ -415,3 +421,70 @@ def test_publish_swallows_errors(monkeypatch):
 	monkeypatch.setattr(frappe, "publish_realtime", boom, raising=False)
 	# Best-effort: a realtime failure must never derail analyze.
 	analyzer._publish("phase_2_run_ready", {"user": "x@y.z"})
+
+
+# Persist semantics: the run stays Analyzing; the job flips it Ready after the report.
+
+
+def _fresh_run_doc():
+	import types
+	child = types.SimpleNamespace(
+		run_uuid="run-1", status="Analyzing", results_json=None, warnings_json=None,
+		total_ms=None, ended_at=None, started_at=None,
+	)
+	doc = types.SimpleNamespace(
+		phase_2_runs=[child], actions=[], findings=[], flags=types.SimpleNamespace(),
+	)
+	doc.append = lambda field, value: getattr(doc, field).append(types.SimpleNamespace(**value))
+	doc.save = lambda **kw: None
+	return child, doc
+
+
+def test_persist_run_raises_when_row_vanished(monkeypatch):
+	"""A missing run row aborts the persist."""
+	import types
+
+	import pytest
+
+	from optimus.analyzers.base import AnalyzerResult
+
+	_, doc = _fresh_run_doc()
+	doc.phase_2_runs = []  # no matching child row
+	monkeypatch.setattr(analyzer, "frappe", types.SimpleNamespace(
+		get_doc=lambda *a, **k: doc, log_error=lambda *a, **k: None))
+
+	with pytest.raises(ValueError):
+		analyzer._persist_run("PS-1", "run-1", [], AnalyzerResult(
+			findings=[{"finding_type": "Hot Line", "title": "x",
+				"technical_detail_json": "{}"}],
+			aggregate={"phase2_functions": []}, warnings=[]), 0.0)
+	assert doc.findings == []
+
+
+def test_persist_run_leaves_status_analyzing(monkeypatch):
+	"""Saving results does not flip the run; the job does that after the report."""
+	import types
+
+	from optimus.analyzers.base import AnalyzerResult
+
+	child, doc = _fresh_run_doc()
+	monkeypatch.setattr(analyzer, "frappe", types.SimpleNamespace(get_doc=lambda *a, **k: doc))
+	analyzer._persist_run("PS-1", "run-1", [], AnalyzerResult(
+		findings=[], aggregate={"phase2_functions": []}, warnings=[]), 1.0)
+	assert child.status == "Analyzing" and child.results_json == "[]"
+
+
+def test_phase2_run_display_status_rules():
+	"""Failed wins, persisted results read as Ready, otherwise the stored status."""
+	import types
+
+	from optimus.analyzers.base import phase2_run_display_status
+
+	def _run(status, results_json):
+		return types.SimpleNamespace(status=status, results_json=results_json)
+
+	assert phase2_run_display_status(_run("Failed", "[{\"x\":1}]")) == "Failed"
+	assert phase2_run_display_status(_run("Analyzing", "[]")) == "Ready"
+	assert phase2_run_display_status(_run("Analyzing", "[{\"x\":1}]")) == "Ready"
+	assert phase2_run_display_status(_run("Analyzing", None)) == "Analyzing"
+	assert phase2_run_display_status(_run("Recording", "")) == "Recording"

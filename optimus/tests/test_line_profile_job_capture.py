@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""End-to-end reproduction of phase-2 line capture for a background-job
+"""End-to-end reproduction of line capture for a background-job
 function.
 
 Drives the real capture functions in-process (no bench/worker): arm a pass, run
@@ -21,23 +21,7 @@ import frappe  # noqa: E402
 
 from optimus.line_profile import capture as cap  # noqa: E402
 from optimus.line_profile import hooks as lp_hooks  # noqa: E402
-
-
-class FakeCache:
-	"""Dict-backed cache without rpush/lrange, so flush/read use the
-	JSON-list fallback (exercises the same aggregate path as production)."""
-
-	def __init__(self):
-		self.store = {}
-
-	def get_value(self, k):
-		return self.store.get(k)
-
-	def set_value(self, k, v, expires_in_sec=None):
-		self.store[k] = v
-
-	def delete_value(self, k):
-		self.store.pop(k, None)
+from optimus.tests.phase2_cache_fake import Cache as FakeCache  # noqa: E402
 
 
 @pytest.fixture
@@ -54,9 +38,11 @@ def lp_env(monkeypatch, tmp_path):
 	monkeypatch.syspath_prepend(str(mod_dir))
 	sys.modules.pop("ugly_hot", None)
 
+	from optimus.renderer import source
+	monkeypatch.setattr(source, "_installed_apps", lambda: {"ugly_hot"})
 	cache = FakeCache()
 	monkeypatch.setattr(frappe, "cache", cache, raising=False)
-	monkeypatch.setattr(frappe, "local", types.SimpleNamespace(), raising=False)
+	monkeypatch.setattr(frappe, "local", types.SimpleNamespace(cache={}), raising=False)
 	monkeypatch.setattr(frappe, "session", types.SimpleNamespace(user="u@x.com"), raising=False)
 	monkeypatch.setattr(frappe, "log_error", lambda *a, **k: None, raising=False)
 	# _should_skip_request is only used by the request hook; not needed here.
@@ -73,7 +59,7 @@ def test_bg_job_line_capture_end_to_end(lp_env):
 	)
 	assert any(r.get("eligible") for r in resolved), resolved
 
-	# 2. Simulate the job running with phase-2 active.
+	# 2. Simulate the job running with line profiling active.
 	import ugly_hot
 	job_kwargs = {"_lp_session_id": run_uuid, "doc_name": "X"}
 	lp_hooks.before_job_line_profile(method="ugly_hot.bg_recheck_users", kwargs=job_kwargs)
@@ -90,7 +76,7 @@ def test_bg_job_line_capture_end_to_end(lp_env):
 	lines = results[0]["lines"]
 	hot = [ln for ln in lines if (ln["hits"] or 0) > 0 and (ln["total_ms"] or 0) > 0]
 	assert hot, (
-		"Phase-2 captured NO per-line timing for the bg-job function "
+		"Line profiling captured NO per-line timing for the bg-job function "
 		f"samples={samples!r} results={results!r}"
 	)
 

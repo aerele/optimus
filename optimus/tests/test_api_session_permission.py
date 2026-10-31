@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""_require_session_permission is the per-session ownership gate the phase-2
+"""_require_session_permission is the per-session ownership gate the line profiling
 (and report/AI/export) endpoints rely on. It must fail CLOSED: deny when
 has_permission returns False AND when has_permission itself raises a
 permission check that errors must never downgrade to the role-only gate."""

@@ -21,6 +21,7 @@ from optimus.analyzers.base import (
 	DEFAULT_DISPLAY_THRESHOLD_MS,
 	_rolls_over_to_seconds,
 	humanize_duration_ms,
+	phase2_run_display_status,
 )
 
 # A whole captured flow slower than this reads as "danger" on the Total-time
@@ -369,8 +370,9 @@ def _build_line_drilldown_runs(session_doc, threshold_ms: float = DEFAULT_DISPLA
 	result = []
 	number = 0
 	for run in runs:
-		status = getattr(run, "status", "") or ""
-		if status != "Ready":
+		# Same display rule as the renderer panel.
+		display_status = phase2_run_display_status(run)
+		if display_status != "Ready":
 			continue
 		number += 1
 		total_ms = getattr(run, "total_ms", 0) or 0
@@ -425,7 +427,7 @@ def _build_line_drilldown_runs(session_doc, threshold_ms: float = DEFAULT_DISPLA
 
 		result.append({
 			"number": number,
-			"status": status,
+			"status": display_status,
 			"total_ms_display": _ms_display(total_ms, decimals=2, threshold_ms=threshold_ms),
 			"timestamp": str(getattr(run, "started_at", "") or ""),
 			"picks": [p.get("dotted_path", "") for p in picks_list],
@@ -457,7 +459,8 @@ def _build_action_plan(action_plan, fmt_ms=None) -> list[dict]:
 			# when the template renders it. f-string would coerce Markup to
 			# plain str and lose the safe-flag.
 			"savings_display": Markup("−") + fmt(gain_ms) if gain_ms else "",
-			"savings_label": step.get("gain_label", "") or "",
+			# No label without a figure (0-impact findings such as Lock Contention).
+			"savings_label": (step.get("gain_label", "") or "") if gain_ms else "",
 			"callsite": step.get("callsite") or "",
 		})
 	return result
@@ -924,7 +927,6 @@ def _build_footer(render_config) -> dict:
 		f"tracked_apps={', '.join(tracked) if tracked else '(none)'}",
 		f"ignored_apps={', '.join(ignored) if ignored else '(none)'}",
 		f"ai_suggest_findings={'on' if rc.get('ai_suggest_findings') else 'off'}",
-		f"ai_suggest_indexes={'on' if rc.get('ai_suggest_indexes') else 'off'}",
 		f"min_action_duration_ms={int(rc.get('min_action_duration_ms') or 0)}",
 		f"large_duration_threshold_ms={int(rc.get('large_duration_threshold_ms') or 0)}",
 	]
@@ -963,7 +965,7 @@ def build_report_context(session_doc: Any, ctx: dict) -> dict:
 	# non-default profile can't split the report into ms-here / seconds-there.
 	_fmt_ms = ctx.get("fmt_ms") or (lambda v, **kw: _ms_display(v, _threshold_ms, **kw))
 	# AI token-usage transparency: total tokens every AI feature consumed this
-	# session fix suggestions (per finding), index suggestions (per table),
+	# session fix suggestions (per finding),
 	# and the Steps-to-Reproduce humanization (one per session). Derived at
 	# render time so re-generated reports stay in sync never baked at
 	# analyze time. (The connectivity probe is a Settings test, not session
@@ -976,11 +978,13 @@ def build_report_context(session_doc: Any, ctx: dict) -> dict:
 		if isinstance(_tok, dict):
 			_ai_tokens_total += int(_tok.get("total_tokens") or 0)
 
-	for _bucket in ctx.get("findings_by_app", []) or []:
-		for _f in (_bucket.get("findings") if isinstance(_bucket, dict) else []) or []:
-			_add_tokens(_f.get("llm_fix") if isinstance(_f, dict) else None)
-	for _t in ctx.get("table_breakdown", []) or []:
-		_add_tokens(_t.get("ai_index") if isinstance(_t, dict) else None)
+	if "ai_fix_tokens" in ctx:
+		# The renderer's sum, taken before retired AI output was hidden.
+		_ai_tokens_total = int(ctx.get("ai_fix_tokens") or 0)
+	else:
+		for _bucket in ctx.get("findings_by_app", []) or []:
+			for _f in (_bucket.get("findings") if isinstance(_bucket, dict) else []) or []:
+				_add_tokens(_f.get("llm_fix") if isinstance(_f, dict) else None)
 	_steps_tokens = int(getattr(session_doc, "ai_steps_tokens", 0) or 0)
 	_ai_tokens_total += _steps_tokens
 	return {
@@ -1043,6 +1047,7 @@ def build_report_context(session_doc: Any, ctx: dict) -> dict:
 		"slow_queries": _build_slow_queries(ctx.get("top_queries", []), _fmt_ms),
 		# J.2.5 non-contract addition for framework split.
 		"slow_queries_framework": _build_slow_queries(ctx.get("top_queries_framework", []), _fmt_ms),
+		"queries_per_action": ctx.get("queries_per_action"),
 		# B.DI4 how many user-app slow queries the analyzer truncated
 		# out of the findings list (5-cap). 0 when nothing was suppressed.
 		"top_queries_suppressed_count": int(ctx.get("top_queries_suppressed_count") or 0),

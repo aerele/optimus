@@ -22,6 +22,26 @@ import pytest
 import optimus  # noqa: F401 triggers _patch_recorder at import-time
 
 
+class _StubRecorder:
+	"""The Recorder shape the patch wraps, for runs without a bench."""
+
+	def __init__(self, *args, **kwargs):
+		self.calls = []
+
+	def register(self, data):
+		self.calls.append(data)
+
+
+@pytest.fixture(autouse=True)
+def _stub_recorder(monkeypatch):
+	"""Patch a stub Recorder when frappe.recorder is only the conftest stub."""
+	import frappe.recorder as rec
+
+	if not hasattr(rec, "Recorder"):
+		monkeypatch.setattr(rec, "Recorder", type("Recorder", (_StubRecorder,), {}), raising=False)
+		optimus._patch_recorder()
+
+
 def _Recorder():
 	"""Return the monkey-patched Recorder class. Skip the test if Frappe's
 	recorder isn't importable (running pytest outside the bench)."""
@@ -189,3 +209,25 @@ class TestSettingsDrivenExtras:
 		out = redact_sensitive({"recovery_code": "abc", "name": "Alice"}, extra_keys=extra_keys)
 		assert out["recovery_code"] == "<REDACTED:recovery_code>"
 		assert out["name"] == "Alice"
+
+	def test_config_read_that_records_sql_does_not_recurse(self, monkeypatch):
+		"""On a config cache miss get_config queries the DB, and the recorder registers those queries too."""
+		import types
+
+		from optimus import settings as _settings
+
+		Recorder = _Recorder()
+		fake = _FakeRecorderInstance()
+		calls = []
+
+		def _fake_get_config():
+			calls.append(1)
+			Recorder.register(fake, {"query": "SELECT name FROM `tabDocType`", "duration": 0.1})
+			return types.SimpleNamespace(sensitive_form_keys=(), sensitive_sql_columns=("bank_account",))
+
+		monkeypatch.setattr(_settings, "get_config", _fake_get_config, raising=False)
+
+		Recorder.register(fake, {"query": "SELECT * FROM acc WHERE bank_account='1234567890'", "duration": 0.1})
+		assert len(calls) == 1
+		assert len(fake.calls) == 2
+		assert "1234567890" not in fake.calls[1]["query"]

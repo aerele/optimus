@@ -16,6 +16,7 @@ until the analyze pipeline finalizes the session and deletes them.
 import hashlib
 import hmac
 import json
+import pickle
 import time
 
 import frappe
@@ -171,11 +172,32 @@ def set_active_session(user: str, session_uuid: str) -> None:
 
 	The active key carries a TTL so a forgotten Stop button auto-clears.
 	"""
-	frappe.cache.set_value(
-		_active_key(user),
-		session_uuid,
-		expires_in_sec=SESSION_TTL_SECONDS,
-	)
+	from redis.exceptions import WatchError
+
+	from optimus import redis_keys, safe_call
+
+	active, phase2 = [frappe.cache.make_key(key) for key in (
+		_active_key(user), redis_keys.lp_active(user),
+	)]
+	guard = safe_call.InterruptGuard(base=True)
+	conflict = False
+	try:
+		with guard, frappe.cache.pipeline() as pipe:
+			pipe.watch(active, phase2)
+			if pipe.exists(active, phase2):
+				conflict = True
+			else:
+				pipe.multi()
+				pipe.set(active, pickle.dumps(session_uuid, protocol=4), ex=SESSION_TTL_SECONDS)
+				pipe.execute()
+	except WatchError:
+		conflict = True
+	finally:
+		frappe.local.cache.pop(active, None)
+	if guard.pending():
+		raise guard.interrupt()
+	if conflict:
+		frappe.throw(frappe._("A profiling capture is already active. Stop it before starting another."))
 
 
 def clear_active_session(user: str) -> None:
@@ -296,12 +318,31 @@ def recording_count(session_uuid: str) -> int:
 # even after Stop (see `draining_until` below) so they aren't lost.
 
 
+# A job finishing after cleanup would re-create these keys without an expiry.
+JOB_KEYS_TTL_SECONDS = 24 * 60 * 60
+
+
+def _bound_ttl(key: str) -> None:
+	"""Best-effort expiry set once, so a chain of jobs cannot keep a dead session's keys alive."""
+	try:
+		r = _raw_redis()
+		if r is None:
+			expire_key(key, JOB_KEYS_TTL_SECONDS)
+			return
+		prefixed = frappe.cache.make_key(key)
+		if r.ttl(prefixed) == -1:  # exists without an expiry (-2: gone)
+			r.expire(prefixed, JOB_KEYS_TTL_SECONDS)
+	except Exception:
+		pass
+
+
 def register_pending_job(session_uuid: str, job_id: str) -> None:
 	"""Record that the flow enqueued RQ job ``job_id``. Best-effort."""
 	if not session_uuid or not job_id:
 		return
 	try:
 		frappe.cache.sadd(_pending_jobs_key(session_uuid), job_id)
+		_bound_ttl(_pending_jobs_key(session_uuid))
 	except Exception:
 		pass
 
@@ -456,6 +497,7 @@ def _atomic_merge_job_meta(
 		# fallback path target the same Redis key.
 		prefixed = frappe.cache.make_key(_jobs_key(session_uuid))
 		frappe.cache.eval(script, 1, prefixed, job_id, json.dumps(fields))
+		_bound_ttl(_jobs_key(session_uuid))
 		return
 	except Exception:
 		# Fall through to the non-atomic path. Loses the multi-worker safety
@@ -470,6 +512,7 @@ def _atomic_merge_job_meta(
 	else:
 		meta.update(fields)
 	_write_job(session_uuid, job_id, meta)
+	_bound_ttl(_jobs_key(session_uuid))
 
 
 def record_job(session_uuid: str, job_id: str, method: str) -> None:
@@ -486,6 +529,27 @@ def record_job(session_uuid: str, job_id: str, method: str) -> None:
 	except Exception:
 		enqueued_at = None
 	fields = {"method": method or "", "enqueued_at": enqueued_at}
+	_atomic_merge_job_meta(session_uuid, job_id, fields, setdefault=True)
+
+
+def record_enqueued_job(
+	session_uuid: str, job_id: str, method: str, parent_recording_uuid: str | None = None
+) -> None:
+	"""Record an enqueued job as Queued with its parent recording, set-if-absent."""
+	if not session_uuid or not job_id:
+		return
+	try:
+		from frappe.utils import now_datetime
+
+		enqueued_at = str(now_datetime())
+	except Exception:
+		enqueued_at = None
+	fields = {
+		"method": method or "",
+		"enqueued_at": enqueued_at,
+		"status": "Queued",
+		"parent_recording_uuid": parent_recording_uuid,
+	}
 	_atomic_merge_job_meta(session_uuid, job_id, fields, setdefault=True)
 
 
