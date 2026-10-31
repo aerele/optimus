@@ -13,8 +13,8 @@ list stays in the per-action breakdown.
 import json
 
 from optimus.analyzers.base import (
-	QUERY_TEXT_LIMIT,
 	AnalyzerResult,
+	cap_sql,
 	dur,
 	installed_apps_allowlist,
 	is_framework_callsite_str,
@@ -37,7 +37,6 @@ MAX_FINDINGS = 5  # only flag the top 5 slow queries to avoid noise
 # clear this floor to qualify; if nothing does, the section renders an
 # empty state instead of a list of trivially-fast queries.
 TOP_QUERY_FLOOR_MS = 10.0
-
 
 def _resolve_slow_query_threshold() -> tuple[float, float]:
 	"""Return (slow_threshold_ms, high_severity_threshold_ms). Reads Optimus
@@ -80,7 +79,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 				continue
 			all_queries.append(
 				{
-					"normalized_query": call.get("normalized_query") or call.get("query") or "",
+					"normalized_query": cap_sql(call.get("normalized_query") or call.get("query") or ""),
 					# v0.7.x M5: renamed from ``duration_ms`` to disambiguate
 				# from action.duration_ms (per-request wall) and
 				# t.duration_ms (consolidated per-table). This is the

@@ -76,8 +76,9 @@ from optimus.analyzers.base import (
 	FRAMEWORK_APPS,
 	FRAPPE_METADATA_COLUMNS,
 	INDEX_FINDING_TYPES,
-	QUERY_TEXT_LIMIT,
+	QUERY_TEXT_LIMIT,  # noqa: F401  (re-exported for tests)
 	TAB_TABLE_RE,
+	is_cut_query,
 	is_write_hot_table,
 )
 from optimus.renderer.ensure_indexes_template import (  # noqa: F401  (public names re-exported)
@@ -308,7 +309,7 @@ def _explain_columns(ftype: str, table: str, query: str, parse) -> tuple[str, li
 		tab_tables = [t for t in (parsed.get("tables") or []) if str(t).startswith("tab")]
 		if len(tab_tables) == 1:
 			key = tab_tables[0]
-		elif ftype == "Slow Query" and len(query) >= QUERY_TEXT_LIMIT:
+		elif ftype == "Slow Query" and is_cut_query(query):
 			# sql_metadata 3 rejects a cut identifier instead of returning partial
 			# metadata. Recover only an unambiguous main table; the bounded WHERE
 			# scan below still decides whether any filter is complete enough to use.
@@ -2045,8 +2046,8 @@ def _advise_finding(
 	multi: tuple[str, ...] = ()
 	maybe: tuple[str, ...] = ()
 	if query:
-		# top_queries keeps QUERY_TEXT_LIMIT characters, so a Slow Query that long may be cut
-		truncated = ftype == "Slow Query" and len(query) >= QUERY_TEXT_LIMIT
+		# A Slow Query that long (or ending in the truncation marker) may be cut short
+		truncated = ftype == "Slow Query" and is_cut_query(query)
 		qualifiers = _target_qualifiers(query, table, getattr(parser, "aliases", None))
 		if truncated and _where_tokens(query, truncated=True) is None:
 			return _no_code(doctype, (), (

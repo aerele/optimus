@@ -4,7 +4,7 @@
 """Unit tests for optimus.analyzers.top_queries."""
 
 from optimus.analyzers import top_queries
-from optimus.analyzers.base import dur
+from optimus.analyzers.base import MAX_SQL_CHARS, cap_sql, dur
 
 
 def test_top_queries_sorted_by_duration_desc(full_scan_recording, empty_context):
@@ -214,3 +214,44 @@ def test_long_query_is_not_truncated(full_scan_recording, empty_context):
 	rec = dict(full_scan_recording, calls=[call])
 	top = top_queries.analyze([rec], empty_context).aggregate["top_queries"]
 	assert top[0]["normalized_query"] == long_sql
+
+
+def _long_recording(sql: str) -> dict:
+	return {
+		"uuid": "r1",
+		"calls": [
+			{
+				"query": sql,
+				"normalized_query": sql,
+				"duration": 900.0,
+				"stack": [{"filename": "acme_app/acme_app/api.py", "lineno": 12}],
+			}
+		],
+	}
+
+
+def test_long_slow_query_kept_in_full_in_leaderboard_and_finding(empty_context):
+	"""A 50 KB statement is stored whole in the leaderboard and the finding."""
+	import json
+
+	sql = "SELECT " + ", ".join(f"`col_{i}`" for i in range(5000)) + " FROM `tabSales Invoice`"
+	assert len(sql) > 50_000
+	result = top_queries.analyze([_long_recording(sql)], empty_context)
+	assert result.aggregate["top_queries"][0]["normalized_query"] == sql
+	detail = json.loads(result.findings[0]["technical_detail_json"])
+	assert detail["normalized_query"] == sql
+
+
+def test_pathological_query_capped_with_visible_note(empty_context):
+	sql = "SELECT " + "x" * (MAX_SQL_CHARS + 500)
+	result = top_queries.analyze([_long_recording(sql)], empty_context)
+	capped = result.aggregate["top_queries"][0]["normalized_query"]
+	assert capped.startswith(sql[: MAX_SQL_CHARS])
+	assert "query truncated at" in capped and str(len(sql)) in capped
+	assert len(capped) < len(sql) + 200
+
+
+def test_cap_sql_leaves_query_at_limit_untouched():
+	sql = "a" * MAX_SQL_CHARS
+	assert cap_sql(sql) == sql
+	assert cap_sql("") == ""

@@ -19,6 +19,7 @@ Pure means no Frappe DB access, no Redis access, no I/O: analyzers operate only
 on the data passed in. The orchestrator (analyze.py) merges and persists results.
 """
 
+import logging
 import math
 import re
 from dataclasses import dataclass, field
@@ -432,9 +433,57 @@ def is_write_hot_table(name) -> bool:
 	return bool(name) and str(name).strip().strip("`").lower() in _WRITE_HOT_TABLES_LOWER
 
 
-# top_queries keeps at most this many characters of a query (its Slow Query findings
-# carry that text); the index advisor treats a query this long as possibly cut short.
+# Older sessions kept only this many characters of a Slow Query; the index advisor still
+# treats a query this long as possibly cut short. Current sessions keep up to MAX_SQL_CHARS
+# (below) and end a cut query with SQL_TRUNCATION_MARKER, which is_cut_query also recognises.
 QUERY_TEXT_LIMIT = 500
+
+# Upper bound on SQL kept per query by cap_sql. Keep in step with QUERY_TEXT_LIMIT above.
+MAX_SQL_CHARS = 200_000
+SQL_TRUNCATION_MARKER = "-- [Optimus: query truncated"
+_cap_log = logging.getLogger(__name__)
+_capped_total = 0
+
+
+def is_cut_query(query: str) -> bool:
+	"""True when ``query`` may be cut short: it carries the marker or is QUERY_TEXT_LIMIT long."""
+	return isinstance(query, str) and (len(query) >= QUERY_TEXT_LIMIT or SQL_TRUNCATION_MARKER in query)
+
+
+def _open_literal_start(head: str) -> int:
+	"""Index where a quote still open at the end of ``head`` began, or -1 when none is."""
+	quote, start, i = "", -1, 0
+	while i < len(head):
+		ch = head[i]
+		if quote:
+			if ch == "\\":
+				i += 1
+			elif ch == quote:
+				quote = ""
+		elif ch in "'\"`":
+			quote, start = ch, i
+		i += 1
+	return start if quote else -1
+
+
+def cap_sql(sql: str) -> str:
+	"""Cut ``sql`` to ``MAX_SQL_CHARS`` and append a visible truncation note.
+
+	A quoted literal left open by the cut is dropped, so half a value is never kept
+	where the redaction pattern could not match it.
+	"""
+	global _capped_total
+	if not isinstance(sql, str) or len(sql) <= MAX_SQL_CHARS:
+		return sql
+	head = sql[:MAX_SQL_CHARS]
+	open_at = _open_literal_start(head)
+	if open_at >= 0:
+		head = head[:open_at]
+	_capped_total += 1
+	_cap_log.info("Optimus: capped an oversized query to %d of %d characters (%d so far)",
+		len(head), len(sql), _capped_total)
+	return f"{head}\n{SQL_TRUNCATION_MARKER} at {MAX_SQL_CHARS} of {len(sql)} characters]"
+
 
 # The finding types whose fix is an index: explain_flags emits the four EXPLAIN ones,
 # index_suggestions emits Missing Index. Their advice is deterministic
