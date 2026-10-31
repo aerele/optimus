@@ -11,6 +11,7 @@ import datetime
 import pytest
 
 pytest.importorskip("rq")
+pytestmark = pytest.mark.rq  # selected by ai-quality.yml, which installs rq
 
 from optimus import analyze, session
 
@@ -101,7 +102,7 @@ class TestCaptureTerminalStatus:
 class TestFinalizePending:
 	def test_active_marked_running_inactive_captured(self, cap, monkeypatch):
 		# j-active stays active → Running; j-done is inactive → captured terminal.
-		monkeypatch.setattr(analyze, "_rq_job_active", lambda jid: jid == "j-active")
+		monkeypatch.setattr(analyze, "_rq_status", lambda jid: "started" if jid == "j-active" else "finished")
 		_set_job(monkeypatch, FakeJob("finished",
 			started_at=datetime.datetime(2026, 5, 21, 12, 0, 0),
 			ended_at=datetime.datetime(2026, 5, 21, 12, 0, 1)))

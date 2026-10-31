@@ -7,15 +7,33 @@
  "engine": "InnoDB",
  "field_order": [
   "run_uuid",
+  "recording_user",
   "status",
   "started_at",
   "ended_at",
   "total_ms",
   "picks_json",
   "results_json",
-  "warnings_json"
+  "warnings_json",
+  "analyze_generation",
+  "analyze_requested_by",
+  "analyze_worker_token",
+  "analyze_lease_until",
+  "analyze_dispatch_at",
+  "analyze_dispatch_pending",
+  "analyze_attempts",
+  "analyze_render_pending"
  ],
  "fields": [
+  {
+   "fieldname": "recording_user",
+   "fieldtype": "Link",
+   "options": "User",
+   "label": "Recording User",
+   "read_only": 1,
+   "hidden": 1,
+   "no_copy": 1
+  },
   {
    "fieldname": "run_uuid",
    "fieldtype": "Data",
@@ -73,6 +91,71 @@
    "fieldtype": "Long Text",
    "label": "Warnings (JSON)",
    "read_only": 1
+  },
+  {
+   "fieldname": "analyze_generation",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "read_only": 1,
+   "no_copy": 1,
+   "label": "Analyze Generation"
+  },
+  {
+   "fieldname": "analyze_requested_by",
+   "fieldtype": "Link",
+   "hidden": 1,
+   "read_only": 1,
+   "no_copy": 1,
+   "label": "Analyze Requested By",
+   "options": "User"
+  },
+  {
+   "fieldname": "analyze_worker_token",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "read_only": 1,
+   "no_copy": 1,
+   "label": "Analyze Worker Token"
+  },
+  {
+   "fieldname": "analyze_lease_until",
+   "fieldtype": "Float",
+   "hidden": 1,
+   "read_only": 1,
+   "no_copy": 1,
+   "label": "Analyze Lease Until"
+  },
+  {
+   "fieldname": "analyze_dispatch_at",
+   "fieldtype": "Float",
+   "hidden": 1,
+   "read_only": 1,
+   "no_copy": 1,
+   "label": "Analyze Dispatch At"
+  },
+  {
+   "fieldname": "analyze_dispatch_pending",
+   "fieldtype": "Check",
+   "hidden": 1,
+   "read_only": 1,
+   "no_copy": 1,
+   "label": "Analyze Dispatch Pending"
+  },
+  {
+   "fieldname": "analyze_attempts",
+   "fieldtype": "Int",
+   "hidden": 1,
+   "read_only": 1,
+   "no_copy": 1,
+   "label": "Analyze Attempts"
+  },
+  {
+   "fieldname": "analyze_render_pending",
+   "fieldtype": "Check",
+   "hidden": 1,
+   "read_only": 1,
+   "no_copy": 1,
+   "label": "Analyze Render Pending"
   }
  ],
  "index_web_pages_for_search": 0,

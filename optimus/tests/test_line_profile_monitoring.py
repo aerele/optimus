@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Phase-2 must never leak the process-global ``sys.monitoring`` profiler tool.
+"""Line profiling must never leak the process-global ``sys.monitoring`` profiler tool.
 
 On Python 3.12+ line_profiler drives ``sys.monitoring`` tool id 2 (PROFILER_ID).
 A botched teardown can leave its line-trace events registered process-wide, so
@@ -132,10 +132,10 @@ def test_after_request_releases_tool_even_when_disable_fails(monkeypatch):
 # ---------------------------------------------------------------------------
 # Startup probe + LOUD pre-arm orphan-reclaim logging (Critical Risk #3).
 # ---------------------------------------------------------------------------
-# A worker that died mid-Phase-2 leaves tool 2 owned by ``line_profiler``;
+# A worker that died mid-line profiling leaves tool 2 owned by ``line_profiler``;
 # on respawn, the next request inherits the orphan AND immediately gets
 # line-traced. The per-arm self-heal in line_profile/hooks.py catches it,
-# but ONLY when the next Phase 2 request fires every interim request
+# but ONLY when the next line profiling request fires every interim request
 # pays the trace tax. The startup probe in optimus/__init__.py runs at
 # app-import and reclaims the orphan immediately. The pre-arm self-heal
 # stays as a per-request safety net, now with a LOUD log so the operator
@@ -161,7 +161,7 @@ def _patch_logger(monkeypatch) -> _LogCapture:
 
 def test_startup_probe_releases_line_profiler_orphan_and_logs(monkeypatch):
 	"""Tool 2 owned by line_profiler at probe time → auto-reclaim + WARN log.
-	This is the worker-respawn-after-mid-Phase-2-crash case."""
+	This is the worker-respawn-after-mid-line profiling-crash case."""
 	import optimus
 
 	cap = _patch_logger(monkeypatch)

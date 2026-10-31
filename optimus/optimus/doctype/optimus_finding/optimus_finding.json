@@ -22,7 +22,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Type",
-   "options": "N+1 Query\nFramework N+1\nFull Table Scan\nFilesort\nTemporary Table\nLow Filter Ratio\nMissing Index\nSlow Query\nSlow Hot Path\nHook Bottleneck\nRepeated Hot Frame\nRedundant Call\nResource Contention\nMemory Pressure\nDB Pool Saturation\nBackground Queue Backlog\nSlow Background Job\nSlow Frontend Render\nNetwork Overhead\nHeavy Response\nHot Line\nFunction Not Invoked",
+   "options": "N+1 Query\nFramework N+1\nFull Table Scan\nFilesort\nTemporary Table\nLow Filter Ratio\nMissing Index\nSlow Query\nSlow Hot Path\nHook Bottleneck\nRepeated Hot Frame\nRedundant Call\nResource Contention\nMemory Pressure\nDB Pool Saturation\nBackground Queue Backlog\nSlow Background Job\nSlow Frontend Render\nNetwork Overhead\nHeavy Response\nHot Line\nFunction Not Invoked\nLock Contention",
    "read_only": 1
   },
   {
@@ -75,7 +75,7 @@
    "read_only": 1
   },
   {
-   "description": "The AI-generated fix suggestion for this finding, stored as JSON (the suggestion text plus which model and provider produced it and when). Filled in when you use the 'Suggest a fix (AI)' action, empty until then.",
+   "description": "The AI-generated fix suggestion for this finding, stored as JSON (the suggestion text plus which model and provider produced it and when). Filled in by Refresh AI suggestions or automatic background enrichment after profiling is Ready; empty until a suggestion is saved.",
    "fieldname": "llm_fix_json",
    "fieldtype": "Long Text",
    "label": "AI Fix Suggestion (JSON)",

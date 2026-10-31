@@ -35,7 +35,7 @@ def _frappe_stub(monkeypatch):
 	explicit and the auto-restore guaranteed."""
 	stub = types.ModuleType("frappe")
 	stub.cache = types.SimpleNamespace(
-		get_value=lambda k: None,
+		get_value=lambda k, **kwargs: None,
 		set_value=lambda k, v: None,
 		delete_value=lambda k: None,
 	)
@@ -210,6 +210,11 @@ class TestIgnoredApps:
 			"helpdesk", "hrms", "insights", "lms", "payments", "wiki",
 		)
 
+	def test_emptied_table_ignores_no_app(self, monkeypatch):
+		monkeypatch.setattr(settings, "_read_doctype_row", lambda: {"ignored_apps": ()})
+		monkeypatch.setattr(settings, "_site_conf_fallback", lambda k: None)
+		assert settings._resolve().ignored_apps == ()
+
 	def test_get_ignored_apps_returns_empty_on_error(self, monkeypatch):
 		def _boom():
 			raise RuntimeError("no config")
@@ -255,7 +260,7 @@ class TestLargeDurationThresholdResolution:
 	def _use_single(self, stub, fields):
 		"""Point the frappe stub at a Single doc carrying ``fields``."""
 		stub.db = types.SimpleNamespace(exists=lambda *a, **kw: True)
-		stub.get_cached_doc = lambda *a, **kw: dict(fields)
+		stub.get_doc = lambda *a, **kw: dict(fields)
 
 	def test_stored_zero_disables_rollover_end_to_end(self, _frappe_stub, monkeypatch):
 		self._use_single(

@@ -11,6 +11,8 @@ recording-count safety cap that keeps inline analyze under the gunicorn timeout.
 
 import inspect
 
+import pytest
+
 from optimus import api
 
 
@@ -312,3 +314,18 @@ def test_enqueue_analyze_cap_is_called_by_retry_analyze():
     assert "docname=" in retry_src, (
         "retry_analyze must pass docname to _enqueue_analyze"
     )
+
+
+@pytest.mark.parametrize(
+	("row", "expected"),
+	[(("Ready", 0), True), (("Ready", 4), False), (("Failed", 0), False)],
+)
+def test_stop_flags_an_empty_inline_session(monkeypatch, row, expected):
+	monkeypatch.setattr(api, "_require_profiler_user", lambda: "u")
+	monkeypatch.setattr(api.session, "get_active_session_for", lambda user: "s")
+	monkeypatch.setattr(api.ratelimit, "enforce_user_rate_limit", lambda *a, **kw: None)
+	monkeypatch.setattr(api, "_stop_session", lambda user, active: ("doc", True))
+	monkeypatch.setattr(api.frappe.db, "get_value", lambda *a, **kw: row, raising=False)
+	out = api.stop()
+	assert out["status"] == row[0]
+	assert out["empty"] is expected

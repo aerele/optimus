@@ -168,7 +168,14 @@ def test_widget_subscribes_to_all_realtime_events():
 		"optimus_session_failed",
 		"optimus_progress",
 	]
+	# All events but "stopping" are subscribed via the pill module's EVENT_NAMES.
+	with open(WIDGET_JS.replace("floating_widget.js", "optimus_pill_state.js")) as f:
+		pill_src = f.read()
+	assert "Pill.EVENT_NAMES.forEach" in src and "frappe.realtime.on(name" in src
 	for event in expected_events:
+		if event != "optimus_session_stopping":
+			assert event in pill_src, f"pill module must handle '{event}'"
+			continue
 		assert f'frappe.realtime.on("{event}"' in src, (
 			f"Widget must subscribe to realtime event '{event}' via "
 			"frappe.realtime.on(). Missing subscription means state "

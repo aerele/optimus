@@ -40,7 +40,7 @@ APP_KEY_PREFIX = "optimus:"
 
 
 # ---------------------------------------------------------------------------
-# Phase-1 session lifecycle
+# Session lifecycle
 # ---------------------------------------------------------------------------
 
 
@@ -119,6 +119,11 @@ def resolved_doc(recording_uuid: str) -> str:
 	return f"profiler:resolved_doc:{recording_uuid}"
 
 
+def lock_events(recording_uuid: str) -> str:
+	"""Deadlock / lock-wait events of a recording (``list[dict]``). TTL: ``SESSION_TTL_SECONDS``."""
+	return f"profiler:lock_events:{recording_uuid}"
+
+
 # ---------------------------------------------------------------------------
 # Frontend metrics (v0.5.0+ split lists)
 # ---------------------------------------------------------------------------
@@ -148,7 +153,7 @@ def frontend_legacy(session_uuid: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Phase-2 line-profile run state
+# Line profiling run state
 # ---------------------------------------------------------------------------
 
 
@@ -176,7 +181,7 @@ def lp_source(run_uuid: str) -> str:
 
 def lp_samples(run_uuid: str) -> str:
 	"""List of per-line samples flushed from each request/job under the
-	active Phase-2 pass. Each entry is a dict
+	active line profiling pass. Each entry is a dict
 	(``lineno``, ``count``, ``wall_ms``, ``function``). No TTL cleaned
 	by ``cleanup_run``."""
 	return f"profiler:lp:{run_uuid}:samples"
@@ -187,6 +192,11 @@ def lp_budget_hit(run_uuid: str) -> str:
 	the literal string ``"1"``. TTL: 3600s (explicit cap so a forgotten
 	flag doesn't outlive the run). Cleared by ``clear_budget_hit``."""
 	return f"profiler:lp:budget_hit:{run_uuid}"
+
+
+def lp_sample_state(run_uuid: str) -> str:
+	"""Raw byte counter for bounded sample appends; -1 means incomplete input."""
+	return f"profiler:lp:{run_uuid}:sample_state"
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +248,24 @@ def schema_version() -> str:
 	return "optimus:schema_version"
 
 
+def user_rate_limit(action: str, user: str, window: int) -> str:
+	"""Per-user fixed-window counter for a rate-limited Optimus action (see
+	:mod:`optimus.ratelimit`). Value: an integer (``INCR``). TTL: ``window`` seconds (``EXPIRE``
+	by the call that opens the window; re-armed when found missing). The window length is part of
+	the key so a changed limit never inherits an old counter."""
+	return f"optimus:ratelimit:{action}:{window}:{user}"
+
+
+def ai_refresh_inflight(session_uuid: str) -> str:
+	"""Per-session single-flight flag for Refresh AI suggestions (``api.refill_ai_suggestions``).
+	Value: the running refresh's random token (raw string). Taken with ``SET NX EX`` before the
+	refresh counts itself or calls the provider, so a second refresh of the same session is
+	refused while it runs; released in a ``finally`` only while Redis still holds that token.
+	TTL: the longest one refresh can run (``api._refresh_flight_ttl``), so the flag of a killed
+	worker clears itself."""
+	return f"optimus:ai_refresh:{session_uuid}"
+
+
 # ---------------------------------------------------------------------------
 # KEY_PATTERNS used by the audit test + REDIS-SCHEMA.md drift check
 # ---------------------------------------------------------------------------
@@ -262,6 +290,7 @@ KEY_PATTERNS: tuple[str, ...] = (
 	"profiler:sidecar:<recording_uuid>",
 	"profiler:infra:<recording_uuid>",
 	"profiler:resolved_doc:<recording_uuid>",
+	"profiler:lock_events:<recording_uuid>",
 	"profiler:frontend:<session_uuid>:xhr",
 	"profiler:frontend:<session_uuid>:vitals",
 	"profiler:frontend:<session_uuid>",
@@ -276,4 +305,6 @@ KEY_PATTERNS: tuple[str, ...] = (
 	"optimus:retention_backlog",
 	"optimus_settings_cached",
 	"optimus:schema_version",
+	"optimus:ratelimit:<action>:<window>:<user>",
+	"optimus:ai_refresh:<session_uuid>",
 )
