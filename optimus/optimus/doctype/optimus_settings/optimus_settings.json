@@ -303,7 +303,7 @@
   {
    "fieldname": "sensitivity_description",
    "fieldtype": "HTML",
-   "options": "<p class=\"text-muted small\">Pick a preset to set every tunable threshold across Optimus in one move analyzer thresholds (the original nine), capture knobs (max queries / sampler interval / background-job wait), retention, display filters, Phase-2 defaults and the AI auto-suggest cap. <b>Strict</b> catches more (more findings, more noise) and keeps data longer; <b>Relaxed</b> catches less and prunes faster; <b>Recommended</b> is the shipped default and automatically tracks future tuning. Choose <b>Custom</b> to edit the individual fields yourself they stay locked under the named presets.</p>"
+   "options": "<p class=\"text-muted small\">Pick a preset to set every tunable threshold across Optimus in one move analyzer thresholds (the original nine), capture knobs (max queries / sampler interval / background-job wait), retention, display filters, line profiling defaults and the AI auto-suggest cap. <b>Strict</b> catches more (more findings, more noise) and keeps data longer; <b>Relaxed</b> catches less and prunes faster; <b>Recommended</b> is the shipped default and automatically tracks future tuning. Choose <b>Custom</b> to edit the individual fields yourself they stay locked under the named presets.</p>"
   },
   {
    "default": "Recommended",
@@ -406,7 +406,7 @@
   },
   {
    "default": "50",
-   "description": "For Phase 2 line profiling: a single line is flagged as High severity when it uses at least this percentage of its function's total time and also at least the minimum milliseconds below. The default is 50% with a 100ms minimum. Reference values: Strict: 35  ·  Recommended: 50  ·  Relaxed: 70.",
+   "description": "For line profiling: a single line is flagged as High severity when it uses at least this percentage of its function's total time and also at least the minimum milliseconds below. The default is 50% with a 100ms minimum. Reference values: Strict: 35  ·  Recommended: 50  ·  Relaxed: 70.",
    "fieldname": "hot_line_high_pct",
    "fieldtype": "Float",
    "label": "Hot Line High Severity (% of function time)",
@@ -415,7 +415,7 @@
   },
   {
    "default": "100",
-   "description": "The smallest absolute time a single line must take to be flagged as High severity in Phase 2 line profiling. Reference values: Strict: 50  ·  Recommended: 100  ·  Relaxed: 250.",
+   "description": "The smallest absolute time a single line must take to be flagged as High severity in line profiling. Reference values: Strict: 50  ·  Recommended: 100  ·  Relaxed: 250.",
    "fieldname": "hot_line_high_min_ms",
    "fieldtype": "Float",
    "label": "Hot Line High Severity Min (ms)",
@@ -425,28 +425,28 @@
   {
    "fieldname": "phase2_section",
    "fieldtype": "Section Break",
-   "label": "Phase 2 Defaults"
+   "label": "Line Profiling Defaults"
   },
   {
    "fieldname": "phase2_description",
    "fieldtype": "HTML",
-   "options": "<p class=\"text-muted small\">Defaults for the phase-2 line-profile pass. The picker dialog still lets the user override these per run.</p>"
+   "options": "<p class=\"text-muted small\">Defaults for the line profiling pass. The picker dialog still lets the user override these per run.</p>"
   },
   {
    "default": "10",
-   "description": "Each session keeps at most this many Phase 2 runs in full. Once there are more, the oldest run's full results are moved to a private file and only its summary row stays on the record. Set it to 0 for no limit, but keep an eye on record size for heavy users. Reference values: Strict: 0  ·  Recommended: 10  ·  Relaxed: 5.",
+   "description": "Each session keeps at most this many line profiling runs in full. Once there are more, the oldest run's full results are moved to a private file and only its summary row stays on the record. Set it to 0 for no limit, but keep an eye on record size for heavy users. Reference values: Strict: 0  ·  Recommended: 10  ·  Relaxed: 5.",
    "fieldname": "phase2_max_runs_per_session",
    "fieldtype": "Int",
-   "label": "Phase 2: Max Runs per Session",
+   "label": "Line Profiling: Max Runs per Session",
    "non_negative": 1,
    "read_only_depends_on": "eval:doc.config_profile != \"Custom\""
   },
   {
    "default": "1",
-   "description": "When ticked, the 'Auto-expand hot chain' box in the picker starts already checked. Auto-expand follows each suggested pick down the Phase 1 call tree so the whole hot chain gets profiled in one go.",
+   "description": "When ticked, the 'Auto-expand hot chain' box in the picker starts already checked. Auto-expand follows each suggested pick down the profile's call tree so the whole hot chain gets profiled in one go.",
    "fieldname": "phase2_default_auto_expand",
    "fieldtype": "Check",
-   "label": "Phase 2: Default Auto-Expand Hot Chain"
+   "label": "Line Profiling: Default Auto-Expand Hot Chain"
   },
   {
    "fieldname": "column_break_phase2",
@@ -613,7 +613,7 @@
   {
    "default": "1",
    "depends_on": "eval:doc.ai_enabled",
-   "description": "After profiling is saved as Ready, queue the finding fixes and/or captured Steps selected above. This uses provider tokens and requires a background worker. Turning off stops further queued or running automatic work; an already dispatched call may still finish. If Phase 2 is armed, its completion can start this work. When off, request AI through Refresh AI suggestions.",
+   "description": "After profiling is saved as Ready, queue the finding fixes and/or captured Steps selected above. This uses provider tokens and requires a background worker. Turning off stops further queued or running automatic work; an already dispatched call may still finish. If line profiling is armed, its completion can start this work. When off, request AI through Refresh AI suggestions.",
    "fieldname": "ai_auto_suggest",
    "fieldtype": "Check",
    "label": "Run AI suggestions automatically after profiling"
@@ -685,7 +685,7 @@
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-10-29 12:00:00.000000",
+ "modified": "2026-10-31 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Optimus",
  "name": "Optimus Settings",

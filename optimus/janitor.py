@@ -53,7 +53,7 @@ def sweep_stale_sessions():
 	except Exception:
 		frappe.log_error(title="optimus janitor sweep_stale_stopping")
 
-	# v0.6.0: phase-2 line-profile runs follow the same staleness model
+	# v0.6.0: line-profile runs follow the same staleness model
 	# but live on the Optimus Phase Two Run child rows. Reuses the same
 	# thresholds (recording → 11min, analyzing → 30min).
 	try:
@@ -484,4 +484,4 @@ def _sweep_stale_phase2_runs():
 				if changed and status == "Recording":
 					_lp_capture.cleanup_run(row["run_uuid"])
 			from optimus.analyze import _run_ai_step
-			_run_ai_step(expire, title="optimus ai stale phase 2 recovery", docname=row["parent"])
+			_run_ai_step(expire, title="optimus ai stale line profiling recovery", docname=row["parent"])

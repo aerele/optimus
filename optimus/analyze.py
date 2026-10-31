@@ -715,7 +715,7 @@ def _auto_arm_phase2(docname: str, context) -> None:
 		failure = context = None
 		raise guard.interrupt()
 	if failure is not None:
-		log_ai_failure("optimus ai auto-arm phase 2", failure)
+		log_ai_failure("optimus ai auto-arm line profiling", failure)
 
 
 def _arm_phase2(docname: str, context) -> None:
@@ -2143,7 +2143,7 @@ def _persist(
 # v0.7.x: per-action analyzers can emit the same (code-path) finding
 # once per action that exercises it. A recording with N actions
 # touching the same hot function used to produce N near-identical
-# cards (same drill-down, same Phase 2 callout, same AI fix). We
+# cards (same drill-down, same line profiling callout, same AI fix). We
 # collapse them into a single card here.
 _DEDUPE_FINDING_TYPES = frozenset({
 	"Slow Hot Path",
@@ -2438,7 +2438,7 @@ def ai_payload_for_finding(
 	(an ``Optimus Finding`` child row or a ``SimpleNamespace`` shaped like one).
 
 	It's the renderer's normalized finding dict plus a wider source-code window
-	around the callsite, plus (when a Phase-2 pass instrumented the finding's
+	around the callsite, plus (when a line profiling pass instrumented the finding's
 	function) its hottest line via ``phase2_index``
 	(``{(basename, function): hotline}``). When ``recordings_by_uuid`` +
 	``actions_by_idx`` are given and the finding has an ``action_ref``, the top-N
@@ -2469,7 +2469,7 @@ def ai_payload_for_finding(
 
 		base = fname.replace("\\", "/").rsplit("/", 1)[-1]
 		script = extract_script_name(fname)
-		# A stored Phase 2 snapshot must not restore source denied by the renderer.
+		# A stored line profiling snapshot must not restore source denied by the renderer.
 		allowed = not script or get_server_script_record(script, cache=file_cache) is not None
 		hot = phase2_index.get((base, fn)) if allowed else None
 		if isinstance(hot, dict) and hot.get("lineno") is not None:
@@ -2636,7 +2636,7 @@ def phase2_index_for(doc_or_docname) -> dict:
 			doc = frappe.get_doc("Optimus Session", doc)
 		return renderer._build_line_drilldown_callsite_index(doc) or {}
 
-	index, _failed = _run_ai_step(_build, title="optimus ai phase 2 context", docname=docname)
+	index, _failed = _run_ai_step(_build, title="optimus ai line profiling context", docname=docname)
 	return index or {}
 
 
@@ -2773,7 +2773,7 @@ def _keep_session_counters(doc) -> None:
 	read with ``for_update=True`` (``check_if_latest``, Frappe v15 and v16), so no increment can
 	land between that read and the write. The Optimus Session controller calls this from
 	``before_validate``, which runs on every save (``ignore_validate`` included), so every save
-	path keeps them: analyze, Phase 2, the Desk form. A new document keeps its own values."""
+	path keeps them: analyze, line profiling, the Desk form. A new document keeps its own values."""
 	previous = doc.get_doc_before_save()
 	if previous is None:
 		return

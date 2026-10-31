@@ -9,9 +9,9 @@ without contacting a provider.
 The Desk form shows progress, cancellation, reported usage and uncertainty.
 Manual refresh selects missing, incomplete and outdated suggestions by default. Cut-off answers stay eligible for a later manual retry, but never repeat within the same run or during an automatic missing-only refresh. The
 confirmation shows the selected count and how many are incomplete; replacing current suggestions requires
-an explicit checkbox. Refresh and an active Phase 2 pass exclude one another.
-Auto-armed Phase 2 therefore takes precedence over automatic AI, with an
-admission notice on the session. Normal Phase 2 completion attempts automatic missing-only AI admission after saving results and report work; manual Refresh AI remains available.
+an explicit checkbox. Refresh and an active line profiling pass exclude one another.
+Auto-armed line profiling therefore takes precedence over automatic AI, with an
+admission notice on the session. Normal line profiling completion attempts automatic missing-only AI admission after saving results and report work; manual Refresh AI remains available.
 
 This is part of a staged integration. Recording/provider/source/privacy
 hardening is included in this stack; final deployment and model acceptance
@@ -47,8 +47,8 @@ its session, and a run of another session is treated as missing.
 Admission avoids range locks on journal runs, and beginning an attempt inserts
 without a locking read of its missing key. Other locking reads by key can still
 take a gap lock on MariaDB when a journal row is missing. The worker's recheck reads
-the session's Phase 2 rows with a `FOR UPDATE` by filter. On MariaDB that locks
-a range of that child table's parent index, so another session's Phase 2
+the session's line profiling rows with a `FOR UPDATE` by filter. On MariaDB that locks
+a range of that child table's parent index, so another session's line profiling
 insert can wait until this short transaction ends.
 
 Admission locks the session row first. When another writer holds that row for
@@ -162,11 +162,11 @@ There is no inline fallback.
 ## Failure, cancellation and recovery
 
 Runs move through queued/running to complete, stopped, cancelled or interrupted.
-The worker rechecks the requester, session readiness, Phase 2 activity and
+The worker rechecks the requester, session readiness, line profiling activity and
 input signature before sending and before saving. A changed or deleted input
 cannot receive a stale answer. A fix answer is guarded by the finding's own
 fingerprint and the Finding row lock, so an unrelated save of the session
-during the call (a Desk edit, a counter, a Phase 2 save) does not discard it;
+during the call (a Desk edit, a counter, a line profiling save) does not discard it;
 the Steps answer rewrites the session's notes, so any save of the session since
 it was prepared makes it stale. Reported usage from a late answer is still
 accounted once, even when cancellation prevents saving the answer.
@@ -237,10 +237,10 @@ reservation attaches without a second refresh count. An expired reservation is
 recovered by the next admission or the scheduler; its unknown call is never
 repeated automatically.
 
-AI and Phase 2 serialize through the Session row. Both admissions change the
+AI and line profiling serialize through the Session row. Both admissions change the
 parent, including automatic AI with no refresh-count increment, so PostgreSQL
 rejects an older snapshot before it can miss an opposing admission. Both AI scopes
-also lock the site capacity row with NOWAIT after their Session. Phase 2 does not
+also lock the site capacity row with NOWAIT after their Session. Line profiling does not
 hold the site mutex while waiting for a session.
 
 ## Selection, grounding and the Error Log
@@ -248,7 +248,7 @@ hold the site mutex while waiting for a session.
 The run keeps the selection's `gated` and `excluded` counts
 (`AiSelection.gated` and `.excluded`, #71's two Refresh toasts), taken once at
 admission, and progress returns them. A background fix prompt gets the same
-grounding as the report analysis: the Phase 2 hottest-line index and the
+grounding as the report analysis: the line profiling hottest-line index and the
 Slow Query index evidence. Both are built once per slice, not once per finding;
 a failure of either is logged once with the session and the slice goes on
 without it.
@@ -282,11 +282,11 @@ What state each title leaves the run in, and what to do, is in "Operating the
 engine".
 
 The session counters keep #72's `optimus ai spend` and `optimus ai refresh count`,
-and a Phase 2 index failure keeps `optimus ai phase 2 context`.
+and a line profiling index failure keeps `optimus ai line profiling context`.
 
 ## Configuration and deployment
 
-Normal Frappe migration installs the journal schema, Phase 2 queue fields and
+Normal Frappe migration installs the journal schema, line profiling queue fields and
 admission mutex. Fresh installation and every migration seed the same mutex. A post-model-sync
 patch gives previously saved Settings a manual refresh cap of 20 when the
 field was absent; an explicitly saved zero remains unlimited. Deploy code and
@@ -329,9 +329,9 @@ deadline comes first.
 Invalid configuration is rejected. A custom queue needs a listening worker.
 Keep the scheduler enabled: minute recovery sweeps expire lost leases and
 redeliver committed queue intents. The scheduler does not replace a worker.
-Phase 2 additionally requires a worker on `long`, even when AI uses a custom
+Line profiling additionally requires a worker on `long`, even when AI uses a custom
 queue. Disabling the scheduler or losing all workers delays recovery; it never
-enables synchronous AI or Phase 2 analysis in a web request.
+enables synchronous AI or line profiling analysis in a web request.
 
 Optimus Settings exposes **Maximum findings per AI refresh** (20 by default; zero is
 unlimited within the job deadline) separately from **Max auto-suggested findings per session**.
@@ -420,7 +420,7 @@ Use the attempt epochs to locate the call in the provider's usage page;
 | **Incomplete usage**: `usage_incomplete` above 0 on the run, `usage_complete` 0 on an attempt | The provider's usage was missing, contradictory or unknown for that call, so the reported tokens may undercount. | Do not trust the run's token total for those attempts; compare with the provider's bill. |
 | **Busy**: a click answers `{"status": "refused", "reason": "busy"}` | Another transaction holds the session row for a whole lock wait (the server's `innodb_lock_wait_timeout` on MariaDB; on Postgres 30 seconds at most, or a stricter `lock_timeout` setting), or another admission holds the site mutex. Nothing was started or counted. | Try again. If it stays busy, look for a long or dead transaction on that Optimus Session row (`SHOW PROCESSLIST` on MariaDB, `pg_stat_activity` on Postgres). |
 | **Already running**: a click answers `{"status": "already_running", ...}` | The session has a live run; the answer carries its progress. | Nothing: the click attached to it. |
-| **Refused**: `disabled`, `no_worker`, `queue_unavailable`, `not_ready`, `permission`, `phase2`, `site_cap`, `user_cap`, `not_resumable`, `already_resumed`, `retry_limit` | `disabled`: AI is off. `no_worker`: no worker listens on the queue. `queue_unavailable`: Redis could not say. `not_ready`: the session is not Ready. `permission`: the requester has no access to the session. `phase2`: a Phase 2 run is in progress. `site_cap`, `user_cap`: the site, or this requester, already has as many live user refreshes as the cap allows. A live run is `queued` or `running` with its lease and deadline not passed, so a dead worker holds its slot only until its lease or deadline expires. The last three refuse a resume. | Fix the cause named; none of them counts or bills. An error naming a site setting that is not a valid whole number raises instead of answering (see Configuration). |
+| **Refused**: `disabled`, `no_worker`, `queue_unavailable`, `not_ready`, `permission`, `phase2`, `site_cap`, `user_cap`, `not_resumable`, `already_resumed`, `retry_limit` | `disabled`: AI is off. `no_worker`: no worker listens on the queue. `queue_unavailable`: Redis could not say. `not_ready`: the session is not Ready. `permission`: the requester has no access to the session. `phase2`: a line profiling run is in progress. `site_cap`, `user_cap`: the site, or this requester, already has as many live user refreshes as the cap allows. A live run is `queued` or `running` with its lease and deadline not passed, so a dead worker holds its slot only until its lease or deadline expires. The last three refuse a resume. | Fix the cause named; none of them counts or bills. An error naming a site setting that is not a valid whole number raises instead of answering (see Configuration). |
 | **Journal unavailable**: the error `AI refresh storage is not initialized` | The admission mutex row is missing (a rollback, or a failed install). A user refresh fails closed. | Run the repair command below. |
 | **Inconsistent**: the error `Refresh journal ... is inconsistent` | A run's reservation or attempt row disagrees with the run. | Use the administrator cancellation command below: it releases the run, treats an open call as uncertain with unknown usage, and writes one `optimus ai refresh release` row. A takeover or the sweep does the same for an expired run. |
 
@@ -440,7 +440,7 @@ bench --site <site> execute optimus.ai_jobs.cancel_refresh --kwargs '{"run_id":"
 | Column | Values |
 | --- | --- |
 | Run `state` | `queued`, `running`, then `complete`, `stopped`, `cancelled` or `interrupted`. Only `queued` and `running` reserve the session; an expired reservation can be taken over. |
-| Run `end_reason` | `complete`; `uncertain` (nothing left but uncertain items); `breaker` (see `breaker_kind`); `deadline` (the total time was spent); `no_progress` (three slices in a row began no item); `disabled` (AI switched off mid-run); `not_ready`, `permission`, `phase2` (the session, the requester's access or a Phase 2 run changed); `history_limit` (more than 10000 attempts to weigh); `cancelled`; `lease_expired` and `deadline` (a run interrupted by a takeover or the sweep); `worker_interrupted` (the worker failed and its cleanup ended the run). |
+| Run `end_reason` | `complete`; `uncertain` (nothing left but uncertain items); `breaker` (see `breaker_kind`); `deadline` (the total time was spent); `no_progress` (three slices in a row began no item); `disabled` (AI switched off mid-run); `not_ready`, `permission`, `phase2` (the session, the requester's access or a line profiling run changed); `history_limit` (more than 10000 attempts to weigh); `cancelled`; `lease_expired` and `deadline` (a run interrupted by a takeover or the sweep); `worker_interrupted` (the worker failed and its cleanup ended the run). |
 | Run `breaker_kind` | The failure kind that stopped the run: `auth`, `quota`, `not_found` or `config` at once, or the kind of the third failure in a row (for example `rate_limited`, `timeout`, `server`, `transport`). `context` and `refused` never set it. |
 | Run `cancelled_by` | The user id (normally the email) that cancelled; empty otherwise. |
 | Attempt `state` | `calling`, then `succeeded`, `failed`, `skipped`, `uncertain` or `discarded`. `error_kind` is the failure kind (`not_eligible` or `deadline` for a skipped item). |
@@ -460,7 +460,7 @@ bench --site <site> execute optimus.ai_jobs.cancel_refresh --kwargs '{"run_id":"
 | `optimus ai refresh selection`, `optimus ai refresh evidence` | Going on | The counts were zero, or the prompts went without index advice. |
 | `optimus ai refresh discarded`, `optimus ai refresh duplicate blocked` | Logging does not change state; a discarded late reply can belong to a terminal run | See the signals below. |
 | `optimus ai refresh uncertain` | The attempt named by `attempt` became `uncertain`; a later known reply can settle it. The run normally becomes `cancelled` or `interrupted`; if worker cleanup failed, it can remain `running` until recovery | Check the provider's usage page for the call's window: its tokens may be missing from the run. A new refresh skips the item while its input is unchanged (see Uncertain above). |
-| `optimus ai refresh ended` | `interrupted`, or `stopped` with the row's `reason` | `interrupted`: see Stuck and Expired above; a run can be resumed once. `no_progress`: three slices in a row could begin no item, because its input changed before each send or the journal refused the send (a `duplicate blocked` row); `history_limit`: more than 10000 attempts to weigh; `disabled`: AI was switched off; `phase2`, `permission`: a Phase 2 run started or the requester lost access. Fix the cause, then refresh again. |
+| `optimus ai refresh ended` | `interrupted`, or `stopped` with the row's `reason` | `interrupted`: see Stuck and Expired above; a run can be resumed once. `no_progress`: three slices in a row could begin no item, because its input changed before each send or the journal refused the send (a `duplicate blocked` row); `history_limit`: more than 10000 attempts to weigh; `disabled`: AI was switched off; `phase2`, `permission`: a line profiling run started or the requester lost access. Fix the cause, then refresh again. |
 
 ### The release-blocking signals
 
@@ -481,7 +481,7 @@ session), `run_id`, and `attempt` and `kind` where there is one.
   not saved. `reason=fenced`: the worker no longer owns the run (cancelled,
   interrupted, or its lease or deadline passed). `reason=session_changed`: the
   session left Ready. `reason=input_changed`: the finding, or the session for a
-  Steps answer, changed during the call, or the requester lost access, or a Phase 2 run
+  Steps answer, changed during the call, or the requester lost access, or a line profiling run
   started. `reason=settled`: the attempt already
   had an outcome. The tokens are still counted, except for a `fenced` reply whose run or
   attempt row is missing or belongs to another worker. That cannot happen
@@ -649,9 +649,9 @@ Retry Analyze atomically fences optional workers before resetting a Failed
 session to Stopping; late AI usage can still be accounted without saving a
 stale answer.
 
-## Phase 2 delivery
+## Line profiling delivery
 
-Stopping or retrying Phase 2 queues analysis on `long`. The response reports
+Stopping or retrying line profiling queues analysis on `long`. The response reports
 `Analyzing` and `ran_inline: false`; a disabled scheduler never selects inline
 compute. New analysis requires a worker listening on `long`; missing or unknown
 worker availability refuses admission. A stopped Recording run becomes Failed
@@ -678,7 +678,7 @@ repeating analysis. Old queued deliveries are adopted only while their row is
 Analyzing and has no new generation. Replace old workers during deployment;
 an already-running old process does not gain the new ownership checks.
 
-Phase 2 admission bounds PostgreSQL row waits and refuses a busy request without
+Line profiling admission bounds PostgreSQL row waits and refuses a busy request without
 retrying that wait. Dispatch and expiry scans use NOWAIT, leaving a busy row for
 the next pass. A refused or attached request leaves the session timestamp alone.
 After an ordinary result-commit error, the worker reads back its exact generation

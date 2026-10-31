@@ -1,12 +1,12 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Phase-2 (line-profile) hook callbacks, registered alongside the phase-1
-callbacks in ``hooks_callbacks.py``. Phase-1 and phase-2 are mutually
+"""Line-profile hook callbacks, registered alongside the phase-1
+callbacks in ``hooks_callbacks.py``. Phase-1 and line profiling are mutually
 exclusive per user (separate Redis flags; the API rejects starting one
 while the other is active).
 
-Each request/job running while phase-2 is active for the user gets a fresh
+Each request/job running while line profiling is active for the user gets a fresh
 ``LineProfiler`` with the run's picked functions, ``enable_by_count()``
 before the body and ``disable()`` + per-line stats RPUSH'd to Redis after.
 No SQL recording, pyinstrument or sidecar wraps: only line-level timings.
@@ -53,7 +53,7 @@ def _cancel_watchdog() -> None:
 
 @capture._interrupt_boundary
 def before_request_line_profile(*args, **kwargs) -> None:
-	"""If phase-2 is active for this user, build a per-request LineProfiler
+	"""If line profiling is active for this user, build a per-request LineProfiler
 	and enable it. Returns silently otherwise.
 
 	Best-effort: any exception is swallowed and logged so the host request
@@ -118,7 +118,7 @@ def before_request_line_profile(*args, **kwargs) -> None:
 		if registered and not ready:
 			_discard_failed_start(profiler)
 	if failure is not None:
-		_log_capture_failure("phase 2 before_request failed", failure)
+		_log_capture_failure("line profiling before_request failed", failure)
 
 
 @capture._interrupt_boundary
@@ -135,7 +135,7 @@ def after_request_line_profile(*args, **kwargs) -> None:
 	frappe.local._lp_active = None  # invalidate the per-request is_active cache
 	failure = _finish_capture(profiler, run_uuid)
 	if failure is not None:
-		_log_capture_failure("phase 2 after_request failed", failure)
+		_log_capture_failure("line profiling after_request failed", failure)
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +145,7 @@ def after_request_line_profile(*args, **kwargs) -> None:
 
 @capture._interrupt_boundary
 def before_job_line_profile(method=None, kwargs=None, **rest) -> None:
-	"""Phase-2 equivalent of ``hooks_callbacks.before_job``. Reads
+	"""Line profiling equivalent of ``hooks_callbacks.before_job``. Reads
 	``_lp_session_id`` injected by the extended enqueue patch.
 
 	WARNING: ``_lp_session_id`` is popped from the job's kwargs dict
@@ -215,12 +215,12 @@ def before_job_line_profile(method=None, kwargs=None, **rest) -> None:
 		if registered and not ready:
 			_discard_failed_start(profiler)
 	if failure is not None:
-		_log_capture_failure("phase 2 before_job failed", failure)
+		_log_capture_failure("line profiling before_job failed", failure)
 
 
 @capture._interrupt_boundary
 def after_job_line_profile(method=None, kwargs=None, result=None, **rest) -> None:
-	"""Phase-2 equivalent of ``hooks_callbacks.after_job``. Same as
+	"""Line profiling equivalent of ``hooks_callbacks.after_job``. Same as
 	``after_request_line_profile`` but called from the job lifecycle.
 	Signature mirrors phase-1's ``hooks_callbacks.after_job``.
 	"""
@@ -231,7 +231,7 @@ def after_job_line_profile(method=None, kwargs=None, result=None, **rest) -> Non
 	frappe.local._lp_active = None
 	failure = _finish_capture(profiler, run_uuid)
 	if failure is not None:
-		_log_capture_failure("phase 2 after_job failed", failure)
+		_log_capture_failure("line profiling after_job failed", failure)
 
 
 def _log_capture_failure(title, failure):
@@ -290,7 +290,7 @@ def _finish_capture(profiler, run_uuid, *, flush=True):
 			try:
 				with guard:
 					if not detached:
-						raise RuntimeError("Phase 2 profiler could not be detached")
+						raise RuntimeError("Line profiling profiler could not be detached")
 					samples = capture.serialize_stats(profiler)
 					capture.flush_samples(run_uuid, samples)
 			except Exception as exc:

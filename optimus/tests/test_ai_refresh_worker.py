@@ -854,7 +854,7 @@ def test_a_run_that_ends_normally_writes_no_ended_row(worker, monkeypatch, reaso
 @pytest.mark.parametrize("reason", ["permission", "phase2", "not_ready"])
 def test_a_run_whose_send_intent_finds_it_must_stop_ends_without_a_call(worker, monkeypatch, reason):
 	"""The item's input changed, and the send-intent transaction's recheck finds the run must
-	stop (access lost, a Phase 2 run started, the session left Ready): the run ends with that
+	stop (access lost, a line profiling run started, the session left Ready): the run ends with that
 	reason, before any call, instead of yielding to try again."""
 	worker.valid = False
 

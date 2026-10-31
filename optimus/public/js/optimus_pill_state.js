@@ -60,14 +60,14 @@
 	function terminalLabel(kind, phase2, pending, empty) {
 		if (kind === "ready") {
 			if (phase2 && pending) {
-				return "Phase 2 results saved";
+				return "Line profiling results saved";
 			}
 			if (empty) {
 				return "No data";
 			}
-			return phase2 ? "Phase 2 report ready" : "Report ready";
+			return phase2 ? "Line profiling report ready" : "Report ready";
 		}
-		return phase2 ? "Phase 2 failed" : "Analyze failed";
+		return phase2 ? "Line profiling failed" : "Analyze failed";
 	}
 
 	function withState(state, patch) {
@@ -112,10 +112,10 @@
 			ui: { display: "ready", label: terminalLabel(kind, phase2, pending, !!data.empty), elapsed: "click to view", tone: failed ? "failed" : null },
 			alert: already ? null : {
 				message: failed
-					? (phase2 ? (data.error ? "Phase 2 analyze failed: {0}" : "Phase 2 analyze failed, open the session for details") : "Profiler analyze failed, check Error Log")
-					: (pending ? "Phase 2 results saved. Use Regenerate Reports to update the report."
+					? (phase2 ? (data.error ? "Line profiling analyze failed: {0}" : "Line profiling analyze failed, open the session for details") : "Profiler analyze failed, check Error Log")
+					: (pending ? "Line profiling results saved. Use Regenerate Reports to update the report."
 						: (data.empty ? "Profiling finished, but no requests were recorded"
-							: (phase2 ? "Phase 2 line-profile report ready" : "Profiler report ready"))),
+							: (phase2 ? "Line profiling report ready" : "Profiler report ready"))),
 				args: failed && phase2 && data.error ? [data.error] : undefined,
 				indicator: failed ? "red" : (pending || data.empty ? "orange" : "blue"),
 			},
@@ -148,7 +148,7 @@
 			docname: data.docname || state.docname,
 			run_uuid: spec.phase2 ? (data.run_uuid || state.run_uuid) : state.run_uuid,
 		});
-		const label = spec.phase2 ? "Phase 2 analyzing…" : "Analyzing…";
+		const label = spec.phase2 ? "Line profiling analyzing…" : "Analyzing…";
 		return { state: next, ui: { display: "analyzing", label: label, elapsed: spec.phase2 ? "" : "0%" }, alert: null };
 	}
 
@@ -193,7 +193,7 @@
 				display: "analyzing", phase2: phase2, session_uuid: srv.session_uuid,
 				docname: srv.docname, run_uuid: phase2 ? srv.run_uuid : state.run_uuid,
 			}),
-			ui: { display: "analyzing", label: phase2 ? "Phase 2 analyzing…" : "Analyzing…", elapsed: "" },
+			ui: { display: "analyzing", label: phase2 ? "Line profiling analyzing…" : "Analyzing…", elapsed: "" },
 			alert: null,
 		};
 	}

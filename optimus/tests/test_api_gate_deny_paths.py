@@ -4,7 +4,7 @@
 """Deny-path spies for every gated endpoint (PR-1).
 
 For each endpoint in GATED_ENDPOINTS and each denied caller shape, the call must raise
-PermissionError and leave no trace: no LLM, analyze, PDF or Phase 2 module touched (tripwired),
+PermissionError and leave no trace: no LLM, analyze, PDF or line profiling module touched (tripwired),
 no enqueue, no set_value or sql, no get_doc, no commit and no rate-limit count.
 """
 

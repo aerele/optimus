@@ -89,7 +89,7 @@ def admission_message(reason, *, queue=None):
 		"queue_unavailable": _("The background queue is unavailable. Try again after it recovers."),
 		"busy": _("The session is busy. Wait a moment and try again."),
 		"not_running": _("This refresh has already ended. Reload its current progress."),
-		"phase2": _("Wait for the active Phase 2 run to finish."),
+		"phase2": _("Wait for the active line profiling run to finish."),
 		"disabled": _("AI suggestions are disabled or the provider is not configured."),
 		"not_ready": _("The session must be Ready before AI suggestions can run."),
 		"permission": _("The requesting user can no longer update this session."),

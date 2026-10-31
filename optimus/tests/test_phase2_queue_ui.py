@@ -1,4 +1,4 @@
-"""Phase 2 UI reports queue admission, bounds batches, and preserves dirty forms."""
+"""Line profiling UI reports queue admission, bounds batches, and preserves dirty forms."""
 
 import shutil
 import subprocess
@@ -34,7 +34,7 @@ assert.equal(reloads,0,"queue acknowledgement must keep edits made during the re
 assert.match(alerts[0].message,/queued/i);
 assert.doesNotMatch(alerts[0].message,/finished|Ready/);
 dirty=false;
-const single=[...buttons].find(([name])=>name.startsWith("Retry Phase 2 Analyze"))[1];
+const single=[...buttons].find(([name])=>name.startsWith("Retry Line Profiling Analyze"))[1];
 single();calls.shift().callback({message:{status:"Analyzing"}});
 assert.match(alerts.at(-1).message,/queued/i);
 assert.equal(alerts.at(-1).indicator,"blue");
@@ -50,7 +50,7 @@ assert.equal(alerts[beforeAlerts].indicator,"orange");
 assert.equal(reloads,beforeReloads,"pending report notice must preserve dirty content");
 dirty=false;
 events.get("phase_2_run_ready")({session_uuid:"fake-session",render_pending:false});
-assert.equal(alerts.at(-1).message,"Phase 2 report ready");
+assert.equal(alerts.at(-1).message,"Line profiling report ready");
 assert.equal(alerts.at(-1).indicator,"green");
 assert.equal(reloads,beforeReloads+1);
 batch();calls.shift().callback({message:{tallies:{Analyzing:0,Refused:5}}});

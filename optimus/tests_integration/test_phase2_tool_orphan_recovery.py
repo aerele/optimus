@@ -4,7 +4,7 @@
 """Real-bench integration test for ``_startup_probe_tool2`` recovery.
 
 On Python 3.12+ line_profiler drives the process-global ``sys.monitoring``
-PROFILER_ID (tool 2). A botched Phase-2 teardown can leave tool 2's LINE events
+PROFILER_ID (tool 2). A botched line profiling teardown can leave tool 2's LINE events
 registered process-wide, so every subsequent request in that worker line-traces
 (CPU peg + frozen UI) until a bench restart. ``_startup_probe_tool2()`` recovers
 at app-import by reclaiming tool 2 when it was leaked by line_profiler.
@@ -67,7 +67,7 @@ class TestPhase2ToolOrphanRecovery(FrappeTestCase):
 				pass
 
 	def _leak_as_line_profiler(self) -> None:
-		"""Simulate the post-leak state of a dead Phase-2 worker:
+		"""Simulate the post-leak state of a dead line profiling worker:
 		tool 2 registered as ``line_profiler`` with LINE events on,
 		exactly what a botched ``LineProfiler.disable()`` leaves
 		behind."""
@@ -89,7 +89,7 @@ class TestPhase2ToolOrphanRecovery(FrappeTestCase):
 	# --- The tests ----------------------------------------------------
 
 	def test_probe_reclaims_leaked_line_profiler_tool_2_on_simulated_worker_respawn(self):
-		"""The canary. Simulate the post-Phase-2-death state (tool 2
+		"""The canary. Simulate the post-crash state (tool 2
 		owned by 'line_profiler' with LINE events on), then call the
 		startup probe. The probe must reclaim the tool and reset its
 		events to 0."""
@@ -115,7 +115,7 @@ class TestPhase2ToolOrphanRecovery(FrappeTestCase):
 	def test_probe_is_noop_when_tool_2_is_already_free(self):
 		"""Happy path. Tool 2 is unowned; the probe is a silent no-op.
 		Catches a regression where the probe accidentally registers
-		itself as the owner (which would block legitimate Phase-2 runs
+		itself as the owner (which would block legitimate line profiling runs
 		from claiming the slot)."""
 		# Confirm the precondition.
 		assert sys.monitoring.get_tool(_PID) is None

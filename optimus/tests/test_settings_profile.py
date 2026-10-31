@@ -43,7 +43,7 @@ _REFVAL_RE = re.compile(
 # Kept here (not imported) so the test pins the contract independently
 # of the implementation's own tuple. v0.13.x expanded the set from 9
 # detection-sensitivity knobs to 19 including capture caps,
-# retention, display filters, Phase-2 UI knobs and the AI auto-suggest
+# retention, display filters, line profiling UI knobs and the AI auto-suggest
 # cap so the UI's "Reference values" promise is honored everywhere
 # it's advertised.
 SENSITIVITY_KEYS = (
@@ -66,7 +66,7 @@ SENSITIVITY_KEYS = (
 	"slow_hot_path_min_ms",
 	"hot_line_high_pct",
 	"hot_line_high_min_ms",
-	# Phase-2 UI knobs
+	# Line profiling UI knobs
 	"phase2_max_runs_per_session",
 	"auto_expand_max_depth",
 	"auto_expand_min_ms",
@@ -124,7 +124,7 @@ class TestProfileTable:
 	# For RESOURCE / RETENTION knobs the rule inverts "higher = stricter
 	# data preservation" Strict's number is at-or-above Relaxed's. A
 	# Strict deployment keeps sessions for 90 days vs Relaxed's 7,
-	# captures 5000 queries per recording vs 1000, allows 25 Phase-2 runs
+	# captures 5000 queries per recording vs 1000, allows 25 line profiling runs
 	# per session vs 5, etc. Stricter monitoring → more data.
 	#
 	# Categorize each key so the sanity check enforces the right ordering

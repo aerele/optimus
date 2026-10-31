@@ -175,7 +175,7 @@ def admit(
 ):
 	"""Reserve a session within the shared site cap and the manual-requester cap.
 
-	Caller checks permissions, provider configuration, Phase 2 and workers before admission,
+	Caller checks permissions, provider configuration, line profiling and workers before admission,
 	and starts a fresh transaction (``ai_jobs._retry_sql``). No queue call happens here.
 
 	Lock order (Q4): the session row first, then the site mutex with NOWAIT;
@@ -253,7 +253,7 @@ def admit(
 		)
 	# The run being resumed belongs to this session, so its row is locked after the session.
 	previous = _read(RUN, resume_from, lock=True) if resume_from else None
-	# Phase 2 writers also hold and change the parent. Read these rows before
+	# Line profiling writers also hold and change the parent. Read these rows before
 	# opening the plain-read snapshot used for capacity and resume checks.
 	if frappe.db.get_values(
 		"Optimus Phase Two Run", {"parent": docname, "status": ["in", ["Recording", "Analyzing"]]},
@@ -422,7 +422,7 @@ def release_expired_reservation(docname, *, now):
 
 
 def lock_phase2_parent(docname, *, now, allow_failed=False):
-	"""Serialize Phase 2 admission with AI through the parent row.
+	"""Serialize line profiling admission with AI through the parent row.
 
 	Every accepted admission's writer updates this row before committing, fencing
 	older PostgreSQL snapshots. Refusals do not change it. The active-run probe is
@@ -855,7 +855,7 @@ def prepare_analyze_retry(docname, session_uuid, *, requested_by, now, stopped_c
 			stopped_captures.append((child["run_uuid"], child.get("recording_user") or parent.get("user")))
 		frappe.db.set_value("Optimus Phase Two Run", child["name"], {
 			"status": "Failed", "analyze_dispatch_pending": 0,
-			"warnings_json": '["Phase 2 stopped because profiling analysis was restarted."]',
+			"warnings_json": '["Line profiling stopped because profiling analysis was restarted."]',
 		}, update_modified=False)
 	frappe.db.set_value("Optimus Session", docname, {"status": "Stopping", "analyzer_warnings": None})
 	return True

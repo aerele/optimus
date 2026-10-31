@@ -1580,7 +1580,7 @@ def test_a_dispatch_is_never_sent_once_the_queued_lease_or_the_deadline_passed(
 
 @pytest.mark.parametrize("status", ["Analyzing", "Recording", "Failed"])
 def test_no_transition_of_a_worker_runs_while_its_session_is_not_ready(journal, status):
-	"""A session that left Ready (a new analyze, a Phase 2 recording, a failure): no slice is
+	"""A session that left Ready (a new analyze, a line profiling recording, a failure): no slice is
 	claimed, no call is begun and no progress is published."""
 	session = journal.db.rows["Optimus Session"]["fake-session-doc"]
 	session["status"] = status

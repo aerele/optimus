@@ -358,7 +358,7 @@
 			// v0.6.0: phase-2 recording uses a different stop API and a
 			// different active-flag in Redis. Route the click accordingly
 			// confirmAndStop calls api.stop which only knows about
-			// phase-1's flag and would no-op silently for phase 2.
+			// phase-1's flag and would no-op silently for line profiling.
 			if (currentState.phase2 && currentState.run_uuid) {
 				stopPhase2();
 			} else {
@@ -385,14 +385,14 @@
 		// Optimistic UI: the realtime phase_2_run_analyzing event will
 		// arrive within ~1s and confirm the transition.
 		currentState.display = "stopping";
-		setDisplay("stopping", "Stopping phase 2…", "");
+		setDisplay("stopping", "Stopping line profiling…", "");
 		frappe.call({
 			method: "optimus.api.stop_line_profile_pass",
 			args: { run_uuid: run_uuid },
 			callback: () => {
 				frappe.show_alert({
 					message: __(
-						"Phase 2 stopped analyzing now. Open the session to see the line-level report when it's ready."
+						"Line profiling stopped analyzing now. Open the session to see the line-level report when it's ready."
 					),
 					indicator: "blue",
 				});
@@ -400,7 +400,7 @@
 			error: () => {
 				// The stop may have landed server-side; resync after reverting.
 				currentState.display = "recording";
-				setDisplay("recording", "Phase 2 recording…", "click form to stop");
+				setDisplay("recording", "Line profiling recording…", "click form to stop");
 				refreshStatus();
 			},
 		});
@@ -950,10 +950,10 @@
 
 		// v0.6.0: phase-2 line-profile events. Widget reflects the same
 		// state-machine slots as phase-1 (recording → analyzing → ready),
-		// but the labels are prefixed with "Phase 2" so the user knows
-		// which mode is running. Phase 2 is started/stopped from the
+		// but the labels are prefixed with "Line profiling" so the user knows
+		// which mode is running. Line profiling is started/stopped from the
 		// Optimus Session form, not the floating widget clicking the
-		// widget while Phase 2 is recording still means "stop" via the
+		// widget while line profiling is recording still means "stop" via the
 		// existing Stop API path (api.stop_line_profile_pass), which the
 		// form's history list reflects after refresh.
 		frappe.realtime.on("phase_2_run_recording", (data) => {
@@ -964,7 +964,7 @@
 			currentState.session_uuid = data.session_uuid;
 			setDisplay(
 				"recording",
-				"Phase 2 recording…",
+				"Line profiling recording…",
 				"click pill or form to stop"
 			);
 		});

@@ -65,7 +65,7 @@ Tested on **Frappe v16** with MariaDB and Redis. The app declares `required_apps
 
 After install, an **Optimus User** role is created automatically. All existing System Managers are granted this role and new System Managers get it automatically via a `User.validate` hook.
 
-> **After every upgrade:** run `bench restart` so the new sign / verify code loads. Sessions captured **before** the restart have null call trees on their actions their Phase-2 picker dialog opens with a yellow "No curated functions available" callout pointing this out. Capture a fresh session after the restart for a working picker.
+> **After every upgrade:** run `bench restart` so the new sign / verify code loads. Sessions captured **before** the restart have null call trees on their actions their line profiling picker dialog opens with a yellow "No curated functions available" callout pointing this out. Capture a fresh session after the restart for a working picker.
 
 ---
 
@@ -144,7 +144,7 @@ read-only sections:
      saved AI suggestions are kept as they are. For new or updated
      suggestions use **AI > Refresh AI suggestions** (Ready sessions,
      with AI enabled).
-   - **Phase 2 → Line Profile**: opens the picker dialog (see
+   - **Line Profiling → Run Line-Profile Pass**: opens the picker dialog (see
      below).
    - **Pin as Baseline** / **Unpin Baseline**: see _Baseline
      comparison_ below.
@@ -168,35 +168,35 @@ Both reports render from the same `templates/report.html` and the same
 persisted data Safe mode is a renderer-time redaction pass, not a
 separate capture.
 
-### Phase 2: Line profiling
+### Line profiling
 
-The default capture (Phase 1) tells you _which functions_ are hot. Phase
-2 tells you _which lines inside those functions_ are hot. Use it when
-Phase 1 surfaces a hot path and you can't tell from reading the function
+The default capture (the normal profile) tells you _which functions_ are hot. Line
+profiling tells you _which lines inside those functions_ are hot. Use it when
+the normal profile surfaces a hot path and you can't tell from reading the function
 which line is doing the work.
 
 Workflow:
 
-1. Open a Ready session, click **Phase 2 → Line Profile**.
-2. The picker dialog shows curated candidates from Phase 1's call tree.
+1. Open a Ready session, click **Line Profiling → Run Line-Profile Pass**.
+2. The picker dialog shows curated candidates from the profile's call tree.
    Functions consuming ≥ 50 ms are pre-ticked as `recommended`.
 3. **Auto-expand hot chain** (ticked by default) walks each pick down
    the call tree to instrument the full chain, not just the entry
    frame.
-4. Click **Start Phase 2**: the widget switches back to recording mode.
-5. Re-execute the same flow you profiled in Phase 1.
-6. Click Stop. Phase 2 analyze runs; the report adds a **Line-Level
+4. Click **Run Line-Profile Pass**: the widget switches back to recording mode.
+5. Re-execute the same flow you profiled in the normal profile.
+6. Click Stop. Line profiling analyze runs; the report adds a **Line-Level
    Drilldown** section with per-line hit-count and time.
 
-Phase 2 has a per-request overhead budget (default 10s; tunable via
+Line profiling has a per-request overhead budget (default 10s; tunable via
 `optimus_phase2_overhead_budget_seconds` in site_config). If the budget
 expires mid-request, line profiling disengages so the request finishes
 at natural speed and the run is flagged "partial data". This stops a
 hot-loop pick from freezing the UI.
 
-Phase 2 does not ask the AI for fixes for its new Hot Line findings; run
+Line profiling does not ask the AI for fixes for its new Hot Line findings; run
 **AI > Refresh AI suggestions** on the Ready session to fill them in. If
-the report re-render after a Phase 2 run fails, the run stays Ready with
+the report re-render after a line profiling run fails, the run stays Ready with
 a warning; use **Regenerate Reports**.
 
 ### AI fix suggestions (optional)
@@ -571,7 +571,7 @@ or analyzed.
 
 | Field | Default | Purpose |
 |---|---|---|
-| **Sensitivity Profile** | `Recommended` | One-knob preset for the 9 detection thresholds below. **Strict** catches more (lower thresholds, more findings, more noise). **Relaxed** catches less. **Recommended** is the shipped default and automatically tracks future tuning across upgrades. **Custom** lets you hand-tune the individual fields they stay locked under the named presets. Display filters, Phase-2, capture, retention and AI settings are **not** affected by the profile. |
+| **Sensitivity Profile** | `Recommended` | One-knob preset for the 9 detection thresholds below. **Strict** catches more (lower thresholds, more findings, more noise). **Relaxed** catches less. **Recommended** is the shipped default and automatically tracks future tuning across upgrades. **Custom** lets you hand-tune the individual fields they stay locked under the named presets. Display filters, line profiling, capture, retention and AI settings are **not** affected by the profile. |
 
 #### Analyzer Thresholds section
 
@@ -596,18 +596,18 @@ sites with strict latency budgets want lower numbers.
 | **Slow Query Threshold (ms)** | `200` | A single query slower than this is flagged as a Slow Query finding. _Strict 100 · Recommended 200 · Relaxed 500._ |
 | **Slow Hot Path Threshold (% of action wall time)** | `25` | A Python subtree consuming ≥ this % AND ≥ the min-ms below qualifies. _Strict 15 · Recommended 25 · Relaxed 40._ |
 | **Slow Hot Path Minimum (ms)** | `200` | Absolute minimum for Slow Hot Path. _Strict 100 · Recommended 200 · Relaxed 500._ |
-| **Hot Line High Severity (% of function time)** | `50` | Phase 2: a single line consuming ≥ this % of the function's total AND ≥ the min-ms below is High. _Strict 35 · Recommended 50 · Relaxed 70._ |
-| **Hot Line High Severity Min (ms)** | `100` | Phase 2 Hot Line absolute minimum for High. _Strict 50 · Recommended 100 · Relaxed 250._ |
+| **Hot Line High Severity (% of function time)** | `50` | Line profiling: a single line consuming ≥ this % of the function's total AND ≥ the min-ms below is High. _Strict 35 · Recommended 50 · Relaxed 70._ |
+| **Hot Line High Severity Min (ms)** | `100` | Line profiling Hot Line absolute minimum for High. _Strict 50 · Recommended 100 · Relaxed 250._ |
 
-#### Phase 2 Defaults section
+#### Line Profiling Defaults section
 
 Defaults for the line-profile picker dialog. The dialog still lets the
 user override these per run.
 
 | Field | Default | Purpose |
 |---|---|---|
-| **Max Runs per Session** | `10` | Cap on how many Phase 2 runs are retained per Optimus Session. When exceeded, the oldest run's full results are archived to a private `File` and only row metadata is kept. _Strict 25 · Recommended 10 · Relaxed 5._ |
-| **Default Auto-Expand Hot Chain** | ✓ on | When on, the picker dialog's `Auto-expand hot chain` checkbox starts ticked. Auto-expansion walks each pick down phase-1's call tree to instrument the full hot chain in one shot. |
+| **Max Runs per Session** | `10` | Cap on how many line profiling runs are retained per Optimus Session. When exceeded, the oldest run's full results are archived to a private `File` and only row metadata is kept. _Strict 25 · Recommended 10 · Relaxed 5._ |
+| **Default Auto-Expand Hot Chain** | ✓ on | When on, the picker dialog's `Auto-expand hot chain` checkbox starts ticked. Auto-expansion walks each pick down the profile's call tree to instrument the full hot chain in one shot. |
 | **Auto-Expand: Max Depth** | `10` | How many levels deep auto-expand will follow. _Strict 15 · Recommended 10 · Relaxed 5._ |
 | **Auto-Expand: Minimum Child Time (ms)** | `50` | Auto-expand stops descending when the next-hottest child consumes less than this. Lower = follow deeper into smaller hot spots. _Strict 25 · Recommended 50 · Relaxed 100._ |
 
@@ -694,12 +694,12 @@ as pre-DocType fallbacks. The DocType row wins if both are set.
 | `optimus_enrich_throttle_every` | `0` | Sleep every N enriched queries during analyze (for EXPLAIN). `0` = no throttle (default). Raise to e.g. `200` on shared MariaDB instances where back-to-back EXPLAINs cause noisy-neighbor issues. |
 | `optimus_enrich_throttle_sleep_ms` | `5` | Sleep length when the throttle above fires. |
 
-### Phase 2
+### Line profiling
 
 | Key | Default | Purpose |
 |---|---|---|
 | `optimus_phase2_overhead_budget_seconds` | `10` | Per-request line-profile overhead budget. On expiry, line tracing disengages and the run is flagged "partial data". Stops a hot-loop pick from freezing the UI. `0` = unbounded (NOT recommended on production). |
-| `optimus_phase2_auto_arm` | `False` | When set, after each Ready session the analyze pipeline auto-arms a Phase 2 pass on the recommended hot paths. Opt-in + admin-only by design (the next user-flow gets instrumented automatically). |
+| `optimus_phase2_auto_arm` | `False` | When set, after each Ready session the analyze pipeline auto-arms a line profiling pass on the recommended hot paths. Opt-in + admin-only by design (the next user-flow gets instrumented automatically). |
 
 ### Security / signing
 
