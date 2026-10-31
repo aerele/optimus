@@ -334,7 +334,21 @@
   table.queries-flat-table col.col-idx      { width: 44px; }
   table.queries-flat-table col.col-num      { width: 110px; }
   table.queries-flat-table col.col-copies   { width: 60px; }
-  table.queries-flat-table col.col-callsite { width: 34%; }
+  table.queries-flat-table col.col-function { width: 16%; }
+  table.queries-flat-table col.col-callsite { width: 28%; }
+  /* One line with an ellipsis; the full name stays in the text and title. */
+  table.queries-flat-table td.fn-cell code {
+    display: block;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    /* Room below the baseline so overflow:hidden doesn't clip underscores. */
+    line-height: 1.5;
+    padding-bottom: 2px;
+  }
+  @media print {
+    table.queries-flat-table td.fn-cell code { white-space: normal; overflow-wrap: anywhere; }
+  }
 
   /* Tight horizontal padding for the # column so 1-3 digit row
      indexes fit inside the narrow col-idx without wrapping. The
@@ -905,7 +919,7 @@
      Editorial card: paper white background, 1px rule border, 6px
      radius. Severity colour moves from a left rail to a small pill
      in the top-left. Title is serif 18px. Impact is large red serif
-     pushed to the right. Body holds the smoking-gun + call chain +
+     pushed to the right. Body holds the smoking-gun + drill-down +
      fix box. The old `.finding-header` / `.severity-badge` /
      `.smoking-gun` / `.ai-fix` rules above are orphaned but left in
      place - clean up in a later phase. */
@@ -1895,7 +1909,7 @@
    when there is a descent (more than one row) so a lone root is never
    reddened. Named for its .chain-tree output, distinct from the separate
    call_tree_renderer that builds the .call-tree panel. Shared by the
-   Drill-down and Call chain blocks so every finding card reads the same way. #}
+   two Drill-down blocks so every finding card reads the same way. #}
 {% macro chain_tree(rows) %}
 <div class="chain-tree">
   {% for row in rows %}
@@ -1984,7 +1998,14 @@
         {# The scope tag is analyzer-declared: a finding whose estimated_impact_ms
            is not the session-wide total sets detail.impact_scope_label (e.g. N+1 →
            "recoverable"). Everything else falls back to "consolidated". #}
+        {# No ms to reclaim (Lock Contention): show the wait instead of "0ms". #}
+        {% if f.estimated_impact_ms %}
         <span class="big">{{ fmt_ms(f.estimated_impact_ms) }}</span><small class="scope-tag">{{ detail.impact_scope_label or "consolidated" }}</small>
+        {% elif detail.total_wait_ms %}
+        <span class="big">{{ fmt_ms(detail.total_wait_ms) }}</span><small class="scope-tag">waited</small>
+        {% else %}
+        <small class="scope-tag">reliability issue</small>
+        {% endif %}
         {% if f.affected_count and f.affected_count > 1 %}
         {% set _per_hit_ms = f.estimated_impact_ms / f.affected_count %}
         <div class="small">{{ f.affected_count }}× hits{% if _per_hit_ms >= 0.05 %} &middot; {{ fmt_ms(_per_hit_ms, 1) }}<small class="scope-tag">per hit</small>{% endif %}</div>
@@ -2060,15 +2081,20 @@
         {% endif %}
       {% endif %}
 
-      {# Call chain (Phase 2 instrumented chain). Nested-call tree, terminal red. #}
-      {% set _phase2_chain = (f.technical_detail or {}).get("call_chain") if f.technical_detail else None %}
-      {% if _phase2_chain and _phase2_chain | length > 1 %}
-      <div class="chain">
-        <div class="chain-label">Call chain</div>
-        {% set _cc_rows = [] %}
-        {% for step in _phase2_chain %}{% set _ = _cc_rows.append(step.qualname ~ (":" ~ step.lineno if step.lineno else "")) %}{% endfor %}
-        {{ chain_tree(_cc_rows) }}
-        <div class="chain-foot">deepest line is where the cost is incurred</div>
+      {# Phase-2 recheck of this phase-1 finding (see line_profile/recheck.py). #}
+      {% set _rc = (f.technical_detail or {}).get("phase2_recheck") if f.technical_detail else None %}
+      {% if _rc and f.finding_type != "Hot Line" %}
+      <div class="phase2-line">
+        <strong>Line-Level Recheck:</strong>
+        {% if _rc.status == "not_rechecked" %}
+        not rechecked, {{ {"not_profiled": "this function was not line-profiled", "ambiguous": "several profiled functions share this name", "not_exercised": "the profiled function did not run", "no_callsite": "the finding has no function location", "no_function": "the finding names a file and line but no function", "cap": "too many findings to recheck"}.get(_rc.reason, "no line evidence") }}.
+        {% else %}
+        {% set _rc_basis = fmt_ms(_rc.function_total_ms) ~ " measured vs " ~ fmt_ms(_rc.phase1_impact_ms) ~ " estimated" %}
+        {{ {"confirmed": "confirmed (" ~ _rc_basis ~ ")", "downgraded": "downgraded from " ~ _rc.phase1_severity ~ " to " ~ f.severity ~ " (" ~ _rc_basis ~ ")", "measured": "measured " ~ fmt_ms(_rc.function_total_ms) ~ ", not comparable with the estimate, severity unchanged"}.get(_rc.status, _rc.status) }}.
+        {% if _rc.hot_line and _rc.hot_line.lineno is not none and not p2_hot %}
+        Hottest line {{ _rc.hot_line.lineno }}, {{ fmt_ms(_rc.hot_line.total_ms) }} / {{ _rc.hot_line.hits }} hit{{ "s" if _rc.hot_line.hits != 1 else "" }}{% if _rc.hot_line.content %}: <code>{{ _rc.hot_line.content | trim }}</code>{% endif %}
+        {% endif %}
+        {% endif %}
       </div>
       {% endif %}
 
@@ -2084,7 +2110,22 @@
       </div>
       {% endif %}
 
-      {# Drill-down chain. Renders as a nested-call tree ending in red
+      {# Drill-down from the line-profiling run (data key call_chain). Nested-call
+         tree, terminal red. When the sampled drill-down below also renders, this
+         block owns the single "Drill-down" heading and that one drops its label. #}
+      {% set _phase2_chain = (f.technical_detail or {}).get("call_chain") if f.technical_detail else None %}
+      {% set _show_p2_chain = _phase2_chain and _phase2_chain | length > 1 %}
+      {% if _show_p2_chain %}
+      <div class="chain">
+        <div class="chain-label">Drill-down</div>
+        {% set _cc_rows = [] %}
+        {% for step in _phase2_chain %}{% set _ = _cc_rows.append(step.qualname ~ (":" ~ step.lineno if step.lineno else "")) %}{% endfor %}
+        {{ chain_tree(_cc_rows) }}
+        <div class="chain-foot">deepest line is where the cost is incurred</div>
+      </div>
+      {% endif %}
+
+      {# Sampled drill-down chain. Renders as a nested-call tree ending in red
          (terminal = deepest user-code frame). A finding that sits at a leaf
          user frame has no descent, so it falls back to its ancestry (the
          nested call path that leads to it); only a truly top-level leaf keeps
@@ -2094,7 +2135,7 @@
       {% set _drill_root_fn = callsite.original_wrapper.function if callsite.original_wrapper else callsite.function %}
       {% if _drilldown %}
       <div class="chain">
-        <div class="chain-label">Drill-down</div>
+        {% if not _show_p2_chain %}<div class="chain-label">Drill-down</div>{% endif %}
         {% set _dd_rows = [_drill_root_fn] %}
         {% for level in _drilldown %}{% set _ = _dd_rows.append(level.function ~ (":" ~ level.lineno if level.lineno else "")) %}{% endfor %}
         {{ chain_tree(_dd_rows) }}
@@ -2102,7 +2143,7 @@
       </div>
       {% elif _drill_ancestry %}
       <div class="chain">
-        <div class="chain-label">Drill-down</div>
+        {% if not _show_p2_chain %}<div class="chain-label">Drill-down</div>{% endif %}
         {% set _an_rows = [] %}
         {% for level in _drill_ancestry %}{% set _ = _an_rows.append(level.function ~ (":" ~ level.lineno if level.lineno else "")) %}{% endfor %}
         {{ chain_tree(_an_rows) }}
@@ -2110,7 +2151,7 @@
       </div>
       {% elif _drilldown is not none %}
       <div class="chain">
-        <div class="chain-label">Drill-down</div>
+        {% if not _show_p2_chain %}<div class="chain-label">Drill-down</div>{% endif %}
         <div class="chain-foot">no deeper user-code frame - <code>{{ _drill_root_fn }}</code> calls framework code directly. Check the N+1 Query or related findings for inner-loop details.</div>
       </div>
       {% endif %}
@@ -2373,7 +2414,7 @@
 
 {% macro bg_status_badge(status) %}
   {%- set _s = status or "Running" -%}
-  {%- set _cls = {"Completed": "ok", "Failed": "fail", "Timeout": "warn", "Running": "info", "Started": "info", "Stopped": "mute", "Queued": "mute"}.get(_s, "mute") -%}
+  {%- set _cls = {"Completed": "ok", "Failed": "fail", "Timeout": "warn", "Running": "info", "Started": "info", "Stopped": "warn", "Queued": "mute"}.get(_s, "mute") -%}
   <span class="job-status job-status-{{ _cls }}">{{ _s }}</span>
 {%- endmacro %}
 
@@ -2391,6 +2432,9 @@
         <div class="action-meta">
           {% if _cs._abs %}<a href="vscode://file{{ _cs._abs }}:{{ _cs.lineno }}" title="Open in VS Code / Cursor">{{ _cs.filename }}:{{ _cs.lineno }}</a>{% else %}{{ _cs.filename }}:{{ _cs.lineno }}{% endif %}{% if _cs.function %} &middot; {{ _cs.function }}{% endif %}
         </div>
+      {% endif %}
+      {% if job.triggered_by %}
+        <div class="action-meta">Triggered by {{ job.triggered_by.label }}</div>
       {% endif %}
     </td>
     <td>{{ bg_status_badge(job.status) }}</td>
@@ -2420,6 +2464,7 @@
       <div class="small" style="margin: 0 0 8px;">
         {{ bg_status_badge(job.status) }}
         {% if job.error %}<code style="color: var(--accent); margin-left: 6px; word-break: break-word;">{{ job.error }}</code>{% endif %}
+        {% if job.status in ("Queued", "Running") %}<span class="muted" style="margin-left: 6px;">Still {{ job.status | lower }} when this report was prepared. Regenerate the report later to see its result.</span>{% endif %}
       </div>
       {% endif %}
       {# v0.7.x: mirror the action_row trim - drop the entry-callsite
@@ -3411,7 +3456,7 @@
   {% if report_data.hot_frames or report_data.hot_frames_framework %}
   <section class="section">
     <a id="hot-frames"></a>{# v0.7.x Phase I.1: mock-spec ID anchor #}
-    <h2>Hot frames (top {{ (report_data.hot_frames | length) + (report_data.hot_frames_framework | length) }})</h2>
+    <h2>Hot frames</h2>
     {% if report_data.frame_truncation and report_data.frame_truncation.actions_affected > 0 %}
     <div class="warning-banner" style="background:#fff3cd; border-left:4px solid #f0ad4e; padding:10px 14px; margin:8px 0 14px; border-radius:4px;">
       <p class="small" style="margin:0;">
@@ -3427,6 +3472,7 @@
     </div>
     {% endif %}
     {% if report_data.hot_frames %}
+    <h3 class="hot-frames-group-title" id="hot-frames-app">Your app's code ({{ report_data.hot_frames | length }})</h3>
     <table class="data hot-frames-table">
       <thead>
         <tr>
@@ -3446,6 +3492,7 @@
       <p class="small muted">No hot frames in your own app's code - all frames ran in framework code. Expand the block below to see what.</p>
     {% endif %}
     {% if report_data.hot_frames_framework %}
+    <h3 class="hot-frames-group-title" id="hot-frames-framework">Framework code</h3>
     <details class="subsection">
       <summary class="small muted"><strong>{{ report_data.hot_frames_framework | length }}</strong> framework frame{{ "s" if report_data.hot_frames_framework | length != 1 else "" }} (click to expand) - <code>frappe</code>, <code>erpnext</code> and friends; the developer can't easily patch these</summary>
       <p class="small muted" style="margin: 6px 0 8px; font-style: italic;">
@@ -3566,6 +3613,7 @@
         <col class="col-action">
         <col class="col-num">
         <col class="col-copies">
+        <col class="col-function">
         <col class="col-callsite">
       </colgroup>
       <thead>
@@ -3574,6 +3622,7 @@
           <th>Action</th>
           <th class="num">Duration <small class="scope-tag">per hit</small></th>
           <th class="num">Copies</th>
+          <th>Function</th>
           <th>Callsite</th>
         </tr>
       </thead>
@@ -3584,6 +3633,7 @@
           <td>{{ r.action }}</td>
           <td class="num">{{ fmt_ms(r.duration, 1) }}</td>
           <td class="num">{% if r.copies and r.copies > 1 %}{{ r.copies }}×{% endif %}</td>
+          <td class="fn-cell">{% if r.function %}<code class="small" title="{{ r.function }}">{{ r.function }}</code>{% else %}<span class="muted">&mdash;</span>{% endif %}</td>
           <td>{% if r.callsite %}<code class="small">{{ r.callsite }}</code>{% endif %}</td>
         </tr>
       {% endfor %}

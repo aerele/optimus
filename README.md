@@ -303,6 +303,7 @@ v0.5.1 emits 18 finding types across 10 analyzers. Every finding has a severity 
 | **Temporary Table** | `EXPLAIN.Extra` contains "Using temporary" | Query + recommendation |
 | **Low Filter Ratio** | `EXPLAIN.filtered < 10%` AND `rows > 100` | Query + *"WHERE clause selectivity is low"* |
 | **Missing Index** | `DBOptimizer` suggests an index AND the column exists AND is not already indexed AND is btree-compatible (v0.5.1 verifies against `information_schema` before emitting) | Table, column, verified DDL (with prefix length for TEXT/BLOB), example queries |
+| **Lock Contention** | A query failed with a deadlock or lock-wait timeout at a callsite in your own code (Frappe-handled errors and `NOWAIT` probes are skipped) | Callsite, the failed queries, time waited, *"keep transactions short, lock rows in a consistent order"* |
 
 ### Python call tree (4 types: v0.3.0)
 
@@ -362,7 +363,7 @@ Deliberately minimal. **Only one non-Frappe dependency is declared** in `pyproje
 |---|---|
 | **`frappe.recorder`** | Frappe's built-in SQL recorder. Captures every query + Python stack during a request. We reuse it unchanged for SQL capture; session tracking and analyze pipeline live on top. |
 | **[`sqlparse`](https://pypi.org/project/sqlparse/)** | SQL tokenizer / pretty-printer. Formats queries in the Raw report and normalizes whitespace for the **Top Queries** leaderboard. |
-| **[`sql_metadata`](https://pypi.org/project/sql-metadata/)** | SQL parser used only by `index_suggestions.py` to extract WHERE/JOIN columns for the **Missing Index** finding's suggested DDL. Parser limitations are caught and downgraded to Analyzer Notes warnings never a hard failure. |
+| **[`sql_metadata`](https://pypi.org/project/sql-metadata/)** | SQL parser used by `index_suggestions.py` to extract WHERE/JOIN columns for the **Missing Index** finding's suggested DDL, and by the table breakdown and index-recipe code. Parser limitations are caught and downgraded to Analyzer Notes warnings never a hard failure. |
 | **[`psutil`](https://pypi.org/project/psutil/)** | CPU %, worker RSS, load average, swap. Powers the **Server Resource** panel + **Memory Pressure** / **Resource Contention** findings. |
 | **[`rq`](https://pypi.org/project/rq/)** | Redis Queue reads queue depth (default/short/long) for the **Background Queue Backlog** finding. |
 | **`redis`** (via `frappe.cache`) | Storage of recordings, sidecar argument logs, pyinstrument session pickles. |

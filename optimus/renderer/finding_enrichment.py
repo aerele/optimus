@@ -22,6 +22,9 @@ import re
 # renderer doesn't drag an analyzer import into hot paths.
 _GROUPING_SEVERITY_RANK = {"High": 0, "Medium": 1, "Low": 2}
 
+# No measured ms, so they must outrank timed findings within a severity.
+_RELIABILITY_FINDING_TYPES = frozenset({"Lock Contention"})
+
 
 def _action_ref_key(value) -> str:
 	"""Match persisted action indices, including zero; never guess malformed refs."""
@@ -155,8 +158,8 @@ def _group_findings_by_root_cause(findings: list[dict]) -> list[dict]:
 	"""Collapse findings sharing a ``(file, function)`` root-cause anchor into
 	one primary card, the rest attached as ``sub_findings``.
 
-	Returns a NEW list: the primary per group (chosen by severity then
-	``estimated_impact_ms``, higher wins) with sorted ``sub_findings``
+	Returns a NEW list: the primary per group (chosen by severity, then
+	reliability findings first, then ``estimated_impact_ms``, higher wins) with sorted ``sub_findings``
 	attached, grouped non-primaries dropped, ungrouped findings passed through
 	as-is.
 	"""
@@ -165,8 +168,9 @@ def _group_findings_by_root_cause(findings: list[dict]) -> list[dict]:
 
 	def _rank(f: dict) -> tuple:
 		sev_rank = _GROUPING_SEVERITY_RANK.get(f.get("severity") or "Low", 2)
+		timed = f.get("finding_type") not in _RELIABILITY_FINDING_TYPES
 		impact = -(f.get("estimated_impact_ms") or 0)
-		return (sev_rank, impact)
+		return (sev_rank, timed, impact)
 
 	# Bucket by root-cause key. None-key findings stream through as
 	# singletons (no grouping).

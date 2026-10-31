@@ -33,6 +33,7 @@ ALLOWED_ROLES = {"System Manager", "Optimus User", "Administrator"}
 _AI_LIMITS: dict[str, dict[str, int]] = {
 	"refill_ai_suggestions": {"limit": 6, "seconds": 3600},
 	"test_ai_connection": {"limit": 10, "seconds": 60},
+	"check_cli_session": {"limit": 10, "seconds": 60},
 }
 _ACTION_LIMITS: dict[str, dict[str, int]] = {
 	"start": {"limit": 10, "seconds": 60},
@@ -228,6 +229,18 @@ def _ai_unavailable_message(section: str | None) -> str:
 		)
 	if section == "humanize":
 		return _('AI-written "Steps to Reproduce" is turned off. Turn it on under Optimus Settings ▸ AI.')
+	from optimus import ai_fix
+	from optimus.settings import get_config
+
+	if not getattr(get_config(), "ai_enabled", False):
+		# The Connect button is hidden while AI is off, so "click Connect" would mislead.
+		return _("Enable AI fix suggestions under Optimus Settings ▸ AI.")
+	if ai_fix.subscription_mode_active():
+		return _(
+			"Codex CLI isn't ready. Ask a System Manager to open Optimus Settings, click "
+			"Connect, and make sure developer_mode and optimus_allow_subscription_cli are set "
+			"in the site config."
+		)
 	return _(
 		"AI suggestions aren't configured. Turn them on under Optimus Settings ▸ AI and set a "
 		"provider, a model and, if the provider needs one, an API key."
@@ -419,8 +432,9 @@ def stop() -> dict:
 
 	Returns a dict with ``stopped``, ``session_uuid``, ``docname``,
 	``ran_inline`` and, only when ran_inline is True, the final ``status``
-	(``Ready`` or ``Failed``). The widget uses ran_inline + status to pick its
-	terminal state (Analyzing / Report ready / Analyze failed).
+	(``Ready`` or ``Failed``) and ``empty`` (a Ready session with no recorded
+	requests). The widget uses ran_inline + status + empty to pick its
+	terminal state (Analyzing / Report ready / No data / Analyze failed).
 	"""
 	user = _require_profiler_user()
 	active = session.get_active_session_for(user)
@@ -437,11 +451,13 @@ def stop() -> dict:
 	# inline analyze would show "Report ready" to the user despite the
 	# session being marked Failed server-side.
 	final_status = None
+	empty = False
 	if ran_inline and docname:
 		try:
-			final_status = frappe.db.get_value(
-				"Optimus Session", docname, "status"
+			final_status, total_requests = frappe.db.get_value(
+				"Optimus Session", docname, ["status", "total_requests"]
 			)
+			empty = final_status == "Ready" and not total_requests
 		except Exception:
 			final_status = None
 
@@ -451,6 +467,7 @@ def stop() -> dict:
 		"docname": docname,
 		"ran_inline": ran_inline,
 		"status": final_status,
+		"empty": empty,
 	}
 
 
@@ -709,6 +726,106 @@ def status() -> dict:
 		"label": meta.get("label"),
 		"started_at": meta.get("started_at"),
 	}
+
+
+# Older in-flight sessions are treated as dead and not shown on reload.
+_PILL_RESYNC_WINDOW_MINUTES = 60
+_PILL_TRANSIENT_STATUSES = ("Stopping", "Capturing Background Jobs", "Analyzing")
+
+
+@frappe.whitelist()
+def pill_state(session_uuid: str | None = None, run_uuid: str | None = None) -> dict:
+	"""State of the caller's own tracked session (or latest in-flight analyze) for the pill."""
+	user = _require_profiler_user()
+	if not all(isinstance(v, str) or v is None for v in (session_uuid, run_uuid)):
+		frappe.throw(_("Invalid session reference"), frappe.ValidationError)
+	active = session.get_active_session_for(user)
+	# A tracked session other than the active one is looked up exactly.
+	if active and (not session_uuid or session_uuid == active):
+		meta = session.get_session_meta(active) or {}
+		return {
+			"phase": "recording",
+			"scope": "session",
+			"session_uuid": active,
+			"docname": meta.get("docname"),
+			"label": meta.get("label"),
+			"started_at": meta.get("started_at"),
+		}
+	if session_uuid:
+		return _pill_state_for(user, session_uuid, run_uuid)
+	return _pill_state_in_flight(user)
+
+
+def _pill_state_for(user: str, session_uuid: str, run_uuid: str | None) -> dict:
+	row = frappe.get_all(
+		"Optimus Session",
+		filters={"session_uuid": session_uuid, "user": user},
+		fields=["name", "status"],
+		limit=1,
+	)
+	if not row:
+		return {"phase": "idle"}
+	docname, status = row[0]["name"], row[0]["status"]
+	if not run_uuid:
+		return _pill_payload("session", session_uuid, docname, status)
+	run = frappe.get_all(
+		"Optimus Phase Two Run",
+		filters={"parent": docname, "parenttype": "Optimus Session", "run_uuid": run_uuid},
+		fields=["status"],
+		limit=1,
+	)
+	if not run:
+		return {"phase": "idle"}
+	return _pill_payload("phase2", session_uuid, docname, run[0]["status"], run_uuid)
+
+
+def _pill_state_in_flight(user: str) -> dict:
+	"""Latest own session still analyzing, else an own phase-2 run still analyzing."""
+	cutoff = add_to_date(now_datetime(), minutes=-_PILL_RESYNC_WINDOW_MINUTES)
+	rows = frappe.get_all(
+		"Optimus Session",
+		filters={"user": user, "modified": [">", cutoff]},
+		fields=["name", "session_uuid", "status"],
+		order_by="modified desc",
+		limit=20,
+	)
+	if not rows:
+		return {"phase": "idle"}
+	for row in rows:
+		if row["status"] in _PILL_TRANSIENT_STATUSES:
+			return _pill_payload("session", row["session_uuid"], row["name"], row["status"])
+	runs = frappe.get_all(
+		"Optimus Phase Two Run",
+		filters={
+			"parenttype": "Optimus Session",
+			"parent": ["in", [r["name"] for r in rows]],
+			"status": "Analyzing",
+		},
+		fields=["parent", "run_uuid"],
+		limit=1,
+	)
+	if not runs:
+		return {"phase": "idle"}
+	parent = next(r for r in rows if r["name"] == runs[0]["parent"])
+	return _pill_payload(
+		"phase2", parent["session_uuid"], parent["name"], "Analyzing", runs[0]["run_uuid"]
+	)
+
+
+def _pill_payload(scope: str, session_uuid, docname, status, run_uuid=None) -> dict:
+	if status == "Ready":
+		phase = "ready"
+	elif status == "Failed":
+		phase = "failed"
+	elif status == "Recording":
+		# The pill tracks analyze only, not phase-2 recording.
+		phase = "idle"
+	else:
+		phase = "analyzing"
+	out = {"phase": phase, "scope": scope, "session_uuid": session_uuid, "docname": docname}
+	if run_uuid:
+		out["run_uuid"] = run_uuid
+	return out
 
 
 @frappe.whitelist()
@@ -1392,22 +1509,46 @@ def regenerate_reports(session_uuid: str) -> dict:
 	}
 
 
+def _require_system_manager(denied_message: str) -> str:
+	"""The profiler user, after refusing anyone who is not a System Manager (or
+	Administrator) with ``denied_message``. Optimus Settings itself is System-Manager-only."""
+	user = _require_profiler_user()
+	if "System Manager" not in set(frappe.get_roles(user)) and user != "Administrator":
+		frappe.throw(denied_message, frappe.PermissionError, title=_("Optimus"))
+	return user
+
+
 @frappe.whitelist(methods=["POST"])
 def test_ai_connection() -> dict:
 	"""Probe the configured AI provider. System-Manager-only (Optimus Settings itself is
 	System-Manager-only) and limited per user. Returns ``{"ok": bool, "message": str,
 	"model": str}``; never raises on a provider failure (the detail is in ``message``)."""
-	user = _require_profiler_user()
-	if "System Manager" not in set(frappe.get_roles(user)) and user != "Administrator":
-		frappe.throw(
-			_("Only a System Manager can test the AI connection."),
-			frappe.PermissionError,
-			title=_("Optimus"),
-		)
+	_require_system_manager(_("Only a System Manager can test the AI connection."))
 	ratelimit.enforce_user_rate_limit("test_ai_connection", **_AI_LIMITS["test_ai_connection"])
 	from optimus import ai_fix
 
 	return ai_fix.test_connection()
+
+
+@frappe.whitelist(methods=["POST"])
+def check_cli_session() -> dict:
+	"""Read-only check that the local Codex CLI is installed and signed in, for the
+	Connect button in Optimus Settings. Never logs in. System-Manager-only and limited
+	per user. Returns ``ai_fix._cli_session_status()`` and stores its message in the
+	read-only ``ai_subscription_status`` field (best effort)."""
+	_require_system_manager(_("Only a System Manager can check the CLI session."))
+	ratelimit.enforce_user_rate_limit("check_cli_session", **_AI_LIMITS["check_cli_session"])
+	from optimus import ai_fix
+
+	status = ai_fix._cli_session_status()
+
+	def store():
+		text = f"{(status.get('message') or '')[:100]} ({_('checked')} {frappe.utils.now_datetime():%Y-%m-%d %H:%M})"
+		frappe.db.set_single_value("Optimus Settings", "ai_subscription_status", text, update_modified=False)
+		safe_commit()
+
+	safe_call.best_effort(store, None)
+	return status
 
 
 @frappe.whitelist()

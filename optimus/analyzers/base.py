@@ -780,6 +780,24 @@ def walk_callsite(stack: list | None) -> dict | None:
 	return None
 
 
+def user_callsite(
+	stack: list | None,
+	tracked_apps: tuple[str, ...] | None = None,
+	installed_apps: frozenset[str] | None = None,
+) -> dict | None:
+	"""Deepest frame in the developer's own code (no framework fallback), or None."""
+	for frame in reversed(stack or []):
+		if not isinstance(frame, dict):
+			continue
+		filename = frame.get("filename") or ""
+		if not filename or frame.get("lineno") is None:
+			continue
+		if is_framework_callsite(filename, tracked_apps=tracked_apps, installed_apps=installed_apps):
+			continue
+		return frame
+	return None
+
+
 def walk_callsite_str(stack: list | None) -> str | None:
 	"""String-form convenience wrapper: 'filename:lineno' or None."""
 	frame = walk_callsite(stack)
@@ -955,3 +973,15 @@ class AnalyzeContext:
 			self.aggregate.update(result.aggregate)
 		if result.warnings:
 			self.warnings.extend(result.warnings)
+
+
+def phase2_run_display_status(run) -> str:
+	"""Status to show for a Phase 2 run: Failed wins, persisted results mean Ready, else the stored status."""
+	status = (getattr(run, "status", "") or "").strip()
+	if status == "Failed":
+		return "Failed"
+	results_json = getattr(run, "results_json", None)
+	# "[]" (finished, no hot lines) still counts as done; unset/empty means not persisted yet.
+	if results_json not in (None, ""):
+		return "Ready"
+	return status or "Analyzing"

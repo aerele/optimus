@@ -59,7 +59,7 @@ Every value captured from your site (title, callsite, source, SQL, EXPLAIN, hot 
 
 | Field | Source | Typical size | Notes |
 |---|---|---|---|
-| `finding_type` | Optimus Finding | ~15 chars | One of the 4 eligible types (§ 5). |
+| `finding_type` | Optimus Finding | ~15 chars | One of the 5 eligible types (§ 5). |
 | `severity` | Optimus Finding | 4–6 chars | High / Medium / Low. |
 | `title` | Optimus Finding | 60–200 chars | Profiler-generated label (e.g. "`frappe.get_doc` on line 12 loops 18×"). |
 | `estimated_impact_ms` | Optimus Finding | ~5 chars | Profiler's impact estimate. |
@@ -361,20 +361,23 @@ The code guardrails apply to finding fixes in every rendered block, regardless o
 
 ## 5. Eligible finding types
 
-These four finding types are the only ones for which Optimus builds an AI payload. Infrastructure, frontend and call-tree findings lack enough code or SQL context. Index findings receive deterministic recipes; Framework N+1 findings refer to framework code the app cannot change. A Hot Line is also skipped when it sits in framework code, when the normal profile named the function that holds its time, or when line profiling measured at least 1,000 microseconds per hit (`per_hit_us`) on a line that calls a non-builtin (`ai_grounding.HOT_LINE_CALLEE_US`). The opener of a multi-line call (`total = sum(`) counts as calling something unnamed, because its callee is on a later line. A line whose call runs once per item of its own comprehension or generator (not in the first iterable, and not in an argument beside the comprehension) is explained as running its own loop over its items, whose whole time is the line's, not the inner call's; no item count is quoted, since the profiler's hits count line executions. The report shows an explanation instead. If the gate itself raises, it fails closed: no AI call, and a neutral note that the check could not run.
+These five finding types are the only ones for which Optimus builds an AI payload. Infrastructure, frontend and call-tree findings lack enough code or SQL context. Index findings receive deterministic recipes; Framework N+1 findings refer to framework code the app cannot change. A Hot Line is also skipped when it sits in framework code, when the normal profile named the function that holds its time, or when line profiling measured at least 1,000 microseconds per hit (`per_hit_us`) on a line that calls a non-builtin (`ai_grounding.HOT_LINE_CALLEE_US`). The opener of a multi-line call (`total = sum(`) counts as calling something unnamed, because its callee is on a later line. A line whose call runs once per item of its own comprehension or generator (not in the first iterable, and not in an argument beside the comprehension) is explained as running its own loop over its items, whose whole time is the line's, not the inner call's; no item count is quoted, since the profiler's hits count line executions. The report shows an explanation instead. If the gate itself raises, it fails closed: no AI call, and a neutral note that the check could not run.
 
 - Hot Line
 - N+1 Query
 - Redundant Call
+- Slow Background Job
 - Slow Query
 
-Redundant Call findings recorded before the callsite correction are excluded from AI suggestions. Newly analyzed findings carry a `callsite_walk: outermost_first` stamp. Re-record the flow to obtain a corrected finding. Stored suggestions remain in the database. Regeneration hides index, Framework N+1 and gated Hot Line suggestions. An older Redundant Call suggestion stays visible with a re-recording caveat. Every displayed suggestion from an earlier prompt version is marked outdated.
+A Slow Background Job is the fallback finding for a slow RQ job whose call tree produced no other finding. Its prompt carries the job method (`job_method`), the deepest hot user-code frame with its share of the job's wall time, the source window around that frame and the job's slowest queries (the finding itself stores none; they are taken from the job's recording when the prompt is built, and redacted like any other query). The job method is the last dotted component only (`execute` for `myapp.tasks.sync.execute`). The report shows a note instead of a stored suggestion, and no AI call is made, when it names no file and line or when that frame is framework or library code (`ai_grounding.slow_job_gate`); a gate that raises fails closed with a neutral note and the log line `optimus: slow-job gate failed`. Findings of other types inside a background job (N+1 Query, Slow Query, Redundant Call, Hot Line) were already eligible and are unchanged. Slow Hot Path and Hook Bottleneck stay without an AI suggestion by design.
+
+Redundant Call findings recorded before the callsite correction are excluded from AI suggestions. Newly analyzed findings carry a `callsite_walk: outermost_first` stamp. Re-record the flow to obtain a corrected finding. Stored suggestions remain in the database. Regeneration hides index, Framework N+1, gated Hot Line and gated Slow Background Job suggestions. An older Redundant Call suggestion stays visible with a re-recording caveat. Every displayed suggestion from an earlier prompt version is marked outdated.
 
 The exact set lives in `optimus/ai_fix.py::AI_ELIGIBLE_FINDING_TYPES`. A test (`test_ai_privacy.py::TestDocStaysFresh`) compares this section's list against the frozenset to make sure the doc never drifts from the code.
 
 ### 5.1 Per-type opt-out (`ai_excluded_finding_types`)
 
-`Optimus Settings → AI → Privacy & Operations → Excluded finding types` is a multi-line list. Each line names one of the four types above (exact match, case-sensitive). Lines starting with `#` are comments. Listed types are skipped in **both** auto-suggest and on-demand calls no payload is built, no request is sent, Refresh AI suggestions counts them as excluded in its toast, and the analyze-time step adds an analyzer note.
+`Optimus Settings → AI → Privacy & Operations → Excluded finding types` is a multi-line list. Each line names one of the five types above (exact match, case-sensitive). Lines starting with `#` are comments. Listed types are skipped in **both** auto-suggest and on-demand calls no payload is built, no request is sent, Refresh AI suggestions counts them as excluded in its toast, and the analyze-time step adds an analyzer note.
 
 Use this when the SQL or source for a particular finding category embeds business logic you don't want flowing to a hosted provider:
 
@@ -429,7 +432,7 @@ Parameter retries and permitted redirects use the remaining request budget. Each
 - `optimus ai refresh prepare`, `optimus ai refresh worker`, `optimus ai refresh cleanup`, `optimus ai refresh item`, `optimus ai refresh result storage`, `optimus ai refresh enqueue`, `optimus ai refresh worker availability`, `optimus ai refresh recovery`, `optimus ai refresh release`, `optimus ai refresh selection`, `optimus ai refresh evidence`, `optimus ai refresh discarded`, `optimus ai refresh duplicate blocked`, `optimus ai refresh uncertain` and `optimus ai refresh ended`: worker transitions, calls, settlement and recovery. See [the engine runbook](AI-REFRESH.md) for each outcome and its action.
 - `optimus ai refresh report`, `optimus ai regenerate report` and `optimus ai line profiling report`: report replacement failed. Saved results remain; reload and use Regenerate Reports. A lost commit acknowledgement can mean the new attachment was already saved.
 - `optimus ai recording cleanup`, `optimus ai empty recording cleanup`, `optimus ai ready progress`, `optimus ai ready notification`, `optimus ai line profiling postprocess` and `optimus ai line profiling input cleanup`: independent cleanup and notification failures after durable profiling results.
-- `optimus ai recording tree read`, `optimus ai recording sidecar read`, `optimus ai recording tree load`, `optimus ai save recording File`, `optimus ai persist recordings` and `optimus ai analyze`: recording verification, snapshot persistence and analysis failures.
+- `optimus ai recording tree read`, `optimus ai recording sidecar read`, `optimus ai recording lock events read`, `optimus ai recording tree load`, `optimus ai save recording File`, `optimus ai persist recordings` and `optimus ai analyze`: recording verification, snapshot persistence and analysis failures.
 - `optimus ai auto-arm line profiling`, `optimus ai line profiling admission cleanup` and `optimus ai line profiling capture recovery`: optional capture admission or recovery failures.
 - `optimus ai line profiling worker availability`, `optimus ai line profiling enqueue`, `optimus ai line profiling worker`, `optimus ai line profiling recovery` and `optimus ai line profiling queue recovery`: durable line profiling dispatch, execution and recovery failures. Retry analysis only for a failed generation; a pending report needs rendering, not repeated analysis.
 
@@ -543,6 +546,36 @@ enabled scheduler are required for execution and recovery. See
 [background refresh operations](AI-REFRESH.md) for deployment, cancellation,
 uncertain usage, resume limits, report recovery and API response changes.
 
+### 6.4a Subscription mode (local Codex CLI)
+
+Instead of an API key you can use the Codex CLI that is signed in with ChatGPT on the bench machine. It is meant for developer benches only.
+
+1. Install the `codex` CLI for the bench user and sign in once to the Codex home that Optimus owns, `sites/<site>/private/optimus-codex` (Optimus creates it, mode 0700, and uses it for nothing else; your own `~/.codex` is never touched):
+
+```bash
+CODEX_HOME=<bench path>/sites/<site>/private/optimus-codex codex login
+```
+
+Choose "Sign in with ChatGPT"; an API-key login is refused. The Connect button and the "not signed in" message show this command with your real path. Optimus reads the file-based sign-in (`auth.json`) in that folder: if your codex keeps credentials in the OS keyring instead, set its file-based credential store before you sign in.
+2. Enable the site flags, then restart the bench (or run `bench clear-cache`) so running workers see them:
+
+```bash
+bench --site <site> set-config developer_mode 1
+bench --site <site> set-config optimus_allow_subscription_cli 1
+```
+
+3. In Optimus Settings > AI set Connection to "Subscription (local CLI)", save, and click Connect. Connect only checks the CLI and the sign-in; it never logs in and shows when it last checked.
+
+What to know:
+
+- The prompt leaves the host: Codex sends it to OpenAI. Section 2 applies as for an API call.
+- Each call runs `codex exec` read-only with the file, command and browser tools turned off. Calls are not serialised by Optimus: the codex CLI refreshes its own sign-in inside the Optimus Codex home, and concurrent runs in that one folder are codex's own business.
+- A call can take longer than 60 seconds. Raise `ai_request_timeout_seconds` (180 is a good start). The check of the CLI comes out of the same limit.
+- If `codex features list` cannot be read, the call is refused with "refused for safety". Check that the command works for the bench user.
+- The guardrail re-ask is not used with this mode, because the CLI takes one flat prompt.
+- Tested with codex 0.164 to 0.165. See SECURITY.md for the residual risks (denylist of tools, pattern based output scrub).
+- A killed worker: on Linux the kernel stops the codex child with the worker (`PR_SET_PDEATHSIG`), but the signal reaches the direct child only, and other platforms do not have it. A run that is abandoned (timeout, interrupt) is logged as `exec_abandoned`, and stale scratch folders are swept (logged as `stale_sandbox_removed`). If the next call says the session expired, run the `codex login` command above again.
+
 ### 6.5 Troubleshooting
 
 - **"The model's context window (N tokens) is too small for the Optimus prompt."** The window cannot hold the system prompt plus a minimal answer (about 2,760 tokens for a fix suggestion, 2,168 for the Steps to Reproduce rewrite). Raise the server's window and the Context window (tokens) setting together.
@@ -584,6 +617,7 @@ Signals from index advice, the Hot Line gate and Refresh AI suggestions. The `op
 | AI refresh progress `failed` | The AI call failed, or its answer could not be saved; old suggestions were kept. | Open the Error Log and search for titles starting with `optimus ai` (`optimus ai_fix` for a provider failure, `optimus ai refresh item` for a failure while processing a reply or saving the answer). The row's `kind=` and `hint=` say what to do; see the `kind=` table above. |
 | AI refresh Steps state `failed` | The Steps to Reproduce rewrite failed; the toast quotes why. The old steps are kept. | The message says what to do; the Error Log row is `optimus ai refresh item`. |
 | Refresh AI suggestions toast "A refresh is already running for this session" | Another refresh of the same session (another tab, another user) is still running. Nothing was counted or billed. | Wait for it to finish, then reload the form. Expired work is recovered from the SQL lease and deadline. The form distinguishes interrupted work and offers an explicit resume. |
+| A Slow Background Job says it "names no source line" or "hot frame is in framework or library code", or "could not check this Slow Background Job" with `optimus: slow-job gate failed: <ErrorType>` in the log | The gate found nothing concrete to send, or raised (fail closed). | Open the job's Line-Level Drilldown. If the check failed repeatedly, send the log line to the Optimus maintainers. |
 | Refresh toast `gated` ("were not sent to the AI") | Those findings get Optimus's own advice or a note in the report, not an AI suggestion (a gated Hot Line, a Framework N+1, an old Redundant Call). Index findings are not counted. | Nothing to fix; each finding says why. |
 | Refresh toast `excluded` | The finding's type is listed under Excluded finding types in Optimus Settings. | Remove the type from that list to let the AI see it (section 5.1). |
 | A run stays in Analyzing or becomes Failed with "its analyze heartbeat lapsed" | The analyze job stopped renewing its single-flight flag (timeout, crash or a lost Redis key); the janitor then marked the run Failed. | Look for `optimus` heartbeat lines in `logs/optimus.log`, then retry from a console: `optimus.analyze.run('<session_uuid>')`. |

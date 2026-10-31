@@ -119,6 +119,11 @@ def resolved_doc(recording_uuid: str) -> str:
 	return f"profiler:resolved_doc:{recording_uuid}"
 
 
+def lock_events(recording_uuid: str) -> str:
+	"""Deadlock / lock-wait events of a recording (``list[dict]``). TTL: ``SESSION_TTL_SECONDS``."""
+	return f"profiler:lock_events:{recording_uuid}"
+
+
 # ---------------------------------------------------------------------------
 # Frontend metrics (v0.5.0+ split lists)
 # ---------------------------------------------------------------------------
@@ -285,6 +290,7 @@ KEY_PATTERNS: tuple[str, ...] = (
 	"profiler:sidecar:<recording_uuid>",
 	"profiler:infra:<recording_uuid>",
 	"profiler:resolved_doc:<recording_uuid>",
+	"profiler:lock_events:<recording_uuid>",
 	"profiler:frontend:<session_uuid>:xhr",
 	"profiler:frontend:<session_uuid>:vitals",
 	"profiler:frontend:<session_uuid>",

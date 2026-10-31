@@ -421,3 +421,70 @@ def test_publish_swallows_errors(monkeypatch):
 	monkeypatch.setattr(frappe, "publish_realtime", boom, raising=False)
 	# Best-effort: a realtime failure must never derail analyze.
 	analyzer._publish("phase_2_run_ready", {"user": "x@y.z"})
+
+
+# Persist semantics: the run stays Analyzing; the job flips it Ready after the report.
+
+
+def _fresh_run_doc():
+	import types
+	child = types.SimpleNamespace(
+		run_uuid="run-1", status="Analyzing", results_json=None, warnings_json=None,
+		total_ms=None, ended_at=None, started_at=None,
+	)
+	doc = types.SimpleNamespace(
+		phase_2_runs=[child], actions=[], findings=[], flags=types.SimpleNamespace(),
+	)
+	doc.append = lambda field, value: getattr(doc, field).append(types.SimpleNamespace(**value))
+	doc.save = lambda **kw: None
+	return child, doc
+
+
+def test_persist_run_raises_when_row_vanished(monkeypatch):
+	"""A missing run row aborts the persist."""
+	import types
+
+	import pytest
+
+	from optimus.analyzers.base import AnalyzerResult
+
+	_, doc = _fresh_run_doc()
+	doc.phase_2_runs = []  # no matching child row
+	monkeypatch.setattr(analyzer, "frappe", types.SimpleNamespace(
+		get_doc=lambda *a, **k: doc, log_error=lambda *a, **k: None))
+
+	with pytest.raises(ValueError):
+		analyzer._persist_run("PS-1", "run-1", [], AnalyzerResult(
+			findings=[{"finding_type": "Hot Line", "title": "x",
+				"technical_detail_json": "{}"}],
+			aggregate={"phase2_functions": []}, warnings=[]), 0.0)
+	assert doc.findings == []
+
+
+def test_persist_run_leaves_status_analyzing(monkeypatch):
+	"""Saving results does not flip the run; the job does that after the report."""
+	import types
+
+	from optimus.analyzers.base import AnalyzerResult
+
+	child, doc = _fresh_run_doc()
+	monkeypatch.setattr(analyzer, "frappe", types.SimpleNamespace(get_doc=lambda *a, **k: doc))
+	analyzer._persist_run("PS-1", "run-1", [], AnalyzerResult(
+		findings=[], aggregate={"phase2_functions": []}, warnings=[]), 1.0)
+	assert child.status == "Analyzing" and child.results_json == "[]"
+
+
+def test_phase2_run_display_status_rules():
+	"""Failed wins, persisted results read as Ready, otherwise the stored status."""
+	import types
+
+	from optimus.analyzers.base import phase2_run_display_status
+
+	def _run(status, results_json):
+		return types.SimpleNamespace(status=status, results_json=results_json)
+
+	assert phase2_run_display_status(_run("Failed", "[{\"x\":1}]")) == "Failed"
+	assert phase2_run_display_status(_run("Analyzing", "[]")) == "Ready"
+	assert phase2_run_display_status(_run("Analyzing", "[{\"x\":1}]")) == "Ready"
+	assert phase2_run_display_status(_run("Analyzing", None)) == "Analyzing"
+	assert phase2_run_display_status(_run("Recording", "")) == "Recording"

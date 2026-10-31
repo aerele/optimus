@@ -8,15 +8,233 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-
-## [0.12.119] - 2026-10-29
+## [0.12.126] - 2026-10-31
 
 ### Changed
 
-- The "Phase 2" feature is now called "Line profiling" in what you see: the Optimus Session form buttons and dialogs (Line Profiling > Run Line-Profile Pass, Stop Line Profiling Run, Retry Line Profiling Analyze), the floating widget text, notifications and error messages, the Optimus Settings labels, and the report text. Reports now say "in the normal profile" instead of "in phase 1" in the line profiling fallback hint.
+- The "Phase 2" feature is now called "Line profiling" in what you see: the Optimus Session form buttons and dialogs (Line Profiling > Run Line-Profile Pass, Stop Line Profiling Run, Retry Line Profiling Analyze), the floating widget and status pill text, notifications and error messages, the Optimus Settings labels, and the report text. Reports now say "in the normal profile" instead of "in phase 1" in the line profiling fallback hint.
 - Error Log titles for the line profiling workers were renamed too (for example `optimus ai phase 2 worker availability` is now `optimus ai line profiling worker availability`), so saved Error Log filters on the old titles stop matching.
 - Messages that were built by joining strings now use placeholders so they can be translated. Site Translation overrides keyed on the old strings stop matching, and findings or reports stored by earlier runs keep the old wording until re-analysed.
 - No DocType name, fieldname, event, API method or setting key changed.
+
+---
+
+## [0.12.125] - 2026-10-30
+
+### Fixed
+
+- Line profiling (Line-Level Drilldown): a run no longer shows "Ready" before its
+  report exists. The results and findings are saved while the run is still
+  "Analyzing" (with `analyze_render_pending` set), the report is rebuilt and
+  attached, and only then is the run flipped to "Ready" (fenced to the worker
+  that owns the run by generation and token) and the "Phase 2 report generated"
+  popup shown. If the rebuild fails the run still becomes Ready with the flag
+  kept, meaning a report update is owed, so Regenerate Reports can finish it.
+- A saved run whose worker died before the report step is completed by the
+  queue recovery after 10 minutes (Ready, report update owed, one log line), and
+  by the legacy janitor sweep, instead of being marked Failed over a populated
+  drill-down. If the report did get attached meanwhile, the owed flag is cleared.
+- Retrying an expired saved run starts clean (stale results are dropped).
+- The report's drill-down panel and run list read one shared rule: a run with
+  persisted results reads as Ready. An AI report refresh no longer clears the
+  owed-report flag of a run that is still Analyzing.
+- Line profiling results are saved while the run is still "Analyzing"; the
+  phase-1 recheck counts that run as the newest one, so findings are judged
+  against it.
+- The Session form and floating widget agree with the report: a saved run is not
+  offered Retry, and the floating pill (in `optimus_pill_state.js`) says "results
+  saved" with an orange alert when the report update is owed.
+
+## [0.12.124] - 2026-10-30
+
+### Added
+
+- AI fix suggestions can now use the local Codex CLI signed in with ChatGPT instead of a cloud API key. In Optimus Settings > AI set Connection to "Subscription (local CLI)" and click Connect to check the CLI and the sign-in. The default stays "API Key", so existing setups are unchanged. Codex is the only CLI supported.
+- Subscription mode needs `developer_mode` and the `optimus_allow_subscription_cli` site flag: run `bench --site <site> set-config optimus_allow_subscription_cli 1`, then restart the bench (or run `bench clear-cache`). The blocked message and the field description now say so.
+- Subscription mode uses a Codex home that only Optimus uses, `<site>/private/optimus-codex` (created mode 0700). Sign in once with `CODEX_HOME=<bench>/sites/<site>/private/optimus-codex codex login`; the Connect button, the "not signed in" message, the settings field description, SECURITY.md and docs/AI-FIXING.md show the exact command. Your own `~/.codex` is never read, copied or written.
+- The analyze-time auto-suggest and the "Refresh AI suggestions" button both run through the CLI. A queued refresh re-reads the saved settings before every call, so turning AI off or switching the connection stops the rest of the job. A terminal CLI failure (missing CLI, signed out, usage limit, a rejected flag) stops a refresh at the first failure; a timeout, a rate limit or a network error does not.
+- The Connect button shows when it last checked, cannot be double clicked, and does not change the modified time of Optimus Settings.
+
+### Security
+
+- The CLI runs as a read-only, ephemeral agent with an allow-listed environment. `HOME` and `TMPDIR` point into a private scratch directory that is deleted afterwards (stale ones left by a killed worker are removed on the next run, with one log line), and `CODEX_HOME` is the Optimus-owned Codex home. The codex CLI refreshes its own sign-in there; Optimus copies, locks and writes back nothing.
+- On Linux the CLI child is started with `PR_SET_PDEATHSIG` so the kernel stops it when the worker dies (the direct child only), and a run that is abandoned is logged (`exec_abandoned`).
+- The reply file is opened without following links and must be a regular file. The capability filter also turns off features named like `daemon`, `skill` or `realtime` that the CLI reports as on.
+- Only the tool features the installed CLI lists are turned off (`--disable`), plus every capability-looking feature it reports as on. Before, a fixed list was always passed and one unknown name made every call fail. If `codex features list` cannot be read, the call is refused instead of running with a guess.
+- The CLI path (or the `PATH` hit) must be a `codex` launcher or a Node entrypoint owned by the bench user or root and not writable by group or others. A path that fails now says which check failed.
+- A CLI send marks the raw-value request as sent, so a re-ask after raw-value consent is revoked is refused. The guardrail re-ask is skipped for this mode because the CLI takes one flat prompt.
+- The reply goes through a pattern scrub for secrets. Known limits: the tool list is a denylist and the scrub is pattern based. Use this mode only on a developer bench with data you trust. Tested with codex 0.164 to 0.165; Connect warns outside that range. See SECURITY.md.
+
+### Fixed
+
+- A failure is read from the last lines of the CLI's error output only. A rate limit is a temporary "rate limited" error, a usage limit is the fatal "quota" error, and a bare `401` in echoed text is no longer a sign-out. A login check that fails without saying "not logged in", a process killed by the system, or a CLI or Node that cannot start is a temporary error, not a sign-out.
+- A failed run that may have reached OpenAI is recorded as "sent, outcome unknown" so it is not repeated automatically. Only a rejection before any answer counts as a known outcome.
+- A reply cut at the output limit ends with a "(truncated)" marker and is treated as incomplete by the guardrails.
+- A call stays inside its time limit: the sign-in check and the feature check come out of it, and the run stops with a timeout when too little is left. The sign-in check is remembered for 5 minutes and cleared when a run reports an expired session.
+- The CLI process group is always stopped when a call ends, and output is read with a size limit. A descendant that keeps the pipe open can no longer hang the call.
+- The unavailable message now tells a non-admin to ask a System Manager to open Optimus Settings and click Connect, and does not mention Connect while AI is off.
+- The Optimus Codex home is always an absolute path, so the CLI child (which runs in a scratch folder) finds the sign-in; before, Frappe's relative site path made Connect and every run fail on a real bench.
+- The CLI's real refresh-failure messages ("refresh token was already used", "token was revoked", "access token could not be refreshed", "log out and sign in") are an expired-session error with the `codex login` hint. Because parallel runs share one sign-in, a run that gets that error is tried once more after 2 seconds (when the time limit allows) before it fails.
+- The capability filter also turns off `goals`, `mentions`, `worktrees`, `write_stdin` and `collab` features. A corrupt `auth.json` ("Error checking login status") reads as signed out, and the Connect message says the token is checked on first use.
+
+---
+
+## [0.12.123] - 2026-10-29
+
+### Changed
+
+- The "Call chain" block on a finding card is now labelled "Drill-down", matching the existing Drill-down block. When a card has both, they sit together under a single "Drill-down" heading: the line-profiling chain first, then the sampled call path without a second heading, each keeping its own footer line. The Hint box now renders above both trees so it no longer separates them.
+- The message shown for framework-code lines that skip the AI now says "Follow the drill-down above" instead of "call chain".
+
+---
+
+## [0.12.122] - 2026-10-30
+
+### Added
+
+- When a profiling session finishes, fails or ends with no recorded requests, a popup shows the Optimus Session ID with a button that opens the record. It appears once per run even with several tabs open, only in a visible tab, wherever you are in Desk, except when you are already on that session's form.
+- The popup waits while you type in a text field or another dialog is open, and opens anyway after about 30 seconds. If it fails to open, the error goes to the browser console and it can still show on the next attempt or in another tab.
+- The pill and alert for a session with no recorded requests say "No data" instead of "Report ready", and so does the alert on the session form. The inline stop response carries `empty` so the widget can tell. The session form shows a red "Analysis failed" alert when analysis fails.
+
+### Fixed
+
+- The widget never received the session events on a fresh page load: it subscribed before Frappe had created the realtime socket, where `frappe.realtime.on` does nothing, so no popup, pill or alert update arrived. The widget now waits for the socket (checking every 250 ms, for up to 30 seconds) and registers its handlers exactly once.
+
+---
+
+## [0.12.121] - 2026-10-29
+
+### Added
+
+- The "Queries per action" table has a separate Function column showing the function that issued each query, next to the callsite. Long names are cut with an ellipsis (full name on hover and when copied) and wrap in PDF export; queries with no captured stack show a dash.
+
+---
+
+## [0.12.120] - 2026-10-29
+
+### Fixed
+
+- The Hot frames section now reliably separates your app's code from framework code. Before, the split guessed the app from a shortened file name, so frappe frames could appear under your app and, with Tracked Apps set, your own tracked app's frames could be pushed into the framework group. Each frame is now classified from its full file path, using the same rules as the rest of the report. Optimus's own code and frames with no file name are never shown as your app.
+- Hot frames no longer lose framework rows on large sessions: when the working set is trimmed, app frames are ranked by self time and framework frames by cumulative time, each in its own group.
+
+### Changed
+
+- Hot frames now has two labelled groups, "Your app's code" first and "Framework code" second, each showing its own top 20.
+- Rows are totalled by app-relative file path plus function, so two files whose shortened names match (a framework `user/user.py` and your app's `user/user.py`) stay separate rows with their own times, while the same file reached by a relative or absolute path is one row. Labels are lengthened only when two rows would otherwise read the same. If two rows still read the same at every length, each shows its last three path segments plus a short hash, never the full path.
+
+---
+
+## [0.12.119] - 2026-10-29
+
+### Added
+
+- Capture and surface DB lock contention. A query that hits a deadlock (`QueryDeadlockError`) or a lock-wait timeout (`QueryTimeoutError`) is recorded and reported as a High-severity "Lock Contention" finding. The Frappe recorder only logs queries that succeed, so these failed queries were invisible before. Optimus patches `Database.sql` once at class level, gated on an active Optimus session, records the contended callsite plus the normalized query (no row data) and re-raises the error unchanged. It keeps working when the recorder runs with "Record SQL" off. Run `bench migrate` to add the new finding type.
+- Findings are raised only for contention at a callsite in your own code (same app classification as the Redundant Call and N+1 analyzers). Lock errors Frappe catches itself (session touch, change-log write, dashboard refresh) are dropped even when your code is above them in the stack, deliberate `NOWAIT` probes are skipped, and a Postgres statement timeout is not reported as a lock wait.
+- The finding is actionable, names the callsite, lists every distinct contended query, shows the wall time the query waited before failing, and gives a fix hint. Within a root-cause group it outranks timed findings of the same severity. It is not sent to the LLM; it shows only its canned fix hint.
+- Stored events are bounded: at most 200 per recording (a truncation marker is added past that), the callsite plus a short tail of frames, and the error cut to its first line.
+- A background job that Frappe retries in the same worker after a deadlock or lock-wait timeout keeps its session and its lock events across the retry, so the deadlock that caused the retry is reported. If the session ends or the user is skipped before the retry starts, the retry runs unprofiled and the first attempt's lock events are not reported.
+- A lock error that is filtered out (`NOWAIT` probe, handled by Frappe, no callsite in your own code) is logged at debug level in the `optimus` logger with the reason.
+
+### Fixed
+
+- The session summary no longer calls a finding with no measured impact "the biggest issue this session".
+- Lock capture no longer swallows an RQ job timeout raised while a lock event is being recorded.
+
+---
+
+## [0.12.118] - 2026-10-29
+
+### Fixed
+
+- Profiling a flow that calls `frappe.enqueue(..., now=True)`, `is_async=False` or the legacy `async=False` no longer passes Optimus's internal markers to your method, which crashed methods that do not accept extra keyword arguments. Positional flags are read from frappe's own signature.
+- Background jobs queued with `enqueue_after_commit=True` are now tracked like any other job, so the report waits for them and includes their recording. A job whose transaction has not committed yet (up to two minutes after it was queued) is kept waiting and shown as "Queued" instead of "Stopped / Never ran". Jobs frappe skips as duplicates are not tracked.
+- Jobs started by another background job after you press Stop (while the report is still collecting jobs) are now captured and attributed to the same session. A job chain no longer revives a session that is already finished, and the job keys expire 24 hours after they are created.
+- A job that is still waiting in the queue when the wait ends is shown as "Queued" instead of "Running". A job that finishes after the report was saved now replaces a "Queued" row or a "Never ran" placeholder with its real result. A job RQ has no record of is shown as "Stopped" with an explanation, in a warning colour. A job still Queued or Running when the report was prepared gets a note saying so.
+
+### Added
+
+- Each background job in the report now says which action (or parent job) triggered it ("Triggered by POST ..."). Existing sessions are unaffected; a migration adds the column.
+
+---
+
+## [0.12.117] - 2026-10-29
+
+### Changed
+
+- A line-level (phase 2) run now rechecks the phase 1 findings against the newest ready run. When a finding's function was line-profiled, the finding shows the measured function time and the hottest line with its time, hit count and code. If the measured function time is under a quarter of the estimate, the finding is downgraded one severity step; a measurement is never used to raise severity. The finding's impact stays the phase 1 estimate, with the measured time shown beside it.
+- The recheck only judges when the numbers are comparable. Findings whose estimate is summed over many calls (N+1, repeated calls), and functions from a time-budgeted run, are shown as measured with no change to severity.
+- A finding is matched to a profiled function by file name, parent folder and function name; names shared by several profiled functions are not guessed. Findings the line profile did not cover say why they were not rechecked.
+- The recheck and the Line-Level Drilldown now use the same function index, so both show the same hottest line from the newest run.
+
+### Fixed
+
+- Running phase 2 again no longer adds a second Hot Line row for the same function. The row is updated in place, and old duplicate rows are removed.
+- A failure while rechecking no longer stops the phase 2 results from being saved. If a row cannot be written, the rows already rechecked are put back, so the findings table is never left half rechecked.
+
+---
+
+## [0.12.116] - 2026-10-29
+
+### Changed
+
+- The "Preparing report" and "Capturing background jobs" banners on the Optimus Session form are now a slim one-line strip with a thin progress bar instead of a large block, so they no longer push the form content down. They stay aligned and wrap cleanly on narrow screens and follow the Desk dark theme. The strip text is announced politely to screen readers, its contrast is higher, the drain text is escaped, and the bar and spinner animations stop when the user prefers reduced motion.
+
+---
+
+## [0.12.115] - 2026-10-29
+
+### Fixed
+
+- The small pill in the bottom-right corner no longer stays on "Analyzing" after the report is ready. It now checks the server when the page loads, when you come back to the tab, when the live connection returns and while it is waiting. It covers both the normal analyze after stopping and the second-pass analyze, and a page reload while a report is still being built brings the "Analyzing" pill back.
+- While waiting, the pill checks with a growing delay and gives up 15 minutes after the wait began, even if the server keeps answering "still analyzing". It then shows "Check report" instead of polling forever.
+- A late "analyzing" update can no longer replace a "Report ready" pill, and a slow server reply can no longer undo a click on the pill or a newly started recording.
+- A failed analyze and the "Check report" give-up state now have their own red and amber colours instead of the blue "ready" look, and a stop click discards any status reply that was already on its way.
+- These background checks no longer pop an error dialog when they fail, a failed second-pass analyze found after a reload no longer shows placeholder text, and a stuck "Phase 2 recording" is rechecked after a failed stop. The failed-analyze alert text is now translatable as a whole sentence.
+
+---
+
+## [0.12.114] - 2026-10-29
+
+### Fixed
+
+- A session with no recordings is now marked Ready only after its (empty) report is rendered and attached, like every other session. If the report cannot be produced, the session is marked Failed instead of showing Ready with no report. The Ready notification is now also sent for such sessions.
+
+## [0.12.113] - 2026-10-29
+
+### Fixed
+
+- A "Slow Background Job" finding in the Findings section now gets an AI fix suggestion like the other findings. Before, it was skipped and the card said it "does not carry enough code or SQL context". The prompt carries the last part of the job method name, the deepest hot frame with its share of the job's time, the source around it and the job's slowest queries (taken from the job's recording when the prompt is built). A job whose hot frame is framework code, or that names no source line, gets no AI call; the card shows a note saying why, and any older stored suggestion is hidden.
+
+### Action needed
+
+- This type is now eligible with no opt-in. To keep it away from the AI provider, add `Slow Background Job` to Excluded finding types in Optimus Settings.
+
+---
+
+## [0.12.112] - 2026-10-29
+
+### Fixed
+
+- Missing-index suggestions no longer propose an index that an existing index already serves for the same query. A composite index such as (a, b) counts for a query that filters `a` and `b` by equality, a FULLTEXT index no longer hides a real missing index, and a column used only inside a function (such as `DATE(col)` or Frappe's `ifnull(col, '')`) gets no suggestion because a plain index cannot serve it. The warning for that case lists the real options: a range rewrite, a functional index, or avoiding the code path that wraps the column.
+- `NOT (col = ...)`, `NOT EXISTS (...)`, `ANY`, `ALL` and `IN (...)` are no longer mistaken for function calls. `LIKE` with anything but a plain prefix literal, such as `LIKE CONCAT('%', x)`, counts as a scan, `IS NOT NULL` is not treated as a weak negation, and a top-level `UNION` is treated as ambiguous so a real suggestion is kept.
+- When a column leads an existing index but the only filter on it is `!=`, `NOT IN` or `NOT LIKE`, the warning says the index exists but may not be able to serve that filter.
+- Many leading `/* ... */` comments, deep parenthesis nesting or unterminated quotes in a recorded statement can no longer stall the analyze worker; the statement and write parsers now run in linear time.
+- The savings floor and the example queries are computed from the queries that still need the index, the first known column cardinality is kept (numeric strings and Decimal values count), and a non-string query or a parser error fails open instead of dropping every index finding. An RQ job timeout is no longer swallowed while reading table aliases.
+
+### Changed
+
+- Before suggesting an index, Optimus checks the other queries in the same session. It drops the suggestion when the column is updated, or the table is written, far more often than the index would help reads (`HOT_COLUMN_MIN_UPDATES` 5, `WRITE_HEAVY_MIN_WRITES` 50, ratio 10), and says why in the warning. Otherwise it adds a "Before adding, check:" note with the write counts and the flows that write, a table with at least `CAUTION_MIN_WRITES` (10) writes, a column with at most `LOW_CARDINALITY_MAX` (10) distinct values, and an existing composite index that already holds the column. The finding's JSON gains `cautions` and `write_impact`.
+- Write detection also reads aliased UPDATE statements and double-quoted table names; `UPDATE ... JOIN` and multi-table `UPDATE a, b SET` are not counted (stated in the module docstring), which only means fewer suppressions. A failed alias parse is logged at debug level.
+
+---
+
+## [0.12.111] - 2026-10-29
+
+### Changed
+
+- The Optimus Session form is reorganised so the most useful things come first. An Overview tab shows the status, top severity and report links, then the totals, the summary, the session details and your notes. Findings, the recorded actions and background jobs, line-profiling runs and the technical and AI usage details each get their own tab or collapsed section. Existing sessions pick this up on the next migrate, and no session data changes.
+
+---
 
 ## [0.12.103] - 2026-10-29
 
@@ -134,6 +352,9 @@ versions may contain breaking changes see migration notes below).
 - Normalized EXPLAIN rows are coerced with `to_int` / `to_float`, so a string or
   `Decimal` value no longer drops that row's findings. `to_int` / `to_float` also
   treat `nan` / `inf` as missing instead of passing them to threshold checks.
+- Test coverage is now configured for the unit suite (line and branch; tests, integration tests and data patches excluded). Run `python -m pytest optimus/tests/ --cov --cov-report=term-missing:skip-covered`.
+- New behaviour tests for the session start/stop/retry endpoints, the request and background-job hooks, install/uninstall, the AI settings warning, the janitor and the Redis schema sentinel.
+- Removed an unused test fixture (`sidecar_with_pii.json`).
 
 
 

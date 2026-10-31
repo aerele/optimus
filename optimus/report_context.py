@@ -21,6 +21,7 @@ from optimus.analyzers.base import (
 	DEFAULT_DISPLAY_THRESHOLD_MS,
 	_rolls_over_to_seconds,
 	humanize_duration_ms,
+	phase2_run_display_status,
 )
 
 # A whole captured flow slower than this reads as "danger" on the Total-time
@@ -369,8 +370,9 @@ def _build_line_drilldown_runs(session_doc, threshold_ms: float = DEFAULT_DISPLA
 	result = []
 	number = 0
 	for run in runs:
-		status = getattr(run, "status", "") or ""
-		if status != "Ready":
+		# Same display rule as the renderer panel.
+		display_status = phase2_run_display_status(run)
+		if display_status != "Ready":
 			continue
 		number += 1
 		total_ms = getattr(run, "total_ms", 0) or 0
@@ -425,7 +427,7 @@ def _build_line_drilldown_runs(session_doc, threshold_ms: float = DEFAULT_DISPLA
 
 		result.append({
 			"number": number,
-			"status": status,
+			"status": display_status,
 			"total_ms_display": _ms_display(total_ms, decimals=2, threshold_ms=threshold_ms),
 			"timestamp": str(getattr(run, "started_at", "") or ""),
 			"picks": [p.get("dotted_path", "") for p in picks_list],
@@ -457,7 +459,8 @@ def _build_action_plan(action_plan, fmt_ms=None) -> list[dict]:
 			# when the template renders it. f-string would coerce Markup to
 			# plain str and lose the safe-flag.
 			"savings_display": Markup("−") + fmt(gain_ms) if gain_ms else "",
-			"savings_label": step.get("gain_label", "") or "",
+			# No label without a figure (0-impact findings such as Lock Contention).
+			"savings_label": (step.get("gain_label", "") or "") if gain_ms else "",
 			"callsite": step.get("callsite") or "",
 		})
 	return result

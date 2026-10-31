@@ -27,7 +27,12 @@ import json
 import os
 from typing import Any
 
-from optimus.analyzers.base import DEFAULT_DISPLAY_THRESHOLD_MS, humanize_duration_ms
+from optimus.analyzers.base import (
+	DEFAULT_DISPLAY_THRESHOLD_MS,
+	humanize_duration_ms,
+	phase2_run_display_status,
+)
+from optimus.line_profile.function_index import build_function_index
 from optimus.renderer.syntax import _highlight_python_snippet
 from optimus.renderer.time_format import _format_duration_ms
 
@@ -51,56 +56,20 @@ def _build_line_drilldown_callsite_index(session_doc: Any) -> dict:
 	line: ..." callout.
 
 	Keyed by file basename (not absolute path) so it survives dev-vs-deploy
-	path differences. When a function appears in multiple runs, the entry with
-	the largest single-line ``total_ms`` wins. Per-function only: reports the
+	path differences. When a function appears in multiple runs, its newest
+	run wins (shared builder with the line-level recheck). Per-function only: reports the
 	function's own hottest line, never a cross-function redirect. Returns an
 	empty dict when there are no line profiling runs or the blobs are empty/malformed.
 	"""
-	runs = list(getattr(session_doc, "phase_2_runs", None) or [])
-	index: dict[tuple, dict] = {}
-	for child in runs:
+	runs = []
+	for child in getattr(session_doc, "phase_2_runs", None) or []:
 		try:
 			results = json.loads(getattr(child, "results_json", None) or "[]")
 		except Exception:
 			continue
-		run_uuid = getattr(child, "run_uuid", "") or ""
-
-		for fn in results:
-			file_path = fn.get("file") or ""
-			dotted = fn.get("dotted_path") or ""
-			qualname = fn.get("qualname") or (dotted.rsplit(".", 1)[-1] if dotted else "")
-			lines = fn.get("lines") or []
-			if not file_path or not qualname or not lines:
-				continue
-			hot_line = max(
-				lines,
-				key=lambda ln: ln.get("total_ms", 0) or 0,
-				default=None,
-			)
-			if not hot_line or not hot_line.get("total_ms"):
-				continue
-			candidate_ms = hot_line.get("total_ms", 0) or 0
-			entry = {
-				"lineno": hot_line.get("lineno"),
-				"content": hot_line.get("content") or "",
-				"total_ms": candidate_ms,
-				"hits": hot_line.get("hits") or 0,
-				"run_uuid": run_uuid,
-				"dotted_path": dotted,
-			}
-			# v0.7.x: key under BOTH the full qualname and its bare last
-			# segment. resolve_freeform may emit a prefixed qualname
-			# (``common.bg_recheck_users`` / ``SalesInvoice.validate``) while a
-			# call_tree finding's callsite carries the bare function name the
-			# callout silently missed when the two disagreed on the prefix even
-			# though the function was profiled (and showing in the panel).
-			basename = os.path.basename(file_path)
-			bare = qualname.rsplit(".", 1)[-1]
-			for k in {(basename, qualname), (basename, bare)}:
-				existing = index.get(k)
-				if existing is None or candidate_ms > (existing.get("total_ms") or 0):
-					index[k] = entry
-	return index
+		runs.append((getattr(child, "run_uuid", "") or "", results))
+	index = build_function_index(runs)
+	return {key: entry for key, entry in index.items() if entry["total_ms"]}
 
 
 # Back-compat alias pre-v0.7.x name.
@@ -347,10 +316,12 @@ def _render_line_drilldown_panel(session_doc: Any, threshold_ms: float = DEFAULT
 					"source": picks_source.get(fn.get("dotted_path"), "curated"),
 				}
 			)
+		# Stored status flips to Ready only after this render, so derive it from persisted results.
+		display_status = phase2_run_display_status(child)
 		parsed_runs.append(
 			{
 				"run_uuid": child.run_uuid,
-				"status": child.status,
+				"status": display_status,
 				"started_at": child.started_at,
 				"ended_at": child.ended_at,
 				"total_ms": child.total_ms or 0,

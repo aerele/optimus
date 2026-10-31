@@ -7,6 +7,8 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
+from optimus.settings import SUBSCRIPTION_CONNECTION
+
 
 def _text(value):
 	return value.strip() if isinstance(value, str) else ""
@@ -282,6 +284,9 @@ class OptimusSettings(Document):
 		that needs one). The feature stays enabled the operator just
 		sees a clear hint instead of a cryptic error on first use."""
 		if not self.get("ai_enabled"):
+			return
+		# The API key, model and base URL fields do not apply to the local CLI.
+		if _text(self.get("ai_connection_type")) == SUBSCRIPTION_CONNECTION:
 			return
 		provider = _text(self.get("ai_provider")) or "Anthropic"
 		from optimus import ai_fix

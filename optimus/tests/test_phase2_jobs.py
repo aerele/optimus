@@ -25,7 +25,8 @@ def phase2(monkeypatch):
 		"name": "fake-child", "parent": "fake-session-doc", "run_uuid": "fake-phase2",
 		"status": "Failed", "analyze_attempts": 0,
 	}}
-	fake = SimpleNamespace(db=db, ValidationError=ValueError)
+	fake = SimpleNamespace(db=db, ValidationError=ValueError,
+		logger=lambda: SimpleNamespace(warning=lambda *a: None))
 	monkeypatch.setattr(mod, "frappe", fake)
 	monkeypatch.setattr(ai_refresh_store, "frappe", fake)
 	monkeypatch.setattr(mod, "_authorized", lambda *a: True)
@@ -161,7 +162,7 @@ def test_committed_result_rejects_duplicate_save_and_late_failure(phase2):
 	with phase2.db.transaction():
 		assert not phase2.mod._complete(run, now=103, persist=lambda: writes.append(True))
 		assert not phase2.mod._fail(run, now=103, reason="failed")
-	assert writes == [True] and phase2.row()["status"] == "Ready"
+	assert writes == [True] and phase2.row()["status"] == "Analyzing"
 	assert phase2.row()["analyze_render_pending"] == 1
 
 
@@ -255,7 +256,7 @@ def test_late_worker_does_not_fail_or_clean_input_of_a_new_retry(worker, monkeyp
 
 
 @pytest.mark.rq
-def test_hard_timeout_after_results_commit_keeps_ready(worker, monkeypatch):
+def test_hard_timeout_after_results_commit_is_completed_by_recovery(worker, monkeypatch):
 	Timeout = pytest.importorskip("rq.timeouts", exc_type=ImportError).JobTimeoutException
 	admit(worker)
 	def timeout(*a):
@@ -263,9 +264,14 @@ def test_hard_timeout_after_results_commit_keeps_ready(worker, monkeypatch):
 	monkeypatch.setattr(worker.mod, "_render", timeout)
 	with pytest.raises(Timeout):
 		run_worker(worker)
-	assert worker.row()["status"] == "Ready" and worker.row()["analyze_render_pending"] == 1
+	# Results are saved; the run is not Ready until the report is attached.
+	assert worker.row()["status"] == "Analyzing" and worker.row()["analyze_render_pending"] == 1
 	assert len(worker.calls.persist) == 1
 	assert not worker.calls.ai
+	with worker.db.transaction():
+		assert worker.mod._recover("fake-session-doc", "fake-phase2", now=10**9) == "Ready"
+	assert worker.row()["status"] == "Ready" and worker.row()["analyze_render_pending"] == 1
+	assert len(worker.calls.persist) == 1
 
 
 def test_queue_dispatch_failure_leaves_durable_intent(worker, monkeypatch):
@@ -320,16 +326,16 @@ def test_phase2_persistence_never_commits_outside_ownership_transaction(monkeypa
 	from optimus.line_profile import analyzer
 	child = SimpleNamespace(run_uuid="fake-run")
 	findings = []
-	parent = SimpleNamespace(phase_2_runs=[child], flags=SimpleNamespace(),
+	parent = SimpleNamespace(phase_2_runs=[child], findings=[], flags=SimpleNamespace(),
 		append=lambda table, row: findings.append(row), save=lambda **kw: None)
 	monkeypatch.setattr(analyzer, "frappe", SimpleNamespace(get_doc=lambda *a: parent,
 		utils=SimpleNamespace(now_datetime=lambda: "fake-time")))
 	def forbidden():
 		raise AssertionError("phase2 save must participate in the ownership transaction")
 	monkeypatch.setattr(analyzer, "safe_commit", forbidden, raising=False)
-	result = SimpleNamespace(findings=[{"title": "fake finding"}], warnings=[])
+	result = SimpleNamespace(findings=[{"title": "fake finding"}], warnings=[], aggregate={})
 	analyzer._persist_run("fake-doc", "fake-run", [], result, 5)
-	assert child.status == "Ready" and len(findings) == 1
+	assert child.results_json == "[]" and not hasattr(child, "status") and len(findings) == 1
 
 
 JOURNAL_FIELDS = {
@@ -415,7 +421,9 @@ def test_interrupt_is_not_replaced_by_a_secondary_log_failure(worker, monkeypatc
 	worker.db.rollback = lambda: (_ for _ in ()).throw(ConnectionError("fake rollback outage"))
 	with pytest.raises(Timeout):
 		run_worker(worker)
-	assert worker.row()["status"] == "Ready"
+	assert worker.row()["status"] == "Analyzing" and worker.row()["analyze_render_pending"] == 1
+	with worker.db.transaction():
+		assert worker.mod._recover("fake-session-doc", "fake-phase2", now=10**9) == "Ready"
 
 
 def test_missing_child_cannot_promote_orphaned_phase2_findings(monkeypatch):
@@ -591,13 +599,13 @@ def test_result_commit_acknowledgement_does_not_repeat_compute(worker, monkeypat
 			return transaction(operation, **kwargs)
 		if committed:
 			value = transaction(operation, **kwargs)
-			if worker.row()["status"] == "Ready":
+			if worker.row()["analyze_render_pending"]:
 				lost = True
 				raise ConnectionError("fake lost commit acknowledgement")
 			return value
 		with worker.db.transaction():
 			value = operation()
-			if worker.row()["status"] == "Ready":
+			if worker.row()["analyze_render_pending"]:
 				lost = True
 				raise ConnectionError("fake failure before commit")
 			return value
@@ -782,3 +790,130 @@ def test_phase2_dispatch_uses_shared_interval(phase2, monkeypatch):
 	for now, expected in [(100, True), (106, False), (107, True)]:
 		with phase2.db.transaction():
 			assert bool(phase2.mod._prepare_dispatch(run, now=now)) == expected
+
+
+def test_run_stays_analyzing_until_the_report_is_attached(worker):
+	admit(worker)
+	seen = []
+	worker.mod._render = lambda *a: seen.append((worker.row()["status"], worker.row()["analyze_render_pending"]))
+	run_worker(worker)
+	assert seen == [("Analyzing", 1)]
+	assert worker.row()["status"] == "Ready" and worker.row()["analyze_render_pending"] == 0
+	assert worker.row()["ended_at"]
+	assert [event for event, _ in worker.calls.events][-1] == "phase_2_run_ready"
+	assert worker.calls.events[-1][1]["render_pending"] is False
+
+
+def test_finish_is_fenced_to_the_owning_worker_generation(worker):
+	admit(worker)
+	run = claim(worker)
+	with worker.db.transaction():
+		assert worker.mod._complete(run, now=102, persist=lambda: None)
+	other = {**run, "analyze_worker_token": "worker-2"}
+	with worker.db.transaction():
+		assert not worker.mod._finish(other, render_failed=False)
+	assert worker.row()["status"] == "Analyzing"
+	with worker.db.transaction():
+		assert worker.mod._finish(run, render_failed=False)
+		assert not worker.mod._finish(run, render_failed=False)
+	assert worker.row()["status"] == "Ready"
+
+
+def test_recovery_completes_a_saved_run_and_fails_an_unsaved_one(worker):
+	admit(worker)
+	run = claim(worker)
+	with worker.db.transaction():
+		worker.mod._complete(run, now=102, persist=lambda: None)
+	with worker.db.transaction():
+		assert worker.mod._recover("fake-session-doc", "fake-phase2", now=10**9) == "Ready"
+	assert worker.row()["status"] == "Ready" and worker.row()["analyze_render_pending"] == 1
+	worker.row().update(status="Analyzing", analyze_render_pending=0, analyze_lease_until=1)
+	with worker.db.transaction():
+		assert worker.mod._recover("fake-session-doc", "fake-phase2", now=10**9) == "Failed"
+	assert worker.row()["status"] == "Failed"
+
+
+def test_legacy_expiry_completes_a_run_whose_results_were_saved(phase2):
+	import datetime
+	row = phase2.row()
+	row.update(status="Analyzing", results_json="[]", modified=datetime.datetime(2026, 1, 1))
+	with phase2.db.transaction():
+		assert phase2.mod.expire_legacy("fake-session-doc", "fake-phase2", status="Analyzing",
+			cutoff=datetime.datetime(2026, 2, 1))
+	assert row["status"] == "Ready"
+	row.update(status="Analyzing", results_json="")
+	with phase2.db.transaction():
+		assert phase2.mod.expire_legacy("fake-session-doc", "fake-phase2", status="Analyzing",
+			cutoff=datetime.datetime(2026, 2, 1))
+	assert row["status"] == "Failed"
+
+
+def test_legacy_expiry_marks_saved_results_as_owing_a_report(phase2):
+	import datetime
+	row = phase2.row()
+	row.update(status="Analyzing", results_json="[]", modified=datetime.datetime(2026, 1, 1))
+	with phase2.db.transaction():
+		phase2.mod.expire_legacy("fake-session-doc", "fake-phase2", status="Analyzing",
+			cutoff=datetime.datetime(2026, 2, 1))
+	assert row["status"] == "Ready" and row["analyze_render_pending"] == 1
+
+
+def test_saved_run_waits_only_a_short_lease_for_its_report(worker):
+	admit(worker)
+	run = claim(worker)
+	with worker.db.transaction():
+		worker.mod._complete(run, now=102, persist=lambda: None)
+	assert worker.row()["analyze_lease_until"] == 102 + worker.mod.RENDER_LEASE_SECONDS
+	assert worker.mod.RENDER_LEASE_SECONDS < worker.mod.LEASE_SECONDS
+
+
+def test_readmitting_an_expired_saved_run_drops_the_stale_results(worker):
+	admit(worker)
+	run = claim(worker)
+	with worker.db.transaction():
+		worker.mod._complete(run, now=102, persist=lambda: None)
+	worker.row().update(results_json="[1]")
+	result = admit(worker, generation="generation-2", now=10**9)
+	assert result["status"] == "queued"
+	assert worker.row()["analyze_render_pending"] == 0 and worker.row()["results_json"] is None
+
+
+def test_finish_after_recovery_clears_the_spurious_pending_flag(worker):
+	admit(worker)
+	run = claim(worker)
+	with worker.db.transaction():
+		worker.mod._complete(run, now=102, persist=lambda: None)
+	with worker.db.transaction():
+		assert worker.mod._recover("fake-session-doc", "fake-phase2", now=10**9) == "Ready"
+	with worker.db.transaction():
+		assert not worker.mod._finish(run, render_failed=False)
+	assert worker.row()["status"] == "Ready" and worker.row()["analyze_render_pending"] == 0
+	# A failed render keeps the owed-report flag.
+	worker.row().update(analyze_render_pending=1)
+	with worker.db.transaction():
+		assert not worker.mod._finish(run, render_failed=True)
+	assert worker.row()["analyze_render_pending"] == 1
+
+
+def test_no_ready_event_when_finish_lost_the_run(worker, monkeypatch):
+	admit(worker)
+	monkeypatch.setattr(worker.mod, "_finish", lambda *a, **k: False)
+	run_worker(worker)
+	assert "phase_2_run_ready" not in [event for event, _ in worker.calls.events]
+
+
+@pytest.mark.parametrize("saved,event,pending", [(True, "phase_2_run_ready", True), (False, "phase_2_run_failed", False)])
+def test_recovery_scan_publishes_the_matching_event(worker, monkeypatch, saved, event, pending):
+	admit(worker)
+	run = claim(worker)
+	if saved:
+		with worker.db.transaction():
+			worker.mod._complete(run, now=102, persist=lambda: None)
+	worker.row().update(analyze_lease_until=1)
+	expired = {"parent": "fake-session-doc", "run_uuid": "fake-phase2", "analyze_generation": "generation-1",
+		"analyze_requested_by": "fake-owner"}
+	monkeypatch.setattr(worker.mod.frappe, "get_all",
+		lambda table, **kw: [expired] if kw["filters"].get("analyze_lease_until") == ["<=", 100] else [], raising=False)
+	worker.mod._recover_pending()
+	assert worker.calls.events[-1][0] == event
+	assert worker.calls.events[-1][1]["render_pending"] is pending

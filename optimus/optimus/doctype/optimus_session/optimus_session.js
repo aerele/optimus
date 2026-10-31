@@ -256,7 +256,7 @@ function _ai_status_banner(frm, state, text, cancel, color) {
 	const html = '<span role="status" class="optimus-ai-status-text">' + frappe.utils.escape_html(text) + '</span>' +
 		' <button type="button" class="btn btn-xs btn-default optimus-ai-cancel"' + (cancel ? '' : ' style="display:none"') + '>' +
 		frappe.utils.escape_html(__("Cancel AI refresh")) + '</button>';
-	const banner = _single_banner(frm, "optimus-ai-progress", "form-message " + color, html, null, ($b) => {
+	const banner = _single_banner(frm, "optimus-ai-progress", "form-message " + color, html, ($b) => {
 		$b.find(".optimus-ai-status-text").text(text);
 		$b.find(".optimus-ai-cancel").toggle(!!cancel).prop("disabled", !!state.cancelling);
 	});
@@ -319,11 +319,11 @@ function _ai_end_message(run) {
 // single element found and removed by `idClass` (which must be unique to this
 // banner) and rewrites its contents in place, returning it so the caller can tag
 // it. Pass html=null to remove it. `extraClasses` update on reuse so a new state
-// receives the current theme classes; `styler` runs once on a freshly created
-// element whose classes do not carry its colours. The element is prepended to
+// receives the current theme classes; `update($b)` patches a reused element in
+// place instead of rewriting its HTML. The element is prepended to
 // .form-layout, outside .form-message-container, so Frappe's own show_message()
 // clearing on each refresh never removes it.
-function _single_banner(frm, idClass, extraClasses, html, styler, update) {
+function _single_banner(frm, idClass, extraClasses, html, update) {
 	const root = frm.$wrapper;
 	if (!root || !root.length) return null;
 	if (html == null) {
@@ -335,7 +335,6 @@ function _single_banner(frm, idClass, extraClasses, html, styler, update) {
 	if (!$b.length) {
 		const cls = extraClasses ? idClass + " " + extraClasses : idClass;
 		$b = $('<div class="' + cls + '"></div>');
-		if (styler) styler($b);
 		const $host = root.find(".form-layout").first();
 		($host.length ? $host : root).prepend($b);
 	}
@@ -345,14 +344,32 @@ function _single_banner(frm, idClass, extraClasses, html, styler, update) {
 	return $b;
 }
 
-// The analyze "preparing report" banner. Uses Frappe's native .form-message.blue
-// theme (same padding, font size, blue scheme plus dark-theme variants) so it
-// matches the bar the old set_headline produced, no inline styling needed. It is
-// tagged with the owning session so render_analyze_progress can drop it once the
-// form shows a different or a new session. Pass html=null to remove it.
-function _progress_banner(frm, html) {
-	const $b = _single_banner(frm, "optimus-analyze-banner", "form-message blue", html);
+// Analyze "preparing report" banner, tagged with its session. Pass html=null to remove it.
+function _progress_banner(frm, html, update) {
+	const $b = _single_banner(frm, "optimus-analyze-banner", "optimus-status", html, update);
 	if ($b) $b.attr("data-optimus-session", frm.doc.session_uuid || "");
+}
+
+// Slim progress strip: only the text span is a live region (the bar is not), so ticks of
+// the bar do not re-announce. Percent is clamped to 0-100 and the bar is patched in place.
+function _analyze_progress_strip(frm, percent, description) {
+	const pct = Number.isFinite(percent) ? Math.max(0, Math.min(100, Math.round(percent))) : null;
+	const desc = description || __("Analyzing…");
+	const text = pct !== null ? __("Preparing report {0}% · {1}", [pct, desc]) : desc;
+	const lead = '<i class="fa fa-spinner fa-spin" aria-hidden="true"></i> ' + frappe.utils.escape_html(text);
+	const bar = pct !== null
+		? '<span class="optimus-status-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"' +
+			' aria-label="' + frappe.utils.escape_html(text) + '" aria-valuenow="' + pct + '">' +
+			'<span style="width:' + pct + '%"></span></span>'
+		: "";
+	const html = '<span class="optimus-status-text" role="status" aria-live="polite">' + lead + "</span>" + bar;
+	_progress_banner(frm, html, ($b) => {
+		const $bar = $b.find(".optimus-status-bar");
+		if (!!$bar.length !== (pct !== null)) return $b.html(html);
+		$b.find(".optimus-status-text").html(lead);
+		if (pct === null) return;
+		$bar.attr({"aria-valuenow": pct, "aria-label": text}).children().css("width", pct + "%");
+	});
 }
 
 // Clear a stale analyze banner on refresh / navigation. The banner is prepended
@@ -409,27 +426,20 @@ function subscribe_session_progress(frm) {
 
 	frappe.realtime.on("optimus_progress", (p) => {
 		if (!mine(p)) return;
-		const pct = typeof p.percent === "number" ? Math.round(p.percent) : null;
-		const desc = frappe.utils.escape_html(p.description || "Analyzing…");
-		// Update one in-place banner rather than frm.dashboard.set_headline,
-		// which appends a new bar on every progress tick (see _progress_banner).
-		_progress_banner(
-			frm,
-			'<span class="text-muted">' +
-				'<i class="fa fa-spinner fa-spin" style="margin-right:6px;"></i>' +
-				(pct !== null ? __("Preparing report {0}% · {1}", [pct, desc]) : desc) +
-				"</span>"
-		);
+		_analyze_progress_strip(frm, p.percent, p.description);
 	});
 	frappe.realtime.on("optimus_session_ready", (p) => {
 		if (!mine(p)) return;
 		_progress_banner(frm, null);
-		frappe.show_alert({ message: __("Report ready"), indicator: "green" });
+		frappe.show_alert(p.empty
+			? { message: __("No requests were recorded"), indicator: "orange" }
+			: { message: __("Report ready"), indicator: "green" });
 		reload();
 	});
 	frappe.realtime.on("optimus_session_failed", (p) => {
 		if (!mine(p)) return;
 		_progress_banner(frm, null);
+		frappe.show_alert({ message: __("Analysis failed"), indicator: "red" });
 		reload();
 	});
 	// v0.7.x: auto-arm fires server-side during analyze (off-form). Tell the
@@ -549,7 +559,7 @@ function _refill_ai_call(frm, state, options) {
 	});
 }
 
-// v0.6.0: Line-profile picker.
+// v0.6.0: Phase-2 line-profile picker.
 //
 // Adds a "Run Line-Profile Pass" custom button when the session is Ready.
 // Clicking opens a dialog that fetches curated candidates (top hot frames
@@ -618,15 +628,18 @@ function render_phase2_button(frm) {
 			)
 		);
 	} else {
-		// A saved result can still need a report after a file/render failure.
-		const pending = (frm.doc.phase_2_runs || []).some(row => row.analyze_render_pending);
-		_phase2_armed_banner(frm, pending
-			? __("Line profiling results are saved. Use Regenerate Reports to update the report.") : null);
+		// A Ready run can still need a report after a file/render failure.
+		const rows = frm.doc.phase_2_runs || [];
+		const saving = rows.some(row => row.status === "Analyzing" && row.analyze_render_pending);
+		const pending = rows.some(row => row.status === "Ready" && row.analyze_render_pending);
+		_phase2_armed_banner(frm, saving ? __("Line profiling results are saved. Saving the report...")
+			: pending ? __("Line profiling results are saved. Use Regenerate Reports to update the report.") : null);
 	}
 
 	// Retrying attaches to live work or queues a bounded new generation.
+	// Analyzing with saved results (pending flag) is only waiting for its report, so Retry would discard them.
 	const stuck_runs = (frm.doc.phase_2_runs || []).filter(row =>
-		row.status === "Analyzing" || row.status === "Failed");
+		(row.status === "Analyzing" && !row.analyze_render_pending) || row.status === "Failed");
 	const clean_form = () => {
 		if (!frm.is_dirty()) return true;
 		frappe.msgprint(__("Save or discard your changes before queueing line profiling analysis."));
@@ -675,7 +688,7 @@ function render_phase2_button(frm) {
 		open_phase2_picker(frm);
 	}, __("Line Profiling"));
 
-	// Recovery hatch: force-clear a stuck line profiling active flag if a
+	// Recovery hatch: force-clear a stuck phase-2 active flag if a
 	// previous run never reached Stop (worker crash, tab close, etc.).
 	// Idempotent safe to click when nothing is stuck.
 	frm.add_custom_button(__("Force Stop Stuck Run"), function () {
@@ -1049,7 +1062,7 @@ function start_phase2(frm, picks, auto_expand) {
 	});
 }
 
-// Listen for line profiling realtime events on this session and refresh the form
+// Listen for phase-2 realtime events on this session and refresh the form
 // so the Line Profiling Runs child table picks up status transitions without the
 // user having to reload manually.
 function subscribe_phase2_events(frm) {
@@ -1173,9 +1186,9 @@ function render_regenerate_report_button(frm) {
 	});
 }
 
-// Parent-level, NON-status hint that an additive line-profile drill-down
+// Parent-level, NON-status hint that an additive phase-2 line-profile drill-down
 // is still computing. The session's own `status` intentionally stays "Ready" (the
-// phase-1 report is rendered and available and a session can have many line profiling
+// phase-1 report is rendered and available and a session can have many phase-2
 // passes) this just resolves the "parent Ready but a line profiling run says Analyzing"
 // confusion without flapping the real status. Driven by the already-loaded child
 // rows, so no extra round-trip; cleared automatically on the next refresh once the
@@ -1223,20 +1236,15 @@ function _drain_suffix(d) {
 	return win ? __(" · up to {0}", [win]) : "";
 }
 
-// The background-jobs drain banner. Same single-element mechanism as the analyze
-// banner (see _single_banner); it keeps its own orange inline styling rather than
-// a .form-message theme class. Pass html=null to remove it.
+// Background-jobs drain banner (orange variant). Takes plain text (escaped here); null removes it.
 function _drain_banner(frm, html) {
-	_single_banner(frm, "optimus-drain-banner", "", html, ($b) =>
-		$b.css({
-			padding: "10px 14px",
-			margin: "8px",
-			background: "#fff7ed",
-			border: "1px solid #fed7aa",
-			"border-radius": "6px",
-			color: "#9a3412",
-			"font-size": "0.9rem",
-		})
+	const safe = html === null ? null : frappe.utils.escape_html(html);
+	_single_banner(
+		frm,
+		"optimus-drain-banner",
+		"optimus-status optimus-status-warn",
+		safe === null ? null : '<span class="optimus-status-text" role="status" aria-live="polite">' + safe + "</span>",
+		($b) => $b.find(".optimus-status-text").html(safe)
 	);
 }
 

@@ -94,7 +94,7 @@ def _render_and_save(docname, recordings, *, run_id, worker_token, required_stat
 		for previous in pending:
 			store.update_run(previous, render_pending=0)
 		phase2_pending = frappe.db.get_values(
-			"Optimus Phase Two Run", {"parent": docname, "analyze_render_pending": 1},
+			"Optimus Phase Two Run", {"parent": docname, "analyze_render_pending": 1, "status": "Ready"},
 			["name"], as_dict=True, for_update=True, limit=10001,
 		)
 		if len(phase2_pending) > 10000:

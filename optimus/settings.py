@@ -15,6 +15,11 @@ from dataclasses import dataclass, field
 from optimus.ai_privacy import opted_in
 from optimus.analyzers.base import DEFAULT_DISPLAY_THRESHOLD_MS
 
+# The ``ai_connection_type`` Select option that routes AI calls through the
+# developer's local CLI session instead of an API key. Single source of truth
+# for the Python side (ai_fix imports it); a test pins it to the doctype JSON.
+SUBSCRIPTION_CONNECTION = "Subscription (local CLI)"
+
 # NOTE: frappe is imported lazily inside each function rather than at
 # module top. Importing at top forces every unit test that touches
 # ``from optimus import settings`` to run under bench, which
@@ -117,6 +122,9 @@ _DEFAULTS = {
 	# ai_fix.py via frappe.utils.password.get_decrypted_password.
 	"ai_enabled": False,
 	"ai_provider": "Anthropic",
+	"ai_connection_type": "API Key",
+	"ai_subscription_cli": "Codex CLI",
+	"ai_cli_path": "",
 	"ai_base_url": "",
 	# 0 = the provider's own window (ai_fix._PROVIDER_DEFAULTS). Only the
 	# OpenAI-compatible provider reads it (the field is hidden for hosted ones).
@@ -362,6 +370,9 @@ class OptimusConfig:
 	# never cached here (see _DEFAULTS note + ai_fix._resolve_provider).
 	ai_enabled: bool = False
 	ai_provider: str = "Anthropic"
+	ai_connection_type: str = "API Key"
+	ai_subscription_cli: str = "Codex CLI"
+	ai_cli_path: str = ""
 	ai_base_url: str = ""
 	ai_context_tokens: int = 0
 	ai_model: str = ""
@@ -531,6 +542,9 @@ def _read_doctype_row() -> dict | None:
 		# False is legitimate. ``ai_auto_suggest_max`` allows 0 (= all).
 		"ai_enabled": bool(doc.get("ai_enabled")),
 		"ai_provider": (doc.get("ai_provider") or "").strip() or None,
+		"ai_connection_type": (doc.get("ai_connection_type") or "").strip() or None,
+		"ai_subscription_cli": (doc.get("ai_subscription_cli") or "").strip() or None,
+		"ai_cli_path": (doc.get("ai_cli_path") or "").strip() or None,
 		"ai_base_url": (doc.get("ai_base_url") or "").strip() or None,
 		"ai_context_tokens": int(_opt_float(doc.get("ai_context_tokens")) or 0),
 		"ai_model": (doc.get("ai_model") or "").strip() or None,
@@ -738,6 +752,9 @@ def _resolve(*, row=_UNREAD_ROW) -> OptimusConfig:
 			else _DEFAULTS["ai_enabled"]
 		),
 		ai_provider=row.get("ai_provider") or _DEFAULTS["ai_provider"],
+		ai_connection_type=row.get("ai_connection_type") or _DEFAULTS["ai_connection_type"],
+		ai_subscription_cli=row.get("ai_subscription_cli") or _DEFAULTS["ai_subscription_cli"],
+		ai_cli_path=row.get("ai_cli_path") or _DEFAULTS["ai_cli_path"],
 		ai_base_url=row.get("ai_base_url") or _DEFAULTS["ai_base_url"],
 		ai_context_tokens=max(0, int(row.get("ai_context_tokens") or 0)),
 		ai_model=row.get("ai_model") or _DEFAULTS["ai_model"],
