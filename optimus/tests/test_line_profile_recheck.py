@@ -271,9 +271,10 @@ def _result(findings, summaries):
 	return AnalyzerResult(findings=findings, aggregate={"phase2_functions": summaries}, warnings=[])
 
 
-def _run_row(functions, status="Ready", run_uuid="r1", ended_at=None, warnings=None):
+def _run_row(functions, status="Ready", run_uuid="r1", ended_at=None, warnings=None, started_at=None):
 	return SimpleNamespace(
 		status=status, results_json=json.dumps(functions), run_uuid=run_uuid, ended_at=ended_at,
+		started_at=started_at,
 		warnings_json=json.dumps(warnings or []),
 	)
 
@@ -364,6 +365,23 @@ class TestPersist:
 		parent = _Parent([_finding(impact=1000.0)], runs)
 		persist.merge_phase2_findings(parent, _result([], []))
 		assert parent.findings[0]["severity"] == "Medium"
+
+	def test_run_being_saved_is_rechecked_and_is_the_newest(self):
+		# The saved run is still Analyzing (report not attached) but already holds results.
+		runs = [
+			_run_row([_fn("app.mod.work", 800.0)], run_uuid="old", ended_at=1, started_at=0),
+			_run_row([_fn("app.mod.work", 20.0)], status="Analyzing", run_uuid="new", started_at=2),
+		]
+		parent = _Parent([_finding(impact=1000.0)], runs)
+		persist.merge_phase2_findings(parent, _result([], []))
+		assert parent.findings[0]["severity"] == "Medium"
+
+	def test_analyzing_run_without_results_is_not_used(self):
+		row = _run_row([_fn("app.mod.work", 20.0)], status="Analyzing", started_at=2)
+		row.results_json = None
+		parent = _Parent([_finding(impact=1000.0)], [row])
+		persist.merge_phase2_findings(parent, _result([], []))
+		assert parent.findings[0]["severity"] == "High"
 
 	def test_time_budgeted_run_does_not_downgrade(self):
 		warn = [persist.BUDGET_WARNING_PREFIX + " to avoid freezing the flow"]

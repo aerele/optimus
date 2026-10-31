@@ -27,7 +27,11 @@ import json
 import os
 from typing import Any
 
-from optimus.analyzers.base import DEFAULT_DISPLAY_THRESHOLD_MS, humanize_duration_ms
+from optimus.analyzers.base import (
+	DEFAULT_DISPLAY_THRESHOLD_MS,
+	humanize_duration_ms,
+	phase2_run_display_status,
+)
 from optimus.line_profile.function_index import build_function_index
 from optimus.renderer.syntax import _highlight_python_snippet
 from optimus.renderer.time_format import _format_duration_ms
@@ -312,10 +316,12 @@ def _render_line_drilldown_panel(session_doc: Any, threshold_ms: float = DEFAULT
 					"source": picks_source.get(fn.get("dotted_path"), "curated"),
 				}
 			)
+		# Stored status flips to Ready only after this render, so derive it from persisted results.
+		display_status = phase2_run_display_status(child)
 		parsed_runs.append(
 			{
 				"run_uuid": child.run_uuid,
-				"status": child.status,
+				"status": display_status,
 				"started_at": child.started_at,
 				"ended_at": child.ended_at,
 				"total_ms": child.total_ms or 0,

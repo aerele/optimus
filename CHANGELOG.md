@@ -8,7 +8,7 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.126] - 2026-10-30
+## [0.12.127] - 2026-10-30
 
 ### Fixed
 
@@ -17,6 +17,32 @@ versions may contain breaking changes see migration notes below).
 - The floating widget now logs (with `window.OPTIMUS_DEBUG = true`) when its 30-second wait for the realtime socket gives up.
 
 ---
+
+## [0.12.125] - 2026-10-30
+
+### Fixed
+
+- Line profiling (Line-Level Drilldown): a run no longer shows "Ready" before its
+  report exists. The results and findings are saved while the run is still
+  "Analyzing" (with `analyze_render_pending` set), the report is rebuilt and
+  attached, and only then is the run flipped to "Ready" (fenced to the worker
+  that owns the run by generation and token) and the "Phase 2 report generated"
+  popup shown. If the rebuild fails the run still becomes Ready with the flag
+  kept, meaning a report update is owed, so Regenerate Reports can finish it.
+- A saved run whose worker died before the report step is completed by the
+  queue recovery after 10 minutes (Ready, report update owed, one log line), and
+  by the legacy janitor sweep, instead of being marked Failed over a populated
+  drill-down. If the report did get attached meanwhile, the owed flag is cleared.
+- Retrying an expired saved run starts clean (stale results are dropped).
+- The report's drill-down panel and run list read one shared rule: a run with
+  persisted results reads as Ready. An AI report refresh no longer clears the
+  owed-report flag of a run that is still Analyzing.
+- Line profiling results are saved while the run is still "Analyzing"; the
+  phase-1 recheck counts that run as the newest one, so findings are judged
+  against it.
+- The Session form and floating widget agree with the report: a saved run is not
+  offered Retry, and the floating pill (in `optimus_pill_state.js`) says "results
+  saved" with an orange alert when the report update is owed.
 
 ## [0.12.124] - 2026-10-30
 

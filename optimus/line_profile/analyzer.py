@@ -567,18 +567,14 @@ def _persist_run(
 	result: AnalyzerResult,
 	total_ms: float,
 ) -> None:
-	"""Write results back to the run row + append findings to the parent
-	session's findings child table, within the caller's locked transaction."""
+	"""Save results and findings in the caller's locked transaction; the run stays Analyzing until its report is attached."""
 	parent = frappe.get_doc("Optimus Session", parent_docname)
 
-	# Update the matching child row in place.
 	for child in (parent.phase_2_runs or []):
 		if child.run_uuid == run_uuid:
 			child.results_json = json.dumps(results_json, default=str)
 			child.warnings_json = json.dumps(result.warnings, default=str)
 			child.total_ms = round(total_ms, 2)
-			child.status = "Ready"
-			child.ended_at = frappe.utils.now_datetime()
 			break
 	else:
 		raise ValueError("Phase 2 result row is missing")

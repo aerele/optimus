@@ -21,7 +21,10 @@ TABLE = "Optimus Phase Two Run"
 QUEUE_SECONDS = queue_protocol.QUEUE_SECONDS
 JOB_SECONDS = 1500
 LEASE_SECONDS = JOB_SECONDS + 120
+# After the results are saved only the report step remains, so recovery needs not wait a full job lease.
+RENDER_LEASE_SECONDS = 600
 MAX_ATTEMPTS = 4
+# analyze_render_pending: Analyzing = results saved, report not attached yet; Ready = report update still owed.
 JOURNAL_FIELDS = (
 	"recording_user",
 	"analyze_generation", "analyze_requested_by", "analyze_worker_token", "analyze_lease_until",
@@ -96,6 +99,12 @@ class Phase2Failed(RuntimeError):
 
 def _now():
 	return time.time()
+
+
+def _stamp():
+	from frappe.utils import now_datetime
+
+	return now_datetime()
 
 
 def _locked(docname, run_uuid, *, wait=True):
@@ -217,7 +226,8 @@ def _admit(docname, session_uuid, run_uuid, requested_by, *, generation, now, fr
 		return {"status": "refused", "reason": "no_worker" if workers is False else "queue_unavailable"}
 	_write(row, status="Analyzing", analyze_generation=generation, analyze_requested_by=requested_by,
 		analyze_worker_token=None, analyze_attempts=attempts + 1, analyze_lease_until=now + QUEUE_SECONDS,
-		analyze_dispatch_at=0, analyze_dispatch_pending=1)
+		analyze_dispatch_at=0, analyze_dispatch_pending=1, analyze_render_pending=0,
+		**({"results_json": None} if row.get("analyze_render_pending") else {}))
 	return {"status": "queued", "run": row}
 
 
@@ -246,7 +256,7 @@ def _owns(row, run, now):
 def _complete(run, *, now, persist):
 	parent, row = _locked(run["parent"], run["run_uuid"])
 	if not (
-		_owns(row, run, now) and parent and parent["status"] == "Ready"
+		_owns(row, run, now) and not row.get("analyze_render_pending") and parent and parent["status"] == "Ready"
 		and parent.get("session_uuid") == run["session_uuid"]
 		and _authorized(parent, row.get("analyze_requested_by"))
 	):
@@ -257,13 +267,29 @@ def _complete(run, *, now, persist):
 		persist()
 	finally:
 		_RESULT_SAVE.reset(token)
-	_write(row, status="Ready", analyze_dispatch_pending=0, analyze_render_pending=1)
+	# The pending flag marks saved results; Ready is set by _finish once the report is attached.
+	_write(row, analyze_dispatch_pending=0, analyze_render_pending=1, analyze_lease_until=now + RENDER_LEASE_SECONDS)
+	return True
+
+
+def _finish(run, *, render_failed):
+	"""Flip this generation's saved run to Ready; False if it is not ours or already done."""
+	_parent, row = _locked(run["parent"], run["run_uuid"])
+	ours = (row and row.get("analyze_render_pending") and row.get("analyze_generation") == run["analyze_generation"]
+		and row.get("analyze_worker_token") == run["analyze_worker_token"])
+	if ours and row["status"] == "Ready" and not render_failed:
+		# Recovery completed the run while this render was still live; the report did get attached.
+		_write(row, analyze_render_pending=0)
+		return False
+	if not (ours and row["status"] == "Analyzing"):
+		return False
+	_write(row, status="Ready", ended_at=_stamp(), analyze_render_pending=int(render_failed))
 	return True
 
 
 def _fail(run, *, now, reason):
 	_parent, row = _locked(run["parent"], run["run_uuid"])
-	if not _owns(row, run, now):
+	if not _owns(row, run, now) or row.get("analyze_render_pending"):
 		return False
 	message = (
 		"Phase 2 samples changed during analysis. Wait for capture requests to finish, then retry analysis."
@@ -280,7 +306,7 @@ def _completed(run):
 	"""Read back this worker's committed outcome after a lost acknowledgement."""
 	parent, row = _locked(run["parent"], run["run_uuid"])
 	return bool(parent and parent.get("session_uuid") == run["session_uuid"] and row
-		and row["status"] == "Ready"
+		and (row["status"] == "Ready" or row.get("analyze_render_pending"))
 		and row.get("analyze_generation") == run["analyze_generation"]
 		and row.get("analyze_worker_token") == run["analyze_worker_token"])
 
@@ -507,7 +533,8 @@ def _postprocess(run):
 		raise guard.interrupt()
 	if failure is not None:
 		_log("optimus ai phase 2 report", failure)
-	_notify({**run, "analyze_render_pending": failure is not None}, "phase_2_run_ready")
+	if _retry_sql(lambda: _finish(run, render_failed=failure is not None)):
+		_notify({**run, "analyze_render_pending": failure is not None}, "phase_2_run_ready")
 
 
 def _notify(run, event):
@@ -527,10 +554,14 @@ def _recover(docname, run_uuid, *, now):
 		return False
 	if (row.get("analyze_lease_until") or 0) > now:
 		return False
+	if row.get("analyze_render_pending"):
+		# Results were saved; only the report step stalled, so complete the run.
+		_write(row, status="Ready", ended_at=_stamp(), analyze_render_pending=1)
+		return "Ready"
 	_write(row, status="Failed", analyze_dispatch_pending=0, warnings_json=json.dumps([
 		"Phase 2 analysis expired before completion. Retry analysis while its captured input is available."
 	]))
-	return True
+	return "Failed"  # _recover returns False (untouched), "Ready" (saved results kept) or "Failed".
 
 
 def recover_pending():
@@ -562,7 +593,11 @@ def _recover_pending():
 			raise
 		if changed:
 			row["session_uuid"] = frappe.db.get_value("Optimus Session", row["parent"], "session_uuid")
-			_notify(row, "phase_2_run_failed")
+			if changed == "Ready":
+				frappe.logger().warning(f"optimus phase 2 run {row['run_uuid']} completed by recovery; report update pending")
+				_notify({**row, "analyze_render_pending": 1}, "phase_2_run_ready")
+			elif changed == "Failed":
+				_notify(row, "phase_2_run_failed")
 	# Separate scans prevent many live workers from hiding undelivered jobs.
 	rows = frappe.get_all(TABLE, filters={"status": "Analyzing", "analyze_dispatch_pending": 1,
 		"analyze_lease_until": [">", now]}, fields=["parent", "run_uuid", "analyze_generation"],
@@ -580,6 +615,9 @@ def expire_legacy(docname, run_uuid, *, status, cutoff):
 		return False
 	if status not in {"Recording", "Analyzing"}:
 		return False
+	if status == "Analyzing" and row.get("results_json"):
+		_write(row, status="Ready", ended_at=_stamp(), analyze_render_pending=1)
+		return True
 	message = (
 		"Phase 2 recording expired. Record a new line-profile pass and stop it after reproducing the flow."
 		if status == "Recording" else
