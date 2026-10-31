@@ -14,6 +14,7 @@ JS_FILES = (
 	"optimus/doctype/optimus_session/optimus_session.js",
 	"optimus/doctype/optimus_settings/optimus_settings.js",
 	"public/js/floating_widget.js",
+	"public/js/optimus_pill_state.js",
 )
 DOC_FILES = ("README.md", "SECURITY.md", "docs/AI-FIXING.md", "docs/AI-REFRESH.md", "docs/REDIS-SCHEMA.md")
 
