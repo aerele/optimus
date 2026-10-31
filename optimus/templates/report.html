@@ -3045,7 +3045,7 @@
           </thead>
           <tbody>
           {% for action in report_data.actions_framework %}
-            {{ action_row(action, loop.index, max_ms=_max_fw_ms) }}
+            {{ action_row(action, 'fw ' ~ loop.index, max_ms=_max_fw_ms) }}
           {% endfor %}
           </tbody>
         </table>
@@ -3295,7 +3295,7 @@
       <tbody>
         {% for row in report_data.resource.timeline %}
         <tr>
-          <td class="num">{{ row.row_number }}</td>
+          <td class="num"{% if row.row_number == "-" %} title="hidden by Min Action Duration"{% endif %}>{{ row.row_number }}</td>
           <td>{{ row.action_label }}</td>
           <td class="num">{{ "%.0f" | format(row.cpu or 0) }}%</td>
           <td class="num">{{ ((row.rss or 0) / 1000000) | round(0) | int }}MB</td>

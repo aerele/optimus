@@ -645,14 +645,17 @@ def _resource_row_numbers(actions, actions_framework) -> dict:
 	return numbers
 
 
-def _resource_row_number(action_idx, numbers: dict) -> str:
-	"""The "#" shown for a Server Resource row, matching the Actions table."""
+def _resource_row_number(action_idx, numbers: dict, idx_fallback: bool = False) -> str:
+	"""The "#" shown for a Server Resource row, matching the Actions table.
+
+	``idx_fallback`` (actions exist but none carries an int ``idx``) shows ``idx + 1``. Any other
+	action missing from the tables was hidden by Min Action Duration and shows "-".
+	"""
 	if not isinstance(action_idx, int):
 		return "-"
 	if action_idx in numbers:
 		return numbers[action_idx]
-	# Actions carry no ``idx``: 1-based fallback. Otherwise the action is hidden from the Actions table.
-	return "-" if numbers else str(action_idx + 1)
+	return str(action_idx + 1) if idx_fallback else "-"
 
 
 def _build_resource(infra_summary, infra_timeline, actions=None, actions_framework=None) -> dict | None:
@@ -727,12 +730,13 @@ def _build_resource(infra_summary, infra_timeline, actions=None, actions_framewo
 	# ``RQ Job: …`` consistent with the rest of the report.
 	_normalised_timeline = []
 	_numbers = _resource_row_numbers(actions, actions_framework)
+	_idx_fallback = not _numbers and bool(actions or actions_framework)
 	for _row in (infra_timeline or []):
 		_row = dict(_row or {})
 		_lab = _row.get("action_label") or ""
 		if _lab.startswith("Job: "):
 			_row["action_label"] = "RQ " + _lab
-		_row["row_number"] = _resource_row_number(_row.get("action_idx"), _numbers)
+		_row["row_number"] = _resource_row_number(_row.get("action_idx"), _numbers, _idx_fallback)
 		_normalised_timeline.append(_row)
 	return {
 		"cards": cards,

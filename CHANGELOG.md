@@ -12,7 +12,7 @@ versions may contain breaking changes see migration notes below).
 
 ### Fixed
 
-- The "#" column of the Server Resource table now starts at 1 and shows the same number the Actions table gives that action. Before, it showed a 0-based index, so it started at 0 and did not line up with the Actions table. Actions with no resource snapshot are still left out, so the numbers can skip. Framework actions show as "fw 1", "fw 2" to match the collapsed framework table, and an action hidden by Min Action Duration shows "-".
+- The "#" column of the Server Resource table now starts at 1 and shows the same number the Actions table gives that action. Before, it showed a 0-based index, so it started at 0 and did not line up with the Actions table. Actions with no resource snapshot are still left out, so the numbers can skip. Framework actions show as "fw 1", "fw 2" to match the collapsed framework table, and the framework table now prints the same "fw " prefix in its own "#" column. An action hidden by Min Action Duration shows "-" with a tooltip saying so, and when Min Action Duration hides every action no numbers are invented.
 
 ---
 

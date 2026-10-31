@@ -803,8 +803,12 @@ class TestResourceRowNumbers:
 		assert self._numbers(rows, own, fw) == ["1", "fw 1", "2", "fw 2"]
 
 	def test_no_idx_on_actions_falls_back_to_idx_plus_one(self):
-		assert self._numbers([self._row(4)], []) == ["5"]
 		assert self._numbers([self._row(4)], [{"x": 1}]) == ["5"]
+
+	def test_all_actions_filtered_out_shows_dash_not_invented_numbers(self):
+		rows = [self._row(0), self._row(1)]
+		assert self._numbers(rows, []) == ["-", "-"]
+		assert self._numbers(rows, [], []) == ["-", "-"]
 
 	def test_action_hidden_from_actions_table_shows_dash(self):
 		# idx 1 was dropped by the Min Action Duration filter, so it has no Actions-table number
