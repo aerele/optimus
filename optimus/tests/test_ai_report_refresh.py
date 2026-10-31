@@ -155,7 +155,7 @@ def test_report_replacement_and_pending_render_accounting_roll_back_together(rep
 @pytest.mark.parametrize("fail", [False, True])
 def test_phase2_render_pending_clears_only_with_report_commit(report, fail):
 	report.journal.db.rows["Optimus Phase Two Run"] = {
-		"fake-child": {"name": "fake-child", "parent": "fake-session-doc", "analyze_render_pending": 1},
+		"fake-child": {"name": "fake-child", "parent": "fake-session-doc", "analyze_render_pending": 1, "status": "Ready"},
 	}
 	report.state.fail_insert = fail
 	if fail:
@@ -164,6 +164,19 @@ def test_phase2_render_pending_clears_only_with_report_commit(report, fail):
 	else:
 		report.mod.render_report("fake-session-doc")
 	assert report.journal.db.rows["Optimus Phase Two Run"]["fake-child"]["analyze_render_pending"] == int(fail)
+
+
+def test_phase2_render_pending_ignores_a_run_that_is_still_analyzing(report):
+	rows = {
+		"saving": {"name": "saving", "parent": "fake-session-doc", "analyze_render_pending": 1, "status": "Analyzing"},
+		"owed": {"name": "owed", "parent": "fake-session-doc", "analyze_render_pending": 1, "status": "Ready"},
+		"other": {"name": "other", "parent": "another-session", "analyze_render_pending": 1, "status": "Ready"},
+	}
+	report.journal.db.rows["Optimus Phase Two Run"] = rows
+	report.mod.render_report("fake-session-doc")
+	assert rows["saving"]["analyze_render_pending"] == 1
+	assert rows["owed"]["analyze_render_pending"] == 0
+	assert rows["other"]["analyze_render_pending"] == 1
 
 
 @pytest.mark.parametrize("expired_field", ["lease_until", "deadline"])

@@ -391,6 +391,18 @@ class TestPhase2RunsShape:
 		)
 		assert out["line_drilldown_runs"] == []
 
+	def test_analyzing_run_with_saved_results_is_shown_ready(self):
+		# The run flips to Ready only after this report is built, so saved results count as Ready.
+		run = self._phase2_run(status="Analyzing")
+		out = build_report_context(_doc(phase_2_runs=[run]), _ctx())
+		assert [r["status"] for r in out["line_drilldown_runs"]] == ["Ready"]
+
+	def test_analyzing_run_without_results_is_skipped(self):
+		run = self._phase2_run(status="Analyzing")
+		run.results_json = None
+		out = build_report_context(_doc(phase_2_runs=[run]), _ctx())
+		assert out["line_drilldown_runs"] == []
+
 	def test_ready_run_has_contract_fields(self):
 		picks = [{"dotted_path": "x.y.fn", "source": "curated"}]
 		results = [{

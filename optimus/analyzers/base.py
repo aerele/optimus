@@ -973,3 +973,15 @@ class AnalyzeContext:
 			self.aggregate.update(result.aggregate)
 		if result.warnings:
 			self.warnings.extend(result.warnings)
+
+
+def phase2_run_display_status(run) -> str:
+	"""Status to show for a Phase 2 run: Failed wins, persisted results mean Ready, else the stored status."""
+	status = (getattr(run, "status", "") or "").strip()
+	if status == "Failed":
+		return "Failed"
+	results_json = getattr(run, "results_json", None)
+	# "[]" (finished, no hot lines) still counts as done; unset/empty means not persisted yet.
+	if results_json not in (None, ""):
+		return "Ready"
+	return status or "Analyzing"
