@@ -12,6 +12,7 @@ renderer is unit-testable without a running site.
 
 import functools
 import json
+import logging
 import os
 import re
 from typing import Any
@@ -92,6 +93,35 @@ def _redact_call_queries(calls) -> None:
 	``optimus.redaction.redact_call_queries`` with the live extra columns."""
 	_, extra_cols = _settings_extras()
 	_redact_call_queries_base(calls, extra_columns=extra_cols)
+
+
+# Slow Query SQL longer than this many characters renders in a collapsed <details>.
+SQL_COLLAPSE_CHARS = 2000
+
+
+def redact_finding_sql(findings) -> None:
+	"""Redact the full SQL a Slow Query card shows, one finding at a time.
+
+	Fails closed: a finding whose SQL cannot be redacted (a regex error or a
+	non-string value) loses its SQL block instead of showing it raw.
+	"""
+	for finding in findings:
+		detail = finding.get("technical_detail")
+		if finding.get("finding_type") != "Slow Query" or not isinstance(detail, dict):
+			continue
+		if not detail.get("normalized_query"):
+			continue
+		try:
+			_, extra_cols = _settings_extras()
+			sql = detail["normalized_query"]
+			if not isinstance(sql, str):
+				raise TypeError(f"query is {type(sql).__name__}, not str")
+			detail["normalized_query"] = _redact_sql_literals_base(sql, extra_columns=extra_cols, strict=True)
+		except Exception as error:
+			logging.getLogger(__name__).warning(
+				"Slow Query SQL dropped from the report, redaction failed: %s", type(error).__name__
+			)
+			detail.pop("normalized_query", None)
 
 
 # v0.10.0+: source-file I/O + the bounded LRU cache moved to
@@ -407,11 +437,6 @@ def render(
 	# Tokens every stored AI fix cost, counted before any filter or hide step below drops
 	# a finding (the tables' retired index-AI tokens are added where the tables are read).
 	_ai_fix_tokens = count_ai_tokens(all_findings, [])
-	# Slow Query cards show the full SQL; redact it like the slowest-queries table.
-	for _f in all_findings:
-		_d = _f.get("technical_detail")
-		if _f.get("finding_type") == "Slow Query" and isinstance(_d, dict) and _d.get("normalized_query"):
-			_d["normalized_query"] = _redact_sql_literals(_d["normalized_query"])
 	# v0.6.x: SQL "red flag" findings carry no callsite derive a
 	# representative one (the hottest user-app frame that ran the offending
 	# query) from the recordings so their smoking-gun block can render too.
@@ -650,6 +675,7 @@ def render(
 		parser=make_query_parser(), errors=_recipe_errors,
 	)
 	mark_outdated_ai_fixes(all_findings, refresh_check=make_refresh_check())
+	redact_finding_sql(all_findings)
 
 	# v0.6.x: drop framework/internal db tables from the "Time spent per
 	# database table" section schema/meta (DocType/DocField/…), user-
@@ -1089,6 +1115,8 @@ def render(
 		# from Optimus Settings. Above the threshold → "5.23s"; below → "ms"
 		# (with caller-chosen decimals to preserve %.1f / %.2f precision).
 		"fmt_ms": _fmt_ms,
+		# Slow Query SQL longer than this renders collapsed.
+		"sql_collapse_chars": SQL_COLLAPSE_CHARS,
 		# Severity breakdown of ALL findings feeds the "Issues found" stat
 		# card's sub-line (which sums to the card's total).
 		"severity_counts": {

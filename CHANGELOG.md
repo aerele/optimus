@@ -12,9 +12,10 @@ versions may contain breaking changes see migration notes below).
 
 ### Fixed
 
-- The Slow Query finding card now shows the complete query (it previously showed only the title and callsite). Long statements wrap in a scrollable block.
-- The slowest-queries table and the Slow Query card are no longer clipped when exported to PDF or printed; the whole statement is shown.
-- Statements larger than 200,000 characters are stored up to that size with a visible "query truncated at N of M characters" note instead of growing the session record without limit.
+- The Slow Query finding card now shows the complete query again, labelled "Full SQL, sensitive values hidden". This reverses the earlier removal of the query block from finding cards (v0.7.x); only Slow Query cards get it, other types keep their SQL in the queries tables. Statements over 2,000 characters sit in a collapsed block with a character count and are keyboard-scrollable.
+- The slowest-queries table and the Slow Query card are no longer clipped when exported to PDF or printed; a long card may break across pages.
+- Statements larger than 200,000 characters are stored up to that size with a visible "query truncated at N of M characters" note, which the label also mentions, and the cut is logged. A quoted value left open by the cut is dropped.
+- The card's SQL is redacted after the index advice is built, one finding at a time; if redaction fails for a finding its SQL is left out rather than shown.
 
 ---
 

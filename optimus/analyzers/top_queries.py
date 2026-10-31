@@ -13,8 +13,8 @@ list stays in the per-action breakdown.
 import json
 
 from optimus.analyzers.base import (
-	QUERY_TEXT_LIMIT,
 	AnalyzerResult,
+	cap_sql,
 	dur,
 	installed_apps_allowlist,
 	is_framework_callsite_str,
@@ -37,17 +37,6 @@ MAX_FINDINGS = 5  # only flag the top 5 slow queries to avoid noise
 # clear this floor to qualify; if nothing does, the section renders an
 # empty state instead of a list of trivially-fast queries.
 TOP_QUERY_FLOOR_MS = 10.0
-
-# Upper bound on SQL kept per slow query; longer text ends with a visible note.
-MAX_SQL_CHARS = 200_000
-
-
-def cap_sql(sql: str) -> str:
-	"""Cut ``sql`` to ``MAX_SQL_CHARS`` and append a visible truncation note."""
-	if not isinstance(sql, str) or len(sql) <= MAX_SQL_CHARS:
-		return sql
-	return f"{sql[:MAX_SQL_CHARS]}\n-- [Optimus: query truncated at {MAX_SQL_CHARS} of {len(sql)} characters]"
-
 
 def _resolve_slow_query_threshold() -> tuple[float, float]:
 	"""Return (slow_threshold_ms, high_severity_threshold_ms). Reads Optimus

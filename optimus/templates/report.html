@@ -50,6 +50,7 @@
     overflow: auto;
     font-size: 0.78rem;
   }
+  details.sql-full-box > summary { cursor: pointer; font-size: 0.85rem; color: #374151; margin: 6px 0; }
   .muted { color: #6b7280; }
   .small { font-size: 0.85rem; }
 
@@ -251,6 +252,8 @@
       max-height: none;
       overflow: visible;
     }
+    /* A long statement may span pages; the rest of the card stays together. */
+    .finding.finding-long-sql { page-break-inside: auto; break-inside: auto; }
   }
 
   /* v0.7.x: shared "fixed-layout + content wraps" behaviour, applied
@@ -1981,10 +1984,10 @@
 
      Data shapes (f.technical_detail / f.llm_fix / f.sub_findings) are
      unchanged from Phase B/C. #}
-  <div class="finding severity-{{ f.severity | lower }}">
+  {% set detail = f.technical_detail or {} %}
+  {% set callsite = detail.callsite or {} %}
+  <div class="finding severity-{{ f.severity | lower }}{% if f.finding_type == "Slow Query" and (detail.normalized_query or "")|length > sql_collapse_chars %} finding-long-sql{% endif %}">
 
-    {% set detail = f.technical_detail or {} %}
-    {% set callsite = detail.callsite or {} %}
 
     <div class="finding-top">
       <span class="severity-pill {{ f.severity | lower }}">{{ f.severity }}</span>
@@ -2180,8 +2183,8 @@
     </div>
     {% endif %}
 
-    {# v0.7.x: keep this OR list in sync with the inner {% if %} branches
-       below - it's a conservative early exit so the styled ``.finding-detail``
+    {# Keep this OR list in sync with the rows the block below displays (the SQL
+       row is Slow Query only) - it's a conservative early exit so the styled ``.finding-detail``
        container (white background + border + padding) doesn't render as an
        empty box for finding types whose technical_detail carries no rows
        that this block displays (Slow Hot Path / Hook Bottleneck / Hot Line
@@ -2193,7 +2196,7 @@
     {% set _ai_fix_shown = f.llm_fix and f.llm_fix.suggestion_html and not hide_ai_fix %}
     {% set _show_fix_hint = detail.fix_hint and not _ai_fix_shown %}
     {% set _has_detail_rows = (
-         detail.normalized_query
+         (f.finding_type == "Slow Query" and detail.normalized_query)
       or detail.suggested_ddl
       or detail.example_queries
       or detail.explain_row
@@ -2221,8 +2224,17 @@
 
       {# Slow Query only: other types keep their SQL in the queries tables. #}
       {% if f.finding_type == "Slow Query" and detail.normalized_query %}
-        <span class="label">Query (complete, literals normalized)</span>
-        <pre class="sql-full">{{ detail.normalized_query }}</pre>
+        {% set _sql_cut = "query truncated at" in detail.normalized_query %}
+        {% set _sql_label = "Full SQL, sensitive values hidden" ~ (" (truncated, see the note at the end)" if _sql_cut else "") %}
+        {% if detail.normalized_query|length > sql_collapse_chars %}
+        <details class="sql-full-box">
+          <summary>{{ _sql_label }} &middot; {{ "{:,}".format(detail.normalized_query|length) }} characters, click to expand</summary>
+          <pre class="sql-full" tabindex="0">{{ detail.normalized_query }}</pre>
+        </details>
+        {% else %}
+        <span class="label">{{ _sql_label }}</span>
+        <pre class="sql-full" tabindex="0">{{ detail.normalized_query }}</pre>
+        {% endif %}
       {% endif %}
 
       {% if detail.suggested_ddl %}

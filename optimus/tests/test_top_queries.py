@@ -4,7 +4,7 @@
 """Unit tests for optimus.analyzers.top_queries."""
 
 from optimus.analyzers import top_queries
-from optimus.analyzers.base import dur
+from optimus.analyzers.base import MAX_SQL_CHARS, cap_sql, dur
 
 
 def test_top_queries_sorted_by_duration_desc(full_scan_recording, empty_context):
@@ -243,15 +243,15 @@ def test_long_slow_query_kept_in_full_in_leaderboard_and_finding(empty_context):
 
 
 def test_pathological_query_capped_with_visible_note(empty_context):
-	sql = "SELECT " + "x" * (top_queries.MAX_SQL_CHARS + 500)
+	sql = "SELECT " + "x" * (MAX_SQL_CHARS + 500)
 	result = top_queries.analyze([_long_recording(sql)], empty_context)
 	capped = result.aggregate["top_queries"][0]["normalized_query"]
-	assert capped.startswith(sql[: top_queries.MAX_SQL_CHARS])
+	assert capped.startswith(sql[: MAX_SQL_CHARS])
 	assert "query truncated at" in capped and str(len(sql)) in capped
 	assert len(capped) < len(sql) + 200
 
 
 def test_cap_sql_leaves_query_at_limit_untouched():
-	sql = "a" * top_queries.MAX_SQL_CHARS
-	assert top_queries.cap_sql(sql) == sql
-	assert top_queries.cap_sql("") == ""
+	sql = "a" * MAX_SQL_CHARS
+	assert cap_sql(sql) == sql
+	assert cap_sql("") == ""
