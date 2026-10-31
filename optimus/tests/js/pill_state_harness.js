@@ -55,6 +55,8 @@ test("normal ready with no requests recorded says no data", () => {
 	assert.strictEqual(empty.alert.indicator, "orange");
 	const p2 = ev(analyzing({ phase2: true, run_uuid: "r1" }), "phase_2_run_ready", { run_uuid: "r1", parent: "OS-1", render_pending: true, empty: true });
 	assert.strictEqual(p2.ui.label, "Phase 2 results saved");
+	assert.strictEqual(p2.alert.message, "Phase 2 results saved. Use Regenerate Reports to update the report.");
+	assert.strictEqual(p2.alert.indicator, "orange");
 	const plain = ev(analyzing(), "optimus_session_ready", { empty: false });
 	assert.strictEqual(plain.ui.label, "Report ready");
 	assert.strictEqual(plain.alert.indicator, "blue");
