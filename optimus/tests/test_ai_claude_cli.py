@@ -277,6 +277,27 @@ class TestInstalledCheck:
 		link.symlink_to(entry)
 		assert ai_fix._cli_installed(_cfg(ai_cli_path=str(link))) == os.path.realpath(entry)
 
+	def test_the_current_npm_install_a_claude_symlink_to_bin_claude_exe_is_accepted(self, tmp_path):
+		# `npm view @anthropic-ai/claude-code@2.1.316 bin` is `bin/claude.exe`, so the realpath basename is claude.exe.
+		entry = _exe(tmp_path / "lib" / "node_modules" / "@anthropic-ai" / "claude-code" / "bin" / "claude.exe")
+		link = tmp_path / "bin" / "claude"
+		link.parent.mkdir()
+		link.symlink_to(entry)
+		assert ai_fix._cli_installed(_cfg(ai_cli_path=str(link))) == os.path.realpath(entry)
+
+	@pytest.mark.parametrize("parts", [
+		("other", "bin", "claude.exe"),
+		("claude-code", "dist", "claude.exe"),
+		("claude-code", "claude.exe"),
+		("evil", "claude-code", "bin", "x", "claude.exe"),
+	])
+	def test_a_claude_exe_outside_the_npm_package_layout_is_rejected(self, tmp_path, parts):
+		target = _exe(tmp_path.joinpath(*parts))
+		link = tmp_path / "launch" / "claude"
+		link.parent.mkdir()
+		link.symlink_to(target)
+		assert ai_fix._cli_resolve(_cfg(ai_cli_path=str(link))) == (None, "entrypoint")
+
 	def test_a_plain_claude_launcher_is_accepted(self, tmp_path):
 		exe = _exe(tmp_path / "claude")
 		assert ai_fix._cli_installed(_cfg(ai_cli_path=str(exe))) == os.path.realpath(exe)

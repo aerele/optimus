@@ -4553,6 +4553,9 @@ def _cli_backend(cfg) -> _CliBackend:
 # `claude auth status` and only ``result`` / ``is_error`` / ``api_error_status`` from a reply.
 
 _CLAUDE_ENTRYPOINT_NAMES = ("claude", "cli.js", "cli.cjs", "cli.mjs")
+# The npm package `@anthropic-ai/claude-code` installs `bin/claude.exe` (a native binary despite the name).
+_CLAUDE_NPM_BINARY = "claude.exe"
+_CLAUDE_NPM_PACKAGE_DIR = "claude-code"
 _CLAUDE_VERSION_FILE_RE = re.compile(r"\d+\.\d+\.\d+(?:[-+.][0-9A-Za-z.+\-]*)?")
 _CLAUDE_LOGIN_CACHE_SECONDS = 30
 _CLAUDE_SUBSCRIPTION_AUTH = "claude.ai"
@@ -4723,16 +4726,22 @@ class _ClaudeBackend(_CliBackend):
 		return _real_claude_dir()
 
 	def is_entrypoint(self, real: str) -> bool:
-		"""The npm entrypoint (`cli.js`), a plain `claude` file, or the native install: a file named
-		for its version inside `claude/versions/`."""
+		"""The npm entrypoint (`cli.js`, or `bin/claude.exe` inside `claude-code` for the current
+		package), a plain `claude` file, or the native install: a file named for its version inside
+		`claude/versions/`. A bare `claude.exe` elsewhere is not accepted."""
 		name = os.path.basename(real)
 		if name in _CLAUDE_ENTRYPOINT_NAMES:
 			return True
-		versions = os.path.dirname(real)
+		parent = os.path.dirname(real)
+		if name == _CLAUDE_NPM_BINARY:
+			return (
+				os.path.basename(parent) == "bin"
+				and os.path.basename(os.path.dirname(parent)) == _CLAUDE_NPM_PACKAGE_DIR
+			)
 		return (
 			bool(_CLAUDE_VERSION_FILE_RE.fullmatch(name))
-			and os.path.basename(versions) == "versions"
-			and os.path.basename(os.path.dirname(versions)) == "claude"
+			and os.path.basename(parent) == "versions"
+			and os.path.basename(os.path.dirname(parent)) == "claude"
 		)
 
 	def entrypoint_message(self) -> str:
@@ -4740,7 +4749,7 @@ class _ClaudeBackend(_CliBackend):
 
 		return _(
 			"The Claude CLI path resolves to a file that is not the native install "
-			"(`claude/versions/<version>`) or a Node entrypoint (`cli.js`)."
+			"(`claude/versions/<version>`) or the npm package (`claude-code/bin/claude.exe` or `cli.js`)."
 		)
 
 	def sign_in_hint(self) -> str:
