@@ -447,7 +447,7 @@ class TestSandbox:
 
 	def test_the_codex_exec_env_gets_none_of_the_claude_switches(self, real_login):
 		(real_login.parent.parent / ".codex").mkdir()
-		with ai_fix._cli_sandbox(real_login=True) as (_w, env):
+		with ai_fix._cli_sandbox(real_login=True, backend=ai_fix._CODEX) as (_w, env):
 			assert "DISABLE_TELEMETRY" not in env and "CLAUDE_CONFIG_DIR" not in env
 			assert env["CODEX_HOME"] == os.path.expanduser("~/.codex")
 
@@ -457,8 +457,6 @@ class TestSandbox:
 # ---------------------------------------------------------------------------
 
 class TestArgv:
-	CLAUDE = None
-
 	@pytest.fixture(autouse=True)
 	def _claude(self):
 		self.claude = ai_fix._CLI_BACKENDS["Claude CLI"]
@@ -683,9 +681,24 @@ class TestSessionStatus:
 		assert "`claude`" in status["message"] and "terminal" in status["message"]
 		assert "codex" not in status["message"].lower() and "CLAUDE_CONFIG_DIR" not in status["message"]
 
-	def test_no_untested_version_warning_for_claude(self, fake_claude, monkeypatch):
+	@pytest.mark.parametrize("version,tested", [
+		("2.1.312 Claude Code", True), ("2.1.316 Claude Code", True), ("2.1.314", True),
+		("2.1.311 Claude Code", False), ("2.1.317 Claude Code", False), ("2.2.0", False), ("1.9.9", False),
+		("3.0.0 Claude Code", False), ("2.1", None), ("dev", None), (None, None),
+	])
+	def test_the_claude_tested_version_range_is_major_minor_patch(self, version, tested):
+		assert ai_fix._version_tested(version, ai_fix._CLAUDE.tested_versions) is tested
+		assert ai_fix._CLAUDE.tested_versions == ((2, 1, 312), (2, 1, 316))
+
+	def test_connect_warns_about_an_untested_claude_version_in_claude_words(self, fake_claude, monkeypatch):
 		fake_claude()
 		monkeypatch.setattr(ai_fix, "_cli_version_cached", lambda p, probe=True: "9.9.9 (Claude Code)")
+		message = ai_fix._cli_session_status()["message"]
+		assert "This claude version is outside the range" in message and "(2.1.312 to 2.1.316)" in message
+		assert "codex" not in message.lower()
+
+	def test_connect_does_not_warn_for_a_tested_claude_version(self, fake_claude):
+		fake_claude()  # the fake prints 2.1.316
 		assert "outside the range" not in ai_fix._cli_session_status()["message"]
 
 	def test_an_unknown_choice_is_an_error_status(self, sub_cfg):
@@ -880,22 +893,48 @@ class TestFailuresInTheReply:
 	"""Claude reports failures in the stdout JSON, with exit 0 or 1: they must never read as a fix."""
 
 	@pytest.mark.parametrize("fields,kind,fatal", [
-		({"error": "authentication_failed"}, "auth", True),
-		({"api_retry": {"error": "rate_limit"}}, "quota", True),
-		({"error": "model_not_found"}, "not_found", True),
-		({"error": "invalid_request"}, "config", True),
-		({"error": "overloaded"}, "transport", False),
-		({"error": "server_error"}, "transport", False),
 		({"api_error_status": 401}, "auth", True),
-		({"api_error_status": 429}, "quota", True),
+		({"api_error_status": 403}, "auth", True),
 		({"api_error_status": 404}, "not_found", True),
 		({"api_error_status": 400}, "config", True),
+		({"api_error_status": 422}, "config", True),
+		# 429: only a usage-limit text is the fatal quota stop, any other 429 is a per-minute rate limit.
+		({"api_error_status": 429}, "rate_limited", False),
+		({"api_error_status": 429, "result": "RAWCANARY Number of request tokens has exceeded your per-minute rate limit"},
+			"rate_limited", False),
+		({"api_error_status": 429, "result": "RAWCANARY You've hit your session limit"}, "quota", True),
+		# 413 and a too-long prompt are about this one prompt: the bulk goes on.
+		({"api_error_status": 413}, "context", False),
+		({"api_error_status": 400, "result": "RAWCANARY prompt is too long: 250000 tokens > 200000"}, "context", False),
+		({"api_error_status": 400, "result": "RAWCANARY Your credit balance is too low to access the API"}, "quota", True),
 		({"api_error_status": 529}, "transport", False),
 		({"api_error_status": 500}, "transport", False),
+		# No status: the text, with the wider usage-limit set.
 		({"api_error_status": None, "result": "Not logged in · Please run /login"}, "auth", True),
 		({"api_error_status": None, "result": "You've hit your session limit · resets 7pm"}, "quota", True),
+		({"api_error_status": None, "result": "You've reached your weekly limit · resets Mon"}, "quota", True),
+		({"api_error_status": None, "result": "You're out of extra usage · resets 3pm"}, "quota", True),
+		({"api_error_status": None, "result": "You are out of usage for this plan"}, "quota", True),
+		({"api_error_status": None, "result": "Credit balance is too low"}, "quota", True),
+		({"api_error_status": None, "result": "Monthly spend limit reached"}, "quota", True),
+		({"api_error_status": None, "result": "There is a billing problem with your account"}, "quota", True),
+		({"api_error_status": None, "result": "Your account_on_hold"}, "quota", True),
+		({"api_error_status": None, "result": "prompt is too long"}, "context", False),
 		({"api_error_status": None, "result": "Unable to connect to API (ECONNREFUSED network)"}, "transport", False),
 		({"api_error_status": None, "result": "something odd RAWCANARY"}, "unknown", False),
+		# terminal_reason, read before the text.
+		({"terminal_reason": "blocking_limit"}, "quota", True),
+		({"terminal_reason": "prompt_too_long"}, "context", False),
+		({"terminal_reason": "refusal"}, "refused", False),
+		({"terminal_reason": "api_error"}, "transport", False),
+		({"terminal_reason": "model_error"}, "transport", False),
+		({"terminal_reason": "aborted_streaming"}, "bad_response", False),
+		({"terminal_reason": "hook_stopped"}, "bad_response", False),
+		# The status wins over the reason.
+		({"api_error_status": 401, "terminal_reason": "api_error"}, "auth", True),
+		# Fields that are not in the real envelope are not read.
+		({"error": "authentication_failed"}, "unknown", False),
+		({"api_retry": {"error": "rate_limit"}}, "unknown", False),
 	])
 	@pytest.mark.parametrize("exit_code", [0, 1])
 	def test_an_is_error_result_is_a_classified_error_whatever_the_exit_code(
@@ -908,8 +947,19 @@ class TestFailuresInTheReply:
 				_call()
 		assert err.value.kind == kind and err.value.fatal is fatal
 		assert "RAWCANARY" not in str(err.value) and err.value.detail == ""
-		known = kind in ("auth", "quota", "config", "not_found", "rate_limited")
+		known = kind in ("auth", "quota", "config", "not_found", "rate_limited", "context", "refused")
 		assert transport.certainty == ("known_response" if known else "sent_unknown")
+
+	def test_a_per_minute_429_does_not_stop_a_bulk_and_a_too_long_prompt_is_a_per_prompt_kind(self):
+		from optimus.ai_refresh_store import PER_PROMPT_KINDS
+
+		claude = ai_fix._CLI_BACKENDS["Claude CLI"]
+		for fields, kind in (({"api_error_status": 413}, "context"), ({"terminal_reason": "refusal"}, "refused")):
+			label = ai_fix._claude_failure_label({**_failure(), **fields})
+			assert claude.exec_errors[label][1] == kind and kind in PER_PROMPT_KINDS
+			assert kind not in ai_fix.AI_FATAL_KINDS
+		assert ai_fix._claude_failure_label({**_failure(), "api_error_status": 429}) == "rate_limited"
+		assert ai_fix._CLAUDE_EXEC_ERRORS["rate_limited"][1] not in ai_fix.AI_FATAL_KINDS
 
 	def test_an_is_error_result_with_exit_zero_is_never_returned_as_a_suggestion(self, fake_claude):
 		fake_claude(exec_body=_emit(_failure(api_error_status=429, result="You've hit your limit")))
@@ -922,7 +972,7 @@ class TestFailuresInTheReply:
 			_call()
 
 	def test_a_usage_limit_is_a_fatal_quota_error_that_stops_a_bulk(self, fake_claude):
-		fake_claude(exec_body=_emit(_failure(api_error_status=429)))
+		fake_claude(exec_body=_emit(_failure(api_error_status=429, result="You've hit your session limit")))
 		with pytest.raises(ai_fix.AiFixError) as err:
 			_call()
 		assert err.value.kind == "quota" and err.value.kind in ai_fix.AI_FATAL_KINDS and err.value.fatal
@@ -995,6 +1045,148 @@ class TestFailuresInTheReply:
 			_call()
 
 
+def _ok(text="A REAL FIX", **extra):
+	return {"type": "result", "subtype": "success", "is_error": False, "result": text, **extra}
+
+
+class TestUnfinishedReplies:
+	"""A reply with ``is_error: false`` that did not end normally is never returned as a suggestion."""
+
+	@pytest.mark.parametrize("fields,kind", [
+		({"stop_reason": "refusal"}, "refused"),
+		({"terminal_reason": "refusal"}, "refused"),
+		({"terminal_reason": "aborted_streaming"}, "bad_response"),
+		({"terminal_reason": "aborted_tools"}, "bad_response"),
+		({"terminal_reason": "hook_stopped"}, "bad_response"),
+		({"terminal_reason": "stop_hook_prevented"}, "bad_response"),
+		({"terminal_reason": "blocking_limit"}, "quota"),
+		({"terminal_reason": "prompt_too_long"}, "context"),
+		({"terminal_reason": "api_error"}, "transport"),
+		({"terminal_reason": "model_error"}, "transport"),
+		({"terminal_reason": "never_heard_of_it"}, "bad_response"),
+		({"terminal_reason": 5}, "bad_response"),
+		({"terminal_reason": ["completed"]}, "bad_response"),
+		({"subtype": "interrupted"}, "bad_response"),
+		({"subtype": 7}, "bad_response"),
+		({"subtype": "success", "terminal_reason": "aborted_streaming"}, "bad_response"),
+	])
+	def test_an_unfinished_reply_is_a_classified_failure_not_a_suggestion(self, fake_claude, fields, kind):
+		fake_claude(exec_body=_emit(_ok(**fields)))
+		with pytest.raises(ai_fix.AiFixError) as err:
+			_call()
+		assert err.value.kind == kind
+		assert "A REAL FIX" not in str(err.value) and err.value.detail == ""
+
+	def test_suggest_fix_never_surfaces_a_refusal_or_an_aborted_stream(self, fake_claude):
+		finding = {"finding_type": "N+1 Query", "severity": "High", "title": "x", "sql": "select 1"}
+		for fields in ({"stop_reason": "refusal"}, {"terminal_reason": "aborted_streaming"}):
+			fake_claude(exec_body=_emit(_ok(**fields)))
+			with pytest.raises(ai_fix.AiFixError):
+				ai_fix.suggest_fix(finding)
+
+	def test_a_refusal_is_not_fatal_and_is_a_known_response(self, fake_claude):
+		fake_claude(exec_body=_emit(_ok(stop_reason="refusal")))
+		with ai_transport.attempt() as transport:
+			with pytest.raises(ai_fix.AiFixError) as err:
+				_call()
+		assert err.value.kind == "refused" and err.value.fatal is False
+		assert transport.certainty == "known_response"
+
+	def test_an_aborted_stream_stays_an_uncertain_outcome(self, fake_claude):
+		fake_claude(exec_body=_emit(_ok(terminal_reason="aborted_streaming")))
+		with ai_transport.attempt() as transport:
+			with pytest.raises(ai_fix.AiFixError):
+				_call()
+		assert transport.certainty == "sent_unknown"
+
+	@pytest.mark.parametrize("fields", [
+		{}, {"subtype": "success"}, {"terminal_reason": "completed"}, {"subtype": "success", "terminal_reason": "completed"},
+		{"stop_reason": "end_turn", "terminal_reason": "completed"}, {"terminal_reason": None, "subtype": None},
+	])
+	def test_a_normal_end_is_still_a_suggestion(self, fake_claude, fields):
+		fake_claude(exec_body=_emit(_ok(**fields)))
+		meta = {}
+		assert _call(meta_out=meta) == "A REAL FIX" and "finish_reason" not in meta
+
+	@pytest.mark.parametrize("fields", [
+		{"stop_reason": "model_context_window_exceeded"},
+		{"terminal_reason": "model_context_window_exceeded"},
+		{"stop_reason": "max_tokens", "terminal_reason": "completed"},
+	])
+	def test_a_reply_that_ran_into_the_window_is_returned_marked_truncated(self, fake_claude, fields):
+		fake_claude(exec_body=_emit(_ok(**fields)))
+		meta = {}
+		reply = _call(meta_out=meta)
+		assert reply.startswith("A REAL FIX") and reply.endswith("…(truncated)") and meta["finish_reason"] == "length"
+
+	def test_the_unfinished_gate_applies_after_a_non_zero_exit_too(self, fake_claude):
+		fake_claude(exec_body=_emit(_ok(stop_reason="refusal")) + "; exit 1")
+		with pytest.raises(ai_fix.AiFixError) as err:
+			_call()
+		assert err.value.kind == "refused"
+
+
+class TestFailureLog:
+	"""The log line names the specific label, the HTTP status and the terminal reason, and nothing else."""
+
+	def _lines(self, fake_claude, monkeypatch, body):
+		fake_claude(exec_body=_emit(body))
+		lines = []
+		monkeypatch.setattr(ai_fix, "_note_line", lines.append)
+		with pytest.raises(ai_fix.AiFixError):
+			_call()
+		return lines
+
+	def test_the_line_carries_the_specific_label_status_and_terminal(self, fake_claude, monkeypatch):
+		lines = self._lines(fake_claude, monkeypatch, _failure(
+			api_error_status=429, terminal_reason="blocking_limit",
+			result="RAWCANARY user@example.com Acme Org hit your weekly limit",
+		))
+		assert lines == [
+			"claude cli: exec_failed version=2.1.316 Claude Code label=quota detail=usage_limit status=429 "
+			"terminal=blocking_limit code=0"
+		]
+		for pii in ("RAWCANARY", "user@example.com", "Acme", "weekly"):
+			assert pii not in lines[0]
+
+	def test_a_per_minute_429_is_told_apart_from_a_usage_limit_in_the_log(self, fake_claude, monkeypatch):
+		lines = self._lines(fake_claude, monkeypatch, _failure(api_error_status=429))
+		assert "label=rate_limited detail=rate_limited status=429" in lines[0]
+
+	def test_an_unknown_terminal_reason_prints_as_other_never_as_the_cli_text(self, fake_claude, monkeypatch):
+		lines = self._lines(fake_claude, monkeypatch, _ok(terminal_reason="RAWCANARY user@example.com"))
+		assert "terminal=other" in lines[0] and "RAWCANARY" not in lines[0] and "user@example.com" not in lines[0]
+		assert "detail=incomplete" in lines[0]
+
+	def test_a_reply_that_is_not_json_is_logged_as_unreadable(self, fake_claude, monkeypatch):
+		lines = self._lines(fake_claude, monkeypatch, "RAWCANARY prose")
+		assert lines == ["claude cli: exec_failed version=2.1.316 Claude Code label=bad_response detail=unreadable_reply code=0"]
+
+	def test_the_result_text_never_reaches_the_line_or_the_error(self, fake_claude, monkeypatch):
+		lines = self._lines(fake_claude, monkeypatch, _failure(api_error_status=500, result="RAWCANARY secret@corp.example"))
+		assert "RAWCANARY" not in " ".join(lines) and "secret@corp.example" not in " ".join(lines)
+
+	def test_the_diagnostic_helper_prints_only_a_plausible_status_a_fixed_detail_and_an_allowed_terminal(self, monkeypatch):
+		lines = []
+		monkeypatch.setattr(ai_fix, "_note_line", lines.append)
+		ai_fix._log_cli_diagnostic(
+			"exec_failed", cli="claude", detail="Has Spaces user@x", status=True, terminal="refusal"
+		)
+		ai_fix._log_cli_diagnostic("exec_failed", cli="claude", detail="usage_limit", status=99999, terminal="")
+		ai_fix._log_cli_diagnostic("exec_failed", cli="claude", detail="usage_limit", status=402, terminal="refusal")
+		assert lines == [
+			"claude cli: exec_failed terminal=refusal",
+			"claude cli: exec_failed detail=usage_limit",
+			"claude cli: exec_failed detail=usage_limit status=402 terminal=refusal",
+		]
+
+	def test_a_codex_failure_line_is_unchanged(self, monkeypatch):
+		lines = []
+		monkeypatch.setattr(ai_fix, "_note_line", lines.append)
+		ai_fix._log_cli_diagnostic("exec_failed", label="other", code=3, version="codex-cli 0.164.0")
+		assert lines == ["codex cli: exec_failed version=codex-cli 0.164.0 label=other code=3"]
+
+
 class TestExitCodes:
 	@pytest.mark.parametrize("body,code", [("kill -TERM $$", -15), ("exit 143", 143)])
 	def test_a_sigterm_is_a_transport_error_and_sent_unknown(self, fake_claude, body, code):
@@ -1049,10 +1241,10 @@ class TestKindsAndBulk:
 		assert {kind for kind in kinds if kind in ai_fix.AI_FATAL_KINDS} == {"auth", "quota", "config", "not_found"}
 		assert ai_fix._CLAUDE_EXEC_ERRORS["server_error"][1] not in ai_fix.AI_FATAL_KINDS
 
-	def test_every_enum_and_status_label_has_a_message(self):
-		labels = set(ai_fix._CLAUDE_ERROR_ENUM.values()) | {label for _codes, label in ai_fix._CLAUDE_STATUS_LABELS}
-		assert labels <= set(ai_fix._CLAUDE_EXEC_ERRORS)
+	def test_every_terminal_and_stderr_label_has_a_message(self):
+		assert set(ai_fix._CLAUDE_TERMINAL_LABELS.values()) <= set(ai_fix._CLAUDE_EXEC_ERRORS)
 		assert ai_fix._CLAUDE_KNOWN_FAILURES <= set(ai_fix._CLAUDE_EXEC_ERRORS)
+		assert not hasattr(ai_fix, "_CLAUDE_ERROR_ENUM")  # the envelope has no top-level `error` / `api_retry`
 
 	def test_the_bulk_cap_applies_in_subscription_claude_mode(self, sub_cfg):
 		assert ai_fix.subscription_mode_active() is True
@@ -1120,6 +1312,178 @@ class TestWording:
 			src = f.read()
 		assert 'frm.doc.ai_subscription_cli || "Codex CLI"' in src
 		assert '__("Connect (check {0})", [cli])' in src and "ai_subscription_cli(frm)" in src
+
+
+# ---------------------------------------------------------------------------
+# Review wave: model alias, backend threading, shared-shell wording, coverage gaps
+# ---------------------------------------------------------------------------
+
+class TestModelAlias:
+	@pytest.fixture(autouse=True)
+	def _claude(self):
+		self.claude = ai_fix._CLI_BACKENDS["Claude CLI"]
+
+	def _argv(self):
+		return self.claude.build_argv("/x/claude", "/s", "/s/out")
+
+	@pytest.mark.parametrize("alias", ["sonnet[1m]", "opus[1m]", "claude-sonnet-4-5[1m]", "claude-opus-4-1[200k]"])
+	def test_a_context_suffix_is_passed_through_to_model(self, monkeypatch, alias):
+		monkeypatch.setattr("frappe.conf", {"optimus_claude_cli_model": alias}, raising=False)
+		argv = self._argv()
+		assert argv[argv.index("--model") + 1] == alias
+
+	@pytest.mark.parametrize("alias", ["sonnet[1m", "sonnet[]", "sonnet[a b]", "sonnet[1m][2m]", "[1m]", "sonnet[1m]x", "sonnet[;ls]"])
+	def test_a_malformed_suffix_is_dropped(self, monkeypatch, alias):
+		monkeypatch.setattr("frappe.conf", {"optimus_claude_cli_model": alias}, raising=False)
+		assert "--model" not in self._argv()
+
+	@pytest.mark.parametrize("alias,label", [
+		("--evil", "malformed"), ("sonnet;ls", "malformed"), ("x" * 100, "malformed"), ("claude", "placeholder"),
+		("Claude", "placeholder"), (5, "not_text"), (["opus"], "not_text"),
+	])
+	def test_a_dropped_value_logs_a_fixed_diagnostic_and_never_the_value(self, monkeypatch, alias, label):
+		lines = []
+		monkeypatch.setattr(ai_fix, "_note_line", lines.append)
+		monkeypatch.setattr("frappe.conf", {"optimus_claude_cli_model": alias}, raising=False)
+		assert "--model" not in self._argv()
+		assert lines == [f"claude cli: model_alias_ignored label={label}"]
+
+	@pytest.mark.parametrize("alias", [None, "", "   "])
+	def test_an_unset_value_is_silent(self, monkeypatch, alias):
+		lines = []
+		monkeypatch.setattr(ai_fix, "_note_line", lines.append)
+		monkeypatch.setattr("frappe.conf", {"optimus_claude_cli_model": alias}, raising=False)
+		assert "--model" not in self._argv() and lines == []
+
+	def test_a_good_value_logs_nothing(self, monkeypatch):
+		lines = []
+		monkeypatch.setattr(ai_fix, "_note_line", lines.append)
+		monkeypatch.setattr("frappe.conf", {"optimus_claude_cli_model": "sonnet[1m]"}, raising=False)
+		self._argv()
+		assert lines == []
+
+
+class TestBackendThreading:
+	def test_the_exec_runs_the_backend_the_validated_provider_names_not_the_cached_settings(self, fake_claude, sub_cfg, monkeypatch):
+		fake_claude()
+		provider = ai_fix._provider_config()
+		# The saved choice flips to Codex after the snapshot check: the cached settings now say Codex.
+		flipped = _cfg(ai_subscription_cli="Codex CLI", ai_cli_path=sub_cfg.ai_cli_path)
+		monkeypatch.setattr("optimus.settings.get_config", lambda: flipped)
+		seen = []
+		real = ai_fix._exec_cli_once
+		monkeypatch.setattr(ai_fix, "_exec_cli_once", lambda backend, *a, **kw: seen.append(backend.key) or real(backend, *a, **kw))
+		assert ai_fix._dispatch_call(provider, "S", [{"content": "q"}], usage_out=None) == "REPLY"
+		assert seen == ["claude"]
+
+	def test_a_direct_call_without_a_key_still_follows_the_cached_settings(self, fake_claude, sub_cfg):
+		fake_claude()
+		assert _call() == "REPLY"
+
+	def test_an_unknown_key_is_a_config_error(self, sub_cfg):
+		with pytest.raises(ai_fix.AiFixError) as err:
+			ai_fix._call_local_cli("S", [{"content": "q"}], backend_key="gemini")
+		assert err.value.kind == "config" and "gemini" in str(err.value)
+
+	def test_the_provider_carries_the_key_the_dispatch_passes_on(self, sub_cfg, monkeypatch):
+		seen = {}
+		monkeypatch.setattr(ai_fix, "_call_local_cli", lambda system, messages, **kw: seen.update(kw) or "T")
+		ai_fix._dispatch_call(ai_fix._provider_config(), "S", [{"content": "q"}], usage_out=None)
+		assert seen["backend_key"] == "claude"
+
+
+class TestSharedShellIsBackendNeutral:
+	def test_the_helpers_the_claude_path_calls_take_the_backend_without_a_codex_default(self):
+		import inspect
+
+		for fn, name in ((ai_fix._cli_missing_text, "backend"), (ai_fix._login_failure_text, "backend"),
+			(ai_fix._login_failure, "backend"), (ai_fix._out_of_time, "display")):
+			assert inspect.signature(fn).parameters[name].default is inspect.Parameter.empty, fn.__name__
+		assert not hasattr(ai_fix, "_sign_in_hint")
+
+	def test_a_real_login_sandbox_without_a_backend_is_refused_not_opened_on_codex(self):
+		with pytest.raises(TypeError):
+			with ai_fix._cli_sandbox(real_login=True):
+				pytest.fail("the sandbox must not open")
+		with ai_fix._cli_sandbox():  # a probe needs no backend
+			pass
+
+	def test_the_claude_login_failure_carries_no_codex_wording(self):
+		claude = ai_fix._CLI_BACKENDS["Claude CLI"]
+		for reason in ("not_subscription", "signed_out", "timeout", "error", "unexpected"):
+			message = ai_fix._login_failure_text(reason, claude, "/x/claude")[0]
+			assert "codex" not in message.lower() and "chatgpt" not in message.lower(), reason
+			assert "may need updating" not in message
+
+	def test_a_third_backend_gets_its_own_untested_version_wording(self):
+		class Third(ai_fix._CliBackend):
+			binary = "third"
+			tested_versions = ((1, 2), (1, 4))
+
+		assert Third().untested_version_message() == "This third version is outside the range Optimus was tested with (1.2 to 1.4)."
+		assert Third.reworded_status_reason is None and Third.reworded_status_text is None
+
+	def test_the_codex_untested_version_text_is_unchanged(self):
+		assert ai_fix._CODEX.untested_version_message() == (
+			"This codex version is outside the range Optimus was tested with (0.164 to 0.165)."
+		)
+
+	def test_the_ca_bundle_of_a_node_cli_reaches_the_child(self):
+		env = ai_fix._build_cli_env({"NODE_EXTRA_CA_CERTS": "/etc/ssl/corp.pem", "PATH": "/usr/bin", "NODE_OPTIONS": "--require /x.js"})
+		assert env["NODE_EXTRA_CA_CERTS"] == "/etc/ssl/corp.pem" and "NODE_OPTIONS" not in env
+
+	def test_the_out_of_time_error_names_the_cli_that_ran_out(self, real_login):
+		claude = ai_fix._CLI_BACKENDS["Claude CLI"]
+		assert str(ai_fix._out_of_time("Claude CLI")) == "Claude CLI ran out of time before it could start."
+		with pytest.raises(ai_fix.AiFixError, match="Claude CLI ran out of time") as err:
+			ai_fix._exec_cli_once(claude, "/x/claude", "p", time.monotonic(), 1)
+		assert err.value.kind == "timeout"
+		with pytest.raises(ai_fix.AiFixError, match="Codex CLI ran out of time"):
+			ai_fix._exec_cli_once(ai_fix._CODEX, "/x/codex", "p", time.monotonic(), 1)
+
+
+class TestUnknownChoiceWording:
+	def _message(self, monkeypatch, **attrs):
+		return TestWording()._message(monkeypatch, **attrs)
+
+	def test_an_unknown_saved_choice_gets_generic_wording_not_codex(self, monkeypatch):
+		msg = self._message(monkeypatch, ai_subscription_cli="Gemini CLI")
+		assert msg.startswith("The subscription CLI isn't ready")
+		assert "codex" not in msg.lower() and "claude" not in msg.lower()
+		assert "optimus_allow_subscription_cli" in msg
+
+	def test_subscription_backend_is_none_for_an_unknown_choice_and_unreadable_settings(self, sub_cfg, monkeypatch):
+		assert ai_fix.subscription_backend().key == "claude"
+		sub_cfg.ai_subscription_cli = "Gemini CLI"
+		assert ai_fix.subscription_backend() is None
+		monkeypatch.setattr("optimus.settings.get_config", lambda: (_ for _ in ()).throw(RuntimeError("db down")))
+		assert ai_fix.subscription_backend() is None
+
+	def test_a_never_saved_choice_is_still_codex(self, monkeypatch):
+		monkeypatch.setattr("optimus.settings.get_config", lambda: SimpleNamespace())
+		assert ai_fix.subscription_backend().key == "codex"
+
+
+class TestCoverageGaps:
+	def test_unreadable_settings_in_the_status_check_report_a_missing_cli_not_a_crash(self, monkeypatch):
+		monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: True)
+		monkeypatch.setattr("optimus.settings.get_config", lambda: (_ for _ in ()).throw(RuntimeError("db down")))
+		status = ai_fix._cli_session_status()
+		assert status["state"] == "missing" and status["cli"] == "codex" and status["ok"] is False
+		assert "Codex CLI not found" in status["message"]
+
+	def test_an_oserror_starting_the_status_probe_is_an_error_and_logged_by_errno(self, fake_claude, monkeypatch):
+		box = fake_claude()
+		lines = []
+		monkeypatch.setattr(ai_fix, "_note_line", lines.append)
+
+		def boom(*a, **kw):
+			raise OSError(2, "gone")
+
+		monkeypatch.setattr(ai_fix, "_run_cli", boom)
+		assert ai_fix._claude_login_ok(str(box.path), use_cache=False) == (False, "error")
+		assert lines == ["claude cli: login_probe_failed label=errno_2"]
+		assert str(box.path) not in ai_fix._LOGIN_CACHE
 
 
 # ---------------------------------------------------------------------------

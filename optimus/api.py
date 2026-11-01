@@ -241,7 +241,10 @@ def _ai_unavailable_message(section: str | None) -> str:
 			"{0} isn't ready. Ask a System Manager to open Optimus Settings, click "
 			"Connect, and make sure developer_mode and optimus_allow_subscription_cli are set "
 			"in the site config and that {1}."
-		).format(backend.display, backend.terminal_login_text())
+		).format(
+			backend.display if backend else _("The subscription CLI"),
+			backend.terminal_login_text() if backend else _("the CLI you picked was signed in to in the bench user's own terminal"),
+		)
 	return _(
 		"AI suggestions aren't configured. Turn them on under Optimus Settings ▸ AI and set a "
 		"provider, a model and, if the provider needs one, an API key."

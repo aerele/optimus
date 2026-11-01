@@ -356,7 +356,7 @@ _PROVIDER_DEFAULTS: dict[str, dict[str, Any]] = {
 	# },
 }
 _DEFAULT_PROVIDER = "Anthropic"
-_CLI_CONTEXT_TOKENS = 128000  # conservative window assumed for the local Codex CLI
+_CLI_CONTEXT_TOKENS = 128000  # conservative window assumed for the local subscription CLI (Codex or Claude)
 _CLI_MAX_OUTPUT_CHARS = 20_000
 # Read this much past the cap so trailing whitespace stripped afterwards cannot hide an overflow.
 _CLI_READ_SLACK = 1024
@@ -544,14 +544,15 @@ def subscription_mode_active() -> bool:
 		return False
 
 
-def subscription_backend() -> _CliBackend:
-	"""The subscription CLI backend the saved settings pick (Codex when unset or unreadable). A
-	config read only (no CLI probe), so messages can name the CLI."""
+def subscription_backend() -> _CliBackend | None:
+	"""The subscription CLI backend the saved settings pick (Codex when the choice was never saved),
+	or None when the saved choice is unknown or the settings cannot be read, so a message words
+	itself generically instead of naming the wrong CLI. A config read only (no CLI probe)."""
 	try:
 		from optimus.settings import get_config
 		return _cli_backend(get_config())
 	except Exception:
-		return _CODEX
+		return None
 
 
 # A subscription run spends the operator's own plan usage, which they share with their terminal
@@ -2917,7 +2918,10 @@ def _dispatch_call(
 			from frappe import _
 
 			raise AiFixError(_("AI configuration changed or could not be read. Check Optimus Settings and retry the refresh."), kind="config")
-		return _call_local_cli(system, messages, usage_out=usage_out, timeout=timeout, meta_out=meta_out)
+		return _call_local_cli(
+			system, messages, usage_out=usage_out, timeout=timeout, meta_out=meta_out,
+			backend_key=provider.get("backend"),
+		)
 	api_key = _get_api_key(provider.get("needs_key", True), provider=provider)
 	if provider.get("needs_key") and not api_key:
 		from frappe import _
@@ -3415,11 +3419,10 @@ def _cli_installed(cfg) -> str | None:
 	return _cli_resolve(cfg)[0]
 
 
-def _cli_missing_text(reason: str, backend: _CliBackend | None = None) -> str:
-	"""Operator-facing explanation for a ``_cli_resolve`` failure."""
+def _cli_missing_text(reason: str, backend: _CliBackend) -> str:
+	"""Operator-facing explanation for a ``_cli_resolve`` failure of ``backend``."""
 	from frappe import _
 
-	backend = backend or _CODEX
 	if reason == "not_found":
 		return _("{0} not found. Install it or set the CLI path in Optimus Settings.").format(backend.display)
 	if reason == "relative":
@@ -3587,9 +3590,10 @@ def _build_cli_argv(cli_path: str, scratch_dir: str, out_file: str, *, probe_sec
 # CLAUDE_CODE_OAUTH_TOKEN are absent, which keeps each CLI on its subscription.
 _CLI_ENV_ALLOWLIST = frozenset({"PATH", "LANG", "SHELL", "USER", "TERM"})
 _CLI_ENV_PREFIX_ALLOWLIST = ("LC_",)
-# Needed for codex to reach OpenAI over TLS / a corporate proxy.
+# Needed for the CLI to reach its vendor over TLS / a corporate proxy (NODE_EXTRA_CA_CERTS is the CA
+# bundle of a Node-based CLI behind a TLS-inspecting proxy).
 _CLI_ENV_PASSTHROUGH = frozenset({
-	"SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE",
+	"SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
 	"HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
 	"https_proxy", "http_proxy", "no_proxy",
 })
@@ -3695,12 +3699,13 @@ def _cli_sandbox(real_login: bool = False, backend: _CliBackend | None = None):
 	"""A private 0700 scratch tree for one CLI invocation, removed afterwards. It yields
 	``(work_dir, env)``: HOME and TMPDIR point inside the tree, so the agent never sees the
 	operator's real home. With ``real_login`` (only the status check and the ``exec`` of
-	``backend``, Codex by default) that CLI's config home (CODEX_HOME / CLAUDE_CONFIG_DIR) is the
+	``backend``, which is then required) that CLI's config home (CODEX_HOME / CLAUDE_CONFIG_DIR) is the
 	operator's real login directory, where the CLI keeps and refreshes its own sign-in; Optimus
 	never creates, reads, copies or writes anything there. Every other probe (``features list``,
 	``--version``) gets an empty scratch config home per CLI, so the operator's settings cannot
 	change what it reports and it writes nothing into the login."""
-	backend = backend or _CODEX
+	if real_login and backend is None:
+		raise TypeError("a real-login sandbox needs the backend whose login directory it opens")
 	real_dir = backend.real_home() if real_login else None
 	_sweep_stale_sandboxes()
 	root = tempfile.mkdtemp(prefix=_SANDBOX_PREFIX)
@@ -3833,7 +3838,7 @@ def _cli_login_ok(cli_path: str, *, use_cache: bool = True) -> tuple[bool, str]:
 		_log_cli_diagnostic("signed_out", label="codex_dir_missing")
 		return False, "signed_out"
 	try:
-		with _cli_sandbox(real_login=True) as (work, env):
+		with _cli_sandbox(real_login=True, backend=_CODEX) as (work, env):
 			code, out, err = _run_cli([cli_path, "login", "status"], env, work, _LOGIN_PROBE_SECONDS)
 	except subprocess.TimeoutExpired:
 		return False, "timeout"
@@ -3894,17 +3899,34 @@ def _cli_version_cached(cli_path: str, *, probe: bool = True) -> str | None:
 	return version
 
 
+# The `terminal_reason` values the log may carry; anything else prints as `other`, so a value the CLI
+# invents can never put text of its own into the log.
+_CLI_TERMINAL_LOG_ALLOWLIST = frozenset({
+	"completed", "prompt_too_long", "model_context_window_exceeded", "blocking_limit", "refusal", "api_error",
+	"model_error", "aborted_streaming", "aborted_tools", "hook_stopped", "stop_hook_prevented", "max_turns",
+})
+
+
 def _log_cli_diagnostic(event: str, *, version: str | None = None, label: str | None = None,
-	code: int | None = None, wait: float | None = None, cli: str = "codex") -> None:
+	code: int | None = None, wait: float | None = None, cli: str = "codex", detail: str | None = None,
+	status: int | None = None, terminal: str | None = None) -> None:
 	"""One ERROR line in the ``optimus`` log naming a CLI event, so a reword or crash of the
 	``cli`` ("codex" / "claude") is diagnosable. It carries ONLY the fixed event name, the
-	sanitized version, a fixed label and the exit code: never stderr, stdout, account details or
-	any part of the prompt. Never raises, except an RQ job timeout (via ``_note_line``)."""
+	sanitized version, a fixed label, the exit code and, for a failure read from a reply, the
+	specific failure ``detail`` label, the HTTP ``status`` and the ``terminal`` reason (from
+	``_CLI_TERMINAL_LOG_ALLOWLIST``): never stderr, stdout, a result, account details or any part
+	of the prompt. Never raises, except an RQ job timeout (via ``_note_line``)."""
 	parts = [f"{cli} cli: {event}"]
 	if version:
 		parts.append(f"version={version}")
 	if label:
 		parts.append(f"label={label}")
+	if detail and re.fullmatch(r"[a-z_]{1,40}", detail):
+		parts.append(f"detail={detail}")
+	if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599:
+		parts.append(f"status={status}")
+	if isinstance(terminal, str) and terminal:
+		parts.append(f"terminal={terminal if terminal in _CLI_TERMINAL_LOG_ALLOWLIST else 'other'}")
 	if isinstance(code, int):
 		parts.append(f"code={code}")
 	if isinstance(wait, (int, float)):
@@ -3923,42 +3945,40 @@ _LOGIN_FAILURES = {
 }
 
 
-def _sign_in_hint(backend: _CliBackend | None = None) -> str:
-	"""How to sign in: in the operator's own terminal. Optimus reuses that login and keeps none."""
-	return (backend or _CODEX).sign_in_hint()
-
-
-def _login_failure_text(reason: str, cli_path: str | None = None, backend: _CliBackend | None = None) -> tuple[str, str]:
-	"""``(message, kind)`` for a failed login check. A ``not_chatgpt`` result also names the
-	CLI version when known (cache only), since a codex that rewords its status output looks
-	the same as an API-key login."""
+def _login_failure_text(reason: str, backend: _CliBackend, cli_path: str | None = None) -> tuple[str, str]:
+	"""``(message, kind)`` for a failed ``backend`` login check. A reason the backend says its CLI
+	reports when it rewords its status output (``reworded_status_reason``) also names the CLI
+	version when known (cache only), since such a CLI looks the same as an API-key login."""
 	from frappe import _
 
-	backend = backend or _CODEX
 	message, kind = backend.login_failures.get(reason, backend.login_failures["error"])
 	message = _(message)
 	if kind == "auth":
 		message += " " + backend.sign_in_hint()
-	if reason == backend.reworded_status_reason and cli_path:
+	if backend.reworded_status_text and reason == backend.reworded_status_reason and cli_path:
 		version = _cli_version_cached(cli_path, probe=False)
 		if version:
-			message += " " + _("If you are signed in with ChatGPT, your codex CLI ({0}) may need updating.").format(version)
+			message += " " + _(backend.reworded_status_text).format(version)
 	return message, kind
 
 
-def _login_failure(reason: str, cli_path: str | None = None, backend: _CliBackend | None = None) -> AiFixError:
-	message, kind = _login_failure_text(reason, cli_path, backend)
+def _login_failure(reason: str, backend: _CliBackend, cli_path: str | None = None) -> AiFixError:
+	message, kind = _login_failure_text(reason, backend, cli_path)
 	return AiFixError(message, kind=kind)
 
 
-def _version_tested(version: str | None) -> bool | None:
-	"""True when ``version`` is inside ``_CLI_TESTED_VERSIONS``, False when outside, None
-	when it carries no ``major.minor`` number."""
-	m = re.search(r"(\d+)\.(\d+)", version or "")
+def _version_tested(version: str | None, tested: tuple = _CLI_TESTED_VERSIONS) -> bool | None:
+	"""True when ``version`` is inside the inclusive ``tested`` range ``(low, high)`` of version
+	tuples (as many numbers as the tuples have: ``(0, 164)`` is major.minor, ``(2, 1, 312)`` adds the
+	patch), False when outside, None when it carries fewer numbers than that."""
+	m = re.search(r"\d+(?:\.\d+)+", version or "")
+	low, high = tested
 	if not m:
 		return None
-	low, high = _CLI_TESTED_VERSIONS
-	return low <= (int(m.group(1)), int(m.group(2))) <= high
+	numbers = tuple(int(n) for n in m.group(0).split("."))
+	if len(numbers) < len(low):
+		return None
+	return low <= numbers[: len(low)] <= high
 
 
 def _cli_session_status() -> dict:
@@ -4002,14 +4022,12 @@ def _cli_session_status() -> dict:
 	if ok:
 		suffix = f" ({result['version']})" if result["version"] else ""
 		message = backend.connected_message().format(suffix)
-		if backend.tested_versions and _version_tested(result["version"]) is False:
-			message += " " + _("This codex version is outside the range Optimus was tested with ({0}.{1} to {2}.{3}).").format(
-				*backend.tested_versions[0], *backend.tested_versions[1]
-			)
+		if backend.tested_versions and _version_tested(result["version"], backend.tested_versions) is False:
+			message += " " + backend.untested_version_message()
 		result.update(ok=True, state="connected", message=message)
 		return result
 	state = "signed_out" if reason in backend.signed_out_reasons else "error"
-	result.update(state=state, message=_login_failure_text(reason, path, backend)[0])
+	result.update(state=state, message=_login_failure_text(reason, backend, path)[0])
 	return result
 
 
@@ -4167,7 +4185,7 @@ def _read_cli_reply(out_file: str, stdout: str) -> tuple[str, bool]:
 _CLI_MIN_EXEC_SECONDS = 5
 
 
-def _out_of_time(display: str = "Codex CLI") -> AiFixError:
+def _out_of_time(display: str) -> AiFixError:
 	return AiFixError(f"{display} ran out of time before it could start.", kind="timeout")
 
 
@@ -4178,6 +4196,11 @@ _CLI_KNOWN_FAILURES = frozenset({"auth_expired", "auth_refresh_race", "usage_lim
 _CLI_AUTH_LABELS = frozenset({"auth_expired", "auth_refresh_race"})
 _CLI_AUTH_RETRY_WAIT = 2
 _CLI_AUTH_RETRY_JITTER = 0.5  # the wait varies by up to +/- this fraction, so parallel runs spread out
+
+
+# A failure read from a reply that is a definite answer to this one prompt (rate limited, too long for
+# the window, declined): the outcome is known, and it is not a transport failure.
+_CLI_KNOWN_RESPONSE_KINDS = frozenset({"rate_limited", "context", "refused"})
 
 
 def _auth_retry_wait() -> float:
@@ -4265,7 +4288,7 @@ def _cli_exec_error(backend: _CliBackend, label: str, code: int | None = None, *
 
 def _call_local_cli(
 	system: str, messages: list[dict], *, usage_out: dict | None = None, timeout: int | None = None,
-	meta_out: dict | None = None,
+	meta_out: dict | None = None, backend_key: str | None = None,
 ) -> str:
 	"""Run one read-only CLI exec (the backend ``ai_subscription_cli`` picks: Codex or Claude) and
 	return its reply text. The prompt goes on stdin and the child runs in a private scratch tree
@@ -4281,7 +4304,11 @@ def _call_local_cli(
 
 	No token usage is reported (a subscription is not token-billed). Failures are
 	``AiFixError``s whose ``kind`` follows ``AI_FATAL_KINDS``: missing CLI, signed out,
-	usage limit and a rejected flag stop a refresh; a timeout or network error does not."""
+	usage limit and a rejected flag stop a refresh; a timeout or network error does not.
+
+	``backend_key`` is the ``provider["backend"]`` the caller validated against a fresh settings
+	snapshot; with it the exec cannot run the other CLI if the choice is saved in between. Without
+	it the cached settings pick the backend."""
 	from frappe import _
 
 	if not _subscription_allowed():
@@ -4292,7 +4319,7 @@ def _call_local_cli(
 		)
 	from optimus.settings import get_config
 	cfg = get_config()
-	backend = _cli_backend(cfg)
+	backend = _cli_backend_by_key(backend_key) if backend_key else _cli_backend(cfg)
 	path, missing = backend.resolve(cfg)
 	if not path:
 		_log_cli_diagnostic("cli_not_usable", label=missing, cli=backend.key)
@@ -4304,7 +4331,7 @@ def _call_local_cli(
 	deadline = time.monotonic() + total_seconds
 	ok, reason = backend.login_check(path)
 	if not ok:
-		raise _login_failure(reason, path, backend)
+		raise _login_failure(reason, backend, path)
 	if deadline - time.monotonic() < _CLI_MIN_EXEC_SECONDS:
 		raise _out_of_time(backend.display)
 	# A lone surrogate in attacker-influenced SQL would make the stdin encode raise
@@ -4335,8 +4362,14 @@ def _call_local_cli(
 		# The backend read a failure out of the reply itself, so the exit code is no guide. Only a
 		# rejection before any answer is a known outcome; a bad or partial reply may have been acted on.
 		kind = run.failure.kind
-		ai_transport.observe("known_response" if kind in AI_FATAL_KINDS or kind == "rate_limited" else "sent_unknown")
-		_log_cli_diagnostic("exec_failed", label=kind, code=code, version=_cli_version_cached(path), cli=backend.key)
+		ai_transport.observe(
+			"known_response" if kind in AI_FATAL_KINDS or kind in _CLI_KNOWN_RESPONSE_KINDS else "sent_unknown"
+		)
+		_log_cli_diagnostic(
+			"exec_failed", label=kind, code=code, version=_cli_version_cached(path), cli=backend.key,
+			detail=getattr(run.failure, "label", None), status=getattr(run.failure, "status", None),
+			terminal=getattr(run.failure, "terminal", None),
+		)
 		if kind == "auth":
 			_LOGIN_CACHE.pop(path, None)
 		raise run.failure
@@ -4396,10 +4429,11 @@ class _CliBackend:
 	config_env: str  # the variable that points the CLI at its login directory
 	scratch_dir: str  # the empty stand-in for that directory outside the real-login runs
 	extra_env: dict[str, str] = {}  # the CLI's own switches, set on every child
-	tested_versions: tuple | None = None
+	tested_versions: tuple | None = None  # inclusive (low, high) version tuples, see ``_version_tested``
 	login_failures: dict[str, tuple[str, str]]
 	signed_out_reasons: tuple[str, ...]
-	reworded_status_reason: str | None = None
+	reworded_status_reason: str | None = None  # the login-check reason a reworded status output lands in
+	reworded_status_text: str | None = None  # the hint for it, with `{0}` for the CLI version
 	exec_errors: dict[str, tuple[str, str]]
 	known_failures: frozenset[str]
 	auth_labels: frozenset[str]
@@ -4461,6 +4495,15 @@ class _CliBackend:
 		"""True when this exit is a lost token-refresh race that one retry can cure."""
 		return False
 
+	def untested_version_message(self) -> str:
+		"""The Connect text for a CLI outside ``tested_versions``."""
+		from frappe import _
+
+		low, high = (".".join(str(n) for n in v) for v in self.tested_versions)
+		return _("This {0} version is outside the range Optimus was tested with ({1} to {2}).").format(
+			self.binary, low, high
+		)
+
 
 class _CodexBackend(_CliBackend):
 	key = "codex"
@@ -4475,6 +4518,7 @@ class _CodexBackend(_CliBackend):
 	login_failures = _LOGIN_FAILURES
 	signed_out_reasons = ("signed_out", "not_chatgpt")
 	reworded_status_reason = "not_chatgpt"
+	reworded_status_text = "If you are signed in with ChatGPT, your codex CLI ({0}) may need updating."
 	exec_errors = _CLI_EXEC_ERRORS
 	known_failures = _CLI_KNOWN_FAILURES
 	auth_labels = _CLI_AUTH_LABELS
@@ -4528,6 +4572,16 @@ class _CodexBackend(_CliBackend):
 _CODEX = _CodexBackend()
 
 
+def _cli_backend_by_key(key: str) -> _CliBackend:
+	"""The backend whose ``key`` ("codex" / "claude") a provider config carries."""
+	from frappe import _
+
+	for backend in _CLI_BACKENDS.values():
+		if backend.key == key:
+			return backend
+	raise AiFixError(_("Unknown subscription CLI '{0}'.").format(key), kind="config")
+
+
 def _cli_backend(cfg) -> _CliBackend:
 	"""The backend the saved ``ai_subscription_cli`` picks. A never-saved field (absent from the
 	settings snapshot) and a blank one both mean Codex, on the live side and the snapshot side
@@ -4544,8 +4598,6 @@ def _cli_backend(cfg) -> _CliBackend:
 	return backend
 
 
-
-
 # ---- Claude CLI backend ------------------------------------------------------------------
 # `claude -p --output-format json` prints ONE result envelope on stdout and reports a failure
 # there too (``is_error``), often with exit 0, so the reply reader here classifies failures and
@@ -4558,21 +4610,34 @@ _CLAUDE_NPM_BINARY = "claude.exe"
 _CLAUDE_NPM_PACKAGE_DIR = "claude-code"
 _CLAUDE_VERSION_FILE_RE = re.compile(r"\d+\.\d+\.\d+(?:[-+.][0-9A-Za-z.+\-]*)?")
 _CLAUDE_LOGIN_CACHE_SECONDS = 30
+# The claude versions this isolation was last checked against (major, minor, patch), inclusive.
+_CLAUDE_TESTED_VERSIONS = ((2, 1, 312), (2, 1, 316))
 _CLAUDE_SUBSCRIPTION_AUTH = "claude.ai"
-_CLAUDE_MODEL_RE = re.compile(r"[A-Za-z][A-Za-z0-9._\-]{0,63}")
-# The `api_retry.error` values a Claude result can carry, as ``_CLAUDE_EXEC_ERRORS`` labels.
-_CLAUDE_ERROR_ENUM = {
-	"authentication_failed": "auth_expired",
-	"rate_limit": "usage_limit",
-	"overloaded": "server_error",
-	"server_error": "server_error",
-	"model_not_found": "model_not_found",
-	"invalid_request": "invalid_request",
-}
-_CLAUDE_STATUS_LABELS = (
-	((401, 403), "auth_expired"), ((404,), "model_not_found"), ((429,), "usage_limit"),
-	((400, 413, 422), "invalid_request"),
+# A model alias or id, with the optional context suffix Claude accepts (`sonnet[1m]`).
+_CLAUDE_MODEL_RE = re.compile(r"[A-Za-z][A-Za-z0-9._\-]{0,63}(?:\[[A-Za-z0-9]{1,8}\])?")
+# What a failed result's text says when the plan or the account is out of room: the usage limits of a
+# subscription, extra usage, the credit balance, a spend cap and billing or a held account. Fatal (quota).
+_CLAUDE_USAGE_RE = re.compile(
+	r"usage limit|quota|(?:reached|hit) your .{0,40}limit|out of (?:extra )?usage|credit balance"
+	r"|spend limit|billing|account[ _]on[ _]hold",
+	re.IGNORECASE,
 )
+_CLAUDE_CONTEXT_RE = re.compile(r"prompt is too long|prompt too long|context (?:window|length)", re.IGNORECASE)
+# The result envelope's `terminal_reason` values that are not a normal end, as ``_CLAUDE_EXEC_ERRORS``
+# labels. `completed` is the one normal end. `model_context_window_exceeded` is a cut-off reply, not
+# a failure, when no error is reported (see ``_ClaudeBackend.read_reply``).
+_CLAUDE_TERMINAL_LABELS = {
+	"prompt_too_long": "context",
+	"model_context_window_exceeded": "context",
+	"blocking_limit": "usage_limit",
+	"refusal": "refused",
+	"api_error": "server_error",
+	"model_error": "server_error",
+	"aborted_streaming": "incomplete",
+	"aborted_tools": "incomplete",
+	"hook_stopped": "incomplete",
+	"stop_hook_prevented": "incomplete",
+}
 
 _CLAUDE_LOGIN_FAILURES = {
 	"not_subscription": (
@@ -4590,16 +4655,18 @@ _CLAUDE_EXEC_ERRORS = {
 	"auth_expired": ("Claude session expired.", "auth"),
 	"usage_limit": ("Claude usage limit reached. Try again later.", "quota"),
 	"rate_limited": ("Claude is rate limiting requests. Wait a few minutes and try again.", "rate_limited"),
+	"context": ("This prompt did not fit Claude's context window.", "context"),
+	"refused": ("Claude declined to answer this prompt. Other prompts are still sent.", "refused"),
+	"incomplete": ("Claude stopped before it finished the reply. Try again.", "bad_response"),
 	"model_not_found": ("Claude does not know the model Optimus asked for. Check optimus_claude_cli_model.", "not_found"),
 	"invalid_request": ("Claude rejected the request.", "config"),
 	"unknown_flag": ("Claude rejected a command-line flag. Update the claude CLI.", "config"),
 	"server_error": ("Claude is overloaded or unavailable. Try again later.", "transport"),
 	"network": ("Claude could not reach the network.", "transport"),
 }
-# Labels where Claude rejected the call before any answer was produced: the outcome is known.
-_CLAUDE_KNOWN_FAILURES = frozenset(
-	{"auth_expired", "usage_limit", "rate_limited", "model_not_found", "invalid_request", "unknown_flag"}
-)
+# Stderr labels (a non-zero exit with no result envelope) where Claude rejected the call before any
+# answer was produced: the outcome is known. A failure read from the result envelope is judged by its kind.
+_CLAUDE_KNOWN_FAILURES = frozenset({"auth_expired", "usage_limit", "rate_limited", "unknown_flag"})
 
 
 def _parse_claude_json(text: str | None) -> dict | None:
@@ -4664,45 +4731,127 @@ def _claude_login_ok(cli_path: str, *, use_cache: bool = True) -> tuple[bool, st
 
 def _claude_model_alias() -> str | None:
 	"""The operator's ``optimus_claude_cli_model`` site-config alias (``sonnet``, ``opus``, a full
-	model id), or None. By default Claude's own default model is used. The identity placeholder
-	``claude`` is not a model and a malformed value could pass as a flag, so both are dropped."""
+	model id, any of them with a context suffix such as ``sonnet[1m]``), or None. By default
+	Claude's own default model is used. The identity placeholder ``claude`` is not a model and a
+	malformed value could pass as a flag, so both are dropped, with a ``model_alias_ignored``
+	diagnostic (never the value) so the operator can tell the setting did not apply. The site config
+	is read per call, so a change needs no restart beyond the usual config cache."""
 	try:
 		import frappe
 
-		value = frappe.conf.get("optimus_claude_cli_model")
+		raw = frappe.conf.get("optimus_claude_cli_model")
 	except Exception:
 		return None
-	value = value.strip() if isinstance(value, str) else ""
-	if value.lower() == "claude" or not _CLAUDE_MODEL_RE.fullmatch(value):
+	if raw is None or (isinstance(raw, str) and not raw.strip()):
 		return None
-	return value
+	value = raw.strip() if isinstance(raw, str) else ""
+	if not value:
+		_log_cli_diagnostic("model_alias_ignored", label="not_text", cli="claude")
+	elif value.lower() == "claude":
+		_log_cli_diagnostic("model_alias_ignored", label="placeholder", cli="claude")
+	elif not _CLAUDE_MODEL_RE.fullmatch(value):
+		_log_cli_diagnostic("model_alias_ignored", label="malformed", cli="claude")
+	else:
+		return value
+	return None
+
+
+def _claude_status(payload: dict) -> int | None:
+	"""The HTTP ``api_error_status`` of a result envelope when it is a plausible status, else None."""
+	status = payload.get("api_error_status")
+	if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599:
+		return status
+	return None
+
+
+def _claude_terminal(payload: dict) -> str | None:
+	"""The envelope's ``terminal_reason`` when it is text, else None."""
+	terminal = payload.get("terminal_reason")
+	return terminal if isinstance(terminal, str) else None
 
 
 def _claude_failure_label(payload: dict) -> str:
-	"""One fixed failure label for an ``is_error`` result envelope, from its stable fields first
-	(the ``api_retry.error`` enum, the HTTP ``api_error_status``) and then the CLI's own short
-	error line matched against the same allow-list as stderr. The text is only matched, never kept."""
-	retry = payload.get("api_retry")
-	enum = payload.get("error") if isinstance(payload.get("error"), str) else (
-		retry.get("error") if isinstance(retry, dict) else None
-	)
-	if enum in _CLAUDE_ERROR_ENUM:
-		return _CLAUDE_ERROR_ENUM[enum]
-	status = payload.get("api_error_status")
-	if isinstance(status, int) and not isinstance(status, bool):
-		for codes, label in _CLAUDE_STATUS_LABELS:
-			if status in codes:
-				return label
-		if status >= 500:
-			return "server_error"
-	text = payload.get("result")
-	return _classify_cli_stderr(text if isinstance(text, str) else "")
+	"""One fixed failure label for an ``is_error`` result envelope. The stable fields come first
+	(the HTTP ``api_error_status`` as an int, then ``terminal_reason``) and the CLI's own short error
+	line (``result``) is only matched, never kept, against the usage-limit and context texts and then
+	the allow-list ``_classify_cli_stderr`` uses. A 429 is a usage limit only when its text says so;
+	any other 429 is a per-minute ``rate_limited``. A 413 or a "prompt too long" is the per-prompt
+	``context`` kind, a plain 400 is ``invalid_request``."""
+	result = payload.get("result")
+	text = result if isinstance(result, str) else ""
+	usage = bool(_CLAUDE_USAGE_RE.search(text))
+	status = _claude_status(payload)
+	if status in (401, 403):
+		return "auth_expired"
+	if status == 404:
+		return "model_not_found"
+	if status == 413:
+		return "context"
+	if status in (400, 422, 429):
+		if usage:
+			return "usage_limit"
+		if status == 429:
+			return "rate_limited"
+		return "context" if _CLAUDE_CONTEXT_RE.search(text) else "invalid_request"
+	if status is not None and status >= 500:
+		return "server_error"
+	terminal = _claude_terminal(payload)
+	if terminal in _CLAUDE_TERMINAL_LABELS:
+		return _CLAUDE_TERMINAL_LABELS[terminal]
+	if usage:
+		return "usage_limit"
+	if _CLAUDE_CONTEXT_RE.search(text):
+		return "context"
+	return _classify_cli_stderr(text)
 
 
 def _claude_envelope_failed(payload: dict) -> bool:
 	"""True when the result envelope reports a failure (``is_error``, or an ``error_*`` subtype)."""
 	subtype = payload.get("subtype")
 	return bool(payload.get("is_error")) or (isinstance(subtype, str) and subtype.startswith("error"))
+
+
+_CLAUDE_CUT_OFF = frozenset({"max_tokens", "model_context_window_exceeded"})
+
+
+def _claude_cut_off(payload: dict) -> bool:
+	"""True when a successful reply stopped at the output limit or the context window."""
+	return payload.get("stop_reason") in _CLAUDE_CUT_OFF or _claude_terminal(payload) in _CLAUDE_CUT_OFF
+
+
+def _claude_unfinished_label(payload: dict) -> str | None:
+	"""For an envelope that does NOT report ``is_error``: the failure label when the reply is not a
+	complete answer, else None. A complete one has ``subtype`` ``success`` (or none) and
+	``terminal_reason`` ``completed`` (or none); a refusal, an aborted stream or tool run, a hook stop
+	and any other ending are not, whatever ``is_error`` says. A cut-off reply is not a failure."""
+	if payload.get("stop_reason") == "refusal":
+		return "refused"
+	if _claude_cut_off(payload):
+		return None
+	terminal = payload.get("terminal_reason")
+	if terminal not in (None, "completed"):
+		return _CLAUDE_TERMINAL_LABELS.get(terminal, "incomplete") if isinstance(terminal, str) else "incomplete"
+	if payload.get("subtype") not in (None, "success"):
+		return "incomplete"
+	return None
+
+
+class _CliReplyFailure(AiFixError):
+	"""An ``AiFixError`` a backend's ``read_reply`` raised, with the facts for the diagnostic log: the
+	specific failure ``label`` (finer than ``kind``), the HTTP ``status`` and the ``terminal``
+	reason. All three are fixed or numeric, never text the CLI printed."""
+
+	def __init__(self, error: AiFixError, *, label: str, status: int | None = None, terminal: str | None = None):
+		super().__init__(str(error), kind=error.kind)
+		self.label, self.status, self.terminal = label, status, terminal
+
+
+def _claude_reply_failure(backend: _CliBackend, payload: dict, label: str, code: int) -> _CliReplyFailure:
+	"""The classified failure for a result envelope that ``label`` says is not an answer."""
+	return _CliReplyFailure(
+		_cli_exec_error(backend, label, code), label=label, status=_claude_status(payload),
+		terminal=_claude_terminal(payload),
+	)
 
 
 class _ClaudeBackend(_CliBackend):
@@ -4716,6 +4865,7 @@ class _ClaudeBackend(_CliBackend):
 	scratch_dir = "claude"
 	# Documented Claude Code switches (settings reference): no telemetry, no background updater.
 	extra_env = {"DISABLE_TELEMETRY": "1", "DISABLE_AUTOUPDATER": "1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
+	tested_versions = _CLAUDE_TESTED_VERSIONS
 	login_failures = _CLAUDE_LOGIN_FAILURES
 	signed_out_reasons = ("signed_out", "not_subscription")
 	exec_errors = _CLAUDE_EXEC_ERRORS
@@ -4793,27 +4943,33 @@ class _ClaudeBackend(_CliBackend):
 
 	def read_reply(self, out_file, stdout, code):
 		"""``.result`` of the result envelope, capped after the parse. Fails closed: a reply that is
-		not exactly one JSON object, has no string ``.result`` or reports ``is_error`` is a classified
-		error, never raw stdout. After a non-zero exit only an envelope that reports an error is
-		classified here; anything else is left to ``classify``."""
+		not exactly one JSON object, has no string ``.result``, reports ``is_error`` or did not end
+		normally (a ``subtype`` other than ``success``, a ``terminal_reason`` other than
+		``completed``, a refusal) is a classified error, never raw stdout and never a suggestion. A
+		reply that ran into the context window is returned as cut off. After a non-zero exit only an
+		envelope that reports a problem is classified here; anything else is left to ``classify``."""
 		from frappe import _
 
 		payload = _parse_claude_json(stdout)
-		if payload is not None and _claude_envelope_failed(payload):
-			raise _cli_exec_error(self, _claude_failure_label(payload), code)
+		if payload is not None:
+			label = _claude_failure_label(payload) if _claude_envelope_failed(payload) else _claude_unfinished_label(payload)
+			if label:
+				raise _claude_reply_failure(self, payload, label, code)
 		if code != 0:
 			return "", False
 		result = payload.get("result") if payload is not None else None
 		if not isinstance(result, str):
-			raise AiFixError(_("Claude CLI returned a reply Optimus could not read."), kind="bad_response")
+			raise _CliReplyFailure(
+				AiFixError(_("Claude CLI returned a reply Optimus could not read."), kind="bad_response"),
+				label="unreadable_reply",
+			)
 		text = result.strip()
-		truncated = len(text) > _CLI_MAX_OUTPUT_CHARS or payload.get("stop_reason") == "max_tokens"
+		truncated = len(text) > _CLI_MAX_OUTPUT_CHARS or _claude_cut_off(payload)
 		return text[:_CLI_MAX_OUTPUT_CHARS], truncated
 
 	def classify(self, stdout, stderr):
-		payload = _parse_claude_json(stdout)
-		label = _claude_failure_label(payload) if payload is not None and _claude_envelope_failed(payload) else None
-		return label or _classify_cli_stderr(stderr)
+		# A failure in the result envelope was already raised by ``read_reply``: only stderr is left.
+		return _classify_cli_stderr(stderr)
 
 
 _CLAUDE = _ClaudeBackend()
