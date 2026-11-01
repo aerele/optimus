@@ -39,6 +39,7 @@ def test_the_orphaned_dedicated_home_and_its_token_are_removed(patch, capsys):
 	assert not patch.home.exists()
 	out = capsys.readouterr().out
 	assert "optimus-codex" in out and "LIVE" not in out  # one notice, never the token
+	assert "not revoked" in out and "ChatGPT account" in out  # removing the folder is not a sign-out
 
 
 def test_nothing_else_in_the_private_folder_is_touched(patch):
@@ -83,11 +84,33 @@ def test_a_removal_failure_warns_with_the_path_and_never_blocks_migrate(patch, m
 	patch.module.execute()  # must not raise
 	out = capsys.readouterr().out
 	assert str(patch.home) in out and "remove" in out.lower()
+	assert "not revoked" in out and "ChatGPT account" in out
 	assert patch.home.exists()
+
+
+def test_a_dangling_symlink_is_unlinked(patch, tmp_path):
+	patch.home.parent.mkdir(parents=True)
+	patch.home.symlink_to(tmp_path / "gone")  # points at nothing
+	assert os.path.lexists(patch.home) and not patch.home.exists()
+	patch.module.execute()
+	assert not os.path.lexists(patch.home)
+
+
+def test_a_regular_file_in_its_place_warns_and_never_blocks_migrate(patch, capsys):
+	patch.home.parent.mkdir(parents=True)
+	patch.home.write_text("not a folder")  # rmtree raises NotADirectoryError
+	patch.module.execute()  # must not raise
+	out = capsys.readouterr().out
+	assert str(patch.home) in out and "by hand" in out and "not revoked" in out
+	assert patch.home.read_text() == "not a folder"
 
 
 def test_the_patch_is_registered_in_patches_txt():
 	here = os.path.dirname(os.path.abspath(__file__))
 	with open(os.path.join(here, "..", "patches.txt")) as f:
 		lines = [line.strip() for line in f]
-	assert "optimus.patches.v0_12_128.remove_dedicated_codex_home" in lines
+	patch_line = "optimus.patches.v0_12_128.remove_dedicated_codex_home"
+	assert lines.count(patch_line) == 1
+	# It only deletes a folder, so it belongs after the model sync, not before it.
+	assert lines.index("[post_model_sync]") < lines.index(patch_line)
+	assert "[pre_model_sync]" not in lines[lines.index("[post_model_sync]"):]

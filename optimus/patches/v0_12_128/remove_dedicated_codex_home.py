@@ -13,6 +13,11 @@ import shutil
 
 import frappe
 
+_NOT_REVOKED = (
+	"The token was not revoked on the server: if a backup or snapshot holds that folder, "
+	"sign those sessions out from your ChatGPT account."
+)
+
 
 def execute():
 	path = os.path.abspath(frappe.get_site_path("private", "optimus-codex"))
@@ -26,10 +31,12 @@ def execute():
 	except OSError:
 		print(
 			f"Optimus could not remove the retired Codex sign-in folder {path}. It holds a "
-			"live refresh token: delete it by hand. Optimus now uses your own ~/.codex login."
+			"live refresh token: delete it by hand. Optimus now uses your own ~/.codex login. "
+			+ _NOT_REVOKED
 		)
 		return
 	print(
 		f"Optimus removed the retired Codex sign-in folder {path}. Codex subscription mode now uses "
-		"your own `codex login` from your terminal (~/.codex)."
+		"your own `codex login` from your terminal (~/.codex). "
+		+ _NOT_REVOKED
 	)
