@@ -57,7 +57,7 @@ def public_state(run, *, now):
 
 def refresh_plan(doc, *, now):
 	"""Count the same eligible rows the worker selects, without source or file I/O."""
-	from optimus import ai_prompts, analyze
+	from optimus import ai_fix, ai_prompts, analyze
 	from optimus.analyzers.base import row_get
 	from optimus.settings import get_config
 
@@ -68,7 +68,7 @@ def refresh_plan(doc, *, now):
 	pending_rows = analyze.eligible_findings(rows, cfg, requested_at=cutoff) if fixes else []
 	pending = len(pending_rows)
 	total = len(analyze.eligible_findings(rows, cfg, regenerate_all=True, requested_at=cutoff)) if fixes else 0
-	cap = cfg.ai_refresh_max_findings
+	cap = ai_fix.bulk_batch_cap(cfg.ai_refresh_max_findings)
 	return {
 		"pending": pending, "total": total, "cap": cap,
 		"selected": min(pending, cap) if cap else pending,
