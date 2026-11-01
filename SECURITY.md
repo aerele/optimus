@@ -95,13 +95,12 @@ What Optimus does to contain the CLI:
 
 - The child process gets an allow-listed environment and a private scratch `HOME` and
   `TMPDIR`, removed afterwards (stale trees left by a killed worker are deleted on the next
-  run and the removal is logged). Its `CODEX_HOME` is a folder owned by Optimus,
-  `<site>/private/optimus-codex` (created mode 0700), that is used by nothing else. The
-  operator's own `~/.codex` is never read, copied or written. The operator signs in once with
-  `CODEX_HOME=<that folder> codex login` (Connect shows the exact command), and the codex
-  CLI refreshes its own sign-in inside that folder. Optimus does not copy, merge or write
-  back tokens, and takes no lock; concurrent codex runs in that one folder are codex's own
-  business.
+  run and the removal is logged). Its `CODEX_HOME` is the operator's own `~/.codex` (the login
+  they made in their own terminal with `codex login`); `HOME` is deliberately not the real
+  home, so `~/.ssh`, `~/.aws` and `~/.config` are not exposed through it. Optimus keeps no
+  token of its own: it never logs in and does not copy, merge, store or write back tokens.
+  The codex CLI itself uses and refreshes its sign-in in place in `~/.codex`. Connect only
+  runs `codex login status` against it. Optimus takes no lock against your own terminal codex.
 - It runs `--sandbox read-only --ephemeral` with the tool features that could read a file
   or run a command turned off (`--disable`). Only the feature names the installed CLI
   lists are passed, and every capability-looking feature it reports as on is turned off too.
@@ -114,14 +113,19 @@ What Optimus does to contain the CLI:
 
 Residual risk, in plain words:
 
-- The Optimus-owned Codex home holds the live sign-in, and the agent runs with
-  `CODEX_HOME` pointing at it, so a prompt injection that gets past the tool list can read or
-  replace that sign-in. It is the Optimus ChatGPT sign-in only, never the operator's own, and
-  `codex login` restores it.
+- The agent runs with `CODEX_HOME` pointing at your real `~/.codex`, which holds your live
+  ChatGPT sign-in, so a prompt injection that gets past the tool list can read or replace
+  that sign-in (the same one you use in your own terminal). `codex login` restores it. This
+  is the deliberate cost of using your real login instead of a separate Optimus one.
+- Your login is shared with your own terminal. A run of Optimus can rarely clash with your
+  own codex on the in-place token refresh and sign your terminal session out (sign in again
+  with `codex login`); Optimus cannot lock your terminal. A bulk run also spends your own
+  plan usage and can use it up for a while: a bulk refresh is capped at a small number of
+  findings in this mode and a usage-limit reply stops the run cleanly.
 - The tool list is a denylist. A new capability that the installed CLI adds under a name
   the floor and the regex do not match stays reachable, and `--sandbox read-only` limits
   writes, not reads. A prompt injection hidden in profiled data could then ask the agent to
-  read a file the bench user can read (the Optimus sign-in, `site_config.json`, private files).
+  read a file the bench user can read (your codex sign-in, `site_config.json`, private files).
 - The output scrub is pattern based. Encoding or splitting a secret defeats it, and it can
   also rewrite legitimate code that looks like a secret.
 - Use this mode only on a developer bench and only with data you trust.

@@ -8,6 +8,30 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.128] - 2026-11-01
+
+### Changed (behaviour change, read before upgrading)
+
+- The Codex subscription backend (Connection = Subscription, Codex CLI) now uses your REAL terminal login in `~/.codex` instead of a separate sign-in that Optimus kept in `<site>/private/optimus-codex`. Optimus keeps no token of its own, never logs in for you and Connect is only a read-only `codex login status` check of your login. The earlier guarantee "your own ~/.codex is never read, copied or written" no longer holds: the codex child runs with `CODEX_HOME` set to your `~/.codex`, so a prompt injection that gets past the tool list can read or replace that sign-in. The child still gets a private scratch `HOME` and `TMPDIR` (never your real home, so `~/.ssh`, `~/.aws` and `~/.config` stay out of reach), `--sandbox read-only --ephemeral` and every other isolation flag unchanged.
+- Sign in with plain `codex login` in your own terminal. Every "not signed in" and Connect message now says that, instead of `CODEX_HOME=<site>/private/optimus-codex codex login`.
+- Accepted risks, now documented in SECURITY.md and docs/AI-FIXING.md: your login is shared with your own terminal codex, so a run can rarely clash with it on the in-place token refresh and sign your terminal session out (sign in again with `codex login`; the existing single retry of a lost refresh race is kept) and a bulk run spends your own plan usage and can use it up for a while.
+- A bulk refresh is now bounded in subscription mode: the findings per run are capped at `SUBSCRIPTION_BULK_MAX_FINDINGS` (10) and a cap of 0 ("all") becomes that maximum. API-key providers keep their configured cap. A codex usage-limit reply was already a fatal `quota` error and still stops a bulk run cleanly.
+- The `ai_connection_type`, `ai_subscription_cli` and `ai_cli_path` field descriptions, SECURITY.md and docs/AI-FIXING.md no longer describe the Optimus-owned Codex home.
+
+### Removed
+
+- The dedicated-home code (`_ensure_codex_home`, `_codex_home_path`, `_codex_login_command` and the `with_auth` / `codex_home` plumbing in `_cli_sandbox` and `_build_cli_env`).
+
+### Migration
+
+- New patch `optimus.patches.v0_12_128.remove_dedicated_codex_home` deletes an existing `<site>/private/optimus-codex` folder on migrate (it holds a live refresh token and is orphaned now), printing one line. If it cannot delete the folder it prints a warning with the path and the migrate goes on; delete the folder by hand. The token is only deleted locally: to revoke it, run `CODEX_HOME=<that folder> codex logout` before you migrate. If you had signed in only to that folder, run `codex login` in your terminal afterwards.
+
+### Tests
+
+- The dedicated-home tests in `test_ai_subscription_cli.py` are rewritten to the real-login behaviour (CODEX_HOME is `~/.codex`, HOME is a private scratch dir, no credential file is opened, copied or written, `<site>/private/optimus-codex` is never created or read, the refresh-race retry still fires, messages say plain `codex login`, status stays free of account details). New tests cover the migrate patch and the bulk batch cap.
+
+---
+
 ## [0.12.127] - 2026-10-31
 
 ### Fixed

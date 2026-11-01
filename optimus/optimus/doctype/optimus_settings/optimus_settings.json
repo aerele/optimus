@@ -495,7 +495,7 @@
   {
    "default": "API Key",
    "depends_on": "eval:doc.ai_enabled",
-   "description": "Subscription (local CLI) needs developer_mode and the optimus_allow_subscription_cli site-config flag: run `bench --site <site> set-config optimus_allow_subscription_cli 1`, then restart the bench (or run `bench clear-cache`) so running workers see it. Sign in once to the Codex home Optimus owns: `CODEX_HOME=<bench>/sites/<site>/private/optimus-codex codex login` (Connect shows the exact command); your own ~/.codex is never used. It runs the Codex CLI on this machine as a read-only agent with a private scratch HOME, but it can still read files the bench user can read, so a prompt injection in profiled data is mitigated, not eliminated; use it only on data you trust. A call can take longer than the default request timeout, so raise the AI request timeout. API Key calls a cloud provider over HTTP.",
+   "description": "Subscription (local CLI) needs developer_mode and the optimus_allow_subscription_cli site-config flag: run `bench --site <site> set-config optimus_allow_subscription_cli 1`, then restart the bench (or run `bench clear-cache`) so running workers see it. Sign in to Codex in your own terminal with `codex login` (Sign in with ChatGPT). Optimus uses that same login from ~/.codex, keeps no token of its own and never logs in for you; Connect only checks it. A run can occasionally clash with your own terminal codex on the token refresh and sign it out (sign in again), and a bulk run spends your own plan usage. It runs the Codex CLI on this machine as a read-only agent with a private scratch HOME, but it can still read files the bench user can read, so a prompt injection in profiled data is mitigated, not eliminated; use it only on data you trust. A call can take longer than the default request timeout, so raise the AI request timeout. API Key calls a cloud provider over HTTP.",
    "fieldname": "ai_connection_type",
    "fieldtype": "Select",
    "label": "Connection",
@@ -546,7 +546,7 @@
   {
    "default": "Codex CLI",
    "depends_on": "eval:doc.ai_enabled && doc.ai_connection_type == 'Subscription (local CLI)'",
-   "description": "Which local CLI to drive. Codex (billed to your ChatGPT plan) is the only option in this version.",
+   "description": "Which local CLI to drive. Codex (billed to your own ChatGPT plan, so runs count against its usage limit) is the only option in this version.",
    "fieldname": "ai_subscription_cli",
    "fieldtype": "Select",
    "label": "Subscription CLI",
@@ -554,7 +554,7 @@
   },
   {
    "depends_on": "eval:doc.ai_enabled && doc.ai_connection_type == 'Subscription (local CLI)'",
-   "description": "Absolute path to the `codex` launcher, or a symlink named `codex` (not the `.js` file). It must be owned by the bench user or root and not writable by group or others. Leave blank to auto-detect `codex` on PATH.",
+   "description": "Absolute path to the `codex` launcher, or a symlink named `codex` (not the `.js` file). It must be owned by the bench user or root and not writable by group or others. Leave blank to auto-detect `codex` on PATH. This only picks the program to run: the sign-in it uses is always your own `codex login` in ~/.codex.",
    "fieldname": "ai_cli_path",
    "fieldtype": "Data",
    "label": "CLI path (optional)"

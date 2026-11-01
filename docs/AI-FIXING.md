@@ -550,13 +550,13 @@ uncertain usage, resume limits, report recovery and API response changes.
 
 Instead of an API key you can use the Codex CLI that is signed in with ChatGPT on the bench machine. It is meant for developer benches only.
 
-1. Install the `codex` CLI for the bench user and sign in once to the Codex home that Optimus owns, `sites/<site>/private/optimus-codex` (Optimus creates it, mode 0700, and uses it for nothing else; your own `~/.codex` is never touched):
+1. Install the `codex` CLI for the bench user and sign in with it in your own terminal, as you normally would:
 
 ```bash
-CODEX_HOME=<bench path>/sites/<site>/private/optimus-codex codex login
+codex login
 ```
 
-Choose "Sign in with ChatGPT"; an API-key login is refused. The Connect button and the "not signed in" message show this command with your real path. Optimus reads the file-based sign-in (`auth.json`) in that folder: if your codex keeps credentials in the OS keyring instead, set its file-based credential store before you sign in.
+Choose "Sign in with ChatGPT"; an API-key login is refused. Optimus uses that same login from `~/.codex`: it keeps no token of its own, never logs in for you and gives the codex child a scratch `HOME` so only `~/.codex` is reachable, not the rest of your home. The Connect button and the "not signed in" message only check your login and tell you to run `codex login`. Optimus reads the file-based sign-in (`auth.json`) that codex keeps: if your codex keeps credentials in the OS keyring instead, set its file-based credential store before you sign in. If you used an earlier version that kept a separate sign-in in `sites/<site>/private/optimus-codex`, the next migrate removes that folder; sign in again with `codex login` if you had no terminal login.
 2. Enable the site flags, then restart the bench (or run `bench clear-cache`) so running workers see them:
 
 ```bash
@@ -569,12 +569,13 @@ bench --site <site> set-config optimus_allow_subscription_cli 1
 What to know:
 
 - The prompt leaves the host: Codex sends it to OpenAI. Section 2 applies as for an API call.
-- Each call runs `codex exec` read-only with the file, command and browser tools turned off. Calls are not serialised by Optimus: the codex CLI refreshes its own sign-in inside the Optimus Codex home, and concurrent runs in that one folder are codex's own business.
+- Each call runs `codex exec` read-only with the file, command and browser tools turned off. Calls are not serialised by Optimus: the codex CLI refreshes its own sign-in in place in your `~/.codex`, and a lost refresh race is retried once. Your own terminal codex shares that login, so a run can rarely sign your terminal session out (sign in again with `codex login`) and Optimus cannot lock your terminal.
+- A bulk refresh spends your own ChatGPT plan usage and can use it up for a while, which also stops your own terminal codex. In this mode a bulk run is capped at 10 findings and when the plan usage limit is hit the run stops cleanly.
 - A call can take longer than 60 seconds. Raise `ai_request_timeout_seconds` (180 is a good start). The check of the CLI comes out of the same limit.
 - If `codex features list` cannot be read, the call is refused with "refused for safety". Check that the command works for the bench user.
 - The guardrail re-ask is not used with this mode, because the CLI takes one flat prompt.
 - Tested with codex 0.164 to 0.165. See SECURITY.md for the residual risks (denylist of tools, pattern based output scrub).
-- A killed worker: on Linux the kernel stops the codex child with the worker (`PR_SET_PDEATHSIG`), but the signal reaches the direct child only, and other platforms do not have it. A run that is abandoned (timeout, interrupt) is logged as `exec_abandoned`, and stale scratch folders are swept (logged as `stale_sandbox_removed`). If the next call says the session expired, run the `codex login` command above again.
+- A killed worker: on Linux the kernel stops the codex child with the worker (`PR_SET_PDEATHSIG`), but the signal reaches the direct child only, and other platforms do not have it. A run that is abandoned (timeout, interrupt) is logged as `exec_abandoned`, and stale scratch folders are swept (logged as `stale_sandbox_removed`). If the next call says the session expired, run `codex login` in your terminal again.
 
 ### 6.5 Troubleshooting
 
