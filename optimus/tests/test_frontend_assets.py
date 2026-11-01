@@ -246,12 +246,12 @@ SETTINGS_JS = os.path.join(
 def _settings_js_before_button(label: str, window: int = 260) -> str:
 	with open(SETTINGS_JS) as f:
 		src = f.read()
-	idx = src.index(f'__("{label}")')
+	idx = src.index(f'__("{label}"')
 	return src[max(0, idx - window):idx]
 
 
 def test_settings_connect_button_only_in_subscription_mode():
-	guard = _settings_js_before_button("Connect (check Codex CLI)")
+	guard = _settings_js_before_button("Connect (check {0})", window=360)
 	assert 'frm.doc.ai_connection_type === "Subscription (local CLI)"' in guard
 
 

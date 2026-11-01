@@ -544,6 +544,16 @@ def subscription_mode_active() -> bool:
 		return False
 
 
+def subscription_backend() -> _CliBackend:
+	"""The subscription CLI backend the saved settings pick (Codex when unset or unreadable). A
+	config read only (no CLI probe), so messages can name the CLI."""
+	try:
+		from optimus.settings import get_config
+		return _cli_backend(get_config())
+	except Exception:
+		return _CODEX
+
+
 # A subscription run spends the operator's own plan usage, which they share with their terminal
 # CLI, so one bulk refresh is bounded. Generic: every subscription backend uses it. A plan usage
 # limit surfaces as the fatal ``quota`` kind, which stops the run cleanly before this is reached.
@@ -564,7 +574,7 @@ def is_available(section: str | None = None) -> bool:
 	``ai_enabled`` set, a model resolvable for the chosen provider and an API
 	key present unless the provider needs none (local endpoints). In
 	subscription (local CLI) mode the API fields do not apply: the
-	developer-mode guard and an installed Codex CLI do.
+	developer-mode guard and an installed CLI do.
 
 	When ``section`` is ``"findings"`` / ``"humanize"``, also
 	requires the matching per-section toggle. Fails soft: an unknown ``section``
@@ -4424,6 +4434,10 @@ class _CliBackend:
 	def sign_in_hint(self) -> str:
 		raise NotImplementedError
 
+	def terminal_login_text(self) -> str:
+		"""Clause finishing "make sure ... and that <this>" in the AI-not-ready message."""
+		raise NotImplementedError
+
 	def connected_message(self) -> str:
 		"""The Connect text, with ``{0}`` for the ` (version)` suffix."""
 		raise NotImplementedError
@@ -4484,6 +4498,11 @@ class _CodexBackend(_CliBackend):
 			"`codex login` and choose Sign in with ChatGPT (an API-key login is refused). "
 			"Optimus reads the bench user's ~/.codex and ignores a custom Codex home set in your own terminal."
 		)
+
+	def terminal_login_text(self) -> str:
+		from frappe import _
+
+		return _("`codex login` was run in the bench user's own terminal")
 
 	def connected_message(self) -> str:
 		from frappe import _
@@ -4733,6 +4752,11 @@ class _ClaudeBackend(_CliBackend):
 			"Connection = API Key for that). Optimus reads the bench user's ~/.claude and ignores a "
 			"custom Claude config directory set in your own terminal."
 		)
+
+	def terminal_login_text(self) -> str:
+		from frappe import _
+
+		return _("`claude` was run and signed in to a Claude subscription in the bench user's own terminal")
 
 	def connected_message(self) -> str:
 		from frappe import _

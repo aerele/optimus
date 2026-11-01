@@ -688,3 +688,414 @@ class TestSessionStatus:
 		assert ai_fix.is_available() is True
 		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: None)
 		assert ai_fix.is_available() is False
+
+
+# ---------------------------------------------------------------------------
+# B2/B3: the exec through the generic shell
+# ---------------------------------------------------------------------------
+
+def _emit(payload) -> str:
+	"""Exec body that prints ``payload`` (a dict, or raw text) on stdout."""
+	text = payload if isinstance(payload, str) else json.dumps(payload)
+	return "printf '%s' '" + text.replace("'", "'\\''") + "'"
+
+
+def _failure(**kw):
+	return {"type": "result", "subtype": "success", "is_error": True, "result": "RAWCANARY something", **kw}
+
+
+class TestExec:
+	def test_the_reply_is_the_result_field_scrubbed(self, fake_claude):
+		fake_claude(exec_body=_emit({"type": "result", "is_error": False, "result": 'db_password = "hunter2hunter2"'}))
+		out = _call()
+		assert "hunter2" not in out and "[redacted]" in out
+
+	def test_the_prompt_goes_on_stdin_and_never_on_argv(self, fake_claude):
+		box = fake_claude()
+		_call(system="OPTIMUS-FORMAT-RULES", content="SELECT 'x; rm -rf /' -- $(whoami)")
+		stdin = _read(box.rec, "stdin.txt")
+		assert stdin.startswith("OPTIMUS-FORMAT-RULES")
+		assert stdin.index("OPTIMUS-FORMAT-RULES") < stdin.index("SECURITY:") < stdin.index("SELECT 'x; rm -rf /'")
+		argv = _read(box.rec, "argv.txt")
+		assert "OPTIMUS-FORMAT-RULES" not in argv and "rm -rf" not in argv
+
+	def test_the_child_gets_the_exact_planned_argv_including_the_empty_tools_list(self, fake_claude):
+		box = fake_claude()
+		_call()
+		lines = _read(box.rec, "argv.txt").split("\n")[:-1]
+		assert lines == [
+			"-p", "--output-format", "json", "--tools", "", "--strict-mcp-config", "--safe-mode", "--restricted",
+			"--no-session-persistence", "--permission-prompts", "none",
+		]
+
+	def test_the_child_env_is_scratch_home_real_config_dir_and_no_secrets(self, fake_claude, real_login, monkeypatch):
+		box = fake_claude()
+		for name, value in _LEAKING.items():
+			monkeypatch.setenv(name, value)
+		monkeypatch.setenv("OPTIMUS_TEST_DB_PASSWORD", "supersecret")
+		_call()
+		env = dict(line.split("=", 1) for line in _read(box.rec, "env_-p.txt").splitlines() if "=" in line)
+		for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL",
+			"OPENAI_API_KEY", "CODEX_API_KEY", "AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN", "CLAUDE_CODE_USE_BEDROCK",
+			"OPTIMUS_TEST_DB_PASSWORD"):
+			assert name not in env, name
+		assert "supersecret" not in _read(box.rec, "env_-p.txt")
+		assert env["CLAUDE_CONFIG_DIR"] == str(real_login.parent)
+		assert env["HOME"] != os.path.expanduser("~") and not env["HOME"].startswith(os.path.expanduser("~") + os.sep)
+		assert _read(box.rec, "homemode_-p.txt").strip() == "drwx------"
+		assert env["DISABLE_TELEMETRY"] == env["DISABLE_AUTOUPDATER"] == env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+		assert _read(box.rec, "pwd_-p.txt").strip().startswith(os.path.dirname(env["HOME"]))
+
+	def test_only_the_status_check_and_the_exec_see_the_real_config_dir(self, fake_claude, real_login):
+		box = fake_claude()
+		ai_fix._cli_session_status()
+		_call()
+		by_command = {}
+		for line in _read(box.rec, "configdir_log.txt").splitlines():
+			command, config_dir = line.split(" ", 1)
+			by_command.setdefault(command, []).append(config_dir)
+		real = str(real_login.parent)
+		assert set(by_command["auth"]) == {real} and set(by_command["-p"]) == {real}
+		for config_dir in by_command["--version"]:
+			assert config_dir != real and os.path.basename(config_dir) == "claude"
+
+	def test_no_credential_file_is_read_copied_or_written(self, fake_claude, real_login, tmp_path):
+		fake_claude()
+		skip = {"rec", "bin"}
+
+		def snapshot():
+			found = set()
+			for root, dirs, files in os.walk(tmp_path):
+				dirs[:] = [d for d in dirs if not (root == str(tmp_path) and d in skip)]
+				found.update(os.path.join(root, n) for n in dirs + files)
+			return found
+
+		tree, before = snapshot(), (real_login.read_bytes(), real_login.stat().st_mtime_ns)
+		_call()
+		assert (real_login.read_bytes(), real_login.stat().st_mtime_ns) == before
+		assert snapshot() == tree  # no copy of the token anywhere, no new login folder
+
+	def test_the_claude_code_never_names_a_credential_file(self):
+		import inspect
+
+		code = "".join(inspect.getsource(obj) for obj in (
+			ai_fix._ClaudeBackend, ai_fix._claude_login_ok, ai_fix._claude_login_state, ai_fix._claude_failure_label,
+		))
+		assert "credentials" not in code.lower() and "keychain" not in code.lower()
+		assert not any(hasattr(ai_fix, name) for name in ("_read_auth", "_save_refreshed_auth", "_auth_source_path"))
+
+	def test_the_scratch_tree_is_deleted_after_success_and_after_failure(self, fake_claude):
+		box = fake_claude()
+		_call()
+		assert not os.path.exists(os.path.dirname(_read(box.rec, "home_-p.txt").strip()))
+		fake_claude(exec_body="exit 3")
+		with pytest.raises(ai_fix.AiFixError):
+			_call()
+		assert not os.path.exists(os.path.dirname(_read(box.rec, "home_-p.txt").strip()))
+
+	def test_no_features_probe_runs_for_claude(self, fake_claude, monkeypatch):
+		box = fake_claude()
+		for name in ("_codex_features", "_cli_disabled_features", "_build_cli_argv"):
+			monkeypatch.setattr(ai_fix, name, lambda *a, **kw: pytest.fail("the codex probe ran for claude"))
+		assert _call() == "REPLY"
+		assert "features" not in _read(box.rec, "calls.txt")
+
+	def test_the_guard_off_refuses_before_any_process(self, fake_claude, monkeypatch):
+		box = fake_claude()
+		monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: False)
+		with pytest.raises(ai_fix.AiFixError, match="developer-mode") as err:
+			_call()
+		assert err.value.kind == "config" and err.value.fatal is True
+		assert not (box.rec / "calls.txt").exists()
+
+	def test_a_success_counts_one_known_zero_cost_call(self, fake_claude):
+		fake_claude()
+		usage = ai_fix.Usage()
+		with ai_transport.attempt() as transport:
+			_call(usage_out=usage)
+		assert usage.calls == 1 and usage.complete and not usage.get("total_tokens")
+		assert transport.certainty == "known_response"
+
+	def test_a_success_refreshes_the_login_memo_and_an_auth_failure_clears_it(self, fake_claude):
+		box = fake_claude()
+		_call()
+		assert ai_fix._LOGIN_CACHE[str(box.path)][1:] == (True, "ok")
+		fake_claude(exec_body=_emit(_failure(api_error_status=401)))
+		with pytest.raises(ai_fix.AiFixError):
+			_call()
+		assert str(box.path) not in ai_fix._LOGIN_CACHE
+
+	def test_a_timeout_kills_the_whole_process_group_and_is_not_fatal(self, fake_claude, monkeypatch):
+		monkeypatch.setattr(ai_fix, "_CLI_MIN_EXEC_SECONDS", 1)
+		rec = fake_claude().rec
+		fake_claude(exec_body=f'sleep 60 & echo $! > "{rec}/child.pid"; wait')
+		with ai_transport.attempt() as transport:
+			with pytest.raises(ai_fix.AiFixError) as err:
+				_call(timeout=2)
+		assert err.value.kind == "timeout" and err.value.fatal is False
+		assert "Claude CLI didn't respond within the 2s limit" in str(err.value)
+		assert transport.certainty == "sent_unknown"
+		pid = int((rec / "child.pid").read_text())
+		for _ in range(50):
+			try:
+				os.kill(pid, 0)
+			except ProcessLookupError:
+				break
+			time.sleep(0.1)
+		else:
+			os.kill(pid, 9)
+			pytest.fail("the grandchild survived the timeout")
+
+	def test_the_exec_failure_is_logged_with_event_version_label_and_code_only(self, fake_claude, monkeypatch):
+		fake_claude(exec_body="echo 'RAWCANARY prompt text SELECT secret' >&2; exit 3")
+		lines = []
+		monkeypatch.setattr(ai_fix, "_note_line", lines.append)
+		with pytest.raises(ai_fix.AiFixError):
+			_call()
+		assert lines == ["claude cli: exec_failed version=2.1.316 Claude Code label=other code=3"]
+
+
+class TestFailuresInTheReply:
+	"""Claude reports failures in the stdout JSON, with exit 0 or 1: they must never read as a fix."""
+
+	@pytest.mark.parametrize("fields,kind,fatal", [
+		({"error": "authentication_failed"}, "auth", True),
+		({"api_retry": {"error": "rate_limit"}}, "quota", True),
+		({"error": "model_not_found"}, "not_found", True),
+		({"error": "invalid_request"}, "config", True),
+		({"error": "overloaded"}, "transport", False),
+		({"error": "server_error"}, "transport", False),
+		({"api_error_status": 401}, "auth", True),
+		({"api_error_status": 429}, "quota", True),
+		({"api_error_status": 404}, "not_found", True),
+		({"api_error_status": 400}, "config", True),
+		({"api_error_status": 529}, "transport", False),
+		({"api_error_status": 500}, "transport", False),
+		({"api_error_status": None, "result": "Not logged in · Please run /login"}, "auth", True),
+		({"api_error_status": None, "result": "You've hit your session limit · resets 7pm"}, "quota", True),
+		({"api_error_status": None, "result": "Unable to connect to API (ECONNREFUSED network)"}, "transport", False),
+		({"api_error_status": None, "result": "something odd RAWCANARY"}, "unknown", False),
+	])
+	@pytest.mark.parametrize("exit_code", [0, 1])
+	def test_an_is_error_result_is_a_classified_error_whatever_the_exit_code(
+		self, fake_claude, fields, kind, fatal, exit_code,
+	):
+		body = {**_failure(), **fields}
+		fake_claude(exec_body=_emit(body) + f"; exit {exit_code}")
+		with ai_transport.attempt() as transport:
+			with pytest.raises(ai_fix.AiFixError) as err:
+				_call()
+		assert err.value.kind == kind and err.value.fatal is fatal
+		assert "RAWCANARY" not in str(err.value) and err.value.detail == ""
+		known = kind in ("auth", "quota", "config", "not_found", "rate_limited")
+		assert transport.certainty == ("known_response" if known else "sent_unknown")
+
+	def test_an_is_error_result_with_exit_zero_is_never_returned_as_a_suggestion(self, fake_claude):
+		fake_claude(exec_body=_emit(_failure(api_error_status=429, result="You've hit your limit")))
+		with pytest.raises(ai_fix.AiFixError):
+			ai_fix.suggest_fix({"finding_type": "N+1 Query", "severity": "High", "title": "x", "sql": "select 1"})
+
+	def test_an_error_subtype_without_is_error_is_still_a_failure(self, fake_claude):
+		fake_claude(exec_body=_emit({"type": "result", "subtype": "error_during_execution", "result": "partial"}))
+		with pytest.raises(ai_fix.AiFixError):
+			_call()
+
+	def test_a_usage_limit_is_a_fatal_quota_error_that_stops_a_bulk(self, fake_claude):
+		fake_claude(exec_body=_emit(_failure(api_error_status=429)))
+		with pytest.raises(ai_fix.AiFixError) as err:
+			_call()
+		assert err.value.kind == "quota" and err.value.kind in ai_fix.AI_FATAL_KINDS and err.value.fatal
+
+	def test_an_auth_failure_tells_the_operator_to_sign_in_with_claude(self, fake_claude):
+		fake_claude(exec_body=_emit(_failure(api_error_status=401)))
+		with pytest.raises(ai_fix.AiFixError) as err:
+			_call()
+		assert "Claude session expired" in str(err.value) and "`claude`" in str(err.value)
+		assert "codex" not in str(err.value).lower()
+
+	@pytest.mark.parametrize("stdout", [
+		"just some prose that is not json", "", "[]", '"a string"', "42", "null", "{", '{"type": "result", "result": "cut off',
+		"{}", '{"type": "result", "is_error": false}', '{"is_error": false, "result": {"nested": 1}}',
+		'{"is_error": false, "result": null}', "[" * 5000,
+	])
+	def test_unusable_stdout_fails_closed_and_is_never_a_fallback_reply(self, fake_claude, stdout):
+		fake_claude(exec_body=_emit(stdout) if stdout else ":")
+		with ai_transport.attempt() as transport:
+			with pytest.raises(ai_fix.AiFixError) as err:
+				_call()
+		assert err.value.kind == "bad_response" and err.value.fatal is False
+		assert transport.certainty == "sent_unknown"
+		assert "prose" not in str(err.value)
+
+	def test_an_envelope_cut_by_the_stream_cap_fails_closed(self, fake_claude, monkeypatch):
+		monkeypatch.setattr(ai_fix, "_CLI_STREAM_LIMIT", 300)
+		fake_claude(exec_body=_emit({"type": "result", "is_error": False, "result": "word " * 400}))
+		with pytest.raises(ai_fix.AiFixError) as err:
+			_call()
+		assert err.value.kind == "bad_response"
+
+	def test_an_empty_result_is_a_bad_response(self, fake_claude):
+		fake_claude(exec_body=_emit({"type": "result", "is_error": False, "result": "  "}))
+		with pytest.raises(ai_fix.AiFixError, match="empty response") as err:
+			_call()
+		assert err.value.kind == "bad_response"
+
+	def test_the_result_is_capped_after_the_parse_and_marked_after_the_scrub(self, fake_claude):
+		long = 'db_password = "hunter2hunter2"\n' + "word " * 6000
+		fake_claude(exec_body=_emit({"type": "result", "is_error": False, "result": long}))
+		meta = {}
+		reply = _call(meta_out=meta)
+		assert "hunter2" not in reply and "[redacted]" in reply
+		assert reply.endswith("word\n…(truncated)") and len(reply) < ai_fix._CLI_MAX_OUTPUT_CHARS + 50
+		assert meta["finish_reason"] == "length"
+
+	def test_the_truncation_marker_survives_an_unterminated_pem_block(self, fake_claude):
+		body = "-----BEGIN PRIVATE KEY-----\n" + "A" * 25_000
+		fake_claude(exec_body=_emit({"type": "result", "is_error": False, "result": body}))
+		reply = _call()
+		assert "BEGIN PRIVATE KEY" not in reply and reply.endswith("\n…(truncated)")
+
+	def test_a_reply_exactly_at_the_cap_is_not_flagged(self):
+		claude = ai_fix._CLI_BACKENDS["Claude CLI"]
+		body = json.dumps({"is_error": False, "result": "x" * ai_fix._CLI_MAX_OUTPUT_CHARS})
+		assert claude.read_reply("", body, 0) == ("x" * ai_fix._CLI_MAX_OUTPUT_CHARS, False)
+		body = json.dumps({"is_error": False, "result": "x" * (ai_fix._CLI_MAX_OUTPUT_CHARS + 1)})
+		assert claude.read_reply("", body, 0) == ("x" * ai_fix._CLI_MAX_OUTPUT_CHARS, True)
+
+	def test_a_reply_that_stopped_at_the_output_limit_is_marked_truncated(self, fake_claude):
+		fake_claude(exec_body=_emit({"type": "result", "is_error": False, "result": "half a fix", "stop_reason": "max_tokens"}))
+		meta = {}
+		assert _call(meta_out=meta).endswith("…(truncated)") and meta["finish_reason"] == "length"
+
+	def test_the_reply_file_path_is_never_read_for_claude(self, fake_claude):
+		# Codex writes its answer to -o; a file Claude never wrote must not become the reply.
+		fake_claude(exec_body=_emit(_failure(api_error_status=429)) + '; echo "A FIX" > "$PWD/out.txt"')
+		with pytest.raises(ai_fix.AiFixError):
+			_call()
+
+
+class TestExitCodes:
+	@pytest.mark.parametrize("body,code", [("kill -TERM $$", -15), ("exit 143", 143)])
+	def test_a_sigterm_is_a_transport_error_and_sent_unknown(self, fake_claude, body, code):
+		fake_claude(exec_body=body)
+		with ai_transport.attempt() as transport:
+			with pytest.raises(ai_fix.AiFixError) as err:
+				_call()
+		assert err.value.kind == "transport" and err.value.fatal is False
+		assert transport.certainty == "sent_unknown" and f"exit {code}" in str(err.value)
+
+	def test_a_sigterm_with_a_stale_failure_envelope_is_still_just_a_signal(self, fake_claude):
+		fake_claude(exec_body=_emit(_failure(api_error_status=401)) + "; exit 143")
+		with pytest.raises(ai_fix.AiFixError) as err:
+			_call()
+		assert err.value.kind == "transport"
+
+	@pytest.mark.parametrize("code", [126, 127])
+	def test_a_cli_that_cannot_run_names_the_claude_cli_and_node(self, fake_claude, code):
+		fake_claude(exec_body=f"exit {code}")
+		with pytest.raises(ai_fix.AiFixError, match="Check that the claude CLI and Node.js work") as err:
+			_call()
+		assert err.value.kind == "transport" and err.value.fatal is False
+
+	@pytest.mark.parametrize("stderr,kind,fatal", [
+		("error: unknown option '--safe-mode'", "config", True),
+		("dns lookup failed", "transport", False),
+		("HTTP 401 Unauthorized", "auth", True),
+		("segfault", "unknown", False),
+	])
+	def test_a_plain_non_zero_exit_without_a_result_is_classified_from_stderr(self, fake_claude, stderr, kind, fatal):
+		fake_claude(exec_body=f"echo 'RAWCANARY {stderr}' >&2; exit 1")
+		with pytest.raises(ai_fix.AiFixError) as err:
+			_call()
+		assert err.value.kind == kind and err.value.fatal is fatal
+		assert "RAWCANARY" not in str(err.value) and err.value.detail == ""
+
+	def test_a_lost_refresh_text_is_not_retried_for_claude(self, fake_claude, monkeypatch, tmp_path):
+		# Claude has no known refresh-race text, so the Codex one-retry does not apply to it.
+		monkeypatch.setattr(ai_fix, "_CLI_AUTH_RETRY_WAIT", 0)
+		count = tmp_path / "rec" / "n"
+		fake_claude(exec_body=f'echo x >> "{count}"; echo "refresh token was already used" >&2; exit 1')
+		with pytest.raises(ai_fix.AiFixError):
+			_call()
+		assert len(count.read_text().split()) == 1
+
+
+class TestKindsAndBulk:
+	def test_every_kind_used_is_known_and_only_terminal_ones_are_fatal(self):
+		kinds = {kind for _msg, kind in ai_fix._CLAUDE_EXEC_ERRORS.values()}
+		kinds |= {kind for _msg, kind in ai_fix._CLAUDE_LOGIN_FAILURES.values()}
+		assert kinds <= set(ai_fix.KIND_HINTS)
+		assert {kind for kind in kinds if kind in ai_fix.AI_FATAL_KINDS} == {"auth", "quota", "config", "not_found"}
+		assert ai_fix._CLAUDE_EXEC_ERRORS["server_error"][1] not in ai_fix.AI_FATAL_KINDS
+
+	def test_every_enum_and_status_label_has_a_message(self):
+		labels = set(ai_fix._CLAUDE_ERROR_ENUM.values()) | {label for _codes, label in ai_fix._CLAUDE_STATUS_LABELS}
+		assert labels <= set(ai_fix._CLAUDE_EXEC_ERRORS)
+		assert ai_fix._CLAUDE_KNOWN_FAILURES <= set(ai_fix._CLAUDE_EXEC_ERRORS)
+
+	def test_the_bulk_cap_applies_in_subscription_claude_mode(self, sub_cfg):
+		assert ai_fix.subscription_mode_active() is True
+		assert ai_fix.bulk_batch_cap(0) == ai_fix.SUBSCRIPTION_BULK_MAX_FINDINGS == 10
+		assert ai_fix.bulk_batch_cap(20) == 10 and ai_fix.bulk_batch_cap(3) == 3
+
+	def test_the_refresh_plan_is_bounded_with_the_claude_choice(self, sub_cfg, monkeypatch):
+		from optimus import ai_jobs
+		from optimus.tests.test_ai_refresh_inputs import config, row
+
+		cfg = config("Slow Query")
+		cfg.ai_enabled = cfg.ai_suggest_findings = cfg.ai_humanize_steps = True
+		cfg.ai_refresh_max_findings = 0
+		cfg.ai_connection_type, cfg.ai_subscription_cli = sub_cfg.ai_connection_type, "Claude CLI"
+		monkeypatch.setattr("optimus.settings.get_config", lambda: cfg)
+		monkeypatch.setattr(ai_jobs, "_now", lambda: 1780000000)
+		plan = ai_jobs.refresh_plan({"findings": [row(f"missing-{i}") for i in range(15)], "actions": []})
+		assert plan["cap"] == 10 and plan["selected"] == 10
+
+
+# ---------------------------------------------------------------------------
+# B4: wording per backend (api message, Settings descriptions, Connect button)
+# ---------------------------------------------------------------------------
+
+class TestWording:
+	def _message(self, monkeypatch, **attrs):
+		from optimus import api
+		from optimus.tests.gate_fakes import install, make_fake_frappe
+
+		install(monkeypatch, make_fake_frappe())
+		monkeypatch.setattr(
+			"optimus.settings.get_config",
+			lambda: SimpleNamespace(ai_enabled=True, ai_connection_type="Subscription (local CLI)", **attrs),
+		)
+		return api._ai_unavailable_message(None)
+
+	def test_the_not_ready_message_names_claude_and_its_terminal_login(self, monkeypatch):
+		msg = self._message(monkeypatch, ai_subscription_cli="Claude CLI")
+		assert msg.startswith("Claude CLI isn't ready") and "`claude`" in msg
+		assert "optimus_allow_subscription_cli" in msg and "Ask a System Manager" in msg
+		assert "codex" not in msg.lower() and "API key" not in msg
+
+	def test_the_not_ready_message_still_names_codex_for_codex_and_for_a_never_saved_field(self, monkeypatch):
+		for attrs in ({"ai_subscription_cli": "Codex CLI"}, {}):
+			msg = self._message(monkeypatch, **attrs)
+			assert msg.startswith("Codex CLI isn't ready") and "`codex login`" in msg and "claude" not in msg.lower()
+
+	def test_the_settings_text_carries_the_claude_wording_and_the_personal_use_note(self):
+		fields = _settings_fields()
+		choice = fields["ai_subscription_cli"]["description"]
+		assert "Claude CLI" in choice and "personal use" in choice and "developer machine" in choice
+		assert "Connection = API Key" in choice and "optimus_claude_cli_model" in choice
+		assert "usage" in choice
+		connection = fields["ai_connection_type"]["description"]
+		assert "`claude`" in connection and "~/.claude" in connection and "`codex login`" in connection
+		assert "keeps no token" in connection and "set-config optimus_allow_subscription_cli 1" in connection
+		path = fields["ai_cli_path"]["description"]
+		assert "`claude`" in path and "~/.claude" in path
+		for name in ("ai_connection_type", "ai_subscription_cli", "ai_cli_path"):
+			assert "CLAUDE_CONFIG_DIR" not in fields[name]["description"], name
+
+	def test_the_connect_button_names_the_selected_cli_and_rebuilds_when_it_changes(self):
+		path = os.path.join(os.path.dirname(__file__), "..", "optimus", "doctype", "optimus_settings", "optimus_settings.js")
+		with open(path, encoding="utf-8") as f:
+			src = f.read()
+		assert 'frm.doc.ai_subscription_cli || "Codex CLI"' in src
+		assert '__("Connect (check {0})", [cli])' in src and "ai_subscription_cli(frm)" in src
