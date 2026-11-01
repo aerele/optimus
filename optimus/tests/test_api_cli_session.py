@@ -153,3 +153,32 @@ def test_section_messages_are_unchanged_in_subscription_mode(monkeypatch):
 	_set_cfg(monkeypatch, ai_connection_type=SUBSCRIPTION)
 	assert "Fix suggestions on findings" in api._ai_unavailable_message("findings")
 	assert "Steps to Reproduce" in api._ai_unavailable_message("humanize")
+
+
+def test_the_stored_status_and_the_diagnostic_log_carry_no_account_detail(monkeypatch, tmp_path):
+	# End to end through the real status check against a fake codex whose login check prints an email and an
+	# account id: neither the stored field text nor any log line may hold them.
+	fake = make_fake_frappe(user="manager@example.com", roles=("System Manager",))
+	install(monkeypatch, fake)
+	home = tmp_path / "home"
+	(home / ".codex").mkdir(parents=True)
+	monkeypatch.setenv("HOME", str(home))
+	script = tmp_path / "codex"
+	script.write_text(
+		'#!/bin/sh\n'
+		'case "$1" in --version) echo "codex-cli 9.9.9" ;; login) echo "Not logged in: user@example.com acct_123" >&2; exit 1 ;; esac\n'
+	)
+	script.chmod(0o755)
+	lines = []
+	monkeypatch.setattr(ai_fix, "_note_line", lines.append)
+	monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: True)
+	_set_cfg(monkeypatch, ai_cli_path=str(script), ai_connection_type=SUBSCRIPTION)
+	monkeypatch.setattr(api, "safe_commit", lambda: None)
+	ai_fix._VERSION_CACHE.clear()
+	status = api.check_cli_session()
+	ai_fix._VERSION_CACHE.clear()
+	assert status["state"] == "signed_out"
+	stored = fake.spies.set_single_value[0][0][2]
+	for text in (stored, str(status), "\n".join(lines)):
+		assert "user@example.com" not in text and "acct_123" not in text
+	assert lines  # the signed-out diagnostic was logged, and it was clean
