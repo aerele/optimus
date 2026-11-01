@@ -8,6 +8,16 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.131] - 2026-11-01
+
+### Fixed
+
+- Claude CLI: a cut-off reply (`max_tokens` or `model_context_window_exceeded`) is kept as truncated only when nothing else is wrong. The `terminal_reason` and `subtype` gate now runs first, so a cut-off that was also an aborted stream, a refusal or a hook stop is a classified failure and not a suggestion.
+- Claude CLI: "Context limit reached" (no HTTP status) is the per-prompt `context` kind and no longer a non-fatal `unknown` that counted toward the failure streak.
+- Claude CLI: a 403 whose text says usage, quota or billing (for example "Credit balance is too low") is the fatal `quota` kind and not "session expired". A 403 without such text and every 401 stay `auth`.
+
+---
+
 ## [0.12.130] - 2026-11-01
 
 ### Fixed

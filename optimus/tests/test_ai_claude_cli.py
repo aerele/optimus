@@ -895,6 +895,10 @@ class TestFailuresInTheReply:
 	@pytest.mark.parametrize("fields,kind,fatal", [
 		({"api_error_status": 401}, "auth", True),
 		({"api_error_status": 403}, "auth", True),
+		# A 403 is a billing stop when its text says so (quota), else an expired session; a 401 is always auth.
+		({"api_error_status": 403, "result": "RAWCANARY Credit balance is too low"}, "quota", True),
+		({"api_error_status": 403, "result": "RAWCANARY Forbidden"}, "auth", True),
+		({"api_error_status": 401, "result": "RAWCANARY Credit balance is too low"}, "auth", True),
 		({"api_error_status": 404}, "not_found", True),
 		({"api_error_status": 400}, "config", True),
 		({"api_error_status": 422}, "config", True),
@@ -920,6 +924,10 @@ class TestFailuresInTheReply:
 		({"api_error_status": None, "result": "There is a billing problem with your account"}, "quota", True),
 		({"api_error_status": None, "result": "Your account_on_hold"}, "quota", True),
 		({"api_error_status": None, "result": "prompt is too long"}, "context", False),
+		({"api_error_status": None, "result": "Context limit reached"}, "context", False),
+		({"api_error_status": None, "result": "context limit exceeded for this session"}, "context", False),
+		# A bare "limit" is not a usage or context text.
+		({"api_error_status": None, "result": "RAWCANARY the limit is unclear"}, "unknown", False),
 		({"api_error_status": None, "result": "Unable to connect to API (ECONNREFUSED network)"}, "transport", False),
 		({"api_error_status": None, "result": "something odd RAWCANARY"}, "unknown", False),
 		# terminal_reason, read before the text.
@@ -960,6 +968,19 @@ class TestFailuresInTheReply:
 			assert kind not in ai_fix.AI_FATAL_KINDS
 		assert ai_fix._claude_failure_label({**_failure(), "api_error_status": 429}) == "rate_limited"
 		assert ai_fix._CLAUDE_EXEC_ERRORS["rate_limited"][1] not in ai_fix.AI_FATAL_KINDS
+
+	def test_a_403_is_a_quota_stop_only_when_its_text_says_so(self):
+		forbidden = {**_failure(), "api_error_status": 403}
+		assert ai_fix._claude_failure_label({**forbidden, "result": "Credit balance is too low"}) == "usage_limit"
+		assert ai_fix._claude_failure_label({**forbidden, "result": "Forbidden"}) == "auth_expired"
+		assert ai_fix._claude_failure_label(forbidden) == "auth_expired"
+		assert ai_fix._claude_failure_label(
+			{**forbidden, "api_error_status": 401, "result": "Credit balance is too low"}
+		) == "auth_expired"
+
+	def test_a_context_limit_text_is_the_per_prompt_context_label_without_a_status(self):
+		label = ai_fix._claude_failure_label({**_failure(), "api_error_status": None, "result": "Context limit reached"})
+		assert label == "context"
 
 	def test_an_is_error_result_with_exit_zero_is_never_returned_as_a_suggestion(self, fake_claude):
 		fake_claude(exec_body=_emit(_failure(api_error_status=429, result="You've hit your limit")))
@@ -1118,6 +1139,24 @@ class TestUnfinishedReplies:
 		meta = {}
 		reply = _call(meta_out=meta)
 		assert reply.startswith("A REAL FIX") and reply.endswith("…(truncated)") and meta["finish_reason"] == "length"
+
+	@pytest.mark.parametrize("fields,kind", [
+		({"stop_reason": "max_tokens", "terminal_reason": "aborted_streaming"}, "bad_response"),
+		({"stop_reason": "model_context_window_exceeded", "terminal_reason": "hook_stopped"}, "bad_response"),
+		({"stop_reason": "max_tokens", "terminal_reason": "refusal"}, "refused"),
+		({"stop_reason": "max_tokens", "subtype": "interrupted"}, "bad_response"),
+		({"stop_reason": "max_tokens", "terminal_reason": 5}, "bad_response"),
+	])
+	def test_a_cut_off_that_also_failed_is_not_returned_as_a_suggestion(self, fake_claude, fields, kind):
+		fake_claude(exec_body=_emit(_ok(**fields)))
+		with pytest.raises(ai_fix.AiFixError) as err:
+			_call()
+		assert err.value.kind == kind
+		assert "A REAL FIX" not in str(err.value)
+
+	def test_a_normal_reply_that_mentions_a_limit_is_not_misread(self, fake_claude):
+		fake_claude(exec_body=_emit(_ok("Raise the context limit and the usage limit of the pool.")))
+		assert _call() == "Raise the context limit and the usage limit of the pool."
 
 	def test_the_unfinished_gate_applies_after_a_non_zero_exit_too(self, fake_claude):
 		fake_claude(exec_body=_emit(_ok(stop_reason="refusal")) + "; exit 1")

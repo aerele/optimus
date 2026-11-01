@@ -4623,7 +4623,9 @@ _CLAUDE_USAGE_RE = re.compile(
 	r"|spend limit|billing|account[ _]on[ _]hold",
 	re.IGNORECASE,
 )
-_CLAUDE_CONTEXT_RE = re.compile(r"prompt is too long|prompt too long|context (?:window|length)", re.IGNORECASE)
+_CLAUDE_CONTEXT_RE = re.compile(
+	r"prompt is too long|prompt too long|context (?:window|length|limit)", re.IGNORECASE,
+)
 # The result envelope's `terminal_reason` values that are not a normal end, as ``_CLAUDE_EXEC_ERRORS``
 # labels. `completed` is the one normal end. `model_context_window_exceeded` is a cut-off reply, not
 # a failure, when no error is reported (see ``_ClaudeBackend.read_reply``).
@@ -4776,12 +4778,15 @@ def _claude_failure_label(payload: dict) -> str:
 	(the HTTP ``api_error_status`` as an int, then ``terminal_reason``) and the CLI's own short error
 	line (``result``) is only matched, never kept, against the usage-limit and context texts and then
 	the allow-list ``_classify_cli_stderr`` uses. A 429 is a usage limit only when its text says so;
-	any other 429 is a per-minute ``rate_limited``. A 413 or a "prompt too long" is the per-prompt
+	any other 429 is a per-minute ``rate_limited``. A 403 with such a text is the usage limit (billing),
+	any other 401 or 403 is an expired session. A 413 or a "prompt too long" is the per-prompt
 	``context`` kind, a plain 400 is ``invalid_request``."""
 	result = payload.get("result")
 	text = result if isinstance(result, str) else ""
 	usage = bool(_CLAUDE_USAGE_RE.search(text))
 	status = _claude_status(payload)
+	if status == 403 and usage:
+		return "usage_limit"
 	if status in (401, 403):
 		return "auth_expired"
 	if status == 404:
@@ -4824,13 +4829,13 @@ def _claude_unfinished_label(payload: dict) -> str | None:
 	"""For an envelope that does NOT report ``is_error``: the failure label when the reply is not a
 	complete answer, else None. A complete one has ``subtype`` ``success`` (or none) and
 	``terminal_reason`` ``completed`` (or none); a refusal, an aborted stream or tool run, a hook stop
-	and any other ending are not, whatever ``is_error`` says. A cut-off reply is not a failure."""
+	and any other ending are not, whatever ``is_error`` says. A cut-off reply (the output limit or the
+	context window) is not a failure by itself, but only when nothing else is wrong: the terminal and
+	subtype gate comes first, so a cut-off that also aborted, was refused or was stopped by a hook fails."""
 	if payload.get("stop_reason") == "refusal":
 		return "refused"
-	if _claude_cut_off(payload):
-		return None
 	terminal = payload.get("terminal_reason")
-	if terminal not in (None, "completed"):
+	if terminal not in (None, "completed", "model_context_window_exceeded"):
 		return _CLAUDE_TERMINAL_LABELS.get(terminal, "incomplete") if isinstance(terminal, str) else "incomplete"
 	if payload.get("subtype") not in (None, "success"):
 		return "incomplete"
