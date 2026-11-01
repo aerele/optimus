@@ -3556,7 +3556,7 @@ def _cli_disabled_features(cli_path: str, timeout: float | None = None) -> list[
 # operator's ``~/.codex/skills`` in the model prompt (name and description, so private skill
 # text reaches the model and the shared report). This key drops that section. There is no
 # equivalent for the global ``~/.codex/AGENTS.md``: see SECURITY.md. A future codex that
-# renames the key would silently stop honouring it, which ``test_codex_prompt_guard`` catches.
+# renames the key would silently stop honouring it, which ``TestCodexPromptGuard`` catches.
 _CLI_PROMPT_OVERRIDES = ("-c", "skills.include_instructions=false")
 
 
@@ -3900,7 +3900,8 @@ def _sign_in_hint() -> str:
 
 	return _(
 		"Optimus uses the Codex login you made in your own terminal. Sign in there with "
-		"`codex login` and choose Sign in with ChatGPT (an API-key login is refused)."
+		"`codex login` and choose Sign in with ChatGPT (an API-key login is refused). "
+		"Optimus reads the bench user's ~/.codex and ignores a custom Codex home set in your own terminal."
 	)
 
 

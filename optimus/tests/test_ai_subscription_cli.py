@@ -215,19 +215,29 @@ class TestCodexPromptGuard:
 		(scratch / "work").mkdir(parents=True)
 		(scratch / "home").mkdir()
 
-		def render(*overrides):
+		def run(*overrides):
 			env = ai_fix._build_cli_env(
 				home=str(scratch / "home"), tmpdir=str(scratch), codex_home=str(home),
 			)
+			return subprocess.run(
+				[codex, "debug", "prompt-input", *overrides, "hello"], env=env, cwd=scratch / "work",
+				capture_output=True, text=True, timeout=60,
+			)
+
+		def render(*overrides):
+			# Only the no-override control may skip (codex cannot run it at all). Once it has
+			# rendered, a failure of the override run is the regression this guard exists to catch:
+			# a codex that rejects the override must fail the test, never skip it.
 			try:
-				done = subprocess.run(
-					[codex, "debug", "prompt-input", *overrides, "hello"], env=env, cwd=scratch / "work",
-					capture_output=True, text=True, timeout=60,
-				)
+				control = run()
 			except (OSError, subprocess.TimeoutExpired):
 				pytest.skip("codex debug prompt-input could not run")
-			if done.returncode != 0:
+			if control.returncode != 0:
 				pytest.skip("this codex has no usable `debug prompt-input`")
+			if not overrides:
+				return control.stdout
+			done = run(*overrides)
+			assert done.returncode == 0, f"codex rejected the prompt overrides: {done.stderr.strip()[:300]}"
 			return done.stdout
 
 		return render
