@@ -3964,7 +3964,7 @@ def _version_tested(version: str | None) -> bool | None:
 def _cli_session_status() -> dict:
 	"""Read-only status of the selected local CLI for the Connect button: the CLI's own login
 	status against the operator's real ``~/.codex`` / ``~/.claude`` login. Never logs in, keeps no
-	token, and never includes an account id, email or organisation."""
+	token and never includes an account id, email or organisation."""
 	from frappe import _
 
 	cfg, backend = None, _CODEX
@@ -4217,7 +4217,7 @@ def _exec_cli_once(backend: _CliBackend, path: str, prompt: str, deadline: float
 		with _cli_sandbox(real_login=True, backend=backend) as (work, env):
 			out_file = os.path.join(work, "out.txt")
 			# The login check came out of the deadline; the argv build (Codex's features
-			# probe) is capped by what is left, and then the exec gets what that left.
+			# probe) is capped by what is left and then the exec gets what that left.
 			remaining = deadline - time.monotonic()
 			if remaining < _CLI_MIN_EXEC_SECONDS:
 				raise _out_of_time(backend.display)
@@ -4621,7 +4621,7 @@ def _claude_login_state(stdout: str) -> tuple[bool, str] | None:
 def _claude_login_ok(cli_path: str, *, use_cache: bool = True) -> tuple[bool, str]:
 	"""Read-only `claude auth status` check returning ``(ok, reason)`` with ``reason`` one of
 	``ok`` / ``not_subscription`` / ``signed_out`` / ``timeout`` / ``error``. It runs in the same
-	sandbox as the real call, against the operator's real ``~/.claude``, and only reads the status
+	sandbox as the real call, against the operator's real ``~/.claude`` and only reads the status
 	(it never logs in). Connected means ``loggedIn`` with the ``claude.ai`` (subscription) auth
 	method; an API-key login is rejected. A success is memoized for 30 seconds per path; failures
 	never are. ``use_cache=False`` forces a fresh probe (the Connect button)."""
@@ -4770,7 +4770,7 @@ class _ClaudeBackend(_CliBackend):
 		return _claude_login_ok(cli_path, use_cache=use_cache)
 
 	def build_argv(self, cli_path, work, out_file, *, probe_seconds=None):
-		"""No features probe: Claude has no `features list`, and `--tools ""` removes every tool.
+		"""No features probe: Claude has no `features list` and `--tools ""` removes every tool.
 		`--safe-mode` drops CLAUDE.md, skills, plugins, hooks and MCP, `--restricted` ignores the
 		user's settings files (so an apiKeyHelper or env block cannot swap the login). The prompt
 		is on stdin. Never `--bare` (it skips the subscription login), a bypass permission mode or

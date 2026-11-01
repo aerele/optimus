@@ -579,6 +579,23 @@ What to know:
 - Tested with codex 0.164 to 0.165. See SECURITY.md for the residual risks (denylist of tools, pattern based output scrub).
 - A killed worker: on Linux the kernel stops the codex child with the worker (`PR_SET_PDEATHSIG`), but the signal reaches the direct child only, and other platforms do not have it. A run that is abandoned (timeout, interrupt) is logged as `exec_abandoned`, and stale scratch folders are swept (logged as `stale_sandbox_removed`). If the next call says the session expired, run `codex login` in your terminal again.
 
+### 6.4b Subscription mode (local Claude CLI)
+
+The second subscription backend. In Optimus Settings > AI set Connection to "Subscription (local CLI)" and Subscription CLI to "Claude CLI". It is for your own personal use on your own developer machine only: Anthropic's terms restrict automated use of a consumer Claude subscription, so never use it on a shared or customer bench (use Connection = API Key there).
+
+1. Install `claude` for the bench user (the native installer or npm both work) and sign in with a Claude subscription account in your own terminal by running `claude`. Optimus uses that same login from `~/.claude`: it keeps no token of its own and never logs in for you. A `CLAUDE_CONFIG_DIR` exported in your terminal or service is ignored and the worker's `HOME` can differ from your shell's.
+2. Set the two site flags as in 6.4a, restart the bench (or run `bench clear-cache`), then save the settings and click Connect. Connect runs `claude auth status` only. It is connected for a Claude subscription login; an API-key login is refused ("use Connection = API Key"). No email, organisation or plan is shown or logged.
+
+What to know (the bullets of 6.4a apply unless they name Codex):
+
+- The prompt leaves the host: Claude sends it to Anthropic. Section 2 applies as for an API call.
+- Each call runs `claude -p --output-format json --tools "" --strict-mcp-config --safe-mode --restricted --no-session-persistence --permission-prompts none` with the prompt on stdin. There is no tool, MCP server, CLAUDE.md, skill, plugin or hook (`--safe-mode`, so your skills and a global `~/.claude/CLAUDE.md` do not reach the model), your settings files are ignored (`--restricted`) and no session transcript is written. No `--model` is passed, so Claude's default model answers; to choose one set `optimus_claude_cli_model` in the site config to an alias such as `sonnet` (a value that is not a plain model name is ignored).
+- No token usage is reported (a subscription is not token-billed), no features probe runs and the guardrail re-ask is not used.
+- Claude reports an error inside its JSON result, often with exit code 0. Optimus reads it as a failure and never shows it as a fix: not signed in or expired is `auth`, the plan usage limit is `quota` (fatal, a bulk run stops and is capped at 10 findings), an unknown model is `not_found`, a rejected request is `config` and an overloaded or unreachable Claude is `transport`. A reply that is not valid JSON, is cut off or has no `result` text is a `bad_response`.
+- Your login is shared with your own terminal claude, so a run can rarely sign your terminal session out (run `claude` and sign in again). Unlike Codex there is no automatic retry of a lost refresh.
+- The CLI keeps updating its own state files in `~/.claude` (`.claude.json`, backups, the plugin store). `--no-session-persistence` writes no transcript. Not verified without a billed call: `history.jsonl` and that the subscription login survives `--safe-mode --restricted` end to end. See SECURITY.md.
+- Log lines use the prefix `claude cli:` and carry only a fixed event, label, version and exit code.
+
 ### 6.5 Troubleshooting
 
 - **Connect says "not signed in" although `codex login status` works in your terminal.** Optimus checks the bench user's own `~/.codex` and ignores a `CODEX_HOME` set in your terminal. The worker may also run with a different `HOME` or user than your shell. Run `codex login` as the user that runs the bench workers, or give them the same `HOME`. If `~/.codex` does not exist at all the check says "not signed in" without starting codex, and the `optimus` log gets `codex cli: signed_out label=codex_dir_missing` (or `codex_dir_present` when codex itself reports the sign-out). If the worker has no `HOME` at all, Connect says the bench user has no home directory.

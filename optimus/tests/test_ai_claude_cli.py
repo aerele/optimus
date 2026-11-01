@@ -79,7 +79,7 @@ def _clear_caches():
 
 @pytest.fixture
 def sub_cfg(monkeypatch):
-	"""Subscription mode on with the Claude CLI picked, and the dev-bench guard open."""
+	"""Subscription mode on with the Claude CLI picked and the dev-bench guard open."""
 	cfg = _cfg()
 	monkeypatch.setattr("optimus.settings.get_config", lambda: cfg)
 	monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: True)
@@ -1099,3 +1099,32 @@ class TestWording:
 			src = f.read()
 		assert 'frm.doc.ai_subscription_cli || "Codex CLI"' in src
 		assert '__("Connect (check {0})", [cli])' in src and "ai_subscription_cli(frm)" in src
+
+
+# ---------------------------------------------------------------------------
+# B5: docs and version
+# ---------------------------------------------------------------------------
+
+class TestDocs:
+	ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
+
+	def _text(self, *parts):
+		with open(os.path.join(self.ROOT, *parts), encoding="utf-8") as f:
+			return " ".join(f.read().split())
+
+	def test_the_changelog_has_an_entry_for_the_current_version(self):
+		import optimus
+
+		assert f"## [{optimus.__version__}]" in self._text("CHANGELOG.md")
+
+	def test_the_docs_describe_the_claude_backend_and_its_isolation(self):
+		security = self._text("SECURITY.md")
+		assert "### Claude CLI backend" in security and "--safe-mode" in security and "--restricted" in security
+		assert "CLAUDE.md" in security and "no transcript" in security
+		guide = self._text("docs", "AI-FIXING.md")
+		assert "6.4b Subscription mode (local Claude CLI)" in guide
+		assert "personal use" in guide and "Connection = API Key" in guide and "optimus_claude_cli_model" in guide
+
+	def test_the_contributor_notes_name_both_backends(self):
+		assert "_ClaudeBackend" in self._text("CONTRIBUTING.md") and "_ClaudeBackend" not in self._text("CLAUDE.md")
+		assert "ai_subscription_cli" in self._text("CLAUDE.md")

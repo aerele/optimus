@@ -8,6 +8,32 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.129] - 2026-11-01
+
+### Added
+
+- A second subscription backend: **Claude CLI** (Anthropic's `claude`), picked with the Subscription CLI field (`ai_subscription_cli`, now "Codex CLI" or "Claude CLI") when Connection = Subscription. It mirrors the Codex backend: it uses your REAL terminal login in `~/.claude`, Optimus keeps no token and never logs in for you and Connect is only a read-only `claude auth status`. Connected means a Claude subscription login (`authMethod` `claude.ai`); an API-key login is refused with a pointer to Connection = API Key. Same gate as Codex (`developer_mode` and `optimus_allow_subscription_cli`), off by default and for personal use on your own developer machine only (Anthropic's terms restrict automated use of a consumer subscription).
+- The Claude run is `claude -p --output-format json --tools "" --strict-mcp-config --safe-mode --restricted --no-session-persistence --permission-prompts none` with the prompt on stdin: no tools, no MCP, no CLAUDE.md, skills, plugins or hooks (`--safe-mode`, so the Claude counterpart of the Codex skills leak is closed), no settings files (`--restricted`, so an `apiKeyHelper` or `env` block cannot swap the login) and no session transcript. Never `--bare`, a bypass permission mode or `--max-budget-usd`. No `--model` is passed by default (Claude's own default model); set `optimus_claude_cli_model` in the site config to an alias such as `sonnet` to choose one.
+- The child gets `CLAUDE_CONFIG_DIR` = your `~/.claude` for the status check and the run only, a scratch `HOME`, no `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or `CLAUDE_CODE_OAUTH_TOKEN` and `DISABLE_TELEMETRY`, `DISABLE_AUTOUPDATER` and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` set to 1.
+- Claude reports failures inside its JSON result, often with exit code 0. The reply reader fails closed: a result with `is_error`, non-JSON output, a cut-off envelope or no `result` text is a classified error (auth, quota, not found, bad request, transport), never a suggestion and never raw stdout. A usage-limit reply is the fatal `quota` kind, so a bulk run stops cleanly and the 10-finding bulk cap applies to Claude too. Connect and the logs carry no email, organisation or plan and the diagnostic prefix is `claude cli:`.
+
+### Changed
+
+- The generic CLI shell (`_call_local_cli`) now runs through a small `_CliBackend` seam (`_CodexBackend`, `_ClaudeBackend`): the login check, argv, reply reader, error classifier and copy differ per CLI, everything else is shared. The Codex backend behaves as before. `_exec_cli_once` returns a `_CliRun` and a backend may raise a classified error from its reply reader whatever the exit code.
+- The AI-not-ready message and the Connect button name the selected CLI. The provider identity now carries a `backend` key, so changing Subscription CLI stops queued jobs as "configuration changed" and the settings snapshot reads `ai_subscription_cli` (a never-saved field means Codex on both sides).
+
+### Residual risks (Claude)
+
+- `~/.claude` is shared with your own terminal claude, so a run can rarely clash with it on the token refresh and sign your terminal session out (sign in again with `claude`). Claude has no known refresh-race text, so unlike Codex a failed refresh is not retried. A bulk run spends your own plan usage.
+- The CLI still updates its own state under `~/.claude` (`.claude.json`, backups, the plugin store). `--no-session-persistence` writes no transcript. Checked on claude 2.1.316 with a call refused as not logged in; whether `history.jsonl` gets a line from a real prompt and that the subscription login survives `--safe-mode --restricted` end to end, are not verified without one billed call.
+- A global `~/.claude/CLAUDE.md`, your skills, plugins and hooks are not read (`--safe-mode`). The isolation rests on the installed claude honouring `--tools ""`, `--safe-mode` and `--restricted`; re-check it before moving to a newer claude. The agent can still read any file the bench user can read by absolute path if it ever gets a tool. See SECURITY.md.
+
+### Tests
+
+- New `optimus/tests/test_ai_claude_cli.py` with a fake `claude` script: the discriminator and staleness identity (including the SELECT placeholder and bound-value count and a never-saved field), native and npm install checks, the real-login environment, the exact argv, the status check (PII free, memoized for 30 seconds, missing `~/.claude` is signed out), fail-closed reply parsing, `is_error` with exit 0 or 1, SIGTERM, no features probe, no credential file touched and the bulk cap.
+
+---
+
 ## [0.12.128] - 2026-11-01
 
 ### Changed (behaviour change, read before upgrading)
