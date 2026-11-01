@@ -310,7 +310,11 @@ frappe.ui.form.on("Optimus Settings", {
 	},
 
 	ai_subscription_cli(frm) {
-		// The Connect button names the CLI, so rebuild it when the choice changes.
+		// The stored Connect result belongs to the CLI that was checked, so drop it when the
+		// choice changes (it reads blank until Connect is clicked for the new one), and rebuild
+		// the Connect button, which names the CLI.
+		frm.set_value("ai_subscription_status", "");
+		frm.refresh_field("ai_subscription_status");
 		frm.clear_custom_buttons();
 		frm.trigger("refresh");
 	},

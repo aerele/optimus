@@ -1313,6 +1313,15 @@ class TestWording:
 		assert 'frm.doc.ai_subscription_cli || "Codex CLI"' in src
 		assert '__("Connect (check {0})", [cli])' in src and "ai_subscription_cli(frm)" in src
 
+	def test_changing_the_cli_choice_clears_the_previous_clis_connect_status(self):
+		path = os.path.join(os.path.dirname(__file__), "..", "optimus", "doctype", "optimus_settings", "optimus_settings.js")
+		with open(path, encoding="utf-8") as f:
+			src = f.read()
+		handler = src[src.index("\tai_subscription_cli(frm) {"):]
+		handler = handler[: handler.index("\n\t},")]
+		assert 'frm.set_value("ai_subscription_status", "")' in handler
+		assert "frm.clear_custom_buttons()" in handler and 'frm.trigger("refresh")' in handler
+
 
 # ---------------------------------------------------------------------------
 # Review wave: model alias, backend threading, shared-shell wording, coverage gaps
