@@ -626,7 +626,7 @@
   {
    "default": "5",
    "depends_on": "eval:doc.ai_enabled && doc.ai_auto_suggest",
-   "description": "The automatic background run selects at most this many findings, ordered by severity and impact. Use 0 for all eligible findings within the run deadline, which can cost more on large sessions. Reference values: Strict: 0; Recommended: 5; Relaxed: 3.",
+   "description": "The automatic background run selects at most this many findings, ordered by severity and impact. Use 0 for all eligible findings within the run deadline, which can cost more on large sessions. In Subscription (local CLI) mode this is capped at 10 whatever you enter, and 0 means 10, to protect your plan usage. Reference values: Strict: 0; Recommended: 5; Relaxed: 3.",
    "fieldname": "ai_auto_suggest_max",
    "read_only_depends_on": "eval:doc.config_profile != \"Custom\"",
    "fieldtype": "Int",
@@ -638,7 +638,7 @@
    "fieldtype": "Int",
    "label": "Maximum findings per AI refresh",
    "default": "20",
-   "description": "Applies to manual refresh and Regenerate all. 0 means no item cap; the background run deadline still applies."
+   "description": "Applies to manual refresh and Regenerate all. 0 means no item cap; the background run deadline still applies. In Subscription (local CLI) mode every cap above 10, and 0, is clamped to 10 to protect your plan usage."
   },
   {
    "depends_on": "eval:doc.ai_enabled",

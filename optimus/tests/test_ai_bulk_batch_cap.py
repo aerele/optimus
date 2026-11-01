@@ -47,3 +47,17 @@ def test_the_refresh_plan_shows_the_bounded_cap_in_subscription_mode(monkeypatch
 	findings = [row(f"missing-{i}") for i in range(MAX + 5)]
 	plan = ai_jobs.refresh_plan({"findings": findings, "actions": []})
 	assert plan["cap"] == MAX and plan["selected"] == MAX and plan["pending"] == MAX + 5
+
+
+def test_the_cap_settings_say_subscription_mode_clamps_them_to_ten():
+	import json
+	import os
+
+	path = os.path.join(
+		os.path.dirname(__file__), "..", "optimus", "doctype", "optimus_settings", "optimus_settings.json"
+	)
+	with open(path) as f:
+		fields = {d["fieldname"]: d for d in json.load(f)["fields"]}
+	for name in ("ai_refresh_max_findings", "ai_auto_suggest_max"):
+		text = fields[name]["description"]
+		assert "Subscription (local CLI)" in text and str(MAX) in text, name
