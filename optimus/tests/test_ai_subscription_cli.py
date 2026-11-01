@@ -24,15 +24,13 @@ import pytest
 
 from optimus import ai_fix, ai_transport
 
-# The real path function, kept before the autouse fixture replaces it.
-_REAL_CODEX_HOME_PATH = ai_fix._codex_home_path
-
 _FAKE_CODEX = """#!/bin/sh
 R="{rec}"
 echo "$1 $2" >> "$R/calls.txt"
 env > "$R/env_$1.txt"
 echo "$PWD" > "$R/pwd_$1.txt"
 echo "$HOME" > "$R/home_$1.txt"
+stat -c %a "$HOME" > "$R/homemode_$1.txt"
 echo "$CODEX_HOME" > "$R/codexhome_$1.txt"
 ls "$CODEX_HOME" > "$R/codexhome_ls_$1.txt" 2>&1
 case "$1" in
@@ -102,23 +100,34 @@ def sub_cfg(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def optimus_home(tmp_path, monkeypatch):
-	"""Keep every test off the real ``~/.codex`` and the real site: HOME is a temp dir and the
-	Optimus-owned Codex home is a temp path that does not exist until a test creates it."""
+def operator_codex(tmp_path, monkeypatch):
+	"""Keep every test off the developer's real ``~/.codex`` and the real site: HOME is a temp
+	dir, so ``~/.codex`` is a temp path that does not exist until a test signs in. Also pins the
+	site folder to a temp path and records every ``get_site_path`` call, so a test can prove the
+	retired ``<site>/private/optimus-codex`` is never created or even looked up."""
+	import frappe
+
 	home = tmp_path / "bench_home"
 	home.mkdir()
 	monkeypatch.setenv("HOME", str(home))
 	monkeypatch.delenv("CODEX_HOME", raising=False)
-	codex_home = tmp_path / "site" / "private" / "optimus-codex"
-	monkeypatch.setattr(ai_fix, "_codex_home_path", lambda: str(codex_home))
-	return codex_home
+	site = tmp_path / "site"
+	site_paths: list[tuple] = []
+
+	def get_site_path(*parts):
+		site_paths.append(parts)
+		return str(site.joinpath(*parts))
+
+	monkeypatch.setattr(frappe, "get_site_path", get_site_path, raising=False)
+	codex_home = home / ".codex"
+	return SimpleNamespace(path=codex_home, site=site, site_paths=site_paths)
 
 
 @pytest.fixture
-def real_auth(optimus_home):
-	"""The Optimus-owned Codex home after a one-time sign-in; returns its ``auth.json``."""
-	optimus_home.mkdir(parents=True, mode=0o700)
-	auth = optimus_home / "auth.json"
+def real_auth(operator_codex):
+	"""The operator's own ``~/.codex`` after a terminal ``codex login``; returns its ``auth.json``."""
+	operator_codex.path.mkdir(parents=True, mode=0o700)
+	auth = operator_codex.path / "auth.json"
 	auth.write_text(json.dumps({"tokens": {"refresh_token": "ORIGINAL"}}))
 	return auth
 
@@ -165,6 +174,16 @@ class TestBuildArgv:
 		assert argv[argv.index("-o") + 1] == "/s/out"
 		assert argv[-1] == "-"
 
+	def test_the_isolation_flags_are_exactly_the_shipped_ones_under_the_real_login(self):
+		# Pointing CODEX_HOME at the real login must not loosen a single isolation flag.
+		argv = ai_fix._build_cli_argv("codex", "/s", "/s/out")
+		assert argv[-15:] == [
+			"-c", 'web_search="disabled"', "--sandbox", "read-only", "--skip-git-repo-check",
+			"--ignore-user-config", "--ignore-rules", "--ephemeral", "--color", "never",
+			"-C", "/s", "-o", "/s/out", "-",
+		]
+		assert "--ephemeral" in argv and "--dangerously-bypass-approvals-and-sandbox" not in argv
+
 
 class TestComposePrompt:
 	def test_system_then_preamble_then_captured_data(self):
@@ -192,19 +211,31 @@ class TestCliEnv:
 	def test_allowlist_drops_bench_secrets_and_sets_scratch_dirs(self):
 		env = ai_fix._build_cli_env(
 			{
-				"PATH": "/usr/bin", "HOME": "/home/op", "CODEX_HOME": "/home/op/.codex", "LANG": "C",
+				"PATH": "/usr/bin", "HOME": "/home/op", "CODEX_HOME": "/elsewhere", "LANG": "C",
 				"LC_ALL": "C", "HTTPS_PROXY": "http://p", "OPENAI_API_KEY": "sk-1", "DB_PASSWORD": "x",
 				"FRAPPE_SITE": "s", "REDIS_CACHE": "redis://",
 			},
-			home="/s/home", codex_home="/s/codex", tmpdir="/s/tmp",
+			home="/s/home", tmpdir="/s/tmp",
 		)
 		assert env == {
 			"PATH": "/usr/bin", "LANG": "C", "LC_ALL": "C", "HTTPS_PROXY": "http://p",
-			"HOME": "/s/home", "CODEX_HOME": "/s/codex", "TMPDIR": "/s/tmp",
+			"HOME": "/s/home", "CODEX_HOME": os.path.expanduser("~/.codex"), "TMPDIR": "/s/tmp",
 		}
+
+	def test_codex_home_is_the_operators_real_codex_dir_and_ignores_an_inherited_one(self, operator_codex):
+		env = ai_fix._build_cli_env({"CODEX_HOME": "/elsewhere"}, home="/s/home", tmpdir="/s/tmp")
+		assert env["CODEX_HOME"] == os.path.expanduser("~/.codex") == str(operator_codex.path)
 
 	def test_inherited_home_is_not_passed_through(self):
 		assert "HOME" not in ai_fix._build_cli_env({"HOME": "/home/op", "PATH": "/bin"})
+
+	def test_the_dedicated_home_parameter_and_helpers_are_gone(self):
+		import inspect
+
+		assert "codex_home" not in inspect.signature(ai_fix._build_cli_env).parameters
+		assert "with_auth" not in inspect.signature(ai_fix._cli_sandbox).parameters
+		for name in ("_ensure_codex_home", "_codex_home_path", "_codex_login_command", "_CODEX_HOME_SUBDIR"):
+			assert not hasattr(ai_fix, name), name
 
 
 # ---------------------------------------------------------------------------
@@ -335,17 +366,18 @@ class TestCliInstalled:
 # ---------------------------------------------------------------------------
 
 class TestCliSandbox:
-	def test_tree_is_private_and_removed_and_codex_home_is_the_optimus_one(self, real_auth, optimus_home):
+	def test_tree_is_private_and_removed_and_codex_home_is_the_operators_real_one(self, real_auth, operator_codex):
 		with ai_fix._cli_sandbox() as (work, env):
 			root = os.path.dirname(work)
 			assert stat.S_IMODE(os.stat(root).st_mode) == 0o700
-			assert env["CODEX_HOME"] == str(optimus_home)
-			assert os.listdir(env["CODEX_HOME"]) == ["auth.json"]
+			assert env["CODEX_HOME"] == os.path.expanduser("~/.codex") == str(operator_codex.path)
+			# HOME is the scratch dir, never the real home that holds ~/.ssh and friends.
 			assert os.listdir(env["HOME"]) == []
 			assert env["HOME"] != os.path.expanduser("~") and env["HOME"].startswith(root)
+			assert stat.S_IMODE(os.stat(env["HOME"]).st_mode) == 0o700
 			assert env["TMPDIR"].startswith(root)
 		assert not os.path.exists(root)
-		assert real_auth.exists()  # the dedicated home outlives the run
+		assert real_auth.exists()  # the operator's login outlives the run
 
 	def test_tree_is_removed_when_the_body_raises(self, real_auth):
 		with pytest.raises(RuntimeError):
@@ -354,48 +386,32 @@ class TestCliSandbox:
 				raise RuntimeError("boom")
 		assert not os.path.exists(root)
 
-	def test_the_dedicated_home_is_created_private_when_missing(self, optimus_home):
-		assert not optimus_home.exists()
+	def test_the_sandbox_neither_creates_nor_tightens_the_operators_codex_dir(self, operator_codex):
+		assert not operator_codex.path.exists()
 		with ai_fix._cli_sandbox() as (work, env):
-			assert os.path.isdir(env["CODEX_HOME"]) and os.listdir(env["CODEX_HOME"]) == []
-		assert stat.S_IMODE(os.stat(optimus_home).st_mode) == 0o700
-
-	def test_a_loose_dedicated_home_is_tightened(self, optimus_home):
-		optimus_home.mkdir(parents=True)
-		os.chmod(optimus_home, 0o755)
+			assert not os.path.exists(env["CODEX_HOME"])
+		assert not operator_codex.path.exists()  # Optimus never creates a login folder
+		operator_codex.path.mkdir(mode=0o755)
+		os.chmod(operator_codex.path, 0o755)
 		with ai_fix._cli_sandbox():
 			pass
-		assert stat.S_IMODE(os.stat(optimus_home).st_mode) == 0o700
+		assert stat.S_IMODE(os.stat(operator_codex.path).st_mode) == 0o755  # not its dir to chmod
 
-	def test_a_link_in_place_of_the_dedicated_home_is_refused(self, optimus_home, tmp_path):
-		target = tmp_path / "elsewhere"
-		target.mkdir()
-		optimus_home.parent.mkdir(parents=True)
-		optimus_home.symlink_to(target)
-		with pytest.raises(OSError):
-			with ai_fix._cli_sandbox():
-				pytest.fail("the sandbox must not start")
-
-	def test_without_auth_the_codex_home_is_an_empty_scratch_dir(self, real_auth, optimus_home):
-		with ai_fix._cli_sandbox(with_auth=False) as (work, env):
-			assert env["CODEX_HOME"] != str(optimus_home)
-			assert env["CODEX_HOME"].startswith(os.path.dirname(work))
-			assert os.listdir(env["CODEX_HOME"]) == []
-
-	def test_without_auth_the_dedicated_home_is_not_created(self, optimus_home):
-		with ai_fix._cli_sandbox(with_auth=False):
+	def test_the_retired_dedicated_home_is_never_created_or_looked_up(self, real_auth, operator_codex):
+		with ai_fix._cli_sandbox():
 			pass
-		assert not optimus_home.exists()
+		assert not (operator_codex.site / "private" / "optimus-codex").exists()
+		assert operator_codex.site_paths == []  # not even asked where the site folder is
 
-	def test_the_operators_own_codex_home_is_never_touched(self, real_auth, tmp_path, monkeypatch):
-		operator = tmp_path / "bench_home" / ".codex"
-		operator.mkdir()
-		(operator / "auth.json").write_text('{"tokens": {"refresh_token": "OPERATOR"}}')
-		monkeypatch.setenv("CODEX_HOME", str(operator))
-		before = {p.name: p.read_bytes() for p in operator.iterdir()}
+	def test_every_sandbox_shares_the_real_codex_dir_not_a_scratch_one(self, real_auth):
 		with ai_fix._cli_sandbox() as (work, env):
-			assert env["CODEX_HOME"] == str(real_auth.parent)
-		assert {p.name: p.read_bytes() for p in operator.iterdir()} == before
+			assert not env["CODEX_HOME"].startswith(os.path.dirname(work))
+
+	def test_no_credential_file_is_read_copied_or_written_by_optimus(self, real_auth):
+		before = real_auth.read_bytes(), real_auth.stat().st_mtime_ns
+		with ai_fix._cli_sandbox() as (work, env):
+			assert not any(n == "auth.json" for _r, _d, files in os.walk(os.path.dirname(work)) for n in files)
+		assert (real_auth.read_bytes(), real_auth.stat().st_mtime_ns) == before
 
 
 # ---------------------------------------------------------------------------
@@ -448,7 +464,7 @@ class TestStaleSweep:
 		monkeypatch.setattr(ai_fix.tempfile, "tempdir", str(tmp_path))
 		monkeypatch.setattr(ai_fix, "_LAST_SWEEP", 0.0)
 		stale = self._old(tmp_path, "optimus-codex-old")
-		with ai_fix._cli_sandbox(with_auth=False):
+		with ai_fix._cli_sandbox():
 			pass
 		assert not stale.exists()
 
@@ -525,9 +541,22 @@ class TestCallLocalCli:
 		assert "supersecret" not in env and "OPENAI_API_KEY" not in env
 		home = _read(box.rec, "home_exec.txt").strip()
 		codex_home = _read(box.rec, "codexhome_exec.txt").strip()
-		assert home != os.path.expanduser("~") and codex_home == str(real_auth.parent)
+		# The real login is reached through CODEX_HOME alone; HOME stays a private 0700 scratch dir.
+		assert codex_home == os.path.expanduser("~/.codex") == str(real_auth.parent)
+		assert home != os.path.expanduser("~") and not home.startswith(os.path.expanduser("~") + os.sep)
+		assert _read(box.rec, "homemode_exec.txt").strip() == "700"
 		assert _read(box.rec, "codexhome_ls_exec.txt").split() == ["auth.json"]
 		assert _read(box.rec, "pwd_exec.txt").strip().startswith(os.path.dirname(home))
+
+	def test_the_exec_never_touches_the_credential_or_the_retired_dedicated_home(
+		self, fake_codex, real_auth, operator_codex,
+	):
+		fake_codex()
+		before = real_auth.read_bytes(), real_auth.stat().st_mtime_ns
+		self._call()
+		assert (real_auth.read_bytes(), real_auth.stat().st_mtime_ns) == before
+		assert not (operator_codex.site / "private" / "optimus-codex").exists()
+		assert operator_codex.site_paths == []
 
 	def test_scratch_tree_is_deleted_afterwards(self, fake_codex):
 		box = fake_codex()
@@ -553,7 +582,7 @@ class TestCallLocalCli:
 			)
 			assert not os.path.exists(os.path.dirname(_read(box.rec, f"home_{name}.txt").strip()))
 
-	def test_the_codex_cli_refreshes_its_own_sign_in_in_the_dedicated_home_only(self, fake_codex, real_auth, tmp_path):
+	def test_the_codex_cli_refreshes_its_own_sign_in_in_the_real_codex_dir_only(self, fake_codex, real_auth, tmp_path):
 		fake_codex(exec_body='echo \'{"tokens": {"refresh_token": "ROTATED"}}\' > "$CODEX_HOME/auth.json"; echo OK > "$out"')
 		skip = {"rec", "bin"}
 
@@ -566,9 +595,11 @@ class TestCallLocalCli:
 
 		before = snapshot()
 		self._call()
+		# The CLI rotated its own token in place, in the operator's ~/.codex ...
 		assert json.loads(real_auth.read_text())["tokens"]["refresh_token"] == "ROTATED"
-		assert snapshot() == before  # nothing new anywhere, and no ~/.codex appeared
-		assert not (tmp_path / "bench_home" / ".codex").exists()
+		# ... and Optimus added nothing anywhere (no copy of the token, no dedicated home).
+		assert snapshot() == before
+		assert not (tmp_path / "site").exists()
 
 	def test_timeout_kills_the_whole_process_group_and_is_not_fatal(self, fake_codex, monkeypatch):
 		monkeypatch.setattr(ai_fix, "_CLI_MIN_EXEC_SECONDS", 1)  # let a 2s budget reach the exec
@@ -897,40 +928,17 @@ class TestCallLocalCli:
 			self._call()
 		assert err.value.kind == "transport" and err.value.fatal is False
 
-	def test_the_codex_home_path_is_absolute_even_when_the_site_path_is_relative(self, monkeypatch, tmp_path):
-		import frappe
-
-		# Frappe's get_site_path is relative to sites_path ("."): the child runs elsewhere.
-		monkeypatch.setattr(frappe, "get_site_path", lambda *p: os.path.join(".", "site1", *p), raising=False)
-		monkeypatch.setattr(ai_fix, "_codex_home_path", _REAL_CODEX_HOME_PATH)
-		monkeypatch.chdir(tmp_path)
-		path = ai_fix._ensure_codex_home()
-		assert os.path.isabs(path) and path == str(tmp_path / "site1" / "private" / "optimus-codex")
-		assert os.path.isabs(ai_fix._codex_home_path())
-		with ai_fix._cli_sandbox() as (work, env):
-			assert env["CODEX_HOME"] == path
-			monkeypatch.chdir(work)  # the child's cwd: the home still resolves
-			assert os.path.isdir(env["CODEX_HOME"])
-		monkeypatch.chdir(tmp_path)
-		assert ai_fix._codex_login_command().startswith(f"CODEX_HOME={path} ")
-
-	def test_a_relative_codex_home_is_refused(self, monkeypatch):
-		monkeypatch.setattr(ai_fix, "_codex_home_path", lambda: "site1/private/optimus-codex")
-		with pytest.raises(ai_fix.AiFixError) as err:
-			ai_fix._ensure_codex_home()
-		assert err.value.kind == "config"
-		assert "site1/private/optimus-codex" in str(err.value)
-
 	@pytest.mark.parametrize("stderr", [
 		"Your access token could not be refreshed. Please log out and sign in again.",
 		"refresh token was already used. Please log out and sign in again.",
 		"token was revoked. Please log out and sign in again.",
 	])
-	def test_real_refresh_failures_are_an_auth_error_with_the_login_hint(self, fake_codex, optimus_home, stderr):
+	def test_real_refresh_failures_are_an_auth_error_with_the_plain_login_hint(self, fake_codex, stderr):
 		fake_codex(exec_body=f"echo '{stderr}' >&2; exit 1")
 		with pytest.raises(ai_fix.AiFixError) as err:
 			self._call()
-		assert err.value.kind == "auth" and f"CODEX_HOME={optimus_home} codex login" in str(err.value)
+		assert err.value.kind == "auth" and "`codex login`" in str(err.value)
+		assert "CODEX_HOME=" not in str(err.value)
 
 	def test_a_lost_refresh_race_is_retried_once_and_succeeds(self, fake_codex, monkeypatch, tmp_path):
 		monkeypatch.setattr(ai_fix, "_CLI_AUTH_RETRY_WAIT", 0)
@@ -942,6 +950,8 @@ class TestCallLocalCli:
 		))
 		assert self._call().startswith("RETRIED")
 		assert len(count.read_text().split()) == 2
+		# Both attempts ran against the operator's real login, with the scratch HOME.
+		assert _read(tmp_path / "rec", "codexhome_exec.txt").strip() == os.path.expanduser("~/.codex")
 
 	def _count_runs(self, fake_codex, monkeypatch, tmp_path, line, code):
 		monkeypatch.setattr(ai_fix, "_CLI_AUTH_RETRY_WAIT", 0)
@@ -1126,42 +1136,40 @@ class TestLoginProbe:
 		assert "your codex CLI (codex-cli 9.9.9) may need updating" in message
 		assert "may need updating" not in ai_fix._login_failure("not_chatgpt").args[0]
 
-	def test_an_operator_who_has_not_signed_in_yet_gets_signed_out_not_an_error(self, fake_codex, optimus_home):
+	def test_an_operator_who_has_not_signed_in_yet_gets_signed_out_not_an_error(self, fake_codex, operator_codex):
 		box = fake_codex(login='echo "Not logged in" >&2; exit 1')
-		shutil.rmtree(optimus_home)  # fake_codex starts signed in; this operator has not
+		shutil.rmtree(operator_codex.path)  # fake_codex starts signed in; this operator has not
 		assert ai_fix._cli_login_ok(str(box.path), use_cache=False) == (False, "signed_out")
-		assert stat.S_IMODE(os.stat(optimus_home).st_mode) == 0o700
+		assert not operator_codex.path.exists()  # the status check creates no login folder
 
-	@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory modes")
-	def test_an_unwritable_site_folder_is_an_error_not_a_sign_out(self, fake_codex, optimus_home, tmp_path):
-		box = fake_codex(login='echo "Not logged in" >&2; exit 1')
-		shutil.rmtree(optimus_home.parent)  # no private/ folder yet, and the site folder is read-only
-		os.chmod(optimus_home.parent.parent, 0o500)
-		try:
-			assert ai_fix._cli_login_ok(str(box.path), use_cache=False) == (False, "error")
-		finally:
-			os.chmod(optimus_home.parent.parent, 0o700)
+	def test_the_status_check_runs_against_the_real_codex_dir(self, fake_codex, real_auth):
+		box = fake_codex()
+		assert ai_fix._cli_login_ok(str(box.path), use_cache=False) == (True, "ok")
+		assert _read(box.rec, "codexhome_login.txt").strip() == os.path.expanduser("~/.codex")
+		assert _read(box.rec, "codexhome_ls_login.txt").split() == ["auth.json"]
 
-	def test_the_not_signed_in_message_gives_the_exact_login_command_with_the_path(self, optimus_home):
+	def test_the_not_signed_in_message_says_plain_codex_login(self):
 		for reason in ("signed_out", "not_chatgpt"):
 			message = ai_fix._login_failure(reason).args[0]
-			assert f"CODEX_HOME={optimus_home} codex login" in message
-			assert "~/.codex" in message
+			assert "`codex login`" in message and "terminal" in message
+			assert "CODEX_HOME" not in message and "optimus-codex" not in message
+			assert "separate from" not in message and "its own Codex sign-in" not in message
 
-	def test_the_login_command_quotes_a_path_with_spaces(self, monkeypatch):
-		monkeypatch.setattr(ai_fix, "_codex_home_path", lambda: "/srv/my site/private/optimus-codex")
-		assert ai_fix._codex_login_command() == "CODEX_HOME='/srv/my site/private/optimus-codex' codex login"
-
-	def test_connect_shows_the_login_command_when_signed_out(self, fake_codex, optimus_home):
+	def test_connect_with_no_real_login_is_not_connected_and_says_plain_codex_login(self, fake_codex, operator_codex):
 		fake_codex(login='echo "Not logged in" >&2; exit 1')
+		shutil.rmtree(operator_codex.path)  # this operator never ran `codex login`
 		st = ai_fix._cli_session_status()
-		assert st["state"] == "signed_out" and f"CODEX_HOME={optimus_home} codex login" in st["message"]
+		assert st["state"] == "signed_out" and st["ok"] is False
+		assert "`codex login`" in st["message"] and "CODEX_HOME" not in st["message"]
+		assert st["cli"] == "codex"
+		assert not operator_codex.path.exists() and operator_codex.site_paths == []
 
-	def test_an_expired_session_message_gives_the_login_command(self, fake_codex, optimus_home):
+	def test_an_expired_session_message_gives_the_plain_login_command(self, fake_codex):
 		fake_codex(exec_body="echo 'HTTP 401 unauthorized' >&2; exit 1")
 		with pytest.raises(ai_fix.AiFixError) as err:
 			ai_fix._call_local_cli("S", [{"content": "x"}])
-		assert err.value.kind == "auth" and f"CODEX_HOME={optimus_home} codex login" in err.value.args[0]
+		assert err.value.kind == "auth" and "`codex login`" in err.value.args[0]
+		assert "CODEX_HOME" not in err.value.args[0]
 
 	def test_signed_out_stops_the_call_as_fatal(self, fake_codex):
 		fake_codex(login='echo "Not logged in" >&2; exit 1')
@@ -1286,6 +1294,18 @@ class TestSessionStatus:
 		text = fields["ai_connection_type"]["description"]
 		assert "set-config optimus_allow_subscription_cli 1" in text and "restart the bench" in text
 
+	def test_the_settings_descriptions_describe_the_real_login_not_a_dedicated_home(self):
+		path = os.path.join(os.path.dirname(__file__), "..", "optimus", "doctype", "optimus_settings", "optimus_settings.json")
+		with open(path) as f:
+			fields = {d["fieldname"]: d for d in json.load(f)["fields"]}
+		for name in ("ai_connection_type", "ai_subscription_cli", "ai_cli_path"):
+			text = fields[name]["description"]
+			assert "optimus-codex" not in text and "CODEX_HOME" not in text, name
+			assert "never used" not in text and "Optimus owns" not in text, name
+		text = fields["ai_connection_type"]["description"]
+		assert "`codex login`" in text and "~/.codex" in text and "keeps no token" in text
+		assert "usage" in fields["ai_subscription_cli"]["description"]
+
 	@pytest.mark.parametrize("version,tested", [
 		("codex-cli 0.164.0", True), ("codex-cli 0.165.9", True),
 		("codex-cli 0.163.0", False), ("codex-cli 0.170.1", False), ("dev", None), (None, None),
@@ -1307,7 +1327,14 @@ class TestSessionStatus:
 		fake_codex()
 		st = ai_fix._cli_session_status()
 		assert st["state"] == "connected" and st["ok"] is True and st["version"] == "codex-cli 9.9.9"
-		assert "@" not in st["message"]
+		assert st["cli"] == "codex" and "@" not in st["message"]
+
+	def test_connected_status_carries_no_account_detail_even_when_the_cli_prints_it(self, fake_codex):
+		fake_codex(login='echo "Logged in using ChatGPT as user@example.com (acct_123)" >&2')
+		st = ai_fix._cli_session_status()
+		assert st["state"] == "connected"
+		assert set(st) == {"ok", "state", "message", "cli", "version"}
+		assert "user@example.com" not in str(st) and "acct_123" not in str(st)
 
 	def test_signed_out_message_carries_no_account_detail(self, fake_codex):
 		fake_codex(login='echo "Not logged in: secret detail user@example.com" >&2; exit 1')
