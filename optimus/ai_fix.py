@@ -4298,9 +4298,10 @@ def _call_local_cli(
 	The prompt carries Optimus's system prompt first, then a SECURITY preamble naming
 	the captured data that follows as untrusted, and the reply goes through
 	``_scrub_secrets`` (an over-cap reply gets its truncation marker after that scrub, and
-	``meta_out["finish_reason"]`` is set to ``length``). Residual risk: the agent can
-	still read files the bench user can read by absolute path, so a prompt injection is
-	mitigated, not eliminated.
+	``meta_out["finish_reason"]`` is set to ``length``). Residual risk: a Codex agent can
+	still read files the bench user can read by absolute path (Claude is given no tool and its
+	file tools are confined to the scratch directory), so a prompt injection is mitigated, not
+	eliminated.
 
 	No token usage is reported (a subscription is not token-billed). Failures are
 	``AiFixError``s whose ``kind`` follows ``AI_FATAL_KINDS``: missing CLI, signed out,

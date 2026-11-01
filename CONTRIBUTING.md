@@ -116,7 +116,7 @@ without a separate design discussion:
 - **Public API surface** in `api.py` - whitelisted endpoints are
   load-bearing for the floating widget and external CLIs.
 
-## The local Codex CLI transport
+## The local subscription CLI transport (Codex and Claude)
 
 The local subscription CLIs (Codex and Claude) are a transport, not a provider. The Subscription CLI field (`ai_subscription_cli`, "Codex CLI" or "Claude CLI") picks the backend: `_cli_backend(cfg)` maps it to a `_CliBackend` (`_CodexBackend` or `_ClaudeBackend` in `ai_fix.py`), reading a never-saved field as Codex on the live and the snapshot side alike. `_provider_config` puts its `backend` key in the provider identity. A backend is data (binary name, install shapes, copy, env switches) plus the callables that really differ (login check, argv, reply reader, error classifier); the gate, sandbox, run, scrub, truncation, deadline, bulk cap and the Codex auth retry stay in the shared `_call_local_cli`. Both backends use your real terminal login (`~/.codex` or `~/.claude`), keep no token of their own and are dev-only behind the same two flags. Adding a third CLI means a new backend class, its Select option (kept equal to `_CLI_BACKENDS`, pinned by a test) and its tests. The Claude backend reports failures in its JSON result with any exit code, so its `read_reply` raises a classified `AiFixError` and never falls back to raw stdout.
 
