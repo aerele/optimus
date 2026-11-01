@@ -101,6 +101,10 @@ What Optimus does to contain the CLI:
   token of its own: it never logs in and does not copy, merge, store or write back tokens.
   The codex CLI itself uses and refreshes its sign-in in place in `~/.codex`. Connect only
   runs `codex login status` against it. Optimus takes no lock against your own terminal codex.
+- The model prompt is built from `~/.codex` too, so Optimus passes `-c skills.include_instructions=false`:
+  without it codex lists every skill under `~/.codex/skills` (name and description) in the
+  prompt of the run, even with `--ignore-user-config`. Checked with `codex debug prompt-input`
+  on codex 0.166; a regression test renders the prompt and fails if a private skill appears.
 - It runs `--sandbox read-only --ephemeral` with the tool features that could read a file
   or run a command turned off (`--disable`). Only the feature names the installed CLI
   lists are passed, and every capability-looking feature it reports as on is turned off too.
@@ -122,16 +126,32 @@ Residual risk, in plain words:
   with `codex login`); Optimus cannot lock your terminal. A bulk run also spends your own
   plan usage and can use it up for a while: a bulk refresh is capped at a small number of
   findings in this mode and a usage-limit reply stops the run cleanly.
+- A global `~/.codex/AGENTS.md` (or `AGENTS.override.md`) is still sent to the model as
+  instructions in every run. No `-c` key or `--disable` feature that turns it off exists in codex
+  0.166 (tried `project_doc_max_bytes`, `project_doc_fallback_filenames`, `project_root_markers`
+  and `user_instructions`; `--ignore-user-config` and `--ignore-rules` are documented as
+  covering `config.toml` and exec-policy rules only), so Optimus cannot. Its text
+  goes to OpenAI with the prompt, can end up in a stored suggestion or the shared report, and
+  is a prompt injection surface for whoever can write that file. Keep private or sensitive
+  text out of `~/.codex/AGENTS.md` on a bench that uses this mode. The test
+  `test_the_global_agents_md_never_reaches_the_prompt` is marked as an expected failure for
+  this reason and turns red when a newer codex fixes it.
+- `~/.codex` holds more than the sign-in: `config.toml` (which can carry MCP server tokens),
+  `sessions/` and `history.jsonl`. A prompt injection that reads files by absolute path can
+  read all of it, not only `auth.json`.
 - The tool list is a denylist. A new capability that the installed CLI adds under a name
   the floor and the regex do not match stays reachable, and `--sandbox read-only` limits
   writes, not reads. A prompt injection hidden in profiled data could then ask the agent to
   read a file the bench user can read (your codex sign-in, `site_config.json`, private files).
+- A read-only agent can still read any file the bench user can read by absolute path.
+  Scratch `HOME` hides `~/.ssh`, `~/.aws` and `~/.config` from `HOME` and relative paths, not
+  from an absolute one.
 - The output scrub is pattern based. Encoding or splitting a secret defeats it, and it can
   also rewrite legitimate code that looks like a secret.
 - Use this mode only on a developer bench and only with data you trust.
-- Tested with codex 0.164 to 0.165. Connect warns when the installed version is outside
-  that range; re-check the isolation (run the opt-in `OPTIMUS_LIVE_CODEX=1` test) before
-  moving to a newer one.
+- Tested with codex 0.164 to 0.165 (the skills and AGENTS.md checks above were made on 0.166).
+  Connect warns when the installed version is outside that range; re-check the isolation
+  (run the opt-in `OPTIMUS_LIVE_CODEX=1` test) before moving to a newer one.
 
 Follow-up under discussion: OS-level confinement (bwrap/landlock) instead of the denylist.
 
