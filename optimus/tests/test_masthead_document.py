@@ -47,3 +47,12 @@ def test_masthead_without_a_document_uses_session_title():
 	html = renderer.render(_doc([]), recordings=[])
 	assert "Sales Order · 2026-08-27 21:55" in html
 	assert 'class="masthead-docname"' not in html
+
+
+def test_masthead_phone_number_is_plain_text_not_a_link():
+	"""Phone is plain text; other contact links stay links."""
+	html = renderer.render(_doc([]), recordings=[])
+	assert "tel:" not in html
+	assert '<span class="masthead-brand-phone">+91 77908 44832</span>' in html
+	assert 'href="mailto:hello@aerele.in"' in html
+	assert 'href="https://aerele.in"' in html
