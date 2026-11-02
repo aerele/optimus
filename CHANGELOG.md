@@ -8,7 +8,7 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.128] - 2026-11-01
+## [0.12.132] - 2026-11-01
 
 ### Changed (behaviour change, read before upgrading)
 
@@ -35,6 +35,37 @@ versions may contain breaking changes see migration notes below).
 ### Tests
 
 - The dedicated-home tests in `test_ai_subscription_cli.py` are rewritten to the real-login behaviour (CODEX_HOME is `~/.codex`, HOME is a private scratch dir, no credential file is opened, copied or written, `<site>/private/optimus-codex` is never created or read, the refresh-race retry still fires, messages say plain `codex login`, status stays free of account details). New tests cover the migrate patch and the bulk batch cap.
+
+---
+
+## [0.12.131] - 2026-10-31
+
+### Fixed
+
+- The Slow Query finding card now shows the complete query again, labelled "Full SQL, sensitive values hidden". This reverses the earlier removal of the query block from finding cards (v0.7.x); only Slow Query cards get it, other types keep their SQL in the queries tables. Statements over 2,000 characters sit in a collapsed block with a character count and are keyboard-scrollable.
+- The slowest-queries table and the Slow Query card are no longer clipped when exported to PDF or printed; a long card may break across pages.
+- Statements larger than 200,000 characters are stored up to that size with a visible "query truncated at N of M characters" note, which the label also mentions, and the cut is logged. A quoted value left open by the cut is dropped.
+- The card's SQL is redacted after the index advice is built, one finding at a time; if redaction fails for a finding its SQL is left out rather than shown.
+
+---
+
+## [0.12.130] - 2026-10-31
+
+### Changed
+
+- The phone number in the report header is now plain text instead of a clickable `tel:` link. The website, email and social links are unchanged.
+
+## [0.12.129] - 2026-10-31
+
+### Changed
+
+- Removed the "Tables written to this session" line from the "Time spent per database table" section. The table itself, including its Reads and Writes columns, is unchanged.
+
+## [0.12.128] - 2026-10-31
+
+### Fixed
+
+- The "#" column of the Server Resource table now starts at 1 and shows the same number the Actions table gives that action. Before, it showed a 0-based index, so it started at 0 and did not line up with the Actions table. Actions with no resource snapshot are still left out, so the numbers can skip. Framework actions show as "fw 1", "fw 2" to match the collapsed framework table, and the framework table now prints the same "fw " prefix in its own "#" column. An action hidden by Min Action Duration shows "-" with a tooltip saying so, and when Min Action Duration hides every action no numbers are invented.
 
 ---
 
