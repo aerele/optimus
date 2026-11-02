@@ -170,7 +170,7 @@ frappe.ui.form.on("Optimus Settings", {
 			});
 		}
 
-		// "Connect (check Codex CLI)" only in Subscription (local CLI) mode. The
+		// "Connect (check <CLI>)" only in Subscription (local CLI) mode. The
 		// endpoint is read-only (it never logs in) and saves its message to
 		// ai_subscription_status server-side, so after showing the result we just
 		// reload the doc to display the stored status without dirtying the form.
@@ -178,7 +178,8 @@ frappe.ui.form.on("Optimus Settings", {
 			frm.doc.ai_enabled &&
 			frm.doc.ai_connection_type === "Subscription (local CLI)"
 		) {
-			frm.add_custom_button(__("Connect (check Codex CLI)"), () => {
+			const cli = frm.doc.ai_subscription_cli || "Codex CLI";
+			frm.add_custom_button(__("Connect (check {0})", [cli]), () => {
 				if (frm.is_dirty()) {
 					frappe.msgprint(
 						__("Save your settings first, then check the CLI session.")
@@ -190,7 +191,7 @@ frappe.ui.form.on("Optimus Settings", {
 				}
 				cli_check_pending = true;
 				frappe.show_alert({
-					message: __("Checking the Codex CLI session..."),
+					message: __("Checking the {0} session...", [cli]),
 					indicator: "blue",
 				});
 				frappe.call({
@@ -212,8 +213,8 @@ frappe.ui.form.on("Optimus Settings", {
 						frappe.msgprint({
 							title:
 								m.state === "connected"
-									? __("Codex CLI connected")
-									: __("Codex CLI not ready"),
+									? __("{0} connected", [cli])
+									: __("{0} not ready", [cli]),
 							indicator,
 							message:
 								frappe.utils.escape_html(m.message || "") +
@@ -306,6 +307,16 @@ frappe.ui.form.on("Optimus Settings", {
 		// default endpoint. Re-evaluate depends_on so Base URL hides/shows
 		// immediately when the provider changes, without a save + reload.
 		frm.refresh_field("ai_base_url");
+	},
+
+	ai_subscription_cli(frm) {
+		// The stored Connect result belongs to the CLI that was checked, so drop it when the
+		// choice changes (it reads blank until Connect is clicked for the new one), and rebuild
+		// the Connect button, which names the CLI.
+		frm.set_value("ai_subscription_status", "");
+		frm.refresh_field("ai_subscription_status");
+		frm.clear_custom_buttons();
+		frm.trigger("refresh");
 	},
 
 	ai_connection_type(frm) {

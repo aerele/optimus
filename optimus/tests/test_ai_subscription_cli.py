@@ -308,7 +308,7 @@ class TestCliEnv:
 		# The worker may have a CODEX_HOME in its environment (a shell export, a service unit):
 		# the CLI is still pointed at the bench user's ~/.codex, never at that.
 		monkeypatch.setenv("CODEX_HOME", "/elsewhere")
-		with ai_fix._cli_sandbox(real_login=True) as (_work, env):
+		with ai_fix._cli_sandbox(real_login=True, backend=ai_fix._CODEX) as (_work, env):
 			assert env["CODEX_HOME"] == str(real_auth.parent)
 
 	def test_the_secret_and_provider_variables_are_stripped_from_the_child(self):
@@ -463,7 +463,7 @@ class TestCliSandbox:
 	def test_tree_is_private_and_removed_and_a_real_login_codex_home_is_the_operators_real_one(
 		self, real_auth, operator_codex,
 	):
-		with ai_fix._cli_sandbox(real_login=True) as (work, env):
+		with ai_fix._cli_sandbox(real_login=True, backend=ai_fix._CODEX) as (work, env):
 			root = os.path.dirname(work)
 			assert stat.S_IMODE(os.stat(root).st_mode) == 0o700
 			assert env["CODEX_HOME"] == os.path.expanduser("~/.codex") == str(operator_codex.path)
@@ -484,12 +484,12 @@ class TestCliSandbox:
 
 	def test_the_sandbox_neither_creates_nor_tightens_the_operators_codex_dir(self, operator_codex):
 		assert not operator_codex.path.exists()
-		with ai_fix._cli_sandbox(real_login=True) as (work, env):
+		with ai_fix._cli_sandbox(real_login=True, backend=ai_fix._CODEX) as (work, env):
 			assert not os.path.exists(env["CODEX_HOME"])
 		assert not operator_codex.path.exists()  # Optimus never creates a login folder
 		operator_codex.path.mkdir(mode=0o755)
 		os.chmod(operator_codex.path, 0o755)
-		with ai_fix._cli_sandbox(real_login=True):
+		with ai_fix._cli_sandbox(real_login=True, backend=ai_fix._CODEX):
 			pass
 		assert stat.S_IMODE(os.stat(operator_codex.path).st_mode) == 0o755  # not its dir to chmod
 
@@ -511,7 +511,7 @@ class TestCliSandbox:
 
 	def test_a_real_login_sandbox_copies_no_credential_file_into_the_scratch_tree(self, real_auth):
 		before = real_auth.read_bytes(), real_auth.stat().st_mtime_ns
-		with ai_fix._cli_sandbox(real_login=True) as (work, env):
+		with ai_fix._cli_sandbox(real_login=True, backend=ai_fix._CODEX) as (work, env):
 			assert not any(n == "auth.json" for _r, _d, files in os.walk(os.path.dirname(work)) for n in files)
 		assert (real_auth.read_bytes(), real_auth.stat().st_mtime_ns) == before
 
@@ -520,7 +520,7 @@ class TestCliSandbox:
 		# its scratch cwd and report a missing login, so Optimus names the real cause instead.
 		monkeypatch.setattr(ai_fix.os.path, "expanduser", lambda p: p)
 		with pytest.raises(ai_fix.AiFixError, match="no home directory") as err:
-			with ai_fix._cli_sandbox(real_login=True):
+			with ai_fix._cli_sandbox(real_login=True, backend=ai_fix._CODEX):
 				pytest.fail("the sandbox must not open")
 		assert err.value.kind == "config"
 		with ai_fix._cli_sandbox():  # a probe never needs the real home
@@ -628,7 +628,7 @@ class TestCliResolve:
 		assert ai_fix._cli_resolve(_cfg(ai_cli_path=str(link))) == (None, "entrypoint")
 
 	def test_every_reason_has_its_own_message(self):
-		texts = {ai_fix._cli_missing_text(r) for r in ("not_found", "relative", "name", "entrypoint", "untrusted")}
+		texts = {ai_fix._cli_missing_text(r, ai_fix._CODEX) for r in ("not_found", "relative", "name", "entrypoint", "untrusted")}
 		assert len(texts) == 5
 
 	def test_the_call_and_the_status_show_the_reason(self, sub_cfg):
@@ -1239,19 +1239,19 @@ class TestCallLocalCli:
 
 class TestLoginProbe:
 	def test_login_failure_kinds(self):
-		assert ai_fix._login_failure("signed_out").fatal is True
-		assert ai_fix._login_failure("not_chatgpt").fatal is True
-		assert ai_fix._login_failure("timeout").fatal is False
-		assert ai_fix._login_failure("timeout").kind == "timeout"
-		assert ai_fix._login_failure("error").fatal is False
-		assert ai_fix._login_failure("unexpected").kind == "transport"
+		assert ai_fix._login_failure("signed_out", ai_fix._CODEX).fatal is True
+		assert ai_fix._login_failure("not_chatgpt", ai_fix._CODEX).fatal is True
+		assert ai_fix._login_failure("timeout", ai_fix._CODEX).fatal is False
+		assert ai_fix._login_failure("timeout", ai_fix._CODEX).kind == "timeout"
+		assert ai_fix._login_failure("error", ai_fix._CODEX).fatal is False
+		assert ai_fix._login_failure("unexpected", ai_fix._CODEX).kind == "transport"
 
 	@pytest.mark.parametrize("code", [126, 127])
 	def test_command_not_runnable_is_an_environment_error_not_a_sign_out(self, fake_codex, code):
 		box = fake_codex(login=f"exit {code}")
 		ok, reason = ai_fix._cli_login_ok(str(box.path), use_cache=False)
 		assert (ok, reason) == (False, "error")
-		failure = ai_fix._login_failure("error")
+		failure = ai_fix._login_failure("error", ai_fix._CODEX)
 		assert failure.kind == "transport" and failure.fatal is False and failure.kind != "auth"
 
 	def test_a_failure_that_says_not_logged_in_is_a_sign_out(self, fake_codex):
@@ -1289,9 +1289,9 @@ class TestLoginProbe:
 		monkeypatch.setattr(ai_fix, "_note_line", lines.append)
 		assert ai_fix._cli_login_ok(str(box.path), use_cache=False) == (False, "not_chatgpt")
 		assert lines == ["codex cli: login_not_chatgpt version=codex-cli 9.9.9"]
-		message = ai_fix._login_failure("not_chatgpt", str(box.path)).args[0]
+		message = ai_fix._login_failure("not_chatgpt", ai_fix._CODEX, str(box.path)).args[0]
 		assert "your codex CLI (codex-cli 9.9.9) may need updating" in message
-		assert "may need updating" not in ai_fix._login_failure("not_chatgpt").args[0]
+		assert "may need updating" not in ai_fix._login_failure("not_chatgpt", ai_fix._CODEX).args[0]
 
 	def test_an_operator_who_has_not_signed_in_yet_gets_signed_out_not_an_error(self, fake_codex, operator_codex):
 		box = fake_codex(login='echo "Not logged in" >&2; exit 1')
@@ -1349,7 +1349,7 @@ class TestLoginProbe:
 
 	def test_the_not_signed_in_message_says_plain_codex_login(self):
 		for reason in ("signed_out", "not_chatgpt"):
-			message = ai_fix._login_failure(reason).args[0]
+			message = ai_fix._login_failure(reason, ai_fix._CODEX).args[0]
 			assert "`codex login`" in message and "terminal" in message
 			assert "CODEX_HOME" not in message and "optimus-codex" not in message
 			assert "separate from" not in message and "its own Codex sign-in" not in message

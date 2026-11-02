@@ -85,10 +85,12 @@ the highest-value security considerations:
 
 Off by default. It needs `developer_mode` and the `optimus_allow_subscription_cli`
 site-config flag, and Optimus Settings > AI > Connection set to "Subscription
-(local CLI)". Instead of an API key, each AI call runs `codex exec` on the bench
-machine and uses the bench user's ChatGPT subscription. The prompt (normalised SQL,
-source snippets, URLs, parameters) goes to OpenAI through that CLI, so it leaves the
-host like an API-key call does. The Connect button (`check_cli_session`) is limited to
+(local CLI)". Instead of an API key, each AI call runs a local CLI on the bench machine
+and uses the bench user's own subscription: `codex exec` (ChatGPT) or `claude -p` (a
+Claude subscription), chosen by the Subscription CLI field. The prompt (normalised SQL,
+source snippets, URLs, parameters) goes to OpenAI or Anthropic through that CLI, so it
+leaves the host like an API-key call does. The text below describes Codex; the Claude
+CLI backend is described after the Codex residual risks. The Connect button (`check_cli_session`) is limited to
 10 per minute per user and System Manager only.
 
 What Optimus does to contain the CLI:
@@ -152,6 +154,74 @@ Residual risk, in plain words:
 - Tested with codex 0.164 to 0.165 (the skills and AGENTS.md checks above were made on 0.166).
   Connect warns when the installed version is outside that range; re-check the isolation
   (run the opt-in `OPTIMUS_LIVE_CODEX=1` test) before moving to a newer one.
+
+### Claude CLI backend
+
+Same gate, same scratch tree and the same rules as above: a real terminal login that
+Optimus only points at (never logs in, copies, stores or writes back), prompt on stdin,
+reply scrub, truncation marker and the process-group kill. What differs:
+
+- The child's `CLAUDE_CONFIG_DIR` is the operator's own `~/.claude` for the `claude auth
+  status` check and the run only (any other probe gets an empty scratch directory), `HOME`
+  is a scratch directory and `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and
+  `CLAUDE_CODE_OAUTH_TOKEN` are removed, so it stays on the subscription. It also gets
+  `DISABLE_TELEMETRY`, `DISABLE_AUTOUPDATER` and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`.
+- Connect is connected only for `loggedIn` with `authMethod` `claude.ai`. An API-key login
+  is refused. Only those two fields of the status are read: the email, organisation and plan
+  it also prints never reach the status, the stored message or the log.
+- The run is `claude -p --output-format json --tools "" --strict-mcp-config --safe-mode
+  --restricted --no-session-persistence --permission-prompts none`. `--tools ""` removes
+  every tool (Claude has no feature list, so there is no probe to fail). `--safe-mode`
+  disables CLAUDE.md, skills, plugins, hooks and MCP, which closes the Claude counterpart of
+  the Codex skills and AGENTS.md leak above (a global `~/.claude/CLAUDE.md` is not sent to
+  the model). `--restricted` ignores the user, project and local settings files, so an
+  `apiKeyHelper` or `env` block there cannot swap the subscription for an API key.
+  `--no-session-persistence` writes no transcript. Never `--bare` (it skips the login),
+  a bypass permission mode or `--max-budget-usd`.
+- Claude reports failures inside its JSON result, often with exit code 0. The reply is
+  accepted only as one JSON object with a text `result`, no `is_error`, a `subtype` of
+  `success` and a `terminal_reason` of `completed` (or none): a refusal, an aborted stream or
+  tool run or a hook stop is a classified error, never a suggestion. A reply that ran into
+  the context window is kept and marked cut off. The failure is classified from the HTTP
+  status, then the terminal reason, then the message text, and the raw output is never shown,
+  stored or logged. Quota (a usage, credit or spend limit, or a 429 whose text says so), auth,
+  model and bad-request replies are fatal kinds, so a bulk run stops cleanly; a plain 429 is a
+  non-fatal rate limit and a too-long prompt (413) or a refusal only fails that one prompt.
+  The failure log line carries the specific label, the HTTP status and a terminal reason from
+  a fixed list, and never the result text.
+
+Residual risk (Claude), in plain words:
+
+- The login is shared with your own terminal claude and a bulk run spends your own plan
+  usage (capped at 10 findings, a usage-limit reply stops it). Claude serialises its own
+  OAuth token refresh with a cross-process lock, so a clash with your terminal is handled by
+  Claude rather than by Optimus, and a run that still loses is a failed call, not a wrong
+  fix. Optimus adds no lock and does not retry a failed refresh. If you are ever signed out,
+  run `claude` and sign in again.
+- Unlike Codex, the agent has no tool (`--tools ""`) and `--restricted` also confines
+  Claude's built-in file tools to the working directory, a scratch folder, so the run is not
+  meant to read the bench user's other files by absolute path even if a file tool were ever
+  available. `~/.claude` is still the directory the CLI updates: `.claude.json` (the global
+  config, a separate file from `.credentials.json`), `sessions/`, backups, the plugin store
+  and `history.jsonl` live there. With `--no-session-persistence` no transcript is written
+  (checked on claude 2.1.316 for a call refused as not logged in). Not verified without one
+  billed call: that `history.jsonl` and `sessions/` stay untouched by a real prompt and that
+  the subscription login survives `--safe-mode --restricted` end to end.
+- Admin-managed (policy) settings, for example `/etc/claude-code/managed-settings.json`, still
+  apply under `--safe-mode` and `--restricted` (per `claude --help`). A machine that has one
+  can change the model, permissions or environment of the run; Optimus cannot override it.
+- Linux only. The login Optimus points at is the plaintext `~/.claude/.credentials.json`. On
+  macOS Claude keeps it in the Keychain, and a Keychain lookup from the scratch `HOME` is
+  untested and may read as signed out, so that platform is not supported.
+- Anthropic account-level telemetry is limited by the environment switches above
+  (`DISABLE_TELEMETRY`, `DISABLE_AUTOUPDATER`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`).
+  Whether they take effect is unproven without a network capture, so treat telemetry as
+  not proven off.
+- The isolation rests on the installed claude honouring `--tools ""`, `--safe-mode` and
+  `--restricted`. Tested with claude 2.1.312 to 2.1.316; re-check before a newer one.
+- Anthropic's terms restrict automated use of a consumer Claude subscription. The Claude
+  option is for your own personal use on your own developer machine. Use Connection = API Key
+  for any shared, customer or product bench.
 
 Follow-up under discussion: OS-level confinement (bwrap/landlock) instead of the denylist.
 

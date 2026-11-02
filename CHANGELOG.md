@@ -8,6 +8,74 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.135] - 2026-11-01
+
+### Fixed
+
+- Claude CLI: a cut-off reply (`max_tokens` or `model_context_window_exceeded`) is kept as truncated only when nothing else is wrong. The `terminal_reason` and `subtype` gate now runs first, so a cut-off that was also an aborted stream, a refusal or a hook stop is a classified failure and not a suggestion.
+- Claude CLI: "Context limit reached" (no HTTP status) is the per-prompt `context` kind and no longer a non-fatal `unknown` that counted toward the failure streak.
+- Claude CLI: a 403 whose text says usage, quota or billing (for example "Credit balance is too low") is the fatal `quota` kind and not "session expired". A 403 without such text and every 401 stay `auth`.
+
+---
+
+## [0.12.134] - 2026-11-01
+
+### Fixed
+
+- Claude CLI: the npm install (`@anthropic-ai/claude-code`, whose `bin/claude.exe` the `claude` link resolves to) is accepted again. It was refused as "not the native install" although the docs promised npm worked. A `claude.exe` is accepted only inside `claude-code/bin/`, next to the existing `cli.js` and native `versions/<semver>` shapes and still has to pass the ownership and permission check.
+- Claude CLI: a reply that did not end normally is never returned as a suggestion. `read_reply` now needs a `subtype` of `success` and a `terminal_reason` of `completed` (or none): a refusal (`stop_reason` or `terminal_reason`), an aborted stream or tool run, a hook stop and any other ending become a classified failure even when `is_error` is false. A reply that ran into the context window (`model_context_window_exceeded`) is kept and marked cut off.
+- Claude CLI: failures are classified from `api_error_status`, then `terminal_reason`, then the message text. The usage-limit text set is wider (reached or hit your ... limit, out of (extra) usage, credit balance, spend limit, billing, account on hold) and is the fatal `quota` kind, so a bulk on an exhausted plan stops at the first call. A 429 without such text is the non-fatal `rate_limited`; a 413 or "prompt too long" is the per-prompt `context` kind and a refusal is `refused`, so one oversize or declined prompt no longer stops the whole bulk. A plain 400 stays `config`. The unreachable top-level `error` / `api_retry` branch is removed.
+- Claude CLI: the failure log line carries the specific cause (`detail=`), the HTTP `status=` and a `terminal=` reason from a fixed list, so the first real run is diagnosable. The result text and any account detail are never logged.
+- Claude CLI: `optimus_claude_cli_model` accepts a context suffix (`sonnet[1m]`) and a value that is dropped (malformed, the placeholder `claude` or not text) now logs a fixed `model_alias_ignored` line instead of silently using Claude's default.
+
+### Changed
+
+- `_call_local_cli` runs the backend the validated provider names (`backend_key`) instead of re-reading the cached settings, so a Settings switch in the window between the check and the exec cannot run the other CLI.
+- Claude has a tested range (2.1.312 to 2.1.316) and Connect warns outside it, as for Codex. The two Codex-worded strings in the shared shell moved to backend data (`reworded_status_text`) and a backend method (`untested_version_message`).
+- `backend` is now required by `_cli_missing_text`, `_login_failure`, `_login_failure_text` and the real-login `_cli_sandbox` and `display` by `_out_of_time`, so a forgotten argument can no longer silently use Codex. Dead code removed (`_sign_in_hint`, the unreachable envelope branch in `ClaudeBackend.classify`, the Claude-only known failures that were never stderr-derived).
+- `NODE_EXTRA_CA_CERTS` reaches the CLI child (both backends), so a developer behind a TLS-inspecting proxy no longer gets a bare network error.
+- The AI-not-ready message uses generic wording when the saved Subscription CLI is unknown or unreadable, instead of naming Codex.
+- Optimus Settings: changing the Subscription CLI clears the stored Connect status of the previous CLI.
+
+### Residual risks (Claude), additions
+
+- Admin-managed (policy) settings, such as `/etc/claude-code/managed-settings.json`, still apply under `--safe-mode` and `--restricted`.
+- Linux only: the login is the plaintext `~/.claude/.credentials.json`. On macOS (Keychain) from the scratch `HOME` it is untested and may read as signed out.
+- The telemetry environment switches (`DISABLE_TELEMETRY`, `DISABLE_AUTOUPDATER`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`) are set but that they take effect is unproven. `sessions/` and the separate `~/.claude/.claude.json` global config are state the CLI keeps updating.
+- Docs corrected: Claude serialises its own token refresh (a cross-process lock), so the "can sign your terminal out" wording is softened; for Claude `--restricted` confines the file tools to the working directory, so "reads any file by absolute path" is Codex-specific.
+
+### Tests
+
+- `test_ai_claude_cli.py`: the real `claude.exe` npm layout (and look-alikes refused), 403/429/413/400 and each usage-text variant, `terminal_reason` classification, refusal and `aborted_*` replies with `is_error` false, the cut-off replies, the log line (specific label, status, terminal, no result text), the alias suffix and `model_alias_ignored`, backend threading, the Claude tested range, generic wording for an unknown choice, the status check with unreadable settings, the login probe `OSError`, `_out_of_time` naming and the JS status clearing.
+
+---
+
+## [0.12.133] - 2026-11-01
+
+### Added
+
+- A second subscription backend: **Claude CLI** (Anthropic's `claude`), picked with the Subscription CLI field (`ai_subscription_cli`, now "Codex CLI" or "Claude CLI") when Connection = Subscription. It mirrors the Codex backend: it uses your REAL terminal login in `~/.claude`, Optimus keeps no token and never logs in for you and Connect is only a read-only `claude auth status`. Connected means a Claude subscription login (`authMethod` `claude.ai`); an API-key login is refused with a pointer to Connection = API Key. Same gate as Codex (`developer_mode` and `optimus_allow_subscription_cli`), off by default and for personal use on your own developer machine only (Anthropic's terms restrict automated use of a consumer subscription).
+- The Claude run is `claude -p --output-format json --tools "" --strict-mcp-config --safe-mode --restricted --no-session-persistence --permission-prompts none` with the prompt on stdin: no tools, no MCP, no CLAUDE.md, skills, plugins or hooks (`--safe-mode`, so the Claude counterpart of the Codex skills leak is closed), no settings files (`--restricted`, so an `apiKeyHelper` or `env` block cannot swap the login) and no session transcript. Never `--bare`, a bypass permission mode or `--max-budget-usd`. No `--model` is passed by default (Claude's own default model); set `optimus_claude_cli_model` in the site config to an alias such as `sonnet` to choose one.
+- The child gets `CLAUDE_CONFIG_DIR` = your `~/.claude` for the status check and the run only, a scratch `HOME`, no `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or `CLAUDE_CODE_OAUTH_TOKEN` and `DISABLE_TELEMETRY`, `DISABLE_AUTOUPDATER` and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` set to 1.
+- Claude reports failures inside its JSON result, often with exit code 0. The reply reader fails closed: a result with `is_error`, non-JSON output, a cut-off envelope or no `result` text is a classified error (auth, quota, not found, bad request, transport), never a suggestion and never raw stdout. A usage-limit reply is the fatal `quota` kind, so a bulk run stops cleanly and the 10-finding bulk cap applies to Claude too. Connect and the logs carry no email, organisation or plan and the diagnostic prefix is `claude cli:`.
+
+### Changed
+
+- The generic CLI shell (`_call_local_cli`) now runs through a small `_CliBackend` seam (`_CodexBackend`, `_ClaudeBackend`): the login check, argv, reply reader, error classifier and copy differ per CLI, everything else is shared. The Codex backend behaves as before. `_exec_cli_once` returns a `_CliRun` and a backend may raise a classified error from its reply reader whatever the exit code.
+- The AI-not-ready message and the Connect button name the selected CLI. The provider identity now carries a `backend` key, so changing Subscription CLI stops queued jobs as "configuration changed" and the settings snapshot reads `ai_subscription_cli` (a never-saved field means Codex on both sides).
+
+### Residual risks (Claude)
+
+- `~/.claude` is shared with your own terminal claude. Claude serialises its own token refresh with a cross-process lock, so a clash is handled by Claude (if you are ever signed out, sign in again with `claude`). Claude has no known refresh-race text, so unlike Codex a failed refresh is not retried. A bulk run spends your own plan usage.
+- The CLI still updates its own state under `~/.claude` (`.claude.json`, backups, the plugin store). `--no-session-persistence` writes no transcript. Checked on claude 2.1.316 with a call refused as not logged in; whether `history.jsonl` gets a line from a real prompt and that the subscription login survives `--safe-mode --restricted` end to end, are not verified without one billed call.
+- A global `~/.claude/CLAUDE.md`, your skills, plugins and hooks are not read (`--safe-mode`). The isolation rests on the installed claude honouring `--tools ""`, `--safe-mode` and `--restricted`; re-check it before moving to a newer claude. Unlike Codex, the agent has no tool and `--restricted` confines Claude's file tools to the working directory. See SECURITY.md.
+
+### Tests
+
+- New `optimus/tests/test_ai_claude_cli.py` with a fake `claude` script: the discriminator and staleness identity (including the SELECT placeholder and bound-value count and a never-saved field), native and npm install checks, the real-login environment, the exact argv, the status check (PII free, memoized for 30 seconds, missing `~/.claude` is signed out), fail-closed reply parsing, `is_error` with exit 0 or 1, SIGTERM, no features probe, no credential file touched and the bulk cap.
+
+---
+
 ## [0.12.132] - 2026-11-01
 
 ### Changed (behaviour change, read before upgrading)

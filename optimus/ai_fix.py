@@ -356,7 +356,7 @@ _PROVIDER_DEFAULTS: dict[str, dict[str, Any]] = {
 	# },
 }
 _DEFAULT_PROVIDER = "Anthropic"
-_CLI_CONTEXT_TOKENS = 128000  # conservative window assumed for the local Codex CLI
+_CLI_CONTEXT_TOKENS = 128000  # conservative window assumed for the local subscription CLI (Codex or Claude)
 _CLI_MAX_OUTPUT_CHARS = 20_000
 # Read this much past the cap so trailing whitespace stripped afterwards cannot hide an overflow.
 _CLI_READ_SLACK = 1024
@@ -544,6 +544,17 @@ def subscription_mode_active() -> bool:
 		return False
 
 
+def subscription_backend() -> _CliBackend | None:
+	"""The subscription CLI backend the saved settings pick (Codex when the choice was never saved),
+	or None when the saved choice is unknown or the settings cannot be read, so a message words
+	itself generically instead of naming the wrong CLI. A config read only (no CLI probe)."""
+	try:
+		from optimus.settings import get_config
+		return _cli_backend(get_config())
+	except Exception:
+		return None
+
+
 # A subscription run spends the operator's own plan usage, which they share with their terminal
 # CLI, so one bulk refresh is bounded. Generic: every subscription backend uses it. A plan usage
 # limit surfaces as the fatal ``quota`` kind, which stops the run cleanly before this is reached.
@@ -564,7 +575,7 @@ def is_available(section: str | None = None) -> bool:
 	``ai_enabled`` set, a model resolvable for the chosen provider and an API
 	key present unless the provider needs none (local endpoints). In
 	subscription (local CLI) mode the API fields do not apply: the
-	developer-mode guard and an installed Codex CLI do.
+	developer-mode guard and an installed CLI do.
 
 	When ``section`` is ``"findings"`` / ``"humanize"``, also
 	requires the matching per-section toggle. Fails soft: an unknown ``section``
@@ -912,11 +923,12 @@ def _read_provider_snapshot():
 	query = """SELECT s.field, s.value, a.password
 		FROM `tabSingles` s LEFT JOIN `__Auth` a
 		ON a.doctype = %s AND a.name = %s AND a.fieldname = %s AND a.encrypted = 1
-		WHERE s.doctype = %s AND s.field IN (%s, %s, %s, %s, %s, %s)"""
+		WHERE s.doctype = %s AND s.field IN (%s, %s, %s, %s, %s, %s, %s)"""
 	rows = frappe.db.multisql(
 		{"mariadb": query, "postgres": query.replace("`", '"')},
 		values=("Optimus Settings", "Optimus Settings", "ai_api_key", "Optimus Settings",
-			"ai_enabled", "ai_connection_type", "ai_provider", "ai_base_url", "ai_model", "ai_context_tokens"),
+			"ai_enabled", "ai_connection_type", "ai_provider", "ai_base_url", "ai_model", "ai_context_tokens",
+			"ai_subscription_cli"),
 	)
 	values = {field: value for field, value, _ in rows}
 	values["ai_enabled"] = ai_privacy.opted_in(values.get("ai_enabled"))
@@ -1254,9 +1266,11 @@ def _provider_config(cfg=None) -> dict:
 	cfg = get_config() if cfg is None else cfg
 	if (getattr(cfg, "ai_connection_type", "") or "").strip() == SUBSCRIPTION_CONNECTION:
 		# Non-empty model / base_url and no key requirement let the shared gates pass unchanged.
+		backend = _cli_backend(cfg)
 		return {
-			"name": "Codex CLI", "protocol": "subscription", "base_url": "cli://codex", "model": "codex",
-			"needs_key": False, "context_tokens": _CLI_CONTEXT_TOKENS, "max_output_tokens": None,
+			"name": backend.display, "protocol": "subscription", "backend": backend.key,
+			"base_url": backend.base_url, "model": backend.model_identity, "needs_key": False,
+			"context_tokens": _CLI_CONTEXT_TOKENS, "max_output_tokens": None,
 			"requested_output_tokens": None, "send_session_metadata": False, "request_options": {},
 		}
 	name = (getattr(cfg, "ai_provider", "") or _DEFAULT_PROVIDER).strip()
@@ -2904,7 +2918,10 @@ def _dispatch_call(
 			from frappe import _
 
 			raise AiFixError(_("AI configuration changed or could not be read. Check Optimus Settings and retry the refresh."), kind="config")
-		return _call_local_cli(system, messages, usage_out=usage_out, timeout=timeout, meta_out=meta_out)
+		return _call_local_cli(
+			system, messages, usage_out=usage_out, timeout=timeout, meta_out=meta_out,
+			backend_key=provider.get("backend"),
+		)
 	api_key = _get_api_key(provider.get("needs_key", True), provider=provider)
 	if provider.get("needs_key") and not api_key:
 		from frappe import _
@@ -3352,10 +3369,10 @@ _QUOTA_CODES = frozenset({
 
 
 # ---------------------------------------------------------------------------
-# Local CLI subscription layer (Codex CLI). Never logs in and keeps no token of its own: it
-# points the CLI at the operator's real ``~/.codex`` (the login they made in their own terminal
-# with `codex login`) and the CLI uses and refreshes that sign-in itself. The prompt travels on
-# stdin, never on argv.
+# Local CLI subscription layer (Codex CLI or Claude CLI, see ``_CliBackend``). Never logs in and
+# keeps no token of its own: it points the CLI at the operator's real ``~/.codex`` or ``~/.claude``
+# (the login they made in their own terminal) and the CLI uses and refreshes that sign-in itself.
+# The prompt travels on stdin, never on argv.
 # ---------------------------------------------------------------------------
 
 def _subscription_allowed() -> bool:
@@ -3388,48 +3405,37 @@ _CLI_ENTRYPOINT_NAMES = ("codex", "codex.js", "codex.cjs", "codex.mjs")
 
 
 def _cli_resolve(cfg) -> tuple[str | None, str]:
-	"""``(path, reason)``: the resolved path of the Codex CLI and ``ok``, or None and why
-	not (``not_found`` / ``relative`` / ``name`` / ``entrypoint`` / ``untrusted``). An
-	explicit ``ai_cli_path`` must be absolute and named ``codex``; after symlinks are
-	resolved it must be a trusted executable (``_trusted_cli_file``) whose name is ``codex``
-	or a Node entrypoint (``codex.js`` and friends, as npm installs it). Blank falls back
-	to the PATH hit, held to the same checks. No subprocess."""
-	configured = (getattr(cfg, "ai_cli_path", "") or "").strip()
-	candidate = configured or shutil.which("codex")
-	if not candidate:
-		return None, "not_found"
-	if not os.path.isabs(candidate):
-		return None, "relative"
-	if os.path.basename(candidate) != "codex":
-		return None, "name"
-	real = os.path.realpath(candidate)
-	if os.path.basename(real) not in _CLI_ENTRYPOINT_NAMES:
-		return None, "entrypoint"
-	if not _trusted_cli_file(real):
-		return None, "untrusted"
-	return real, "ok"
+	"""``(path, reason)``: the resolved path of the selected subscription CLI and ``ok``, or
+	None and why not (``not_found`` / ``relative`` / ``name`` / ``entrypoint`` / ``untrusted``).
+	An explicit ``ai_cli_path`` must be absolute and named after the CLI; after symlinks are
+	resolved it must be a trusted executable (``_trusted_cli_file``) in that CLI's install shape
+	(``_CliBackend.is_entrypoint``). Blank falls back to the PATH hit, held to the same checks.
+	No subprocess."""
+	return _cli_backend(cfg).resolve(cfg)
 
 
 def _cli_installed(cfg) -> str | None:
-	"""Resolved path of the Codex CLI, or None (see ``_cli_resolve`` for why)."""
+	"""Resolved path of the selected CLI, or None (see ``_cli_resolve`` for why)."""
 	return _cli_resolve(cfg)[0]
 
 
-def _cli_missing_text(reason: str) -> str:
-	"""Operator-facing explanation for a ``_cli_resolve`` failure."""
+def _cli_missing_text(reason: str, backend: _CliBackend) -> str:
+	"""Operator-facing explanation for a ``_cli_resolve`` failure of ``backend``."""
 	from frappe import _
 
 	if reason == "not_found":
-		return _("Codex CLI not found. Install it or set the CLI path in Optimus Settings.")
+		return _("{0} not found. Install it or set the CLI path in Optimus Settings.").format(backend.display)
 	if reason == "relative":
-		return _("The Codex CLI path must be absolute.")
+		return _("The {0} path must be absolute.").format(backend.display)
 	if reason == "name":
-		return _("The CLI path must point at the `codex` launcher or a symlink named `codex`, not the `.js` file.")
+		return _(
+			"The CLI path must point at the `{0}` launcher or a symlink named `{0}`, not the `.js` file."
+		).format(backend.binary)
 	if reason == "entrypoint":
-		return _("The Codex CLI path resolves to a file that is not `codex` or a Node entrypoint (`codex.js`).")
+		return backend.entrypoint_message()
 	return _(
-		"The Codex CLI file must be owned by the bench user or root and not writable by group or others."
-	)
+		"The {0} file must be owned by the bench user or root and not writable by group or others."
+	).format(backend.display)
 
 
 # The data that follows the SECURITY line is captured from an application and may
@@ -3576,16 +3582,18 @@ def _build_cli_argv(cli_path: str, scratch_dir: str, out_file: str, *, probe_sec
 
 # The child gets an ALLOWLISTED environment: nothing from the bench (DB / Redis
 # URLs, other providers' API keys, site secrets). HOME and TMPDIR are set to a private
-# scratch directory by ``_cli_sandbox``. CODEX_HOME is the operator's real ``~/.codex`` for
-# the ``login status`` check and the ``exec`` only, a scratch directory for every other probe
-# (HOME is deliberately NOT the real home, which would expose ~/.ssh, ~/.aws and ~/.config
-# through HOME or a relative path). OPENAI_API_KEY / CODEX_API_KEY are absent, which keeps
-# the CLI on the ChatGPT subscription.
+# scratch directory by ``_cli_sandbox``. The CLI's config-home variable (CODEX_HOME or
+# CLAUDE_CONFIG_DIR) is the operator's real login directory for the status check and the
+# ``exec`` only, a scratch directory for every other probe (HOME is deliberately NOT the real
+# home, which would expose ~/.ssh, ~/.aws and ~/.config through HOME or a relative path).
+# OPENAI_API_KEY / CODEX_API_KEY / ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN /
+# CLAUDE_CODE_OAUTH_TOKEN are absent, which keeps each CLI on its subscription.
 _CLI_ENV_ALLOWLIST = frozenset({"PATH", "LANG", "SHELL", "USER", "TERM"})
 _CLI_ENV_PREFIX_ALLOWLIST = ("LC_",)
-# Needed for codex to reach OpenAI over TLS / a corporate proxy.
+# Needed for the CLI to reach its vendor over TLS / a corporate proxy (NODE_EXTRA_CA_CERTS is the CA
+# bundle of a Node-based CLI behind a TLS-inspecting proxy).
 _CLI_ENV_PASSTHROUGH = frozenset({
-	"SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE",
+	"SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
 	"HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
 	"https_proxy", "http_proxy", "no_proxy",
 })
@@ -3593,12 +3601,13 @@ _CLI_ENV_PASSTHROUGH = frozenset({
 
 def _build_cli_env(
 	environ=None, *, home: str | None = None, tmpdir: str | None = None, codex_home: str | None = None,
+	extra: dict[str, str] | None = None,
 ) -> dict[str, str]:
 	"""The child environment: allowlisted keys from ``environ`` (default ``os.environ``), the
-	given scratch ``HOME`` / ``TMPDIR`` and the given ``CODEX_HOME``, whatever the inherited
-	environment said. Nothing in it is a credential: the CLI finds and refreshes its own
-	sign-in in the CODEX_HOME it is given. A pure function of its arguments, apart from the
-	``environ`` default."""
+	given scratch ``HOME`` / ``TMPDIR``, the given ``CODEX_HOME`` and the ``extra`` variables (a
+	backend's config-home and its own switches), whatever the inherited environment said. Nothing
+	in it is a credential: the CLI finds and refreshes its own sign-in in the config home it is
+	given. A pure function of its arguments, apart from the ``environ`` default."""
 	source = os.environ if environ is None else environ
 	env = {
 		k: v for k, v in source.items()
@@ -3606,26 +3615,36 @@ def _build_cli_env(
 		or k in _CLI_ENV_PASSTHROUGH
 		or k.startswith(_CLI_ENV_PREFIX_ALLOWLIST)
 	}
-	for name, value in (("HOME", home), ("TMPDIR", tmpdir), ("CODEX_HOME", codex_home)):
+	for name, value in (("HOME", home), ("TMPDIR", tmpdir), ("CODEX_HOME", codex_home), *(extra or {}).items()):
 		if value:
 			env[name] = value
 	return env
 
 
-def _real_codex_home() -> str:
-	"""The operator's real ``~/.codex`` as an absolute path. With no HOME and no passwd entry
-	``expanduser`` leaves a relative ``~/.codex``, which the CLI would resolve against its own
-	scratch working directory and report as a missing login, so refuse it with a clear error."""
+def _real_login_dir(folder: str, vendor: str) -> str:
+	"""The operator's real ``~/<folder>`` as an absolute path. With no HOME and no passwd entry
+	``expanduser`` leaves a relative path, which the CLI would resolve against its own scratch
+	working directory and report as a missing login, so refuse it with a clear error."""
 	from frappe import _
 
-	path = os.path.expanduser("~/.codex")
+	path = os.path.expanduser(f"~/{folder}")
 	if not os.path.isabs(path):
 		raise AiFixError(
-			_("The bench user has no home directory, so its Codex login cannot be located. "
-			"Set HOME for the bench worker, then try again."),
+			_("The bench user has no home directory, so its {0} login cannot be located. "
+			"Set HOME for the bench worker, then try again.").format(vendor),
 			kind="config",
 		)
 	return path
+
+
+def _real_codex_home() -> str:
+	"""The operator's real ``~/.codex`` as an absolute path (see ``_real_login_dir``)."""
+	return _real_login_dir(".codex", "Codex")
+
+
+def _real_claude_dir() -> str:
+	"""The operator's real ``~/.claude`` as an absolute path (see ``_real_login_dir``)."""
+	return _real_login_dir(".claude", "Claude")
 
 
 def _cli_preexec():
@@ -3676,23 +3695,32 @@ def _sweep_stale_sandboxes() -> None:
 
 
 @contextlib.contextmanager
-def _cli_sandbox(real_login: bool = False):
+def _cli_sandbox(real_login: bool = False, backend: _CliBackend | None = None):
 	"""A private 0700 scratch tree for one CLI invocation, removed afterwards. It yields
 	``(work_dir, env)``: HOME and TMPDIR point inside the tree, so the agent never sees the
-	operator's real home. With ``real_login`` (only the ``login status`` check and the
-	``exec``) CODEX_HOME is the operator's real ``~/.codex``, where the CLI keeps and refreshes
-	its own sign-in; Optimus never creates, reads, copies or writes anything there. Every
-	other probe (``features list``, ``--version``) gets an empty scratch CODEX_HOME, so the
-	operator's config.toml cannot change what it reports and it writes nothing into the login."""
-	codex_home = _real_codex_home() if real_login else None
+	operator's real home. With ``real_login`` (only the status check and the ``exec`` of
+	``backend``, which is then required) that CLI's config home (CODEX_HOME / CLAUDE_CONFIG_DIR) is the
+	operator's real login directory, where the CLI keeps and refreshes its own sign-in; Optimus
+	never creates, reads, copies or writes anything there. Every other probe (``features list``,
+	``--version``) gets an empty scratch config home per CLI, so the operator's settings cannot
+	change what it reports and it writes nothing into the login."""
+	if real_login and backend is None:
+		raise TypeError("a real-login sandbox needs the backend whose login directory it opens")
+	real_dir = backend.real_home() if real_login else None
 	_sweep_stale_sandboxes()
 	root = tempfile.mkdtemp(prefix=_SANDBOX_PREFIX)
 	try:
-		dirs = {name: os.path.join(root, name) for name in ("home", "tmp", "work", "codex")}
+		scratch_names = {b.scratch_dir for b in _CLI_BACKENDS.values()}
+		dirs = {name: os.path.join(root, name) for name in ("home", "tmp", "work", *scratch_names)}
 		for path in dirs.values():
 			os.mkdir(path, 0o700)
-		env = _build_cli_env(home=dirs["home"], tmpdir=dirs["tmp"], codex_home=codex_home or dirs["codex"])
-		yield dirs["work"], env
+		if real_dir:
+			extra = {backend.config_env: real_dir, **backend.extra_env}
+		else:
+			extra = {b.config_env: dirs[b.scratch_dir] for b in _CLI_BACKENDS.values()}
+			for b in _CLI_BACKENDS.values():
+				extra.update(b.extra_env)
+		yield dirs["work"], _build_cli_env(home=dirs["home"], tmpdir=dirs["tmp"], extra=extra)
 	finally:
 		shutil.rmtree(root, ignore_errors=True)
 
@@ -3778,6 +3806,14 @@ _LOGIN_PROBE_SECONDS = 5
 _LOGIN_CACHE: dict[str, tuple[float, bool, str]] = {}
 
 
+def _login_memo_hit(cli_path: str, use_cache: bool, seconds: float) -> tuple[bool, str] | None:
+	"""The memoized ``(ok, reason)`` of a recent successful login check for ``cli_path``, or None."""
+	hit = _LOGIN_CACHE.get(cli_path) if use_cache else None
+	if hit and time.monotonic() - hit[0] < seconds:
+		return hit[1], hit[2]
+	return None
+
+
 _NOT_LOGGED_IN_RE = re.compile(
 	r"not (logged|signed) ?in|no (stored )?(credentials|auth)|(log|sign) ?in required|please (log|sign) ?in"
 	r"|error checking login status"
@@ -3794,17 +3830,15 @@ def _cli_login_ok(cli_path: str, *, use_cache: bool = True) -> tuple[bool, str]:
 	to stderr, so both streams are read. An API-key login is rejected because only the
 	subscription is wanted. A success is memoized for 5 minutes per path; failures never are.
 	``use_cache=False`` forces a fresh probe (the Connect button)."""
-	now = time.monotonic()
-	if use_cache:
-		hit = _LOGIN_CACHE.get(cli_path)
-		if hit and now - hit[0] < _LOGIN_CACHE_SECONDS:
-			return hit[1], hit[2]
+	memo = _login_memo_hit(cli_path, use_cache, _LOGIN_CACHE_SECONDS)
+	if memo:
+		return memo
 	if not os.path.isdir(_real_codex_home()):
 		# First run, or ~/.codex is a file: the CLI would only say CODEX_HOME "does not exist".
 		_log_cli_diagnostic("signed_out", label="codex_dir_missing")
 		return False, "signed_out"
 	try:
-		with _cli_sandbox(real_login=True) as (work, env):
+		with _cli_sandbox(real_login=True, backend=_CODEX) as (work, env):
 			code, out, err = _run_cli([cli_path, "login", "status"], env, work, _LOGIN_PROBE_SECONDS)
 	except subprocess.TimeoutExpired:
 		return False, "timeout"
@@ -3828,7 +3862,7 @@ def _cli_login_ok(cli_path: str, *, use_cache: bool = True) -> tuple[bool, str]:
 		# A codex that rewords `login status` lands here too: log the version for diagnosis.
 		_log_cli_diagnostic("login_not_chatgpt", version=_cli_version_cached(cli_path))
 		return False, "not_chatgpt"
-	_LOGIN_CACHE[cli_path] = (now, True, "ok")
+	_LOGIN_CACHE[cli_path] = (time.monotonic(), True, "ok")
 	return True, "ok"
 
 
@@ -3865,17 +3899,34 @@ def _cli_version_cached(cli_path: str, *, probe: bool = True) -> str | None:
 	return version
 
 
+# The `terminal_reason` values the log may carry; anything else prints as `other`, so a value the CLI
+# invents can never put text of its own into the log.
+_CLI_TERMINAL_LOG_ALLOWLIST = frozenset({
+	"completed", "prompt_too_long", "model_context_window_exceeded", "blocking_limit", "refusal", "api_error",
+	"model_error", "aborted_streaming", "aborted_tools", "hook_stopped", "stop_hook_prevented", "max_turns",
+})
+
+
 def _log_cli_diagnostic(event: str, *, version: str | None = None, label: str | None = None,
-	code: int | None = None, wait: float | None = None) -> None:
-	"""One ERROR line in the ``optimus`` log naming a CLI event, so a codex reword or crash
-	is diagnosable. It carries ONLY the fixed event name, the sanitized version, a fixed
-	stderr label and the exit code: never stderr, stdout or any part of the prompt. Never
-	raises, except an RQ job timeout (via ``_note_line``)."""
-	parts = [f"codex cli: {event}"]
+	code: int | None = None, wait: float | None = None, cli: str = "codex", detail: str | None = None,
+	status: int | None = None, terminal: str | None = None) -> None:
+	"""One ERROR line in the ``optimus`` log naming a CLI event, so a reword or crash of the
+	``cli`` ("codex" / "claude") is diagnosable. It carries ONLY the fixed event name, the
+	sanitized version, a fixed label, the exit code and, for a failure read from a reply, the
+	specific failure ``detail`` label, the HTTP ``status`` and the ``terminal`` reason (from
+	``_CLI_TERMINAL_LOG_ALLOWLIST``): never stderr, stdout, a result, account details or any part
+	of the prompt. Never raises, except an RQ job timeout (via ``_note_line``)."""
+	parts = [f"{cli} cli: {event}"]
 	if version:
 		parts.append(f"version={version}")
 	if label:
 		parts.append(f"label={label}")
+	if detail and re.fullmatch(r"[a-z_]{1,40}", detail):
+		parts.append(f"detail={detail}")
+	if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599:
+		parts.append(f"status={status}")
+	if isinstance(terminal, str) and terminal:
+		parts.append(f"terminal={terminal if terminal in _CLI_TERMINAL_LOG_ALLOWLIST else 'other'}")
 	if isinstance(code, int):
 		parts.append(f"code={code}")
 	if isinstance(wait, (int, float)):
@@ -3894,56 +3945,58 @@ _LOGIN_FAILURES = {
 }
 
 
-def _sign_in_hint() -> str:
-	"""How to sign in: in the operator's own terminal. Optimus reuses that login and keeps none."""
+def _login_failure_text(reason: str, backend: _CliBackend, cli_path: str | None = None) -> tuple[str, str]:
+	"""``(message, kind)`` for a failed ``backend`` login check. A reason the backend says its CLI
+	reports when it rewords its status output (``reworded_status_reason``) also names the CLI
+	version when known (cache only), since such a CLI looks the same as an API-key login."""
 	from frappe import _
 
-	return _(
-		"Optimus uses the Codex login you made in your own terminal. Sign in there with "
-		"`codex login` and choose Sign in with ChatGPT (an API-key login is refused). "
-		"Optimus reads the bench user's ~/.codex and ignores a custom Codex home set in your own terminal."
-	)
-
-
-def _login_failure_text(reason: str, cli_path: str | None = None) -> tuple[str, str]:
-	"""``(message, kind)`` for a failed login check. A ``not_chatgpt`` result also names the
-	CLI version when known (cache only), since a codex that rewords its status output looks
-	the same as an API-key login."""
-	from frappe import _
-
-	message, kind = _LOGIN_FAILURES.get(reason, _LOGIN_FAILURES["error"])
+	message, kind = backend.login_failures.get(reason, backend.login_failures["error"])
 	message = _(message)
 	if kind == "auth":
-		message += " " + _sign_in_hint()
-	if reason == "not_chatgpt" and cli_path:
+		message += " " + backend.sign_in_hint()
+	if backend.reworded_status_text and reason == backend.reworded_status_reason and cli_path:
 		version = _cli_version_cached(cli_path, probe=False)
 		if version:
-			message += " " + _("If you are signed in with ChatGPT, your codex CLI ({0}) may need updating.").format(version)
+			message += " " + _(backend.reworded_status_text).format(version)
 	return message, kind
 
 
-def _login_failure(reason: str, cli_path: str | None = None) -> AiFixError:
-	message, kind = _login_failure_text(reason, cli_path)
+def _login_failure(reason: str, backend: _CliBackend, cli_path: str | None = None) -> AiFixError:
+	message, kind = _login_failure_text(reason, backend, cli_path)
 	return AiFixError(message, kind=kind)
 
 
-def _version_tested(version: str | None) -> bool | None:
-	"""True when ``version`` is inside ``_CLI_TESTED_VERSIONS``, False when outside, None
-	when it carries no ``major.minor`` number."""
-	m = re.search(r"(\d+)\.(\d+)", version or "")
+def _version_tested(version: str | None, tested: tuple = _CLI_TESTED_VERSIONS) -> bool | None:
+	"""True when ``version`` is inside the inclusive ``tested`` range ``(low, high)`` of version
+	tuples (as many numbers as the tuples have: ``(0, 164)`` is major.minor, ``(2, 1, 312)`` adds the
+	patch), False when outside, None when it carries fewer numbers than that."""
+	m = re.search(r"\d+(?:\.\d+)+", version or "")
+	low, high = tested
 	if not m:
 		return None
-	low, high = _CLI_TESTED_VERSIONS
-	return low <= (int(m.group(1)), int(m.group(2))) <= high
+	numbers = tuple(int(n) for n in m.group(0).split("."))
+	if len(numbers) < len(low):
+		return None
+	return low <= numbers[: len(low)] <= high
 
 
 def _cli_session_status() -> dict:
-	"""Read-only status of the local Codex CLI for the Connect button: ``codex login status``
-	against the operator's real ``~/.codex`` login. Never logs in, keeps no token, and never
-	includes an account id or email."""
+	"""Read-only status of the selected local CLI for the Connect button: the CLI's own login
+	status against the operator's real ``~/.codex`` / ``~/.claude`` login. Never logs in, keeps no
+	token and never includes an account id, email or organisation."""
 	from frappe import _
 
-	result = {"ok": False, "state": "error", "message": "", "cli": "codex", "version": None}
+	cfg, backend = None, _CODEX
+	try:
+		from optimus.settings import get_config
+		cfg = get_config()
+		backend = _cli_backend(cfg)
+	except AiFixError as e:
+		return {"ok": False, "state": "error", "message": str(e), "cli": _CODEX.key, "version": None}
+	except Exception:
+		cfg = None
+	result = {"ok": False, "state": "error", "message": "", "cli": backend.key, "version": None}
 	if not _subscription_allowed():
 		result.update(
 			state="blocked",
@@ -3954,33 +4007,27 @@ def _cli_session_status() -> dict:
 			),
 		)
 		return result
-	try:
-		from optimus.settings import get_config
-		path, reason = _cli_resolve(get_config())
-	except Exception:
-		path, reason = None, "not_found"
+	path, reason = backend.resolve(cfg) if cfg is not None else (None, "not_found")
 	if not path:
-		_log_cli_diagnostic("cli_not_usable", label=reason)
-		result.update(state="missing", message=_cli_missing_text(reason))
+		_log_cli_diagnostic("cli_not_usable", label=reason, cli=backend.key)
+		result.update(state="missing", message=_cli_missing_text(reason, backend))
 		return result
 	result["version"] = _cli_version_cached(path)
 	# A fresh probe: the button must reflect the session now, not minutes ago.
 	try:
-		ok, reason = _cli_login_ok(path, use_cache=False)
+		ok, reason = backend.login_check(path, use_cache=False)
 	except AiFixError as e:
 		result.update(state="error", message=str(e))
 		return result
 	if ok:
 		suffix = f" ({result['version']})" if result["version"] else ""
-		message = _("Connected. Codex CLI{0} is signed in with ChatGPT on this machine (the token is checked on first use).").format(suffix)
-		if _version_tested(result["version"]) is False:
-			message += " " + _("This codex version is outside the range Optimus was tested with ({0}.{1} to {2}.{3}).").format(
-				*_CLI_TESTED_VERSIONS[0], *_CLI_TESTED_VERSIONS[1]
-			)
+		message = backend.connected_message().format(suffix)
+		if backend.tested_versions and _version_tested(result["version"], backend.tested_versions) is False:
+			message += " " + backend.untested_version_message()
 		result.update(ok=True, state="connected", message=message)
 		return result
-	state = "signed_out" if reason in ("signed_out", "not_chatgpt") else "error"
-	result.update(state=state, message=_login_failure_text(reason, path)[0])
+	state = "signed_out" if reason in backend.signed_out_reasons else "error"
+	result.update(state=state, message=_login_failure_text(reason, backend, path)[0])
 	return result
 
 
@@ -4138,8 +4185,8 @@ def _read_cli_reply(out_file: str, stdout: str) -> tuple[str, bool]:
 _CLI_MIN_EXEC_SECONDS = 5
 
 
-def _out_of_time() -> AiFixError:
-	return AiFixError("Codex CLI ran out of time before it could start.", kind="timeout")
+def _out_of_time(display: str) -> AiFixError:
+	return AiFixError(f"{display} ran out of time before it could start.", kind="timeout")
 
 
 # Labels where the CLI rejected the call before any answer was produced: the outcome is known.
@@ -4149,6 +4196,11 @@ _CLI_KNOWN_FAILURES = frozenset({"auth_expired", "auth_refresh_race", "usage_lim
 _CLI_AUTH_LABELS = frozenset({"auth_expired", "auth_refresh_race"})
 _CLI_AUTH_RETRY_WAIT = 2
 _CLI_AUTH_RETRY_JITTER = 0.5  # the wait varies by up to +/- this fraction, so parallel runs spread out
+
+
+# A failure read from a reply that is a definite answer to this one prompt (rate limited, too long for
+# the window, declined): the outcome is known, and it is not a transport failure.
+_CLI_KNOWN_RESPONSE_KINDS = frozenset({"rate_limited", "context", "refused"})
 
 
 def _auth_retry_wait() -> float:
@@ -4167,22 +4219,35 @@ def _auth_retry_applies(code: int, err: str | None) -> bool:
 	return 0 < code < 126 and _classify_cli_stderr(err) == "auth_refresh_race"
 
 
-def _exec_cli_once(path: str, prompt: str, deadline: float, total_seconds: int):
-	"""Run ``codex exec`` once in a fresh sandbox and return ``(code, text, truncated, stderr)``."""
+class _CliRun(NamedTuple):
+	"""One finished CLI exec. ``failure`` is a classified ``AiFixError`` the backend's reply reader
+	raised (Claude reports errors in a JSON result whatever the exit code); ``text`` is the reply
+	otherwise, with ``truncated`` set when a longer one was cut."""
+
+	code: int
+	text: str
+	truncated: bool
+	out: str
+	err: str
+	failure: AiFixError | None
+
+
+def _exec_cli_once(backend: _CliBackend, path: str, prompt: str, deadline: float, total_seconds: int) -> _CliRun:
+	"""Run the CLI once in a fresh sandbox and return the finished ``_CliRun``."""
 	from frappe import _
 
 	try:
-		with _cli_sandbox(real_login=True) as (work, env):
+		with _cli_sandbox(real_login=True, backend=backend) as (work, env):
 			out_file = os.path.join(work, "out.txt")
-			# The login check came out of the deadline; the features
-			# probe is capped by what is left, and then the exec gets what the probe left.
+			# The login check came out of the deadline; the argv build (Codex's features
+			# probe) is capped by what is left and then the exec gets what that left.
 			remaining = deadline - time.monotonic()
 			if remaining < _CLI_MIN_EXEC_SECONDS:
-				raise _out_of_time()
-			argv = _build_cli_argv(path, work, out_file, probe_seconds=remaining - _CLI_MIN_EXEC_SECONDS)
+				raise _out_of_time(backend.display)
+			argv = backend.build_argv(path, work, out_file, probe_seconds=remaining - _CLI_MIN_EXEC_SECONDS)
 			exec_seconds = int(deadline - time.monotonic())
 			if exec_seconds < _CLI_MIN_EXEC_SECONDS:
-				raise _out_of_time()
+				raise _out_of_time(backend.display)
 			try:
 				code, out, err = _run_cli(argv, env, work, exec_seconds, prompt)
 			except OSError:
@@ -4191,36 +4256,60 @@ def _exec_cli_once(path: str, prompt: str, deadline: float, total_seconds: int):
 				# A timeout, a worker/job interrupt or a kill after the prompt was fed:
 				# the outcome is unknown, so record it before the exception propagates.
 				ai_transport.observe("sent_unknown")
-				_log_cli_diagnostic("exec_abandoned", label=type(e).__name__)
+				_log_cli_diagnostic("exec_abandoned", label=type(e).__name__, cli=backend.key)
 				raise
-			text, truncated = _read_cli_reply(out_file, out) if code == 0 else ("", False)
+			text, truncated, failure = "", False, None
+			if 0 <= code < 126:  # a signal kill or a shell 126/127 left no reply worth reading
+				try:
+					text, truncated = backend.read_reply(out_file, out, code)
+				except AiFixError as e:
+					failure = e
 	except subprocess.TimeoutExpired:
-		raise AiFixError(_("Codex CLI didn't respond within the {0}s limit.").format(total_seconds), kind="timeout")
+		raise AiFixError(_("{0} didn't respond within the {1}s limit.").format(backend.display, total_seconds), kind="timeout")
 	except OSError as e:
-		_log_cli_diagnostic("exec_spawn_failed", label=f"errno_{e.errno}")
-		raise AiFixError(_("Codex CLI could not be started."), kind="transport")
-	return code, text, truncated, err
+		_log_cli_diagnostic("exec_spawn_failed", label=f"errno_{e.errno}", cli=backend.key)
+		raise AiFixError(_("{0} could not be started.").format(backend.display), kind="transport")
+	return _CliRun(code, text, truncated, out, err, failure)
+
+
+def _cli_exec_error(backend: _CliBackend, label: str, code: int | None = None, *, retried: bool = False) -> AiFixError:
+	"""The operator-facing ``AiFixError`` for a classified failure ``label`` of ``backend``. The
+	message is fixed text: nothing the CLI printed (stderr, stdout, a result) is ever put in it."""
+	from frappe import _
+
+	if label not in backend.exec_errors:
+		return AiFixError(_("{0} could not produce a suggestion (exit {1}).").format(backend.display, code))
+	message, kind = backend.exec_errors[label]
+	if label in backend.auth_labels:
+		message = _("{0} session expired after a retry.").format(backend.vendor) if retried else _(message)
+		return AiFixError(f"{message} {backend.sign_in_hint()}", kind=kind)
+	return AiFixError(_(message), kind=kind)
 
 
 def _call_local_cli(
 	system: str, messages: list[dict], *, usage_out: dict | None = None, timeout: int | None = None,
-	meta_out: dict | None = None,
+	meta_out: dict | None = None, backend_key: str | None = None,
 ) -> str:
-	"""Run one read-only ``codex exec`` and return its reply text. The prompt goes on
-	stdin and the child runs in a private scratch tree with an allowlisted environment
-	(``_cli_sandbox``), so it uses only the ChatGPT subscription session. ``timeout``
-	bounds the whole call, session check included.
+	"""Run one read-only CLI exec (the backend ``ai_subscription_cli`` picks: Codex or Claude) and
+	return its reply text. The prompt goes on stdin and the child runs in a private scratch tree
+	with an allowlisted environment (``_cli_sandbox``), so it uses only the operator's
+	subscription session. ``timeout`` bounds the whole call, session check included.
 
 	The prompt carries Optimus's system prompt first, then a SECURITY preamble naming
 	the captured data that follows as untrusted, and the reply goes through
 	``_scrub_secrets`` (an over-cap reply gets its truncation marker after that scrub, and
-	``meta_out["finish_reason"]`` is set to ``length``). Residual risk: the agent can
-	still read files the bench user can read by absolute path, so a prompt injection is
-	mitigated, not eliminated.
+	``meta_out["finish_reason"]`` is set to ``length``). Residual risk: a Codex agent can
+	still read files the bench user can read by absolute path (Claude is given no tool and its
+	file tools are confined to the scratch directory), so a prompt injection is mitigated, not
+	eliminated.
 
 	No token usage is reported (a subscription is not token-billed). Failures are
 	``AiFixError``s whose ``kind`` follows ``AI_FATAL_KINDS``: missing CLI, signed out,
-	usage limit and a rejected flag stop a refresh; a timeout or network error does not."""
+	usage limit and a rejected flag stop a refresh; a timeout or network error does not.
+
+	``backend_key`` is the ``provider["backend"]`` the caller validated against a fresh settings
+	snapshot; with it the exec cannot run the other CLI if the choice is saved in between. Without
+	it the cached settings pick the backend."""
 	from frappe import _
 
 	if not _subscription_allowed():
@@ -4231,20 +4320,21 @@ def _call_local_cli(
 		)
 	from optimus.settings import get_config
 	cfg = get_config()
-	path, missing = _cli_resolve(cfg)
+	backend = _cli_backend_by_key(backend_key) if backend_key else _cli_backend(cfg)
+	path, missing = backend.resolve(cfg)
 	if not path:
-		_log_cli_diagnostic("cli_not_usable", label=missing)
-		raise AiFixError(_cli_missing_text(missing), kind="config")
+		_log_cli_diagnostic("cli_not_usable", label=missing, cli=backend.key)
+		raise AiFixError(_cli_missing_text(missing, backend), kind="config")
 	content = _compose_cli_prompt(system, messages)
 	if not content.strip():
 		raise AiFixError(_("There is no content to send to the CLI."), kind="internal")
 	total_seconds = int(timeout or request_timeout_seconds())
 	deadline = time.monotonic() + total_seconds
-	ok, reason = _cli_login_ok(path)
+	ok, reason = backend.login_check(path)
 	if not ok:
-		raise _login_failure(reason, path)
+		raise _login_failure(reason, backend, path)
 	if deadline - time.monotonic() < _CLI_MIN_EXEC_SECONDS:
-		raise _out_of_time()
+		raise _out_of_time(backend.display)
 	# A lone surrogate in attacker-influenced SQL would make the stdin encode raise
 	# after the child spawned; replace it up front.
 	prompt = content.encode("utf-8", "replace").decode("utf-8")
@@ -4252,57 +4342,641 @@ def _call_local_cli(
 		usage_out.begin()
 		usage_out.observe(True)  # nothing is billed per token, so the cost is a known zero
 	ai_privacy.before_http_send()  # a CLI send discloses the prompt like an HTTP one
-	code, text, truncated, err = _exec_cli_once(path, prompt, deadline, total_seconds)
+	run = _exec_cli_once(backend, path, prompt, deadline, total_seconds)
 	retried = False
-	if _auth_retry_applies(code, err):
+	if backend.retry_applies(run.code, run.out, run.err):
 		if _auth_retry_fits(deadline):
 			# Parallel runs share one sign-in: a lost refresh race is rejected before any answer
-			# and the winner has rewritten auth.json, so one retry cures it.
+			# and the winner has rewritten the token, so one retry cures it.
 			_LOGIN_CACHE.pop(path, None)
 			wait = _auth_retry_wait()
-			_log_cli_diagnostic("auth_retry", label="auth_refresh_race", code=code, wait=wait)
+			_log_cli_diagnostic("auth_retry", label="auth_refresh_race", code=run.code, wait=wait, cli=backend.key)
 			time.sleep(wait)
-			code, text, truncated, err = _exec_cli_once(path, prompt, deadline, total_seconds)
+			run = _exec_cli_once(backend, path, prompt, deadline, total_seconds)
 			retried = True
-			if code == 0:
-				_log_cli_diagnostic("auth_retry_ok", label="auth_refresh_race", wait=wait)
+			if run.code == 0:
+				_log_cli_diagnostic("auth_retry_ok", label="auth_refresh_race", wait=wait, cli=backend.key)
 		else:
-			_log_cli_diagnostic("auth_retry_skipped", label="auth_refresh_race", code=code, wait=_CLI_AUTH_RETRY_WAIT)
+			_log_cli_diagnostic("auth_retry_skipped", label="auth_refresh_race", code=run.code, wait=_CLI_AUTH_RETRY_WAIT, cli=backend.key)
+	code = run.code
+	if run.failure is not None:
+		# The backend read a failure out of the reply itself, so the exit code is no guide. Only a
+		# rejection before any answer is a known outcome; a bad or partial reply may have been acted on.
+		kind = run.failure.kind
+		ai_transport.observe(
+			"known_response" if kind in AI_FATAL_KINDS or kind in _CLI_KNOWN_RESPONSE_KINDS else "sent_unknown"
+		)
+		_log_cli_diagnostic(
+			"exec_failed", label=kind, code=code, version=_cli_version_cached(path), cli=backend.key,
+			detail=getattr(run.failure, "label", None), status=getattr(run.failure, "status", None),
+			terminal=getattr(run.failure, "terminal", None),
+		)
+		if kind == "auth":
+			_LOGIN_CACHE.pop(path, None)
+		raise run.failure
 	if code < 0 or code >= 128:
-		# Killed by a signal (OOM, SIGSEGV) after the prompt was sent: an uncertain outcome.
+		# Killed by a signal (OOM, SIGSEGV, SIGTERM) after the prompt was sent: an uncertain outcome.
 		ai_transport.observe("sent_unknown")
-		_log_cli_diagnostic("exec_failed", label="signal", code=code, version=_cli_version_cached(path))
-		raise AiFixError(_("Codex CLI was stopped before it finished (exit {0}). Try again.").format(code), kind="transport")
+		_log_cli_diagnostic("exec_failed", label="signal", code=code, version=_cli_version_cached(path), cli=backend.key)
+		raise AiFixError(_("{0} was stopped before it finished (exit {1}). Try again.").format(backend.display, code), kind="transport")
 	if code in (126, 127):
-		_log_cli_diagnostic("exec_failed", label="not_runnable", code=code, version=_cli_version_cached(path))
+		_log_cli_diagnostic("exec_failed", label="not_runnable", code=code, version=_cli_version_cached(path), cli=backend.key)
 		raise AiFixError(
-			_("Codex CLI could not be run (exit {0}). Check that the codex CLI and Node.js work for the bench user.").format(code),
+			_("{0} could not be run (exit {1}). Check that the {2} CLI and Node.js work for the bench user.").format(
+				backend.display, code, backend.binary
+			),
 			kind="transport",
 		)
 	if code != 0:
-		label = _classify_cli_stderr(err)
+		label = backend.classify(run.out, run.err)
 		# Only a rejection before any answer is a known outcome; anything else may have been
 		# acted on, so it is not repeated automatically.
-		ai_transport.observe("known_response" if label in _CLI_KNOWN_FAILURES else "sent_unknown")
-		_log_cli_diagnostic("exec_failed", label=label, code=code, version=_cli_version_cached(path))
-		if label in _CLI_AUTH_LABELS:
+		ai_transport.observe("known_response" if label in backend.known_failures else "sent_unknown")
+		_log_cli_diagnostic("exec_failed", label=label, code=code, version=_cli_version_cached(path), cli=backend.key)
+		if label in backend.auth_labels:
 			_LOGIN_CACHE.pop(path, None)
-		if label in _CLI_EXEC_ERRORS:
-			message, kind = _CLI_EXEC_ERRORS[label]
-			if label in _CLI_AUTH_LABELS:
-				message = _("Codex session expired after a retry.") if retried else _(message)
-				raise AiFixError(f"{message} {_sign_in_hint()}", kind=kind)
-			raise AiFixError(_(message), kind=kind)
-		raise AiFixError(_("Codex CLI could not produce a suggestion (exit {0}).").format(code))
+		raise _cli_exec_error(backend, label, code, retried=retried)
 	ai_transport.observe("known_response")
 	# A successful exec proves the session, and takes long enough for the memo to lapse.
 	_LOGIN_CACHE[path] = (time.monotonic(), True, "ok")
-	if not text:
-		raise AiFixError(_("Codex CLI returned an empty response."), kind="bad_response")
-	text = _scrub_secrets(text)
-	if truncated:
+	if not run.text:
+		raise AiFixError(_("{0} returned an empty response.").format(backend.display), kind="bad_response")
+	text = _scrub_secrets(run.text)
+	if run.truncated:
 		# Appended after the scrub: a PEM-open rule cannot swallow the marker.
 		text = text.rstrip() + "\n…(truncated)"
 		if meta_out is not None:
 			meta_out["finish_reason"] = "length"
 	return text
+
+
+# ---------------------------------------------------------------------------
+# Subscription CLI backends. ``ai_subscription_cli`` picks one. The class holds that CLI's data
+# (names, install shapes, copy) and the behaviour that really differs (login check, argv, reply
+# parsing, error classification). The generic shell (gate, sandbox, run, scrub, truncate, deadline,
+# bulk cap, auth retry) is ``_call_local_cli`` and does not change per CLI. Methods look the
+# module-level helpers up by name at call time, so they stay patchable.
+# ---------------------------------------------------------------------------
+
+class _CliBackend:
+	"""Base of one local subscription CLI. Subclasses set the data and override the callables."""
+
+	key: str  # "codex" / "claude": the Connect status `cli` field and the diagnostic prefix
+	display: str  # the `ai_subscription_cli` option, the provider name and the copy
+	vendor: str
+	binary: str  # the launcher name and the CLI path's required basename
+	base_url: str  # synthetic, only for the provider identity
+	model_identity: str  # synthetic, only for the provider identity (never passed as a model)
+	config_env: str  # the variable that points the CLI at its login directory
+	scratch_dir: str  # the empty stand-in for that directory outside the real-login runs
+	extra_env: dict[str, str] = {}  # the CLI's own switches, set on every child
+	tested_versions: tuple | None = None  # inclusive (low, high) version tuples, see ``_version_tested``
+	login_failures: dict[str, tuple[str, str]]
+	signed_out_reasons: tuple[str, ...]
+	reworded_status_reason: str | None = None  # the login-check reason a reworded status output lands in
+	reworded_status_text: str | None = None  # the hint for it, with `{0}` for the CLI version
+	exec_errors: dict[str, tuple[str, str]]
+	known_failures: frozenset[str]
+	auth_labels: frozenset[str]
+
+	def real_home(self) -> str:
+		raise NotImplementedError
+
+	def is_entrypoint(self, real: str) -> bool:
+		"""True when the symlink-resolved ``real`` has the shape of this CLI's install."""
+		raise NotImplementedError
+
+	def resolve(self, cfg) -> tuple[str | None, str]:
+		"""``(path, reason)`` as ``_cli_resolve`` documents."""
+		configured = (getattr(cfg, "ai_cli_path", "") or "").strip()
+		candidate = configured or shutil.which(self.binary)
+		if not candidate:
+			return None, "not_found"
+		if not os.path.isabs(candidate):
+			return None, "relative"
+		if os.path.basename(candidate) != self.binary:
+			return None, "name"
+		real = os.path.realpath(candidate)
+		if not self.is_entrypoint(real):
+			return None, "entrypoint"
+		if not _trusted_cli_file(real):
+			return None, "untrusted"
+		return real, "ok"
+
+	def entrypoint_message(self) -> str:
+		raise NotImplementedError
+
+	def sign_in_hint(self) -> str:
+		raise NotImplementedError
+
+	def terminal_login_text(self) -> str:
+		"""Clause finishing "make sure ... and that <this>" in the AI-not-ready message."""
+		raise NotImplementedError
+
+	def connected_message(self) -> str:
+		"""The Connect text, with ``{0}`` for the ` (version)` suffix."""
+		raise NotImplementedError
+
+	def login_check(self, cli_path: str, *, use_cache: bool = True) -> tuple[bool, str]:
+		raise NotImplementedError
+
+	def build_argv(self, cli_path: str, work: str, out_file: str, *, probe_seconds: float | None = None) -> list[str]:
+		raise NotImplementedError
+
+	def read_reply(self, out_file: str, stdout: str, code: int) -> tuple[str, bool]:
+		"""``(text, truncated)`` of a finished exec with exit ``code`` (0 to 125). May raise a
+		classified ``AiFixError`` whatever the exit code: a failure can be in the reply itself."""
+		raise NotImplementedError
+
+	def classify(self, stdout: str, stderr: str | None) -> str:
+		"""One fixed failure label (a key of ``exec_errors`` or ``other``) for a non-zero exit."""
+		raise NotImplementedError
+
+	def retry_applies(self, code: int, stdout: str, stderr: str | None) -> bool:
+		"""True when this exit is a lost token-refresh race that one retry can cure."""
+		return False
+
+	def untested_version_message(self) -> str:
+		"""The Connect text for a CLI outside ``tested_versions``."""
+		from frappe import _
+
+		low, high = (".".join(str(n) for n in v) for v in self.tested_versions)
+		return _("This {0} version is outside the range Optimus was tested with ({1} to {2}).").format(
+			self.binary, low, high
+		)
+
+
+class _CodexBackend(_CliBackend):
+	key = "codex"
+	display = "Codex CLI"
+	vendor = "Codex"
+	binary = "codex"
+	base_url = "cli://codex"
+	model_identity = "codex"
+	config_env = "CODEX_HOME"
+	scratch_dir = "codex"
+	tested_versions = _CLI_TESTED_VERSIONS
+	login_failures = _LOGIN_FAILURES
+	signed_out_reasons = ("signed_out", "not_chatgpt")
+	reworded_status_reason = "not_chatgpt"
+	reworded_status_text = "If you are signed in with ChatGPT, your codex CLI ({0}) may need updating."
+	exec_errors = _CLI_EXEC_ERRORS
+	known_failures = _CLI_KNOWN_FAILURES
+	auth_labels = _CLI_AUTH_LABELS
+
+	def real_home(self) -> str:
+		return _real_codex_home()
+
+	def is_entrypoint(self, real: str) -> bool:
+		return os.path.basename(real) in _CLI_ENTRYPOINT_NAMES
+
+	def entrypoint_message(self) -> str:
+		from frappe import _
+
+		return _("The Codex CLI path resolves to a file that is not `codex` or a Node entrypoint (`codex.js`).")
+
+	def sign_in_hint(self) -> str:
+		from frappe import _
+
+		return _(
+			"Optimus uses the Codex login you made in your own terminal. Sign in there with "
+			"`codex login` and choose Sign in with ChatGPT (an API-key login is refused). "
+			"Optimus reads the bench user's ~/.codex and ignores a custom Codex home set in your own terminal."
+		)
+
+	def terminal_login_text(self) -> str:
+		from frappe import _
+
+		return _("`codex login` was run in the bench user's own terminal")
+
+	def connected_message(self) -> str:
+		from frappe import _
+
+		return _("Connected. Codex CLI{0} is signed in with ChatGPT on this machine (the token is checked on first use).")
+
+	def login_check(self, cli_path, *, use_cache=True):
+		return _cli_login_ok(cli_path, use_cache=use_cache)
+
+	def build_argv(self, cli_path, work, out_file, *, probe_seconds=None):
+		return _build_cli_argv(cli_path, work, out_file, probe_seconds=probe_seconds)
+
+	def read_reply(self, out_file, stdout, code):
+		return _read_cli_reply(out_file, stdout) if code == 0 else ("", False)
+
+	def classify(self, stdout, stderr):
+		return _classify_cli_stderr(stderr)
+
+	def retry_applies(self, code, stdout, stderr):
+		return _auth_retry_applies(code, stderr)
+
+
+_CODEX = _CodexBackend()
+
+
+def _cli_backend_by_key(key: str) -> _CliBackend:
+	"""The backend whose ``key`` ("codex" / "claude") a provider config carries."""
+	from frappe import _
+
+	for backend in _CLI_BACKENDS.values():
+		if backend.key == key:
+			return backend
+	raise AiFixError(_("Unknown subscription CLI '{0}'.").format(key), kind="config")
+
+
+def _cli_backend(cfg) -> _CliBackend:
+	"""The backend the saved ``ai_subscription_cli`` picks. A never-saved field (absent from the
+	settings snapshot) and a blank one both mean Codex, on the live side and the snapshot side
+	alike, so an unsaved choice never reads as a configuration change."""
+	from frappe import _
+
+	choice = (getattr(cfg, "ai_subscription_cli", "Codex CLI") or "Codex CLI").strip()
+	backend = _CLI_BACKENDS.get(choice)
+	if backend is None:
+		raise AiFixError(
+			_("Unknown subscription CLI '{0}'. Pick Codex CLI or Claude CLI under Optimus Settings > AI Fix Suggestions.").format(choice),
+			kind="config",
+		)
+	return backend
+
+
+# ---- Claude CLI backend ------------------------------------------------------------------
+# `claude -p --output-format json` prints ONE result envelope on stdout and reports a failure
+# there too (``is_error``), often with exit 0, so the reply reader here classifies failures and
+# never falls back to raw stdout. Optimus reads only ``loggedIn`` / ``authMethod`` from
+# `claude auth status` and only ``result`` / ``is_error`` / ``api_error_status`` from a reply.
+
+_CLAUDE_ENTRYPOINT_NAMES = ("claude", "cli.js", "cli.cjs", "cli.mjs")
+# The npm package `@anthropic-ai/claude-code` installs `bin/claude.exe` (a native binary despite the name).
+_CLAUDE_NPM_BINARY = "claude.exe"
+_CLAUDE_NPM_PACKAGE_DIR = "claude-code"
+_CLAUDE_VERSION_FILE_RE = re.compile(r"\d+\.\d+\.\d+(?:[-+.][0-9A-Za-z.+\-]*)?")
+_CLAUDE_LOGIN_CACHE_SECONDS = 30
+# The claude versions this isolation was last checked against (major, minor, patch), inclusive.
+_CLAUDE_TESTED_VERSIONS = ((2, 1, 312), (2, 1, 316))
+_CLAUDE_SUBSCRIPTION_AUTH = "claude.ai"
+# A model alias or id, with the optional context suffix Claude accepts (`sonnet[1m]`).
+_CLAUDE_MODEL_RE = re.compile(r"[A-Za-z][A-Za-z0-9._\-]{0,63}(?:\[[A-Za-z0-9]{1,8}\])?")
+# What a failed result's text says when the plan or the account is out of room: the usage limits of a
+# subscription, extra usage, the credit balance, a spend cap and billing or a held account. Fatal (quota).
+_CLAUDE_USAGE_RE = re.compile(
+	r"usage limit|quota|(?:reached|hit) your .{0,40}limit|out of (?:extra )?usage|credit balance"
+	r"|spend limit|billing|account[ _]on[ _]hold",
+	re.IGNORECASE,
+)
+_CLAUDE_CONTEXT_RE = re.compile(
+	r"prompt is too long|prompt too long|context (?:window|length|limit)", re.IGNORECASE,
+)
+# The result envelope's `terminal_reason` values that are not a normal end, as ``_CLAUDE_EXEC_ERRORS``
+# labels. `completed` is the one normal end. `model_context_window_exceeded` is a cut-off reply, not
+# a failure, when no error is reported (see ``_ClaudeBackend.read_reply``).
+_CLAUDE_TERMINAL_LABELS = {
+	"prompt_too_long": "context",
+	"model_context_window_exceeded": "context",
+	"blocking_limit": "usage_limit",
+	"refusal": "refused",
+	"api_error": "server_error",
+	"model_error": "server_error",
+	"aborted_streaming": "incomplete",
+	"aborted_tools": "incomplete",
+	"hook_stopped": "incomplete",
+	"stop_hook_prevented": "incomplete",
+}
+
+_CLAUDE_LOGIN_FAILURES = {
+	"not_subscription": (
+		"Claude CLI is signed in with something other than a Claude subscription (for example an API key). "
+		"That is the API-key path: use Connection = API Key in Optimus Settings instead.",
+		"auth",
+	),
+	"signed_out": ("Claude CLI is not signed in with a Claude subscription.", "auth"),
+	"timeout": ("The Claude CLI session check timed out. Try again.", "timeout"),
+	"error": ("The Claude CLI session could not be checked. Try again.", "transport"),
+}
+
+# (message, error kind) per failure label. Only the kinds in ``AI_FATAL_KINDS`` stop a refresh.
+_CLAUDE_EXEC_ERRORS = {
+	"auth_expired": ("Claude session expired.", "auth"),
+	"usage_limit": ("Claude usage limit reached. Try again later.", "quota"),
+	"rate_limited": ("Claude is rate limiting requests. Wait a few minutes and try again.", "rate_limited"),
+	"context": ("This prompt did not fit Claude's context window.", "context"),
+	"refused": ("Claude declined to answer this prompt. Other prompts are still sent.", "refused"),
+	"incomplete": ("Claude stopped before it finished the reply. Try again.", "bad_response"),
+	"model_not_found": ("Claude does not know the model Optimus asked for. Check optimus_claude_cli_model.", "not_found"),
+	"invalid_request": ("Claude rejected the request.", "config"),
+	"unknown_flag": ("Claude rejected a command-line flag. Update the claude CLI.", "config"),
+	"server_error": ("Claude is overloaded or unavailable. Try again later.", "transport"),
+	"network": ("Claude could not reach the network.", "transport"),
+}
+# Stderr labels (a non-zero exit with no result envelope) where Claude rejected the call before any
+# answer was produced: the outcome is known. A failure read from the result envelope is judged by its kind.
+_CLAUDE_KNOWN_FAILURES = frozenset({"auth_expired", "usage_limit", "rate_limited", "unknown_flag"})
+
+
+def _parse_claude_json(text: str | None) -> dict | None:
+	"""The one JSON object `claude` printed, or None when ``text`` is anything else."""
+	try:
+		payload = json.loads((text or "").strip())
+	except (ValueError, RecursionError):
+		return None
+	return payload if isinstance(payload, dict) else None
+
+
+def _claude_login_state(stdout: str) -> tuple[bool, str] | None:
+	"""``(logged_in, auth_method)`` from `claude auth status` JSON, or None when it is not
+	readable. Nothing else is read: the account details the status also prints stay in the CLI."""
+	payload = _parse_claude_json(stdout)
+	if payload is None or not isinstance(payload.get("loggedIn"), bool):
+		return None
+	method = payload.get("authMethod")
+	return payload["loggedIn"], method if isinstance(method, str) else ""
+
+
+def _claude_login_ok(cli_path: str, *, use_cache: bool = True) -> tuple[bool, str]:
+	"""Read-only `claude auth status` check returning ``(ok, reason)`` with ``reason`` one of
+	``ok`` / ``not_subscription`` / ``signed_out`` / ``timeout`` / ``error``. It runs in the same
+	sandbox as the real call, against the operator's real ``~/.claude`` and only reads the status
+	(it never logs in). Connected means ``loggedIn`` with the ``claude.ai`` (subscription) auth
+	method; an API-key login is rejected. A success is memoized for 30 seconds per path; failures
+	never are. ``use_cache=False`` forces a fresh probe (the Connect button)."""
+	memo = _login_memo_hit(cli_path, use_cache, _CLAUDE_LOGIN_CACHE_SECONDS)
+	if memo:
+		return memo
+	if not os.path.isdir(_real_claude_dir()):
+		# First run, or ~/.claude is a file: nothing to sign in with.
+		_log_cli_diagnostic("signed_out", label="claude_dir_missing", cli="claude")
+		return False, "signed_out"
+	try:
+		with _cli_sandbox(real_login=True, backend=_CLAUDE) as (work, env):
+			code, out, _err = _run_cli([cli_path, "auth", "status"], env, work, _LOGIN_PROBE_SECONDS)
+	except subprocess.TimeoutExpired:
+		return False, "timeout"
+	except OSError as e:
+		_log_cli_diagnostic("login_probe_failed", label=f"errno_{e.errno}", cli="claude")
+		return False, "error"
+	if code < 0 or code in (2, 126, 127) or code >= 128:
+		# A signal kill, a shell 126/127 or a usage error from a claude too old for `auth status`:
+		# not a sign-out, so it must not stop the whole refresh.
+		return False, "error"
+	state = _claude_login_state(out)
+	if state is None:
+		_log_cli_diagnostic("login_probe_failed", label="unreadable", code=code, version=_cli_version_cached(cli_path), cli="claude")
+		return False, "error"
+	logged_in, method = state
+	if not logged_in:
+		_log_cli_diagnostic("signed_out", label="claude_dir_present", cli="claude")
+		return False, "signed_out"
+	if method != _CLAUDE_SUBSCRIPTION_AUTH:
+		_log_cli_diagnostic("login_not_subscription", version=_cli_version_cached(cli_path), cli="claude")
+		return False, "not_subscription"
+	_LOGIN_CACHE[cli_path] = (time.monotonic(), True, "ok")
+	return True, "ok"
+
+
+def _claude_model_alias() -> str | None:
+	"""The operator's ``optimus_claude_cli_model`` site-config alias (``sonnet``, ``opus``, a full
+	model id, any of them with a context suffix such as ``sonnet[1m]``), or None. By default
+	Claude's own default model is used. The identity placeholder ``claude`` is not a model and a
+	malformed value could pass as a flag, so both are dropped, with a ``model_alias_ignored``
+	diagnostic (never the value) so the operator can tell the setting did not apply. The site config
+	is read per call, so a change needs no restart beyond the usual config cache."""
+	try:
+		import frappe
+
+		raw = frappe.conf.get("optimus_claude_cli_model")
+	except Exception:
+		return None
+	if raw is None or (isinstance(raw, str) and not raw.strip()):
+		return None
+	value = raw.strip() if isinstance(raw, str) else ""
+	if not value:
+		_log_cli_diagnostic("model_alias_ignored", label="not_text", cli="claude")
+	elif value.lower() == "claude":
+		_log_cli_diagnostic("model_alias_ignored", label="placeholder", cli="claude")
+	elif not _CLAUDE_MODEL_RE.fullmatch(value):
+		_log_cli_diagnostic("model_alias_ignored", label="malformed", cli="claude")
+	else:
+		return value
+	return None
+
+
+def _claude_status(payload: dict) -> int | None:
+	"""The HTTP ``api_error_status`` of a result envelope when it is a plausible status, else None."""
+	status = payload.get("api_error_status")
+	if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599:
+		return status
+	return None
+
+
+def _claude_terminal(payload: dict) -> str | None:
+	"""The envelope's ``terminal_reason`` when it is text, else None."""
+	terminal = payload.get("terminal_reason")
+	return terminal if isinstance(terminal, str) else None
+
+
+def _claude_failure_label(payload: dict) -> str:
+	"""One fixed failure label for an ``is_error`` result envelope. The stable fields come first
+	(the HTTP ``api_error_status`` as an int, then ``terminal_reason``) and the CLI's own short error
+	line (``result``) is only matched, never kept, against the usage-limit and context texts and then
+	the allow-list ``_classify_cli_stderr`` uses. A 429 is a usage limit only when its text says so;
+	any other 429 is a per-minute ``rate_limited``. A 403 with such a text is the usage limit (billing),
+	any other 401 or 403 is an expired session. A 413 or a "prompt too long" is the per-prompt
+	``context`` kind, a plain 400 is ``invalid_request``."""
+	result = payload.get("result")
+	text = result if isinstance(result, str) else ""
+	usage = bool(_CLAUDE_USAGE_RE.search(text))
+	status = _claude_status(payload)
+	if status == 403 and usage:
+		return "usage_limit"
+	if status in (401, 403):
+		return "auth_expired"
+	if status == 404:
+		return "model_not_found"
+	if status == 413:
+		return "context"
+	if status in (400, 422, 429):
+		if usage:
+			return "usage_limit"
+		if status == 429:
+			return "rate_limited"
+		return "context" if _CLAUDE_CONTEXT_RE.search(text) else "invalid_request"
+	if status is not None and status >= 500:
+		return "server_error"
+	terminal = _claude_terminal(payload)
+	if terminal in _CLAUDE_TERMINAL_LABELS:
+		return _CLAUDE_TERMINAL_LABELS[terminal]
+	if usage:
+		return "usage_limit"
+	if _CLAUDE_CONTEXT_RE.search(text):
+		return "context"
+	return _classify_cli_stderr(text)
+
+
+def _claude_envelope_failed(payload: dict) -> bool:
+	"""True when the result envelope reports a failure (``is_error``, or an ``error_*`` subtype)."""
+	subtype = payload.get("subtype")
+	return bool(payload.get("is_error")) or (isinstance(subtype, str) and subtype.startswith("error"))
+
+
+_CLAUDE_CUT_OFF = frozenset({"max_tokens", "model_context_window_exceeded"})
+
+
+def _claude_cut_off(payload: dict) -> bool:
+	"""True when a successful reply stopped at the output limit or the context window."""
+	return payload.get("stop_reason") in _CLAUDE_CUT_OFF or _claude_terminal(payload) in _CLAUDE_CUT_OFF
+
+
+def _claude_unfinished_label(payload: dict) -> str | None:
+	"""For an envelope that does NOT report ``is_error``: the failure label when the reply is not a
+	complete answer, else None. A complete one has ``subtype`` ``success`` (or none) and
+	``terminal_reason`` ``completed`` (or none); a refusal, an aborted stream or tool run, a hook stop
+	and any other ending are not, whatever ``is_error`` says. A cut-off reply (the output limit or the
+	context window) is not a failure by itself, but only when nothing else is wrong: the terminal and
+	subtype gate comes first, so a cut-off that also aborted, was refused or was stopped by a hook fails."""
+	if payload.get("stop_reason") == "refusal":
+		return "refused"
+	terminal = payload.get("terminal_reason")
+	if terminal not in (None, "completed", "model_context_window_exceeded"):
+		return _CLAUDE_TERMINAL_LABELS.get(terminal, "incomplete") if isinstance(terminal, str) else "incomplete"
+	if payload.get("subtype") not in (None, "success"):
+		return "incomplete"
+	return None
+
+
+class _CliReplyFailure(AiFixError):
+	"""An ``AiFixError`` a backend's ``read_reply`` raised, with the facts for the diagnostic log: the
+	specific failure ``label`` (finer than ``kind``), the HTTP ``status`` and the ``terminal``
+	reason. All three are fixed or numeric, never text the CLI printed."""
+
+	def __init__(self, error: AiFixError, *, label: str, status: int | None = None, terminal: str | None = None):
+		super().__init__(str(error), kind=error.kind)
+		self.label, self.status, self.terminal = label, status, terminal
+
+
+def _claude_reply_failure(backend: _CliBackend, payload: dict, label: str, code: int) -> _CliReplyFailure:
+	"""The classified failure for a result envelope that ``label`` says is not an answer."""
+	return _CliReplyFailure(
+		_cli_exec_error(backend, label, code), label=label, status=_claude_status(payload),
+		terminal=_claude_terminal(payload),
+	)
+
+
+class _ClaudeBackend(_CliBackend):
+	key = "claude"
+	display = "Claude CLI"
+	vendor = "Claude"
+	binary = "claude"
+	base_url = "cli://claude"
+	model_identity = "claude"  # staleness identity only: `--model claude` is not a model
+	config_env = "CLAUDE_CONFIG_DIR"
+	scratch_dir = "claude"
+	# Documented Claude Code switches (settings reference): no telemetry, no background updater.
+	extra_env = {"DISABLE_TELEMETRY": "1", "DISABLE_AUTOUPDATER": "1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
+	tested_versions = _CLAUDE_TESTED_VERSIONS
+	login_failures = _CLAUDE_LOGIN_FAILURES
+	signed_out_reasons = ("signed_out", "not_subscription")
+	exec_errors = _CLAUDE_EXEC_ERRORS
+	known_failures = _CLAUDE_KNOWN_FAILURES
+	auth_labels = frozenset({"auth_expired"})
+
+	def real_home(self) -> str:
+		return _real_claude_dir()
+
+	def is_entrypoint(self, real: str) -> bool:
+		"""The npm entrypoint (`cli.js`, or `bin/claude.exe` inside `claude-code` for the current
+		package), a plain `claude` file, or the native install: a file named for its version inside
+		`claude/versions/`. A bare `claude.exe` elsewhere is not accepted."""
+		name = os.path.basename(real)
+		if name in _CLAUDE_ENTRYPOINT_NAMES:
+			return True
+		parent = os.path.dirname(real)
+		if name == _CLAUDE_NPM_BINARY:
+			return (
+				os.path.basename(parent) == "bin"
+				and os.path.basename(os.path.dirname(parent)) == _CLAUDE_NPM_PACKAGE_DIR
+			)
+		return (
+			bool(_CLAUDE_VERSION_FILE_RE.fullmatch(name))
+			and os.path.basename(parent) == "versions"
+			and os.path.basename(os.path.dirname(parent)) == "claude"
+		)
+
+	def entrypoint_message(self) -> str:
+		from frappe import _
+
+		return _(
+			"The Claude CLI path resolves to a file that is not the native install "
+			"(`claude/versions/<version>`) or the npm package (`claude-code/bin/claude.exe` or `cli.js`)."
+		)
+
+	def sign_in_hint(self) -> str:
+		from frappe import _
+
+		return _(
+			"Optimus uses the Claude login you made in your own terminal. Sign in there by running "
+			"`claude` and choosing a Claude subscription account (an API-key login is refused: use "
+			"Connection = API Key for that). Optimus reads the bench user's ~/.claude and ignores a "
+			"custom Claude config directory set in your own terminal."
+		)
+
+	def terminal_login_text(self) -> str:
+		from frappe import _
+
+		return _("`claude` was run and signed in to a Claude subscription in the bench user's own terminal")
+
+	def connected_message(self) -> str:
+		from frappe import _
+
+		return _(
+			"Connected. Claude CLI{0} is signed in with a Claude subscription on this machine "
+			"(the token is checked on first use)."
+		)
+
+	def login_check(self, cli_path, *, use_cache=True):
+		return _claude_login_ok(cli_path, use_cache=use_cache)
+
+	def build_argv(self, cli_path, work, out_file, *, probe_seconds=None):
+		"""No features probe: Claude has no `features list` and `--tools ""` removes every tool.
+		`--safe-mode` drops CLAUDE.md, skills, plugins, hooks and MCP, `--restricted` ignores the
+		user's settings files (so an apiKeyHelper or env block cannot swap the login). The prompt
+		is on stdin. Never `--bare` (it skips the subscription login), a bypass permission mode or
+		`--max-budget-usd` (API mode only)."""
+		argv = [
+			cli_path, "-p", "--output-format", "json", "--tools", "", "--strict-mcp-config", "--safe-mode",
+			"--restricted", "--no-session-persistence", "--permission-prompts", "none",
+		]
+		alias = _claude_model_alias()
+		return argv + ["--model", alias] if alias else argv
+
+	def read_reply(self, out_file, stdout, code):
+		"""``.result`` of the result envelope, capped after the parse. Fails closed: a reply that is
+		not exactly one JSON object, has no string ``.result``, reports ``is_error`` or did not end
+		normally (a ``subtype`` other than ``success``, a ``terminal_reason`` other than
+		``completed``, a refusal) is a classified error, never raw stdout and never a suggestion. A
+		reply that ran into the context window is returned as cut off. After a non-zero exit only an
+		envelope that reports a problem is classified here; anything else is left to ``classify``."""
+		from frappe import _
+
+		payload = _parse_claude_json(stdout)
+		if payload is not None:
+			label = _claude_failure_label(payload) if _claude_envelope_failed(payload) else _claude_unfinished_label(payload)
+			if label:
+				raise _claude_reply_failure(self, payload, label, code)
+		if code != 0:
+			return "", False
+		result = payload.get("result") if payload is not None else None
+		if not isinstance(result, str):
+			raise _CliReplyFailure(
+				AiFixError(_("Claude CLI returned a reply Optimus could not read."), kind="bad_response"),
+				label="unreadable_reply",
+			)
+		text = result.strip()
+		truncated = len(text) > _CLI_MAX_OUTPUT_CHARS or _claude_cut_off(payload)
+		return text[:_CLI_MAX_OUTPUT_CHARS], truncated
+
+	def classify(self, stdout, stderr):
+		# A failure in the result envelope was already raised by ``read_reply``: only stderr is left.
+		return _classify_cli_stderr(stderr)
+
+
+_CLAUDE = _ClaudeBackend()
+_CLI_BACKENDS: dict[str, _CliBackend] = {_CODEX.display: _CODEX, _CLAUDE.display: _CLAUDE}

@@ -236,10 +236,14 @@ def _ai_unavailable_message(section: str | None) -> str:
 		# The Connect button is hidden while AI is off, so "click Connect" would mislead.
 		return _("Enable AI fix suggestions under Optimus Settings ▸ AI.")
 	if ai_fix.subscription_mode_active():
+		backend = ai_fix.subscription_backend()
 		return _(
-			"Codex CLI isn't ready. Ask a System Manager to open Optimus Settings, click "
+			"{0} isn't ready. Ask a System Manager to open Optimus Settings, click "
 			"Connect, and make sure developer_mode and optimus_allow_subscription_cli are set "
-			"in the site config and that `codex login` was run in the bench user's own terminal."
+			"in the site config and that {1}."
+		).format(
+			backend.display if backend else _("The subscription CLI"),
+			backend.terminal_login_text() if backend else _("the CLI you picked was signed in to in the bench user's own terminal"),
 		)
 	return _(
 		"AI suggestions aren't configured. Turn them on under Optimus Settings ▸ AI and set a "
@@ -1532,10 +1536,10 @@ def test_ai_connection() -> dict:
 
 @frappe.whitelist(methods=["POST"])
 def check_cli_session() -> dict:
-	"""Read-only check that the local Codex CLI is installed and that the operator is signed in
-	to it in their own terminal (the real ``~/.codex`` login), for the Connect button in Optimus
-	Settings. Never logs in and keeps no token. System-Manager-only and limited
-	per user. Returns ``ai_fix._cli_session_status()`` and stores its message in the
+	"""Read-only check that the selected local CLI (Codex or Claude) is installed and that the
+	operator is signed in to it in their own terminal (the real ``~/.codex`` / ``~/.claude``
+	login), for the Connect button in Optimus Settings. Never logs in and keeps no token.
+	System-Manager-only and limited per user. Returns ``ai_fix._cli_session_status()`` and stores its message in the
 	read-only ``ai_subscription_status`` field (best effort)."""
 	_require_system_manager(_("Only a System Manager can check the CLI session."))
 	ratelimit.enforce_user_rate_limit("check_cli_session", **_AI_LIMITS["check_cli_session"])
