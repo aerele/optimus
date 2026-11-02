@@ -8,7 +8,7 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.129] - 2026-10-31
+## [0.12.131] - 2026-10-31
 
 ### Fixed
 
@@ -16,6 +16,26 @@ versions may contain breaking changes see migration notes below).
 - The slowest-queries table and the Slow Query card are no longer clipped when exported to PDF or printed; a long card may break across pages.
 - Statements larger than 200,000 characters are stored up to that size with a visible "query truncated at N of M characters" note, which the label also mentions, and the cut is logged. A quoted value left open by the cut is dropped.
 - The card's SQL is redacted after the index advice is built, one finding at a time; if redaction fails for a finding its SQL is left out rather than shown.
+
+---
+
+## [0.12.130] - 2026-10-31
+
+### Changed
+
+- The phone number in the report header is now plain text instead of a clickable `tel:` link. The website, email and social links are unchanged.
+
+## [0.12.129] - 2026-10-31
+
+### Changed
+
+- Removed the "Tables written to this session" line from the "Time spent per database table" section. The table itself, including its Reads and Writes columns, is unchanged.
+
+## [0.12.128] - 2026-10-31
+
+### Fixed
+
+- The "#" column of the Server Resource table now starts at 1 and shows the same number the Actions table gives that action. Before, it showed a 0-based index, so it started at 0 and did not line up with the Actions table. Actions with no resource snapshot are still left out, so the numbers can skip. Framework actions show as "fw 1", "fw 2" to match the collapsed framework table, and the framework table now prints the same "fw " prefix in its own "#" column. An action hidden by Min Action Duration shows "-" with a tooltip saying so, and when Min Action Duration hides every action no numbers are invented.
 
 ---
 

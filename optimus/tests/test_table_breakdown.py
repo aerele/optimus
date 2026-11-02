@@ -435,7 +435,7 @@ class TestRenderedSection:
 		assert ">docstatus</code>" in html
 		assert "every index added also slows those writes" in html
 
-	def test_render_shows_tables_written_to_line(self):
+	def test_tables_written_section_removed_but_table_unchanged(self):
 		from optimus import renderer
 		breakdown = [
 			{"table": "tabReadHeavy", "duration_ms": 500.0, "queries": 50, "read_count": 50,
@@ -446,16 +446,30 @@ class TestRenderedSection:
 			 "write_count": 1, "read_time_ms": 0.0, "write_time_ms": 1.0, "index_candidates": []},
 		]
 		html = renderer.render_raw(self._doc(breakdown), recordings=[])
-		assert "Tables written to this session" in html
-		assert ">tabSales Invoice</code>" in html and ">tabVersion</code>" in html
-		# the explanation that writes are cheap so they rank low by time
-		assert "Writes are usually cheap" in html
+		assert "Tables written to this session" not in html
+		assert "Writes are usually cheap" not in html
+		assert "tables written to</em>" not in html
+		assert "Time spent per database table" in html
+		assert "<th class=\"num\">Writes " in html
+		for table in ("tabReadHeavy", "tabSales Invoice", "tabVersion"):
+			assert table in html
 
 	def test_no_tables_written_line_when_nothing_written(self):
 		from optimus import renderer
 		breakdown = [{"table": "tabFoo", "duration_ms": 50.0, "queries": 2, "read_count": 2,
 		              "write_count": 0, "read_time_ms": 50.0, "write_time_ms": 0.0, "index_candidates": []}]
 		html = renderer.render_raw(self._doc(breakdown), recordings=[])
+		assert "Tables written to this session" not in html
+		assert "Time spent per database table" in html
+
+	def test_old_stored_rows_without_write_fields_render(self):
+		# Old stored rows may have no write_* keys.
+		from optimus import renderer
+		html = renderer.render_raw(
+			self._doc([{"table": "tabLegacy", "duration_ms": 5.0, "queries": 1, "index_candidates": []}]),
+			recordings=[],
+		)
+		assert "tabLegacy" in html
 		assert "Tables written to this session" not in html
 
 	def test_render_low_risk_note_when_no_writes(self):
