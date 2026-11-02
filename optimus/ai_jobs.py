@@ -1313,6 +1313,7 @@ def start_refresh(
 		return {"status": "already_running", "refresh": public_state(current, now=now)}
 	if not ai_fix.is_available():
 		return {"status": "refused", "reason": "disabled"}
+	cap = ai_fix.bulk_batch_cap(cap)
 	# Every setting is read before admission: a run admitted with an unusable slice
 	# length could never be dispatched and held its session until the queued lease expired.
 	max_seconds = _setting_int("optimus_ai_refresh_max_seconds", 3600, 60, 86400)

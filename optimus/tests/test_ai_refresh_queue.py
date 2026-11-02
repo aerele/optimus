@@ -1120,3 +1120,33 @@ def test_only_accepted_manual_runs_consume_refresh_quota(admitting):
 	assert set(db.rows[mod.RUN]) == {'one', 'two'}
 	db.rows[mod.RUN]['one']['creation'] -= timedelta(hours=2)
 	assert start('three')['status'] == 'queued'
+
+
+@pytest.mark.parametrize(
+	("subscription", "asked", "admitted"),
+	[
+		(True, 0, ai_fix.SUBSCRIPTION_BULK_MAX_FINDINGS),  # 0 means "all" over HTTP: bounded here
+		(True, 500, ai_fix.SUBSCRIPTION_BULK_MAX_FINDINGS),
+		(True, 3, 3),
+		(False, 0, 0),
+		(False, 500, 500),
+	],
+)
+def test_admission_bounds_a_bulk_run_on_the_subscription_only(queue, monkeypatch, subscription, asked, admitted):
+	queue.journal.db.rows[queue.journal.mod.RUN] = {}
+	monkeypatch.setattr(queue.jobs, "_workers_listening", lambda docname=None: True)
+	monkeypatch.setattr(queue.jobs, "_check_run", lambda run: None)
+	monkeypatch.setattr(ai_fix, "is_available", lambda: True)
+	monkeypatch.setattr(ai_fix, "subscription_mode_active", lambda: subscription)
+	seen = {}
+	real = queue.jobs.store.admit
+
+	def spy(**kw):
+		seen.update(kw)
+		return real(**kw)
+
+	monkeypatch.setattr(queue.jobs.store, "admit", spy)
+	queue.jobs.start_refresh(
+		docname="fake-session-doc", session_uuid="fake-session", requested_by="fake-owner", cap=asked
+	)
+	assert seen["cap"] == admitted

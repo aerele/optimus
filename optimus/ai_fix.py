@@ -27,13 +27,11 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
-import errno
 import ipaddress
 import json
 import os
 import random
 import re
-import shlex
 import shutil
 import signal
 import stat
@@ -544,6 +542,21 @@ def subscription_mode_active() -> bool:
 		return (getattr(get_config(), "ai_connection_type", "") or "").strip() == SUBSCRIPTION_CONNECTION
 	except Exception:
 		return False
+
+
+# A subscription run spends the operator's own plan usage, which they share with their terminal
+# CLI, so one bulk refresh is bounded. Generic: every subscription backend uses it. A plan usage
+# limit surfaces as the fatal ``quota`` kind, which stops the run cleanly before this is reached.
+SUBSCRIPTION_BULK_MAX_FINDINGS = 10
+
+
+def bulk_batch_cap(cap: int) -> int:
+	"""The findings one bulk refresh may ask about. ``cap`` is the configured cap (0 = all); in
+	subscription (local CLI) mode it is clamped to ``SUBSCRIPTION_BULK_MAX_FINDINGS`` and "all"
+	becomes that maximum. HTTP providers keep ``cap`` unchanged."""
+	if not subscription_mode_active():
+		return cap
+	return min(cap, SUBSCRIPTION_BULK_MAX_FINDINGS) if cap else SUBSCRIPTION_BULK_MAX_FINDINGS
 
 
 def is_available(section: str | None = None) -> bool:
@@ -3339,9 +3352,10 @@ _QUOTA_CODES = frozenset({
 
 
 # ---------------------------------------------------------------------------
-# Local CLI subscription layer (Codex CLI). Never logs in: it reuses the session the
-# operator created once with `CODEX_HOME=<site>/private/optimus-codex codex login`, in a
-# Codex home that only Optimus uses. The prompt travels on stdin, never on argv.
+# Local CLI subscription layer (Codex CLI). Never logs in and keeps no token of its own: it
+# points the CLI at the operator's real ``~/.codex`` (the login they made in their own terminal
+# with `codex login`) and the CLI uses and refreshes that sign-in itself. The prompt travels on
+# stdin, never on argv.
 # ---------------------------------------------------------------------------
 
 def _subscription_allowed() -> bool:
@@ -3506,7 +3520,7 @@ def _codex_features(cli_path: str, timeout: float | None = None) -> tuple[frozen
 	guard = _InterruptGuard(base=True)
 	try:
 		with guard:
-			with _cli_sandbox(with_auth=False) as (work, env):
+			with _cli_sandbox() as (work, env):
 				seconds = _FEATURES_PROBE_SECONDS if timeout is None else max(1, min(_FEATURES_PROBE_SECONDS, timeout))
 				code, out, _err = _run_cli([cli_path, "features", "list"], env, work, seconds)
 			if code == 0:
@@ -3538,6 +3552,14 @@ def _cli_disabled_features(cli_path: str, timeout: float | None = None) -> list[
 		| {name for name in on if _CLI_CAPABILITY_RE.search(name)})
 
 
+# ``--ignore-user-config`` skips only config.toml: the CLI still lists every skill under the
+# operator's ``~/.codex/skills`` in the model prompt (name and description, so private skill
+# text reaches the model and the shared report). This key drops that section. There is no
+# equivalent for the global ``~/.codex/AGENTS.md``: see SECURITY.md. A future codex that
+# renames the key would silently stop honouring it, which ``TestCodexPromptGuard`` catches.
+_CLI_PROMPT_OVERRIDES = ("-c", "skills.include_instructions=false")
+
+
 def _build_cli_argv(cli_path: str, scratch_dir: str, out_file: str, *, probe_seconds: float | None = None) -> list[str]:
 	"""Fixed argv for a read-only, ephemeral ``codex exec`` with every file, command,
 	agent, browser and web tool turned off (``_cli_disabled_features``; ``probe_seconds``
@@ -3546,16 +3568,19 @@ def _build_cli_argv(cli_path: str, scratch_dir: str, out_file: str, *, probe_sec
 	for feature in _cli_disabled_features(cli_path, probe_seconds):
 		argv += ["--disable", feature]
 	return argv + [
-		"-c", 'web_search="disabled"', "--sandbox", "read-only", "--skip-git-repo-check",
+		"-c", 'web_search="disabled"', *_CLI_PROMPT_OVERRIDES, "--sandbox", "read-only", "--skip-git-repo-check",
 		"--ignore-user-config", "--ignore-rules", "--ephemeral", "--color", "never",
 		"-C", scratch_dir, "-o", out_file, "-",
 	]
 
 
 # The child gets an ALLOWLISTED environment: nothing from the bench (DB / Redis
-# URLs, other providers' API keys, site secrets). HOME, CODEX_HOME and TMPDIR are
-# set to the private scratch directory by ``_cli_sandbox``. OPENAI_API_KEY /
-# CODEX_API_KEY are absent, which keeps the CLI on the ChatGPT subscription.
+# URLs, other providers' API keys, site secrets). HOME and TMPDIR are set to a private
+# scratch directory by ``_cli_sandbox``. CODEX_HOME is the operator's real ``~/.codex`` for
+# the ``login status`` check and the ``exec`` only, a scratch directory for every other probe
+# (HOME is deliberately NOT the real home, which would expose ~/.ssh, ~/.aws and ~/.config
+# through HOME or a relative path). OPENAI_API_KEY / CODEX_API_KEY are absent, which keeps
+# the CLI on the ChatGPT subscription.
 _CLI_ENV_ALLOWLIST = frozenset({"PATH", "LANG", "SHELL", "USER", "TERM"})
 _CLI_ENV_PREFIX_ALLOWLIST = ("LC_",)
 # Needed for codex to reach OpenAI over TLS / a corporate proxy.
@@ -3566,10 +3591,14 @@ _CLI_ENV_PASSTHROUGH = frozenset({
 })
 
 
-def _build_cli_env(environ=None, *, home: str | None = None, codex_home: str | None = None,
-	tmpdir: str | None = None) -> dict[str, str]:
-	"""The child environment: allowlisted keys from ``environ`` (default
-	``os.environ``) plus the given scratch ``HOME`` / ``CODEX_HOME`` / ``TMPDIR``. Pure."""
+def _build_cli_env(
+	environ=None, *, home: str | None = None, tmpdir: str | None = None, codex_home: str | None = None,
+) -> dict[str, str]:
+	"""The child environment: allowlisted keys from ``environ`` (default ``os.environ``), the
+	given scratch ``HOME`` / ``TMPDIR`` and the given ``CODEX_HOME``, whatever the inherited
+	environment said. Nothing in it is a credential: the CLI finds and refreshes its own
+	sign-in in the CODEX_HOME it is given. A pure function of its arguments, apart from the
+	``environ`` default."""
 	source = os.environ if environ is None else environ
 	env = {
 		k: v for k, v in source.items()
@@ -3577,46 +3606,25 @@ def _build_cli_env(environ=None, *, home: str | None = None, codex_home: str | N
 		or k in _CLI_ENV_PASSTHROUGH
 		or k.startswith(_CLI_ENV_PREFIX_ALLOWLIST)
 	}
-	for name, value in (("HOME", home), ("CODEX_HOME", codex_home), ("TMPDIR", tmpdir)):
+	for name, value in (("HOME", home), ("TMPDIR", tmpdir), ("CODEX_HOME", codex_home)):
 		if value:
 			env[name] = value
 	return env
 
 
-_CODEX_HOME_SUBDIR = "optimus-codex"
-
-
-def _codex_home_path() -> str:
-	"""The Optimus-owned Codex home: ``<site>/private/optimus-codex``. It is never the
-	operator's own ``~/.codex``."""
-	import frappe
-
-	# get_site_path is relative to the sites folder; the child runs in a scratch cwd.
-	return os.path.abspath(frappe.get_site_path("private", _CODEX_HOME_SUBDIR))
-
-
-def _codex_login_command() -> str:
-	"""The one-time sign-in command for the Optimus-owned Codex home."""
-	return f"CODEX_HOME={shlex.quote(_codex_home_path())} codex login"
-
-
-def _ensure_codex_home() -> str:
-	"""Create the Optimus-owned Codex home (mode 0700) when missing and return its path.
-	It must be a real directory owned by this user, never a link."""
+def _real_codex_home() -> str:
+	"""The operator's real ``~/.codex`` as an absolute path. With no HOME and no passwd entry
+	``expanduser`` leaves a relative ``~/.codex``, which the CLI would resolve against its own
+	scratch working directory and report as a missing login, so refuse it with a clear error."""
 	from frappe import _
 
-	path = _codex_home_path()
+	path = os.path.expanduser("~/.codex")
 	if not os.path.isabs(path):
 		raise AiFixError(
-			_("The Codex home must be an absolute path, but it is {0}. Check the bench sites folder and the site's private folder.").format(path),
+			_("The bench user has no home directory, so its Codex login cannot be located. "
+			"Set HOME for the bench worker, then try again."),
 			kind="config",
 		)
-	os.makedirs(path, mode=0o700, exist_ok=True)
-	st = os.lstat(path)
-	if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid():
-		raise NotADirectoryError(errno.ENOTDIR, "Codex home is not a directory owned by this user")
-	if stat.S_IMODE(st.st_mode) != 0o700:
-		os.chmod(path, 0o700)
 	return path
 
 
@@ -3668,20 +3676,22 @@ def _sweep_stale_sandboxes() -> None:
 
 
 @contextlib.contextmanager
-def _cli_sandbox(*, with_auth: bool = True):
+def _cli_sandbox(real_login: bool = False):
 	"""A private 0700 scratch tree for one CLI invocation, removed afterwards. It yields
-	``(work_dir, env)``: HOME and TMPDIR point inside the tree. With ``with_auth`` CODEX_HOME
-	is the Optimus-owned Codex home (``_ensure_codex_home``), where the CLI keeps and
-	refreshes its own sign-in; otherwise it is an empty directory in the tree. Nothing is
-	read from or written to the operator's own ``~/.codex``."""
+	``(work_dir, env)``: HOME and TMPDIR point inside the tree, so the agent never sees the
+	operator's real home. With ``real_login`` (only the ``login status`` check and the
+	``exec``) CODEX_HOME is the operator's real ``~/.codex``, where the CLI keeps and refreshes
+	its own sign-in; Optimus never creates, reads, copies or writes anything there. Every
+	other probe (``features list``, ``--version``) gets an empty scratch CODEX_HOME, so the
+	operator's config.toml cannot change what it reports and it writes nothing into the login."""
+	codex_home = _real_codex_home() if real_login else None
 	_sweep_stale_sandboxes()
 	root = tempfile.mkdtemp(prefix=_SANDBOX_PREFIX)
 	try:
-		dirs = {name: os.path.join(root, name) for name in ("home", "codex", "tmp", "work")}
+		dirs = {name: os.path.join(root, name) for name in ("home", "tmp", "work", "codex")}
 		for path in dirs.values():
 			os.mkdir(path, 0o700)
-		codex_home = _ensure_codex_home() if with_auth else dirs["codex"]
-		env = _build_cli_env(home=dirs["home"], codex_home=codex_home, tmpdir=dirs["tmp"])
+		env = _build_cli_env(home=dirs["home"], tmpdir=dirs["tmp"], codex_home=codex_home or dirs["codex"])
 		yield dirs["work"], env
 	finally:
 		shutil.rmtree(root, ignore_errors=True)
@@ -3770,7 +3780,8 @@ _LOGIN_CACHE: dict[str, tuple[float, bool, str]] = {}
 
 _NOT_LOGGED_IN_RE = re.compile(
 	r"not (logged|signed) ?in|no (stored )?(credentials|auth)|(log|sign) ?in required|please (log|sign) ?in"
-	r"|error checking login status",
+	r"|error checking login status"
+	r"|CODEX_HOME points to .* (does not exist|is not a directory)",
 	re.IGNORECASE,
 )
 
@@ -3778,7 +3789,8 @@ _NOT_LOGGED_IN_RE = re.compile(
 def _cli_login_ok(cli_path: str, *, use_cache: bool = True) -> tuple[bool, str]:
 	"""Read-only ``codex login status`` check returning ``(ok, reason)`` with
 	``reason`` one of ``ok`` / ``not_chatgpt`` / ``signed_out`` / ``timeout`` /
-	``error``. It runs in the same sandbox as the real call; the CLI prints the status
+	``error``. It runs in the same sandbox as the real call, against the operator's real
+	``~/.codex``, and only reads the status (it never logs in); the CLI prints the status
 	to stderr, so both streams are read. An API-key login is rejected because only the
 	subscription is wanted. A success is memoized for 5 minutes per path; failures never are.
 	``use_cache=False`` forces a fresh probe (the Connect button)."""
@@ -3787,8 +3799,12 @@ def _cli_login_ok(cli_path: str, *, use_cache: bool = True) -> tuple[bool, str]:
 		hit = _LOGIN_CACHE.get(cli_path)
 		if hit and now - hit[0] < _LOGIN_CACHE_SECONDS:
 			return hit[1], hit[2]
+	if not os.path.isdir(_real_codex_home()):
+		# First run, or ~/.codex is a file: the CLI would only say CODEX_HOME "does not exist".
+		_log_cli_diagnostic("signed_out", label="codex_dir_missing")
+		return False, "signed_out"
 	try:
-		with _cli_sandbox() as (work, env):
+		with _cli_sandbox(real_login=True) as (work, env):
 			code, out, err = _run_cli([cli_path, "login", "status"], env, work, _LOGIN_PROBE_SECONDS)
 	except subprocess.TimeoutExpired:
 		return False, "timeout"
@@ -3804,6 +3820,7 @@ def _cli_login_ok(cli_path: str, *, use_cache: bool = True) -> tuple[bool, str]:
 	if code != 0:
 		# Only output that says "not logged in" is a sign-out; any other failure is an error.
 		if _NOT_LOGGED_IN_RE.search(out + "\n" + err):
+			_log_cli_diagnostic("signed_out", label="codex_dir_present")
 			return False, "signed_out"
 		_log_cli_diagnostic("login_probe_failed", label="other", code=code, version=_cli_version_cached(cli_path))
 		return False, "error"
@@ -3819,7 +3836,7 @@ def _cli_version(cli_path: str, timeout: float = 10) -> str | None:
 	"""The ``--version`` line of the CLI, reduced to a safe character set and capped,
 	or None. Best-effort (never raises)."""
 	try:
-		with _cli_sandbox(with_auth=False) as (work, env):
+		with _cli_sandbox() as (work, env):
 			code, out, err = _run_cli([cli_path, "--version"], env, work, timeout)
 		if code == 0:
 			return re.sub(r"[^\w .+\-]", "", (out + err).strip())[:80] or None
@@ -3878,13 +3895,14 @@ _LOGIN_FAILURES = {
 
 
 def _sign_in_hint() -> str:
-	"""How to sign in: Optimus keeps its own Codex home, apart from the operator's ``~/.codex``."""
+	"""How to sign in: in the operator's own terminal. Optimus reuses that login and keeps none."""
 	from frappe import _
 
 	return _(
-		"Optimus uses its own Codex sign-in, separate from ~/.codex. Sign in once with "
-		"`{0}` and choose Sign in with ChatGPT (an API-key login is refused)."
-	).format(_codex_login_command())
+		"Optimus uses the Codex login you made in your own terminal. Sign in there with "
+		"`codex login` and choose Sign in with ChatGPT (an API-key login is refused). "
+		"Optimus reads the bench user's ~/.codex and ignores a custom Codex home set in your own terminal."
+	)
 
 
 def _login_failure_text(reason: str, cli_path: str | None = None) -> tuple[str, str]:
@@ -3920,8 +3938,9 @@ def _version_tested(version: str | None) -> bool | None:
 
 
 def _cli_session_status() -> dict:
-	"""Read-only status of the local Codex CLI for the Connect button. Never logs in
-	and never includes an account id or email."""
+	"""Read-only status of the local Codex CLI for the Connect button: ``codex login status``
+	against the operator's real ``~/.codex`` login. Never logs in, keeps no token, and never
+	includes an account id or email."""
 	from frappe import _
 
 	result = {"ok": False, "state": "error", "message": "", "cli": "codex", "version": None}
@@ -3946,7 +3965,11 @@ def _cli_session_status() -> dict:
 		return result
 	result["version"] = _cli_version_cached(path)
 	# A fresh probe: the button must reflect the session now, not minutes ago.
-	ok, reason = _cli_login_ok(path, use_cache=False)
+	try:
+		ok, reason = _cli_login_ok(path, use_cache=False)
+	except AiFixError as e:
+		result.update(state="error", message=str(e))
+		return result
 	if ok:
 		suffix = f" ({result['version']})" if result["version"] else ""
 		message = _("Connected. Codex CLI{0} is signed in with ChatGPT on this machine (the token is checked on first use).").format(suffix)
@@ -4149,7 +4172,7 @@ def _exec_cli_once(path: str, prompt: str, deadline: float, total_seconds: int):
 	from frappe import _
 
 	try:
-		with _cli_sandbox() as (work, env):
+		with _cli_sandbox(real_login=True) as (work, env):
 			out_file = os.path.join(work, "out.txt")
 			# The login check came out of the deadline; the features
 			# probe is capped by what is left, and then the exec gets what the probe left.

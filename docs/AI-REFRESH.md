@@ -289,7 +289,8 @@ and a line profiling index failure keeps `optimus ai line profiling context`.
 Normal Frappe migration installs the journal schema, line profiling queue fields and
 admission mutex. Fresh installation and every migration seed the same mutex. A post-model-sync
 patch gives previously saved Settings a manual refresh cap of 20 when the
-field was absent; an explicitly saved zero remains unlimited. Deploy code and
+field was absent; an explicitly saved zero remains unlimited (except in Subscription (local CLI)
+mode, where every cap is clamped to 10, see below). Deploy code and
 schema before routing traffic to new callers. Restart web, workers and the
 scheduler together through the normal deployment process.
 Do not route work to a worker running older code. A missing journal is an error,
@@ -334,7 +335,8 @@ queue. Disabling the scheduler or losing all workers delays recovery; it never
 enables synchronous AI or line profiling analysis in a web request.
 
 Optimus Settings exposes **Maximum findings per AI refresh** (20 by default; zero is
-unlimited within the job deadline) separately from **Max auto-suggested findings per session**.
+unlimited within the job deadline, except in Subscription (local CLI) mode, where it and every
+larger value become 10) separately from **Max auto-suggested findings per session**.
 Sensitivity profiles do not change the manual cap. **AI model context window (tokens)**
 exposes the existing context-fit limit; zero selects the provider/model default.
 Settings cache failures during the seed print a fixed recovery instruction to
@@ -343,6 +345,14 @@ Manual and analyze-time `fixes_missing` runs share the site-wide active-run cap.
 Manual runs additionally have a per-requester cap of two; automatic runs do not
 consume that manual allowance. Each run reserves its own session. The item cap applies even to Regenerate all, and across a resume
 chain; zero means unlimited within the run deadline and bounded history limit.
+
+In Subscription (local CLI) mode the run is spent on your own ChatGPT plan, so the shared
+admission step (`ai_fix.bulk_batch_cap`, used by the manual refresh, Regenerate all and the
+automatic run after analyze) clamps the cap to `SUBSCRIPTION_BULK_MAX_FINDINGS` (10): zero
+and any larger **Maximum findings per AI refresh** or **Max auto-suggested findings per session**
+value both become 10, and the refresh plan shows the clamped number. A run resumed from before
+the upgrade keeps the cap it was stored with; the usage-limit reply still stops it as a fatal
+`quota` error.
 
 Slices run on the `optimus_ai_queue` queue, `long` by default, which analysis
 shares. A run holds one worker until its slice yields; an in-flight call can
