@@ -40,7 +40,7 @@ APP_KEY_PREFIX = "optimus:"
 
 
 # ---------------------------------------------------------------------------
-# Phase-1 session lifecycle
+# Session lifecycle
 # ---------------------------------------------------------------------------
 
 
@@ -119,6 +119,11 @@ def resolved_doc(recording_uuid: str) -> str:
 	return f"profiler:resolved_doc:{recording_uuid}"
 
 
+def lock_events(recording_uuid: str) -> str:
+	"""Deadlock / lock-wait events of a recording (``list[dict]``). TTL: ``SESSION_TTL_SECONDS``."""
+	return f"profiler:lock_events:{recording_uuid}"
+
+
 # ---------------------------------------------------------------------------
 # Frontend metrics (v0.5.0+ split lists)
 # ---------------------------------------------------------------------------
@@ -148,7 +153,7 @@ def frontend_legacy(session_uuid: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Phase-2 line-profile run state
+# Line profiling run state
 # ---------------------------------------------------------------------------
 
 
@@ -176,7 +181,7 @@ def lp_source(run_uuid: str) -> str:
 
 def lp_samples(run_uuid: str) -> str:
 	"""List of per-line samples flushed from each request/job under the
-	active Phase-2 pass. Each entry is a dict
+	active line profiling pass. Each entry is a dict
 	(``lineno``, ``count``, ``wall_ms``, ``function``). No TTL cleaned
 	by ``cleanup_run``."""
 	return f"profiler:lp:{run_uuid}:samples"
@@ -285,6 +290,7 @@ KEY_PATTERNS: tuple[str, ...] = (
 	"profiler:sidecar:<recording_uuid>",
 	"profiler:infra:<recording_uuid>",
 	"profiler:resolved_doc:<recording_uuid>",
+	"profiler:lock_events:<recording_uuid>",
 	"profiler:frontend:<session_uuid>:xhr",
 	"profiler:frontend:<session_uuid>:vitals",
 	"profiler:frontend:<session_uuid>",

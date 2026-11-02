@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Phase-2 overhead budget: profiling must observe without spoiling the flow.
+"""Line profiling overhead budget: profiling must observe without spoiling the flow.
 
 A time-budget watchdog auto-disengages line tracing mid-request so a hot-loop
 function can't freeze the user's flow. These tests pin the watchdog wiring and

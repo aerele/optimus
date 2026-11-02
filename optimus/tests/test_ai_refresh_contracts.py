@@ -290,7 +290,7 @@ def test_a_failed_phase2_index_is_logged_once_per_slice_with_the_session(work, m
 	seen = _prepared_grounding(work, monkeypatch)
 
 	def fail(doc):
-		raise ValueError("fake corrupt phase 2 data")
+		raise ValueError("fake corrupt line profiling data")
 
 	monkeypatch.setattr(analyze.renderer, "_build_line_drilldown_callsite_index", fail)
 	monkeypatch.setattr(analyze, "phase2_index_for", _REAL_PHASE2_INDEX)
@@ -300,7 +300,7 @@ def test_a_failed_phase2_index_is_logged_once_per_slice_with_the_session(work, m
 	for _ in range(3):
 		work.jobs._next_item(work.journal.run, memo)
 	assert len(seen) == 3 and seen[0]["phase2_index"] == {}
-	assert [r[0] for r in rows] == ["optimus ai phase 2 context"]
+	assert [r[0] for r in rows] == ["optimus ai line profiling context"]
 	assert rows[0][1]["docname"] == "fake-session-doc"
 
 
@@ -340,7 +340,7 @@ def test_the_recordings_memo_keeps_only_recordings(work, monkeypatch):
 
 def test_an_unrelated_session_save_no_longer_discards_a_paid_fix_answer(work, monkeypatch):
 	"""A fix item is guarded by its fingerprint and the Finding lock, not by the session's
-	``modified``: a counter, a Desk edit or a Phase 2 save during the HTTP call keeps the answer."""
+	``modified``: a counter, a Desk edit or a line profiling save during the HTTP call keeps the answer."""
 	monkeypatch.setattr("frappe.utils.now_datetime", lambda: "fake-new-modified")
 	work.parent["modified"] = "t1"
 	item = work.jobs._next_item(work.journal.run, {})
@@ -551,7 +551,7 @@ def test_every_engine_row_names_its_session_and_run():
 	"""``docname`` and ``run_id`` on every row the engine writes (the settlement rows
 	and the sweep's pass them through one ``reference`` / the row's own keywords)."""
 	# Written before any run exists (so no run_id): they carry the session only.
-	# (``optimus ai phase 2 context`` is #72's shared title, written by analyze, so it is not
+	# (``optimus ai line profiling context`` is #72's shared title, written by analyze, so it is not
 	# scanned here and has the session but no run.)
 	before_a_run = {"optimus ai refresh worker availability", "optimus ai refresh selection"}
 	missing = []

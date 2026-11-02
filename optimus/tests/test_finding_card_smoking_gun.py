@@ -2,7 +2,7 @@
 # For license information, please see license.txt
 
 """Tests for the finding-card 'smoking gun' block: the prominent callsite +
-source snippet + Phase 2 hot-line callout above the technical_detail rows. Uses
+source snippet + line profiling hot-line callout above the technical_detail rows. Uses
 renderer.render_raw end-to-end so the macro is verified in its real context.
 """
 
@@ -202,8 +202,8 @@ class TestPhase2Crosslink:
 		)
 
 	def test_phase2_callout_renders_when_function_match(self):
-		"""When a finding's callsite function was instrumented in Phase 2,
-		the card shows 'Phase 2: hottest line N Mms / X hits'."""
+		"""When a finding's callsite function was instrumented in line profiling,
+		the card shows 'Line profiling: hottest line N Mms / X hits'."""
 		snippet = [{"lineno": 42, "content": "    do_thing()"}]
 		finding = _finding_child(
 			filename="/different/path/myapp/x.py",  # different prefix, same basename
@@ -231,10 +231,10 @@ class TestPhase2Crosslink:
 		assert "50 hit" in html
 
 	def test_no_callout_when_function_not_in_phase2(self):
-		"""A finding whose function is not in any Phase 2 run gets no
-		callout (would be misleading). The Phase 2 panel itself still
+		"""A finding whose function is not in any line profiling run gets no
+		callout (would be misleading). The line profiling panel itself still
 		renders, so we check for the distinctive callout phrase
-		'hottest line' rather than just 'Phase 2:'."""
+		'hottest line' rather than just 'Line profiling:'."""
 		snippet = [{"lineno": 42, "content": "    do_thing()"}]
 		finding = _finding_child(function="my_func", source_snippet=snippet)
 		phase2 = self._phase2_run(
@@ -260,16 +260,16 @@ class TestPhase2Crosslink:
 		html = renderer.render_raw(doc, recordings=[])
 
 		assert "hottest line" not in html
-		# Also: with no phase-2 runs, the panel itself shouldn't render.
-		assert "Phase 2: Line-Level Drilldown" not in html
+		# Also: with no line profiling runs, the panel itself shouldn't render.
+		assert "Line profiling: Line-Level Drilldown" not in html
 
 	def test_retarget_phase1_callsite_to_drilldown_leaf(self, tmp_path):
 		"""A Slow Hot Path finding whose drill-down chain walks from
 		``looped_validate`` down to ``_check_user_exists`` (via ``_run_validations``)
 		re-anchors the smoking-gun snippet on the call site of ``_check_user_exists``
 		inside ``_run_validations`` (``    _check_user_exists(doc)``), not the leaf's
-		own ``def``. The wrapper is kept as a breadcrumb caption; Phase-2's hot
-		internal line (20) still surfaces in the separate Phase 2 callout."""
+		own ``def``. The wrapper is kept as a breadcrumb caption; line profiling's hot
+		internal line (20) still surfaces in the separate line profiling callout."""
 		src = tmp_path / "common.py"
 		src.write_text(
 			"line1\n"
@@ -314,7 +314,7 @@ class TestPhase2Crosslink:
 				"is_hook": False,
 			}),
 		)
-		# Phase-2 captures the leaf's actual hot line at 20.
+		# Line profiling captures the leaf's actual hot line at 20.
 		phase2 = SimpleNamespace(
 			run_uuid="r1",
 			status="Ready",
@@ -405,8 +405,8 @@ class TestPhase2Crosslink:
 		# The breadcrumb caption mentions the wrapper.
 		assert "Time entered through" in html
 		assert "looped_validate" in html
-		# Phase 2 callout STILL renders (snippet anchors on call line 13,
-		# Phase 2 surfaces the actually-hot internal line 20).
+		# Line profiling callout STILL renders (snippet anchors on call line 13,
+		# Line profiling surfaces the actually-hot internal line 20).
 		assert "hottest line 20" in html
 		# The drill-down narrative heading uses the WRAPPER's name (the
 		# chain's root), not the retargeted callsite function.
@@ -697,13 +697,13 @@ class TestHotLineLegacyShape:
 		assert ">7<" in html
 
 	def test_phase2_callout_suppressed_for_hot_line(self):
-		"""Hot Line findings are themselves the phase-2 hot line. The
-		'Phase 2: hottest line N' callout would be self-referential, so
+		"""Hot Line findings are themselves the line profiling hot line. The
+		'Line profiling: hottest line N' callout would be self-referential, so
 		it must be suppressed for finding_type == 'Hot Line'."""
 		finding = _hot_line_finding(
 			"/abs/myapp/x.py", 7, "    do_thing()",
 		)
-		# Stage a phase-2 run where the same function would otherwise
+		# Stage a line profiling run where the same function would otherwise
 		# match the smoking-gun lookup.
 		phase2 = SimpleNamespace(
 			run_uuid="r1",
@@ -729,11 +729,11 @@ class TestHotLineLegacyShape:
 
 		html = renderer.render_raw(doc, recordings=[])
 
-		# The callout's distinctive HTML `<strong …>Phase 2:</strong>`:
+		# The callout's distinctive HTML `<strong …>line profiling:</strong>`:
 		# must NOT appear (the title text "single hottest line" is part
 		# of the Hot Line finding's own title, so we can't filter on
 		# that phrase alone).
-		assert "Phase 2:</strong>" not in html
+		assert "Line profiling:</strong>" not in html
 
 
 class TestLazySnippetRead:
@@ -830,7 +830,7 @@ def _function_not_invoked(dotted_path):
 	return SimpleNamespace(
 		finding_type="Function Not Invoked",
 		severity="Low",
-		title=f"{dotted_path} was picked but never invoked during phase 2",
+		title=f"{dotted_path} was picked but never invoked during line profiling",
 		customer_description=f"The function **{dotted_path}** was instrumented but never ran.",
 		estimated_impact_ms=0.0,
 		affected_count=0,
@@ -875,7 +875,7 @@ class TestRenderTimeCallsiteResolution:
 		assert 'class="smoking"' not in html
 
 	def test_function_not_invoked_is_filtered_out(self):
-		# v0.7.x: "X was picked but never invoked during phase 2" is
+		# v0.7.x: "X was picked but never invoked during line profiling" is
 		# non-actionable noise render() drops these findings entirely (the
 		# Line-Level Drilldown notes uninvoked picks in one concise line).
 		doc = _fake_doc([_function_not_invoked("optimus.renderer.render")])
@@ -925,7 +925,7 @@ class TestRenderTimeCallsiteResolution:
 
 class TestDocEventHookInsideSmokingGun:
 	"""The target-document + doc-event-hook breadcrumb is rendered inside the
-	smoking-gun box (alongside the Phase 2 + Drill-down callouts), not in a
+	smoking-gun box (alongside the line profiling + Drill-down callouts), not in a
 	separate finding-detail box below, keeping all context cues in one block."""
 
 	def test_hook_line_lives_inside_smoking_gun(self):
@@ -1188,7 +1188,7 @@ class TestDrilldownPlaceholder:
 def test_phase2_callout_renders_for_empty_drilldown_self_time_finding():
 	"""User's exact case: a Slow Hot Path finding with NO deeper user-code
 	frame (empty drilldown_chain) e.g. bg_recheck_users plus a completed
-	phase-2 run on that function. The card MUST show the Line-Level callout."""
+	line profiling run on that function. The card MUST show the Line-Level callout."""
 	import json as _json
 	from types import SimpleNamespace as _NS
 

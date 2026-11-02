@@ -51,6 +51,12 @@ DEFAULT_SENSITIVE_SQL_COLUMNS: tuple[str, ...] = (
 	"credit", "card", "bank",
 )
 
+# Secret names whose compound columns (reset_password_key, api_secret) are secrets too.
+_COMPOUND_SQL_COLUMNS = frozenset({
+	"password", "pwd", "api_key", "apikey", "token", "secret",
+	"encryption_key", "private_key", "session_id", "access_key",
+})
+
 
 def is_sensitive_key(key, *, extra: tuple[str, ...] = ()) -> bool:
 	"""Return True when ``key`` looks like a sensitive identifier.
@@ -119,8 +125,13 @@ def _sql_literal_regex(columns: tuple[str, ...]) -> re.Pattern:
 	# parenthesised IN-list, then a BARE token (unquoted number/hex/identifier)
 	# the last catches ``WHERE password = 123`` / ``= 0xDEAD`` / ``= admin`` which
 	# the quoted-only pattern leaked verbatim.
+	# A secret name also matches as one underscore-separated part of a column, as in reset_password_key.
+	compound = [c for c in columns if c in _COMPOUND_SQL_COLUMNS]
+	exact = [c for c in columns if c not in _COMPOUND_SQL_COLUMNS]
+	names = [r"(?:[A-Za-z0-9]+_)*(?:" + "|".join(re.escape(c) for c in compound) + r")(?:_[A-Za-z0-9]+)*"] if compound else []
+	names += [re.escape(c) for c in exact]
 	return re.compile(
-		r"""(\b(?:""" + "|".join(re.escape(c) for c in columns)
+		r"""(\b(?:""" + "|".join(names)
 		+ r""")\b[`"]?\s*(?:=|LIKE|IN)\s*)("(?:[^"\\]|\\.|"")*"|'(?:[^'\\]|\\.|'')*'|\([^)]*\)|[\w.+-]+)""",
 		re.IGNORECASE,
 	)
@@ -200,6 +211,20 @@ def redact_call_queries(calls, *, extra_columns: tuple[str, ...] = ()) -> None:
 
 SECRET_PLACEHOLDER = "********"
 
+# The schemes an Authorization value can start with. The authorization rules
+# that mask a schemeless token skip a value that is only a scheme (see
+# ``_SCHEME_ONLY``).
+_AUTH_SCHEMES = ("bearer", "basic", "token", "key", "apikey")
+# Lookahead for those rules: a scheme followed by white space (its token is
+# the business of the scheme rules), or a scheme, or the start of one, that
+# ends the text (a field cut inside the word, as a title is cut to its
+# column, which no token follows).
+_SCHEME_ONLY = (
+	"(?:(?:" + "|".join(_AUTH_SCHEMES) + r")\s|(?:"
+	+ "|".join(sorted({w[:n] for w in _AUTH_SCHEMES for n in range(1, len(w) + 1)}, key=len, reverse=True))
+	+ r")\Z)"
+)
+
 _SECRET_PATTERNS: tuple[re.Pattern, ...] = (
 	# 'authorization': 'Bearer <tok>' (either quote style; also Basic, Token,
 	# Key, ApiKey; the value may be bytes: b'Bearer <tok>'). A frame-local
@@ -255,12 +280,17 @@ _SECRET_PATTERNS: tuple[re.Pattern, ...] = (
 	# Explicit Authorization containers also hold schemeless/rotated tokens.
 	# Exclude known schemes here: their rules above preserve the scheme and
 	# truncated placeholders, and repeated scrubbing must remain idempotent.
+	# A scheme word followed by a token, or a scheme word (or the start of
+	# one) alone at the end of the text, is one too: a field cut inside
+	# "Bearer" (a title cut to its column) leaves the scheme with no token,
+	# and masking that bare word would lengthen the text and change it on
+	# every pass.
 	re.compile(
-		r"""((['"])(?:proxy-)?authorization\2\s*:\s*b?(['"]))(?!\*|(?:bearer|basic|token|key|apikey)\s)[^'"\r\n]+(\3|(?=\r?$))""",
+		rf"""((['"])(?:proxy-)?authorization\2\s*:\s*b?(['"]))(?!\*|{_SCHEME_ONLY})[^'"\r\n]+(\3|(?=\r?$))""",
 		re.IGNORECASE | re.MULTILINE,
 	),
 	re.compile(
-		r"""(\b(?:proxy-)?authorization:[ \t]*)(?![ \t]|\*|(?:bearer|basic|token|key|apikey)\s)[^'"\r\n]+()()()""",
+		rf"""(\b(?:proxy-)?authorization:[ \t]*)(?![ \t]|\*|{_SCHEME_ONLY})[^'"\r\n]+()()()""",
 		re.IGNORECASE,
 	),
 )

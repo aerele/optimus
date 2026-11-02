@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for renderer._render_phase2_panel, exercising the phase-2 HTML without
+"""Tests for renderer._render_phase2_panel, exercising the line profiling HTML without
 Frappe / Jinja by feeding a minimal session-doc-shaped object to the helper."""
 
 import json
@@ -65,7 +65,7 @@ class TestRenderPhase2PanelSingleRun:
 		html = renderer._render_phase2_panel(session)
 
 		assert "my_app.x.compute" in html
-		# v0.7.x Phase I.2: heading dropped the "Phase 2" prefix
+		# v0.7.x Phase I.2: heading dropped the "Line profiling" prefix
 		# now reads just "Line-Level Drilldown" (the section's own
 		# content makes the line-level drilldown nature self-evident
 		# without the internal-phase jargon).
@@ -213,7 +213,7 @@ class TestRenderPhase2PanelAutoExpandChain:
 
 class TestRenderPhase2PanelSelfContainment:
 	def test_no_external_urls_in_output(self):
-		# Critical: safe-report self-containment invariant. The phase-2
+		# Critical: safe-report self-containment invariant. The line profiling
 		# panel must not introduce any http:// / https:// references or
 		# external <script>/<link> elements that would make the safe
 		# report fetch resources at view time.
@@ -224,7 +224,7 @@ class TestRenderPhase2PanelSelfContainment:
 
 		# No protocol-prefixed URLs (excluding xmlns-style namespaces, none
 		# of which we use in this panel).
-		assert not re.search(r"https?://", html), "phase-2 panel must not introduce external URLs"
+		assert not re.search(r"https?://", html), "line profiling panel must not introduce external URLs"
 		# No <script src=...> or <link href=...> with external URLs
 		assert "<script src=" not in html
 		assert "<link " not in html
@@ -262,7 +262,7 @@ class TestRenderPhase2PanelPosition:
 		assert phase2_idx > 0, "id=\"phase2\" wrapper missing from rendered HTML"
 		assert findings_h2 > 0, "Findings <h2> missing from rendered HTML"
 		assert phase2_idx < findings_h2, (
-			"Phase 2 panel must render before the Findings <h2> it is the "
+			"Line profiling panel must render before the Findings <h2> it is the "
 			"showcase section, hoisted above the actionable list"
 		)
 
@@ -278,7 +278,7 @@ class TestRenderPhase2PanelPosition:
 	def test_phase2_omitted_when_no_runs(self):
 		html = renderer.render_raw(self._session_doc(with_phase2=False), recordings=[])
 		# Conditional both ways: no panel + no jump link when the session
-		# had no phase-2 runs.
+		# had no line profiling runs.
 		assert 'id="phase2"' not in html
 		assert 'id="line-drilldown"' not in html
 		assert 'href="#line-drilldown"' not in html

@@ -2249,6 +2249,12 @@ def test_phase2_ambiguous_commit_replay_does_not_append_twice(sql):
 	assert not ai_jobs._transaction(lambda: phase2._complete(run, now=103, persist=persist))
 	assert not ai_jobs._transaction(lambda: phase2._fail(run, now=103, reason="failed"))
 	assert sql.primary.get_value("Optimus Session", "parent-a", "ai_refresh_count") == 1
+	# Results are saved but the run stays Analyzing until the report is attached.
+	assert sql.primary.get_value(phase2.TABLE, "fake-child", "status") == "Analyzing"
+	assert sql.primary.get_value(phase2.TABLE, "fake-child", "analyze_render_pending") == 1
+	assert phase2._completed(run)
+	assert ai_jobs._transaction(lambda: phase2._finish(run, render_failed=False))
+	assert not ai_jobs._transaction(lambda: phase2._finish(run, render_failed=False))
 	assert sql.primary.get_value(phase2.TABLE, "fake-child", "status") == "Ready"
 
 
@@ -2274,7 +2280,7 @@ def test_phase2_result_commit_readback_uses_durable_generation(sql, monkeypatch,
 	writes = []
 	def lose_ack():
 		nonlocal lost
-		if not lost and sql.primary.get_value(phase2.TABLE, "fake-child", "status") == "Ready":
+		if not lost and sql.primary.get_value(phase2.TABLE, "fake-child", "analyze_render_pending") == 1:
 			lost = True
 			if committed:
 				commit()
@@ -2290,7 +2296,8 @@ def test_phase2_result_commit_readback_uses_durable_generation(sql, monkeypatch,
 		with pytest.raises(ConnectionError):
 			phase2._save_results(run, persist)
 	assert lost and writes == [True]
-	assert sql.primary.get_value(phase2.TABLE, "fake-child", "status") == ("Ready" if committed else "Analyzing")
+	assert sql.primary.get_value(phase2.TABLE, "fake-child", "status") == "Analyzing"
+	assert sql.primary.get_value(phase2.TABLE, "fake-child", "analyze_render_pending") == (1 if committed else 0)
 	assert (value(sql, "answer", "row-00", "body") == "durable phase2 answer") is committed
 
 

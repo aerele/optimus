@@ -11,20 +11,22 @@ def test_widget_deduplicates_room_delivery_and_follows_only_its_actor():
 	if not shutil.which("node"):
 		pytest.skip("node not installed")
 	source = Path(__file__).resolve().parents[1] / "public/js/floating_widget.js"
+	pill = Path(__file__).resolve().parents[1] / "public/js/optimus_pill_state.js"
 	script = r'''
 const vm=require('node:vm'),fs=require('node:fs'),assert=require('node:assert/strict');
 function widget(user) {
  const handlers={},alerts=[],displays=[];
  const ctx={window:{},document:{readyState:'loading',addEventListener:()=>{}},
   setTimeout:()=>{},clearInterval:()=>{},displays,
-  __:text=>text,frappe:{session:{user},set_route:()=>{},realtime:{on:(name,fn)=>handlers[name]=fn},
+  __:text=>text,frappe:{session:{user},set_route:()=>{},realtime:{socket:{},on:(name,fn)=>handlers[name]=fn},
    show_alert:a=>alerts.push(a)}};
  vm.createContext(ctx);
  let code=fs.readFileSync(process.argv[1],'utf8');
  code=code.replace(/\}\)\(\);\s*$/,`setDisplay=(...args)=>displays.push(args);
- globalThis.widgetTest={subscribeRealtime,onClick,state:currentState};})();`);
+ globalThis.widgetTest={subscribeRealtime,onClick,get state(){return currentState}};})();`);
+ vm.runInContext(fs.readFileSync(process.argv[2],'utf8'),ctx);
  vm.runInContext(code,ctx);ctx.widgetTest.subscribeRealtime();
- return {state:ctx.widgetTest.state,click:ctx.widgetTest.onClick,handlers,alerts,displays};
+ return {get state(){return ctx.widgetTest.state},click:ctx.widgetTest.onClick,handlers,alerts,displays};
 }
 const owner=widget('owner'),reader=widget('reader'),actor=widget('actor');
 const ready={session_uuid:'session',docname:'doc',recording_user:'owner',event_id:'ready'};
@@ -61,16 +63,17 @@ actor.handlers.phase_2_run_ready({...phase2,event_id:'phase2-ready',parent:'doc'
 actor.handlers.phase_2_run_ready({...phase2,event_id:'phase2-ready',parent:'doc'});
 assert.equal(actor.alerts.length,1);assert.equal(actor.state.phase2,false);
 // Distinct events remain live while the duplicate cache stays bounded.
+const shown=owner.displays.length;
 for(let i=0;i<200;i++)owner.handlers.optimus_session_ready({...ready,event_id:'next-'+i});
-assert.equal(owner.alerts.length,201);
+assert.equal(owner.displays.length,shown+200);
 owner.handlers.optimus_session_ready(ready);
-assert.equal(owner.alerts.length,202,'old IDs must be evicted from the bounded cache');
+assert.equal(owner.displays.length,shown+201,'old IDs must be evicted from the bounded cache');
 owner.click();assert.equal(owner.state.display,'inactive');
 owner.handlers.optimus_session_analyzing({...ready,session_uuid:'next-session',event_id:'next-session'});
 assert.equal(owner.state.display,'analyzing','after opening a report, a new own session must still update');
 assert.equal(owner.state.session_uuid,'next-session');
 '''
-	result = subprocess.run(["node", "-e", script, str(source)], capture_output=True, text=True)
+	result = subprocess.run(["node", "-e", script, str(source), str(pill)], capture_output=True, text=True)
 	assert result.returncode == 0, result.stderr
 
 

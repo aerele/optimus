@@ -2,8 +2,8 @@
 # For license information, please see license.txt
 
 """The finding-card "Line-Level Drilldown" callout links a finding to its
-phase-2 hot line via (file-basename, function-name). The index is keyed on the
-phase-2 result's ``qualname`` while the lookup uses the callsite ``function``,
+line profiling hot line via (file-basename, function-name). The index is keyed on the
+line profiling result's ``qualname`` while the lookup uses the callsite ``function``,
 and the two can disagree on the module/class prefix (``common.bg_recheck_users``
 vs bare ``bg_recheck_users``). These tests pin that matching stays robust to the
 prefix on both sides.
@@ -87,3 +87,19 @@ class TestDiffDeltaCellStyling:
 		assert "1.60s" in html
 		assert 'class="time-high">1.60s' not in html
 		assert 'class="removed"' in html
+
+
+class TestPanelStatusForRunsStillAnalyzing:
+	def _panel(self, results_json):
+		from optimus.renderer.line_drilldown import _render_line_drilldown_panel
+
+		run = SimpleNamespace(run_uuid="r1", status="Analyzing", started_at="2026-10-28 10:00:00",
+			ended_at=None, total_ms=5.0, picks_json="[]", results_json=results_json)
+		return _render_line_drilldown_panel(SimpleNamespace(phase_2_runs=[run]))
+
+	def test_saved_results_render_as_ready(self):
+		html = self._panel("[]")
+		assert "status-Ready" in html and "status-Analyzing" not in html
+
+	def test_unsaved_run_keeps_its_stored_status(self):
+		assert "status-Analyzing" in self._panel(None)

@@ -15,7 +15,7 @@ def publish_session_event(event: str, payload: dict) -> None:
 
 	Explicit rooms avoid Frappe's ambient task_id routing. Document subscriptions
 	check read permission in Frappe, preserving updates for shared open forms.
-	Phase 2 callers supply their authorized capture/analysis actor in ``user``;
+	Line profiling callers supply their authorized capture/analysis actor in ``user``;
 	that actor also receives updates in their other Desk tabs.
 	"""
 	docname = payload.get("docname") or payload.get("parent")

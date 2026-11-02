@@ -1,4 +1,4 @@
-"""Short SQL transactions shared by AI, Phase 2 and report replacement.
+"""Short SQL transactions shared by AI, line profiling and report replacement.
 
 Callers supply commit/rollback and framework exception types. This module owns
 conflict classification and fresh interrupt propagation; it never sends HTTP,

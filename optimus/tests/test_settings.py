@@ -210,6 +210,11 @@ class TestIgnoredApps:
 			"helpdesk", "hrms", "insights", "lms", "payments", "wiki",
 		)
 
+	def test_emptied_table_ignores_no_app(self, monkeypatch):
+		monkeypatch.setattr(settings, "_read_doctype_row", lambda: {"ignored_apps": ()})
+		monkeypatch.setattr(settings, "_site_conf_fallback", lambda k: None)
+		assert settings._resolve().ignored_apps == ()
+
 	def test_get_ignored_apps_returns_empty_on_error(self, monkeypatch):
 		def _boom():
 			raise RuntimeError("no config")

@@ -241,6 +241,26 @@ class TestMaskedRecord:
 		once = maintenance._masked_record(record, key)
 		assert maintenance._masked_record(once, key) == once
 
+	@pytest.mark.parametrize("cut_title", [
+		# a title whose column cut lands right after the scheme
+		json.dumps({"error": '\nheaders = {"x-api-key": "00000000"}\n0000000000000\n'
+			"headers = {'content-type': 'application/json', 'authorization': 'Bearer 00000000'}\n"}),
+		# a title whose column cut lands inside the scheme word
+		"\nheaders = {'content-type': 'application/json', 'authorization': 'Bearer 00000000'}\n\n"
+		'headers = {"x-api-key": "00000000"}\n\nAuthorization: Bearer 00000000 rejected\n',
+	])
+	def test_a_title_cut_inside_a_scheme_is_masked_once(self, cut_title):
+		# The masked title is cut to its column; the cut leaves "Bearer" (or
+		# "Bea") with no token. A second pass must not mask that bare word
+		# as a schemeless token: it would lengthen the title past its column,
+		# move it into the error again and change the record.
+		key = "00000000"
+		record = {"error": "", "method": cut_title, "metadata": "", "seen": 0, "reference_doctype": None}
+		once = maintenance._masked_record(record, key)
+		assert once["method"].endswith(("authorization': 'Bearer", "Authorization: Bea"))
+		assert not any(_survives(key, once[field]) for field in ("error", "method"))
+		assert maintenance._masked_record(once, key) == once
+
 	@_SETTINGS
 	@given(_error_log_records())
 	def test_the_title_fits_its_column_and_a_long_one_leads_the_error(self, case):

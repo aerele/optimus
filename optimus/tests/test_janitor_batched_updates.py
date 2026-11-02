@@ -5,7 +5,7 @@
 
 The lifecycle sweeps call ``frappe.db.set_value`` ONCE with a ``{"name": ("in",
 [...])}`` filter; ``_sweep_old_sessions`` preloads every File-doc name in a
-single ``frappe.get_all``. Phase 2 additionally checks current ownership under row locks. ``frappe`` is stubbed via
+single ``frappe.get_all``. Line profiling additionally checks current ownership under row locks. ``frappe`` is stubbed via
 ``monkeypatch.setitem(sys.modules, ...)`` so these run pure (no bench / no
 MariaDB) and the real module is restored at teardown.
 """
@@ -88,7 +88,7 @@ def _install_frappe_stub(monkeypatch):
 	import optimus as _optimus_pkg
 	monkeypatch.setattr(_optimus_pkg, "session", session_mod, raising=False)
 
-	# Phase-2 capture stub.
+	# Line profiling capture stub.
 	lp_capture = types.ModuleType("optimus.line_profile.capture")
 	lp_capture.cleanup_run = lambda run_uuid: None
 	monkeypatch.setitem(sys.modules, "optimus.line_profile.capture", lp_capture)
@@ -293,7 +293,7 @@ class TestSweepStaleStopping:
 
 
 # --------------------------------------------------------------------------
-# Stale Phase-2 sweep one batched UPDATE per branch (Recording + Analyzing).
+# Stale line profiling sweep one batched UPDATE per branch (Recording + Analyzing).
 # --------------------------------------------------------------------------
 
 class TestSweepStalePhase2Runs:

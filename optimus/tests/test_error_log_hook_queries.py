@@ -88,7 +88,7 @@ class TestSessionQueryTotals:
 			title = "t"
 
 			def __setattr__(self, name, value):
-				if name == "top_severity":
+				if name == "summary_html":
 					raise _Stop  # everything the test needs is set by now
 				object.__setattr__(self, name, value)
 

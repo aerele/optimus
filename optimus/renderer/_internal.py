@@ -12,6 +12,7 @@ renderer is unit-testable without a running site.
 
 import functools
 import json
+import logging
 import os
 import re
 from typing import Any
@@ -92,6 +93,35 @@ def _redact_call_queries(calls) -> None:
 	``optimus.redaction.redact_call_queries`` with the live extra columns."""
 	_, extra_cols = _settings_extras()
 	_redact_call_queries_base(calls, extra_columns=extra_cols)
+
+
+# Slow Query SQL longer than this many characters renders in a collapsed <details>.
+SQL_COLLAPSE_CHARS = 2000
+
+
+def redact_finding_sql(findings) -> None:
+	"""Redact the full SQL a Slow Query card shows, one finding at a time.
+
+	Fails closed: a finding whose SQL cannot be redacted (a regex error or a
+	non-string value) loses its SQL block instead of showing it raw.
+	"""
+	for finding in findings:
+		detail = finding.get("technical_detail")
+		if finding.get("finding_type") != "Slow Query" or not isinstance(detail, dict):
+			continue
+		if not detail.get("normalized_query"):
+			continue
+		try:
+			_, extra_cols = _settings_extras()
+			sql = detail["normalized_query"]
+			if not isinstance(sql, str):
+				raise TypeError(f"query is {type(sql).__name__}, not str")
+			detail["normalized_query"] = _redact_sql_literals_base(sql, extra_columns=extra_cols, strict=True)
+		except Exception as error:
+			logging.getLogger(__name__).warning(
+				"Slow Query SQL dropped from the report, redaction failed: %s", type(error).__name__
+			)
+			detail.pop("normalized_query", None)
 
 
 # v0.10.0+: source-file I/O + the bounded LRU cache moved to
@@ -303,6 +333,13 @@ def _sanitize_report_html(value):
 	return sanitize_html(str(soup), always_sanitize=True)
 
 
+def _has_renderable_callsite(f: dict) -> bool:
+	"""True when the finding has a callsite file; the report drops the rest."""
+	detail = f.get("technical_detail") or {}
+	callsite = detail.get("callsite") or {}
+	return bool((callsite.get("filename") or "").strip())
+
+
 @render_validation_budget()
 def render(
 	session_doc: Any,
@@ -412,13 +449,8 @@ def render(
 	# survive. The filter is global these findings also disappear
 	# from the Executive Summary, severity counts and observations
 	# so there's no phantom-row inconsistency between sections.
-	def _has_renderable_callsite(f):
-		detail = f.get("technical_detail") or {}
-		callsite = detail.get("callsite") or {}
-		return bool((callsite.get("filename") or "").strip())
-
 	all_findings = [f for f in all_findings if _has_renderable_callsite(f)]
-	# v0.7.x: "X was picked but never invoked during phase 2" is non-actionable
+	# v0.7.x: "X was picked but never invoked during line profiling" is non-actionable
 	# noise it just means the replay didn't exercise that pick. The Line-Level
 	# Drilldown already notes uninvoked picks in one concise line. Drop these
 	# globally at render so existing reports declutter on regenerate too (the
@@ -643,6 +675,7 @@ def render(
 		parser=make_query_parser(), errors=_recipe_errors,
 	)
 	mark_outdated_ai_fixes(all_findings, refresh_check=make_refresh_check())
+	redact_finding_sql(all_findings)
 
 	# v0.6.x: drop framework/internal db tables from the "Time spent per
 	# database table" section schema/meta (DocType/DocField/…), user-
@@ -925,11 +958,7 @@ def render(
 	# (shape: ``"<short_path>::<func>"`` from _redacted_module_key), which
 	# `build_hot_frames_table` strips on the way to `display_name`. So split
 	# the raw rows first, then build each table separately.
-	_hf_raw_custom, _hf_raw_framework = _split_by_framework_app(
-		_hot_frames_raw,
-		lambda r: (r.get("function") or "").split("::", 1)[0],
-		tracked_apps,
-	)
+	_hf_raw_custom, _hf_raw_framework = _split_hot_frames(_hot_frames_raw, tracked_apps)
 	hot_frames_rows = build_hot_frames_table(_hf_raw_custom, is_hot=True)
 	hot_frames_rows_framework = build_hot_frames_table(_hf_raw_framework, is_hot=False)
 
@@ -1086,6 +1115,8 @@ def render(
 		# from Optimus Settings. Above the threshold → "5.23s"; below → "ms"
 		# (with caller-chosen decimals to preserve %.1f / %.2f precision).
 		"fmt_ms": _fmt_ms,
+		# Slow Query SQL longer than this renders collapsed.
+		"sql_collapse_chars": SQL_COLLAPSE_CHARS,
 		# Severity breakdown of ALL findings feeds the "Issues found" stat
 		# card's sub-line (which sums to the card's total).
 		"severity_counts": {
@@ -1201,7 +1232,7 @@ def render(
 
 
 def _e(text: object) -> str:
-	"""HTML-escape small alias to keep the phase-2 builder readable."""
+	"""HTML-escape small alias to keep the line profiling builder readable."""
 	import html as _html
 	return _html.escape("" if text is None else str(text))
 
@@ -1323,6 +1354,21 @@ def _tracked_row_get(row, key, default=None):
 	return getattr(row, key, default)
 
 
+def _triggered_by(tracked_row, action_by_uuid, recordings_by_uuid) -> dict | None:
+	"""The action that enqueued a job as ``{label}``, or None if unknown."""
+	parent = (_tracked_row_get(tracked_row, "parent_recording_uuid") or "").strip()
+	action = action_by_uuid.get(parent) if parent else None
+	if not action:
+		return None
+	if action.get("event_type") == "RQ Job":
+		rec = recordings_by_uuid.get(parent) if recordings_by_uuid else None
+		label = "job " + _clean_job_method(action.get("action_label"), action.get("path"), rec)
+	else:
+		label = action.get("action_label") or action.get("path") or ""
+	label = label.strip()
+	return {"label": label} if label else None
+
+
 def build_background_jobs(actions, recordings_by_uuid, findings=None, tracked_jobs=None) -> dict:
 	"""Build the "RQ Jobs" section payload from the action dicts, merged with
 	the persisted per-job terminal-status rows so failed / timed-out /
@@ -1353,6 +1399,7 @@ def build_background_jobs(actions, recordings_by_uuid, findings=None, tracked_jo
 		if ruuid:
 			tracked_by_uuid[ruuid] = row
 
+	action_by_uuid = {a.get("recording_uuid"): a for a in (actions or []) if a.get("recording_uuid")}
 	jobs: list[dict] = []
 	matched_uuids: set[str] = set()
 	for a in (actions or []):
@@ -1405,6 +1452,7 @@ def build_background_jobs(actions, recordings_by_uuid, findings=None, tracked_jo
 			"idx": idx,
 			"status": (_tracked_row_get(trow, "status") or "Completed") if trow else "Completed",
 			"error": _tracked_row_get(trow, "error") if trow else None,
+			"triggered_by": _triggered_by(trow, action_by_uuid, recordings_by_uuid),
 		})
 
 	# Append every tracked job that produced no captured action (failed, timed
@@ -1429,6 +1477,7 @@ def build_background_jobs(actions, recordings_by_uuid, findings=None, tracked_jo
 			"idx": None,
 			"status": _tracked_row_get(row, "status") or "Running",
 			"error": _tracked_row_get(row, "error"),
+			"triggered_by": _triggered_by(row, action_by_uuid, recordings_by_uuid),
 		})
 
 	jobs.sort(key=lambda j: -(j.get("duration_ms") or 0))
@@ -1497,6 +1546,7 @@ _CATEGORY_FOR_FINDING_TYPE: dict[str, str] = {
 	"Filesort": "filesort",
 	"Temporary Table": "temp_table",
 	"Low Filter Ratio": "low_filter",
+	"Lock Contention": "lock_contention",
 }
 
 # Ascending order for sorted() High first. NOT the same as the
@@ -1529,6 +1579,7 @@ _ACTION_VERB_FOR_FINDING_TYPE: dict[str, str] = {
 	"Low Filter Ratio": "Narrow the WHERE clause",
 	"Redundant Call": "Cache the repeated call",
 	"Repeated Hot Frame": "Investigate the recurring hot frame",
+	"Lock Contention": "Resolve the lock contention",
 }
 
 
@@ -1941,6 +1992,9 @@ def _compose_tldr(
 				"<span class=\"hot\">{impact}</span> in redundant work "
 				"{title}"
 			).format(impact=impact_html, title=title)
+	elif category == "lock_contention":
+		# No ms to reclaim, so no "0ms" badge.
+		headline = Markup("{title}").format(title=title)
 	else:
 		# Fallback verbatim title with the impact called out.
 		headline = Markup(
@@ -2176,6 +2230,25 @@ def _is_framework_app(filename_or_app, tracked_apps: tuple[str, ...] = ()) -> bo
 	return is_framework_callsite(val, tracked_apps=tracked_apps or None)
 
 
+def _split_hot_frames(rows, tracked_apps: tuple[str, ...] = ()):
+	"""Split hot-frame rows into ``(custom, framework)``; rows without ``is_framework`` use the key."""
+	custom, framework = [], []
+	legacy = []
+	for r in rows or []:
+		flag = r.get("is_framework") if isinstance(r, dict) else None
+		if flag is None:
+			legacy.append(r)
+		else:
+			(framework if flag else custom).append(r)
+	if legacy:
+		l_custom, l_framework = _split_by_framework_app(
+			legacy, lambda r: (r.get("function") or "").split("::", 1)[0], tracked_apps
+		)
+		custom += l_custom
+		framework += l_framework
+	return custom, framework
+
+
 def _split_by_framework_app(rows, app_key, tracked_apps: tuple[str, ...] = ()):
 	"""Split a list into ``(custom, framework)`` preserving order within each.
 	``app_key`` is a callable ``row → str | None`` that returns either a
@@ -2331,8 +2404,9 @@ _ACTIONABLE_FINDING_TYPES = frozenset({
 	# Frontend user can trim responses / optimize JS
 	"Slow Frontend Render",
 	"Heavy Response",
-	# v0.6.0 phase-2 line profiler
+	# v0.6.0 line profiler
 	"Hot Line",            # one source line concentrates the function's time
+	"Lock Contention",     # user callsites only
 })
 # Observation-only finding types (informational, no direct fix):
 #   Framework N+1 loop inside frappe/*

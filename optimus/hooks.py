@@ -54,8 +54,11 @@ def _asset_version(relative_path: str) -> str:
 _widget_js_v = _asset_version("js/floating_widget.js")
 _frontend_js_v = _asset_version("js/optimus_frontend.js")
 _widget_css_v = _asset_version("css/floating_widget.css")
+_pill_js_v = _asset_version("js/optimus_pill_state.js")
 
 app_include_js = [
+	# Pure pill state logic; must load before floating_widget.js.
+	f"/assets/optimus/js/optimus_pill_state.js?v={_pill_js_v}",
 	f"/assets/optimus/js/floating_widget.js?v={_widget_js_v}",
 	# v0.5.0: browser-side metrics shim (fetch/XHR wrap + Web Vitals).
 	# Loads after floating_widget.js so the widget is already in the DOM
@@ -82,7 +85,7 @@ after_migrate = ["optimus.install.after_migrate"]
 # corresponding client-side guard.
 boot_session = "optimus.boot.boot_session"
 
-# Request lifecycle (Phase 1)
+# Request lifecycle (normal profile)
 # ---------------------------
 # These hooks run AFTER frappe's own recorder hooks, so by the time
 # `before_request` runs, frappe.recorder.record() has already been called
@@ -100,7 +103,7 @@ after_request = [
 	"optimus.line_profile.hooks.after_request_line_profile",
 ]
 
-# Background job lifecycle (Phase 2)
+# Background job lifecycle (line profiling)
 # ----------------------------------
 # These mirror the request hooks. The frappe.enqueue monkey-patch in
 # optimus/__init__.py injects `_profiler_session_id` into job
@@ -119,6 +122,9 @@ after_job = [
 	"optimus.hooks_callbacks.after_job",
 	"optimus.line_profile.hooks.after_job_line_profile",
 ]
+
+# Keep live sessions and recordings when a save calls frappe.clear_cache().
+persistent_cache_keys = ["profiler:*"]
 
 # Janitor (Phase 6)
 # -----------------

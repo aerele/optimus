@@ -295,6 +295,7 @@ def test_persist_recordings_file_builds_parseable_bundle(monkeypatch):
 		f"profiler:tree:{rec_uuid}": tree_blob,
 		f"profiler:sidecar:{rec_uuid}": [{"fn_name": "get_list"}],
 		f"profiler:infra:{rec_uuid}": {"cpu": 1.5},
+		f"profiler:lock_events:{rec_uuid}": [{"kind": "deadlock"}],
 	}
 	monkeypatch.setattr(frappe, "cache", FakeCache(store), raising=False)
 	monkeypatch.setattr(frappe, "log_error", lambda **kw: None, raising=False)
@@ -329,11 +330,13 @@ def test_persist_recordings_file_builds_parseable_bundle(monkeypatch):
 	assert "sidecar" not in entry
 	assert entry["infra"] == {"cpu": 1.5}
 	assert "tree_b64" not in entry
+	assert entry["rec"]["lock_events"] == [{"kind": "deadlock"}]
 
 	# Round-trip: the persisted bundle rebuilds the recording with Redis empty.
 	monkeypatch.setattr(frappe, "cache", FakeCache({}), raising=False)
 	monkeypatch.setattr(analyze, "_load_recordings_bundle", lambda doc: bundle)
 	results = analyze.load_recordings_light(SimpleNamespace(name="fake-doc", session_uuid="fake-session", recordings_file="fake-file"), [rec_uuid])
+	assert results[0]["lock_events"] == [{"kind": "deadlock"}]
 	assert "pyi_session" not in results[0] and "sidecar" not in results[0]
 
 

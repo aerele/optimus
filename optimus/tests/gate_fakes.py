@@ -162,7 +162,7 @@ def make_fake_frappe(
 	"""A ``frappe`` stand-in for optimus.api and optimus.ratelimit.
 
 	sessions: session_uuid -> row (keys name, owner, user, status, title).
-	runs: run_uuid -> Phase 2 Run row (keys name, parent, status).
+	runs: run_uuid -> line profiling run row (keys name, parent, status).
 	perms: (ptype, docname, user) -> bool. A missing key is False: deny by default.
 	has_permission: optional ``(doctype, ptype, doc, user) -> bool`` replacing the keyed lookup
 	(use it to make the permission engine raise).
@@ -175,7 +175,7 @@ def make_fake_frappe(
 	by_docname = {row["name"]: row for row in by_uuid.values()}
 	run_rows = {u: dict(row, run_uuid=u) for u, row in (runs or {}).items()}
 	spies = SimpleNamespace(
-		set_value=[], sql=[], enqueue=[], get_doc=[], throws=[], has_permission=[],
+		set_value=[], set_single_value=[], sql=[], enqueue=[], get_doc=[], throws=[], has_permission=[],
 		publish_realtime=[], log_error=[], rollback=[],
 	)
 
@@ -201,6 +201,9 @@ def make_fake_frappe(
 
 	def set_value(*args, **kwargs):
 		spies.set_value.append((args, kwargs))
+
+	def set_single_value(*args, **kwargs):
+		spies.set_single_value.append((args, kwargs))
 
 	def sql(*args, **kwargs):
 		spies.sql.append((args, kwargs))
@@ -236,7 +239,7 @@ def make_fake_frappe(
 		session=SimpleNamespace(user=user),
 		get_roles=lambda *a, **k: list(roles),
 		db=SimpleNamespace(
-			get_value=get_value, set_value=set_value, sql=sql, commit=lambda: None, rollback=rollback,
+			get_value=get_value, set_value=set_value, set_single_value=set_single_value, sql=sql, commit=lambda: None, rollback=rollback,
 		),
 		has_permission=_has_permission,
 		throw=throw,

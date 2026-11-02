@@ -531,6 +531,15 @@ def apply_finding_recipes(
 			if note:
 				detail["fix_hint"] = note
 				f["llm_fix"] = None
+		elif ftype == "Slow Background Job":
+			note = best_effort(
+				lambda: ai_grounding.slow_job_gate(f, tracked_apps=scope, installed_apps=installed_apps),
+				ai_grounding.JOB_GATE_CHECK_FAILED_NOTE,
+				on_error=lambda kind: log_error_line(f"optimus: slow-job gate failed: {kind}"),
+			)
+			if note:
+				detail["fix_hint"] = note
+				f["llm_fix"] = None
 	return stats
 
 

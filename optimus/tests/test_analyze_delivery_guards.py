@@ -106,6 +106,59 @@ def test_genuine_empty_capture_still_finalizes(delivery):
 	assert ("_finalize_with_empty_session",) in state.events
 
 
+def test_empty_capture_publishes_ready_event_flagged_empty(delivery, monkeypatch):
+	state = delivery
+	state.requested, state.recordings = [], []
+	published = []
+	monkeypatch.setattr(analyze, "_publish_session_event", lambda *a, **kw: published.append((a, kw)))
+	analyze.run("s")
+	assert published[-1] == (
+		("optimus_session_ready",), {"session_uuid": "s", "docname": "doc", "empty": True}
+	)
+
+
+def test_empty_capture_renders_report_before_ready(delivery):
+	state = delivery
+	state.requested, state.recordings = [], []
+	analyze.run("s")
+	order = [e[0] if e[0] != "write" else e[2] for e in state.events if e[0] in {
+		"_finalize_with_empty_session", "_render_and_attach_reports", "write"}]
+	assert order.index("_finalize_with_empty_session") < order.index("_render_and_attach_reports") < order.index("Ready")
+	assert state.status == "Ready"
+
+
+def test_empty_capture_publishes_ready_event(delivery, monkeypatch):
+	state = delivery
+	state.requested, state.recordings = [], []
+	sent = []
+	monkeypatch.setattr(analyze, "_publish_session_event", lambda name, **kw: sent.append(name))
+	analyze.run("s")
+	assert sent.count("optimus_session_ready") == 1
+
+
+def test_empty_capture_render_failure_marks_failed_never_ready(delivery, monkeypatch):
+	state = delivery
+	state.requested, state.recordings = [], []
+	def broken(*a, **kw):
+		raise RuntimeError("render failed")
+	monkeypatch.setattr(analyze, "_render_and_attach_reports", broken)
+	with pytest.raises(RuntimeError, match="render failed"):
+		analyze.run("s")
+	assert state.status == "Failed"
+	assert ("write", "status", "Ready") not in state.events
+
+
+def test_empty_summary_save_does_not_set_ready(monkeypatch):
+	saved = []
+	doc = SimpleNamespace(status="Analyzing")
+	monkeypatch.setattr(analyze.frappe, "get_doc", lambda *a: doc, raising=False)
+	import optimus.managed as managed
+	monkeypatch.setattr(managed, "save_session", lambda d: saved.append(d.status))
+	monkeypatch.setattr(analyze, "safe_commit", lambda: None)
+	analyze._finalize_with_empty_session("OS-1")
+	assert saved == ["Analyzing"] and doc.total_queries == 0
+
+
 def test_ready_commit_failure_retains_input(delivery):
 	state = delivery
 	state.fail_ready_commit = True

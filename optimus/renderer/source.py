@@ -3,7 +3,7 @@
 
 """On-disk source-file access plus a bounded LRU cache for the renderer.
 
-Finding-card snippets, AI-fix source windows and Phase-2 drilldowns all read
+Finding-card snippets, AI-fix source windows and line profiling drilldowns all read
 source lines through here. Three responsibilities:
 
   * Path resolution (:func:`_resolve_source_path`): turn analyzer-recorded

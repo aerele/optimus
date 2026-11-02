@@ -94,11 +94,11 @@ def _render_and_save(docname, recordings, *, run_id, worker_token, required_stat
 		for previous in pending:
 			store.update_run(previous, render_pending=0)
 		phase2_pending = frappe.db.get_values(
-			"Optimus Phase Two Run", {"parent": docname, "analyze_render_pending": 1},
+			"Optimus Phase Two Run", {"parent": docname, "analyze_render_pending": 1, "status": "Ready"},
 			["name"], as_dict=True, for_update=True, limit=10001,
 		)
 		if len(phase2_pending) > 10000:
-			raise store.JournalUnavailable("Phase 2 report history exceeds the recovery limit")
+			raise store.JournalUnavailable("Line profiling report history exceeds the recovery limit")
 		for previous in phase2_pending:
 			frappe.db.set_value("Optimus Phase Two Run", previous["name"],
 				{"analyze_render_pending": 0}, update_modified=False)

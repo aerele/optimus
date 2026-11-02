@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Phase-2 picker: turn phase-1 results into a candidate function list and
+"""Line profiling picker: turn phase-1 results into a candidate function list and
 resolve free-form dotted paths typed by the customer.
 
 Two responsibilities:

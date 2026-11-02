@@ -67,7 +67,7 @@ class TestRetryPhase2BatchEndpoint:
 		assert "try:" in body and "except Exception as exc:" in body
 		# And the failed row is recorded with its error message.
 		assert "\"error\": str(exc)" not in body
-		assert "Phase 2 retry could not be confirmed" in body
+		assert "Line profiling retry could not be confirmed" in body
 
 	def test_returns_aggregate_tallies(self):
 		body = _fn_body("retry_phase2_analyzes_batch")

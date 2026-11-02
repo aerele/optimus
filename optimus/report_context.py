@@ -21,6 +21,7 @@ from optimus.analyzers.base import (
 	DEFAULT_DISPLAY_THRESHOLD_MS,
 	_rolls_over_to_seconds,
 	humanize_duration_ms,
+	phase2_run_display_status,
 )
 
 # A whole captured flow slower than this reads as "danger" on the Total-time
@@ -369,8 +370,9 @@ def _build_line_drilldown_runs(session_doc, threshold_ms: float = DEFAULT_DISPLA
 	result = []
 	number = 0
 	for run in runs:
-		status = getattr(run, "status", "") or ""
-		if status != "Ready":
+		# Same display rule as the renderer panel.
+		display_status = phase2_run_display_status(run)
+		if display_status != "Ready":
 			continue
 		number += 1
 		total_ms = getattr(run, "total_ms", 0) or 0
@@ -425,7 +427,7 @@ def _build_line_drilldown_runs(session_doc, threshold_ms: float = DEFAULT_DISPLA
 
 		result.append({
 			"number": number,
-			"status": status,
+			"status": display_status,
 			"total_ms_display": _ms_display(total_ms, decimals=2, threshold_ms=threshold_ms),
 			"timestamp": str(getattr(run, "started_at", "") or ""),
 			"picks": [p.get("dotted_path", "") for p in picks_list],
@@ -457,7 +459,8 @@ def _build_action_plan(action_plan, fmt_ms=None) -> list[dict]:
 			# when the template renders it. f-string would coerce Markup to
 			# plain str and lose the safe-flag.
 			"savings_display": Markup("−") + fmt(gain_ms) if gain_ms else "",
-			"savings_label": step.get("gain_label", "") or "",
+			# No label without a figure (0-impact findings such as Lock Contention).
+			"savings_label": (step.get("gain_label", "") or "") if gain_ms else "",
 			"callsite": step.get("callsite") or "",
 		})
 	return result
@@ -631,8 +634,32 @@ def _build_doc_events(doc_event_breakdown, fmt_ms=None) -> list[dict]:
 	return result
 
 
-def _build_resource(infra_summary, infra_timeline) -> dict | None:
-	"""Contract ``resource`` = {cards: list of 4 KPI cards}.
+def _resource_row_numbers(actions, actions_framework) -> dict:
+	"""Map each action ``idx`` to its Actions-table number ("fw <n>" for the framework table)."""
+	numbers: dict = {}
+	for prefix, group in (("", actions), ("fw ", actions_framework)):
+		for position, action in enumerate(group or [], start=1):
+			idx = (action or {}).get("idx")
+			if isinstance(idx, int) and idx not in numbers:
+				numbers[idx] = f"{prefix}{position}"
+	return numbers
+
+
+def _resource_row_number(action_idx, numbers: dict, idx_fallback: bool = False) -> str:
+	"""The "#" shown for a Server Resource row, matching the Actions table.
+
+	``idx_fallback`` (actions exist but none carries an int ``idx``) shows ``idx + 1``. Any other
+	action missing from the tables was hidden by Min Action Duration and shows "-".
+	"""
+	if not isinstance(action_idx, int):
+		return "-"
+	if action_idx in numbers:
+		return numbers[action_idx]
+	return str(action_idx + 1) if idx_fallback else "-"
+
+
+def _build_resource(infra_summary, infra_timeline, actions=None, actions_framework=None) -> dict | None:
+	"""Contract ``resource`` = {cards: list of 4 KPI cards}; timeline rows gain a ``row_number``.
 
 	Cards: CPU avg/peak, RSS delta, Swap peak, Load peak. Each has
 	{label, value, unit, sub_html, value_kind, sub_is_warn}.
@@ -702,11 +729,14 @@ def _build_resource(infra_summary, infra_timeline) -> dict | None:
 	# at render time so the Server Resource per-action timeline reads
 	# ``RQ Job: …`` consistent with the rest of the report.
 	_normalised_timeline = []
+	_numbers = _resource_row_numbers(actions, actions_framework)
+	_idx_fallback = not _numbers and bool(actions or actions_framework)
 	for _row in (infra_timeline or []):
-		_lab = (_row or {}).get("action_label") or ""
+		_row = dict(_row or {})
+		_lab = _row.get("action_label") or ""
 		if _lab.startswith("Job: "):
-			_row = dict(_row)
 			_row["action_label"] = "RQ " + _lab
+		_row["row_number"] = _resource_row_number(_row.get("action_idx"), _numbers, _idx_fallback)
 		_normalised_timeline.append(_row)
 	return {
 		"cards": cards,
@@ -1031,7 +1061,8 @@ def build_report_context(session_doc: Any, ctx: dict) -> dict:
 		),
 		"doc_events": _build_doc_events(ctx.get("doc_event_breakdown") or {}, _fmt_ms),
 		"resource": _build_resource(
-			ctx.get("infra_summary") or {}, ctx.get("infra_timeline") or []
+			ctx.get("infra_summary") or {}, ctx.get("infra_timeline") or [],
+			ctx.get("actions", []), ctx.get("actions_framework", []),
 		),
 		"frontend": _build_frontend(ctx),
 		"hot_frames": _build_hot_frames(

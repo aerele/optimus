@@ -72,7 +72,7 @@ class TestEligibleSet:
 
 	def test_exact_eligible_set(self):
 		assert ai_fix.AI_ELIGIBLE_FINDING_TYPES == frozenset(
-			{"N+1 Query", "Slow Query", "Redundant Call", "Hot Line"},
+			{"N+1 Query", "Slow Query", "Redundant Call", "Hot Line", "Slow Background Job"},
 		)
 
 

@@ -18,6 +18,7 @@ import re
 
 from optimus import safe_call
 from optimus.analyzers.base import AnalyzerResult, dur
+from optimus.line_profile import persist
 
 try:
 	import frappe  # type: ignore[import-not-found]
@@ -182,7 +183,7 @@ def _compute_phase1_hint(
 		"next_hot_callee": callee_dotted,
 		"phase1_cumulative_ms": round(float(hottest.get("cumulative_ms") or 0), 2),
 		"suggested_action": (
-			f"Re-run Phase 2 with {callee_dotted} picked for line-level breakdown."
+			f"Re-run line profiling with {callee_dotted} picked for line-level breakdown."
 		),
 	}
 
@@ -340,7 +341,7 @@ def _attach_phase1_hint(finding: dict, hint: dict) -> None:
 	finding["technical_detail_json"] = json.dumps(td, default=str)
 
 	finding["customer_description"] = finding["customer_description"] + (
-		f"\n\nIn phase 1, this descendant **{hint['next_hot_callee']}** "
+		f"\n\nIn the normal profile, this descendant **{hint['next_hot_callee']}** "
 		f"accumulated {dur(hint['phase1_cumulative_ms'])} across all calls "
 		f"of the parent function (not a single-action wall time). "
 		f"{hint['suggested_action']}"
@@ -550,7 +551,7 @@ def _compute_run(parent_docname: str, run_uuid: str):
 	result = analyze(results_json, call_trees=call_trees or None)
 	if capture.budget_was_hit(run_uuid):
 		result.warnings.append(
-			"Line profiling was time-budgeted to avoid freezing the flow, so "
+			persist.BUDGET_WARNING_PREFIX + " to avoid freezing the flow, so "
 			"results are partial for the longest-running call(s). Tune "
 			"optimus_phase2_overhead_budget_seconds in site_config "
 			"(lower = snappier flow, higher = fuller data; 0 = unlimited)."
@@ -566,36 +567,20 @@ def _persist_run(
 	result: AnalyzerResult,
 	total_ms: float,
 ) -> None:
-	"""Write results back to the run row + append findings to the parent
-	session's findings child table, within the caller's locked transaction."""
+	"""Save results and findings in the caller's locked transaction; the run stays Analyzing until its report is attached."""
 	parent = frappe.get_doc("Optimus Session", parent_docname)
 
-	# Update the matching child row in place.
 	for child in (parent.phase_2_runs or []):
 		if child.run_uuid == run_uuid:
 			child.results_json = json.dumps(results_json, default=str)
 			child.warnings_json = json.dumps(result.warnings, default=str)
 			child.total_ms = round(total_ms, 2)
-			child.status = "Ready"
-			child.ended_at = frappe.utils.now_datetime()
 			break
 	else:
-		raise ValueError("Phase 2 result row is missing")
+		raise ValueError("Line profiling result row is missing")
 
-	# Promote findings into the unified Session.findings table so the
-	# existing finding rendering / filtering picks them up alongside
-	# phase-1 findings.
-	for original in result.findings:
-		finding = dict(original)
-		# Optimus Finding.title is a Data(140) field. Phase-2 findings are
-		# appended directly here (bypassing analyze._truncate_finding_titles),
-		# so clamp defensively a long title must not trip Frappe's truncation
-		# warning while stopping phase 2. Full context lives in the description /
-		# technical_detail_json.
-		_title = finding.get("title") or ""
-		if len(_title) > 140:
-			finding["title"] = _title[:137].rstrip() + "..."
-		parent.append("findings", finding)
+	# Merge Hot Lines and recheck phase-1 findings.
+	persist.merge_phase2_findings(parent, result)
 
 	parent.flags.ignore_validate_update_after_submit = True
 	from optimus.managed import save_session

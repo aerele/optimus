@@ -102,7 +102,7 @@ def phase2_index(case: dict) -> dict:
 
 def build_finding(case: dict, *, source_lines: list[str] | None = None) -> dict:
 	"""The dict the product hands ``ai_fix.suggest_fix`` for this finding on the refresh
-	path (Phase 2 index, no recordings)."""
+	path (line profiling index, no recordings)."""
 	from optimus import analyze
 
 	file_cache = {callsite_filename(case): file_lines(case, source_lines)}

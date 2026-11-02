@@ -15,6 +15,11 @@ from dataclasses import dataclass, field
 from optimus.ai_privacy import opted_in
 from optimus.analyzers.base import DEFAULT_DISPLAY_THRESHOLD_MS
 
+# The ``ai_connection_type`` Select option that routes AI calls through the
+# developer's local CLI session instead of an API key. Single source of truth
+# for the Python side (ai_fix imports it); a test pins it to the doctype JSON.
+SUBSCRIPTION_CONNECTION = "Subscription (local CLI)"
+
 # NOTE: frappe is imported lazily inside each function rather than at
 # module top. Importing at top forces every unit test that touches
 # ``from optimus import settings`` to run under bench, which
@@ -117,6 +122,9 @@ _DEFAULTS = {
 	# ai_fix.py via frappe.utils.password.get_decrypted_password.
 	"ai_enabled": False,
 	"ai_provider": "Anthropic",
+	"ai_connection_type": "API Key",
+	"ai_subscription_cli": "Codex CLI",
+	"ai_cli_path": "",
 	"ai_base_url": "",
 	# 0 = the provider's own window (ai_fix._PROVIDER_DEFAULTS). Only the
 	# OpenAI-compatible provider reads it (the field is hidden for hosted ones).
@@ -158,7 +166,7 @@ _DEFAULTS = {
 # "Reference values: Strict: X · Recommended: Y · Relaxed: Z" triplet
 # joins the Sensitivity Profile. Pre-v0.13.x this was nine detection-
 # sensitivity thresholds only (the comment block here used to say
-# "display filters / Phase-2 UI / capture caps / retention / AI are
+# "display filters / line profiling UI / capture caps / retention / AI are
 # deployment choices, not detection sensitivity") but every one of
 # those fields ALSO advertises a triplet in its operator-facing
 # description, which made the UI promise something the resolve path
@@ -191,7 +199,7 @@ _SENSITIVITY_KEYS = (
 	"slow_hot_path_min_ms",
 	"hot_line_high_pct",
 	"hot_line_high_min_ms",
-	# Phase-2 UI knobs
+	# line profiling UI knobs
 	"phase2_max_runs_per_session",
 	"auto_expand_max_depth",
 	"auto_expand_min_ms",
@@ -215,7 +223,7 @@ _SENSITIVITY_KEYS = (
 # pair.
 _PROFILES = {
 	"Strict": {
-		# General + capture + display + Phase-2 + AI extras (v0.13.x)
+		# General + capture + display + line profiling + AI extras (v0.13.x)
 		#
 		# Posture: "see everything, keep nothing longer than needed".
 		# Fields with a "0 = unlimited" sentinel that the read site
@@ -252,7 +260,7 @@ _PROFILES = {
 	},
 	"Recommended": {key: _DEFAULTS[key] for key in _SENSITIVITY_KEYS},
 	"Relaxed": {
-		# General + capture + display + Phase-2 + AI extras (v0.13.x)
+		# General + capture + display + line profiling + AI extras (v0.13.x)
 		"session_retention_days": 7,
 		"max_queries_per_recording": 1000,
 		"pyinstrument_sampler_interval_ms": 5.0,
@@ -331,7 +339,7 @@ class OptimusConfig:
 	redundant_cache_threshold: int = 50
 	redundant_perm_threshold: int = 10
 	n_plus_one_min_occurrences: int = 10
-	# v0.6.0 Round 6: severity tuning + capture / phase-2 / skip-rule
+	# v0.6.0 Round 6: severity tuning + capture / line profiling / skip-rule
 	# knobs that used to be hardcoded constants in their consumers.
 	slow_query_threshold_ms: float = 200.0
 	slow_hot_path_pct_threshold: float = 25.0
@@ -362,6 +370,9 @@ class OptimusConfig:
 	# never cached here (see _DEFAULTS note + ai_fix._resolve_provider).
 	ai_enabled: bool = False
 	ai_provider: str = "Anthropic"
+	ai_connection_type: str = "API Key"
+	ai_subscription_cli: str = "Codex CLI"
+	ai_cli_path: str = ""
 	ai_base_url: str = ""
 	ai_context_tokens: int = 0
 	ai_model: str = ""
@@ -507,7 +518,7 @@ def _read_doctype_row() -> dict | None:
 		"background_job_wait_seconds": int(
 			doc.get("background_job_wait_seconds", _DEFAULTS["background_job_wait_seconds"]) or 0
 		),
-		# Phase-2 default auto-expand is a Check; bool() handles the
+		# Line profiling default auto-expand is a Check; bool() handles the
 		# 1/0 from Frappe's storage. We can't use ``or None`` here
 		# because False is a legitimate value.
 		"phase2_default_auto_expand": bool(doc.get("phase2_default_auto_expand", 1)),
@@ -531,6 +542,9 @@ def _read_doctype_row() -> dict | None:
 		# False is legitimate. ``ai_auto_suggest_max`` allows 0 (= all).
 		"ai_enabled": bool(doc.get("ai_enabled")),
 		"ai_provider": (doc.get("ai_provider") or "").strip() or None,
+		"ai_connection_type": (doc.get("ai_connection_type") or "").strip() or None,
+		"ai_subscription_cli": (doc.get("ai_subscription_cli") or "").strip() or None,
+		"ai_cli_path": (doc.get("ai_cli_path") or "").strip() or None,
 		"ai_base_url": (doc.get("ai_base_url") or "").strip() or None,
 		"ai_context_tokens": int(_opt_float(doc.get("ai_context_tokens")) or 0),
 		"ai_model": (doc.get("ai_model") or "").strip() or None,
@@ -674,8 +688,9 @@ def _resolve(*, row=_UNREAD_ROW) -> OptimusConfig:
 		# rows themselves, so the row read returns the configured tuple
 		# and this fallback is bypassed; the no-bench / pure-pytest path
 		# is what depends on this default.
+		# An emptied table is a choice to ignore no app, so only a missing row falls back.
 		ignored_apps=tuple(
-			row.get("ignored_apps") or _DEFAULTS["ignored_apps"]
+			row["ignored_apps"] if "ignored_apps" in row else _DEFAULTS["ignored_apps"]
 		),
 		hide_framework_tables=bool(
 			row.get("hide_framework_tables")
@@ -737,6 +752,9 @@ def _resolve(*, row=_UNREAD_ROW) -> OptimusConfig:
 			else _DEFAULTS["ai_enabled"]
 		),
 		ai_provider=row.get("ai_provider") or _DEFAULTS["ai_provider"],
+		ai_connection_type=row.get("ai_connection_type") or _DEFAULTS["ai_connection_type"],
+		ai_subscription_cli=row.get("ai_subscription_cli") or _DEFAULTS["ai_subscription_cli"],
+		ai_cli_path=row.get("ai_cli_path") or _DEFAULTS["ai_cli_path"],
 		ai_base_url=row.get("ai_base_url") or _DEFAULTS["ai_base_url"],
 		ai_context_tokens=max(0, int(row.get("ai_context_tokens") or 0)),
 		ai_model=row.get("ai_model") or _DEFAULTS["ai_model"],

@@ -42,7 +42,8 @@ the highest-value security considerations:
    admin-only.
 2. **AI fix sends source code to an LLM.** When the AI fix feature
    is enabled (Optimus Settings ▸ AI Fix), code snippets +
-   normalised SQL are POSTed to the configured `ai_base_url`. The
+   normalised SQL are POSTed to the configured `ai_base_url`
+   (or, in Subscription mode, passed to the local Codex CLI, see below). The
    site operator chooses the endpoint (typically OpenAI / Anthropic
    / a self-hosted Ollama instance). The URL policy below rejects unsafe
    syntax and literal metadata addresses. Operators still control the
@@ -54,15 +55,15 @@ the highest-value security considerations:
    inject a malicious pickle - signature verification fires on
    read.
 4. **Session actions share a permission gate and mutating endpoints require POST.**
-   Refresh AI suggestions, Regenerate Reports, Retry Analyze and Phase 2
+   Refresh AI suggestions, Regenerate Reports, Retry Analyze and line profiling
    actions use `api._session_action_gate`: the caller needs the profiler
    role, read access, and ownership or write permission. Read-only sharing
    does not permit these actions. Mutating endpoints require POST, so
    Frappe applies its CSRF protection. AI and report actions count per-user
    fixed-window limits (`optimus/ratelimit.py`) after permission checks. Defaults:
    `refill_ai_suggestions` 6 per hour; `regenerate_reports` 30 per minute;
-   `retry_analyze` 5 per minute; `test_ai_connection` 10 per minute;
-   `download_pdf` and `export_session` 20 per minute. Session and Phase 2
+   `retry_analyze` 5 per minute; `test_ai_connection` and `check_cli_session` 10 per minute;
+   `download_pdf` and `export_session` 20 per minute. Session and line profiling
    starts allow 10 per minute, their stops allow 20 per minute, and
    `retry_phase2_analyze` allows 5 per minute. A batch contains at most 5
    entries, retries each distinct run once, and uses the same per-run limit.
@@ -79,6 +80,150 @@ the highest-value security considerations:
    Dotted paths import installed apps only; other paths may inspect already
    loaded modules. Server Script bodies require both the acting user and
    the session owner or refresh requester to have read permission.
+
+## Subscription (local CLI) mode
+
+Off by default. It needs `developer_mode` and the `optimus_allow_subscription_cli`
+site-config flag, and Optimus Settings > AI > Connection set to "Subscription
+(local CLI)". Instead of an API key, each AI call runs a local CLI on the bench machine
+and uses the bench user's own subscription: `codex exec` (ChatGPT) or `claude -p` (a
+Claude subscription), chosen by the Subscription CLI field. The prompt (normalised SQL,
+source snippets, URLs, parameters) goes to OpenAI or Anthropic through that CLI, so it
+leaves the host like an API-key call does. The text below describes Codex; the Claude
+CLI backend is described after the Codex residual risks. The Connect button (`check_cli_session`) is limited to
+10 per minute per user and System Manager only.
+
+What Optimus does to contain the CLI:
+
+- The child process gets an allow-listed environment and a private scratch `HOME` and
+  `TMPDIR`, removed afterwards (stale trees left by a killed worker are deleted on the next
+  run and the removal is logged). Its `CODEX_HOME` is the operator's own `~/.codex` (the login
+  they made in their own terminal with `codex login`); `HOME` is deliberately not the real
+  home, so `~/.ssh`, `~/.aws` and `~/.config` are not exposed through it. Optimus keeps no
+  token of its own: it never logs in and does not copy, merge, store or write back tokens.
+  The codex CLI itself uses and refreshes its sign-in in place in `~/.codex`. Connect only
+  runs `codex login status` against it. Optimus takes no lock against your own terminal codex.
+- The model prompt is built from `~/.codex` too, so Optimus passes `-c skills.include_instructions=false`:
+  without it codex lists every skill under `~/.codex/skills` (name and description) in the
+  prompt of the run, even with `--ignore-user-config`. Checked with `codex debug prompt-input`
+  on codex 0.166; a regression test renders the prompt and fails if a private skill appears.
+- It runs `--sandbox read-only --ephemeral` with the tool features that could read a file
+  or run a command turned off (`--disable`). Only the feature names the installed CLI
+  lists are passed, and every capability-looking feature it reports as on is turned off too.
+- If `codex features list` cannot be read, the run is refused. Nothing is guessed.
+- On Linux the child is started with `PR_SET_PDEATHSIG` (SIGKILL), so the kernel stops it when
+  the worker that started it dies, and the whole process group is killed when a call ends or
+  times out. Limits: the signal reaches the direct child only, not what it spawned, and other
+  platforms have no such call. An abandoned run is logged (`exec_abandoned`).
+- The reply goes through a pattern scrub for secrets before it is stored.
+
+Residual risk, in plain words:
+
+- The agent runs with `CODEX_HOME` pointing at your real `~/.codex`, which holds your live
+  ChatGPT sign-in, so a prompt injection that gets past the tool list can read or replace
+  that sign-in (the same one you use in your own terminal). `codex login` restores it. This
+  is the deliberate cost of using your real login instead of a separate Optimus one.
+- Your login is shared with your own terminal. A run of Optimus can rarely clash with your
+  own codex on the in-place token refresh and sign your terminal session out (sign in again
+  with `codex login`); Optimus cannot lock your terminal. A bulk run also spends your own
+  plan usage and can use it up for a while: a bulk refresh is capped at a small number of
+  findings in this mode and a usage-limit reply stops the run cleanly.
+- A global `~/.codex/AGENTS.md` (or `AGENTS.override.md`) is still sent to the model as
+  instructions in every run. No `-c` key or `--disable` feature that turns it off exists in codex
+  0.166 (tried `project_doc_max_bytes`, `project_doc_fallback_filenames`, `project_root_markers`
+  and `user_instructions`; `--ignore-user-config` and `--ignore-rules` are documented as
+  covering `config.toml` and exec-policy rules only), so Optimus cannot. Its text
+  goes to OpenAI with the prompt, can end up in a stored suggestion or the shared report, and
+  is a prompt injection surface for whoever can write that file. Keep private or sensitive
+  text out of `~/.codex/AGENTS.md` on a bench that uses this mode. The test
+  `test_the_global_agents_md_never_reaches_the_prompt` is marked as an expected failure for
+  this reason and turns red when a newer codex fixes it.
+- `~/.codex` holds more than the sign-in: `config.toml` (which can carry MCP server tokens),
+  `sessions/` and `history.jsonl`. A prompt injection that reads files by absolute path can
+  read all of it, not only `auth.json`.
+- The tool list is a denylist. A new capability that the installed CLI adds under a name
+  the floor and the regex do not match stays reachable, and `--sandbox read-only` limits
+  writes, not reads. A prompt injection hidden in profiled data could then ask the agent to
+  read a file the bench user can read (your codex sign-in, `site_config.json`, private files).
+- A read-only agent can still read any file the bench user can read by absolute path.
+  Scratch `HOME` hides `~/.ssh`, `~/.aws` and `~/.config` from `HOME` and relative paths, not
+  from an absolute one.
+- The output scrub is pattern based. Encoding or splitting a secret defeats it, and it can
+  also rewrite legitimate code that looks like a secret.
+- Use this mode only on a developer bench and only with data you trust.
+- Tested with codex 0.164 to 0.165 (the skills and AGENTS.md checks above were made on 0.166).
+  Connect warns when the installed version is outside that range; re-check the isolation
+  (run the opt-in `OPTIMUS_LIVE_CODEX=1` test) before moving to a newer one.
+
+### Claude CLI backend
+
+Same gate, same scratch tree and the same rules as above: a real terminal login that
+Optimus only points at (never logs in, copies, stores or writes back), prompt on stdin,
+reply scrub, truncation marker and the process-group kill. What differs:
+
+- The child's `CLAUDE_CONFIG_DIR` is the operator's own `~/.claude` for the `claude auth
+  status` check and the run only (any other probe gets an empty scratch directory), `HOME`
+  is a scratch directory and `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and
+  `CLAUDE_CODE_OAUTH_TOKEN` are removed, so it stays on the subscription. It also gets
+  `DISABLE_TELEMETRY`, `DISABLE_AUTOUPDATER` and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`.
+- Connect is connected only for `loggedIn` with `authMethod` `claude.ai`. An API-key login
+  is refused. Only those two fields of the status are read: the email, organisation and plan
+  it also prints never reach the status, the stored message or the log.
+- The run is `claude -p --output-format json --tools "" --strict-mcp-config --safe-mode
+  --restricted --no-session-persistence --permission-prompts none`. `--tools ""` removes
+  every tool (Claude has no feature list, so there is no probe to fail). `--safe-mode`
+  disables CLAUDE.md, skills, plugins, hooks and MCP, which closes the Claude counterpart of
+  the Codex skills and AGENTS.md leak above (a global `~/.claude/CLAUDE.md` is not sent to
+  the model). `--restricted` ignores the user, project and local settings files, so an
+  `apiKeyHelper` or `env` block there cannot swap the subscription for an API key.
+  `--no-session-persistence` writes no transcript. Never `--bare` (it skips the login),
+  a bypass permission mode or `--max-budget-usd`.
+- Claude reports failures inside its JSON result, often with exit code 0. The reply is
+  accepted only as one JSON object with a text `result`, no `is_error`, a `subtype` of
+  `success` and a `terminal_reason` of `completed` (or none): a refusal, an aborted stream or
+  tool run or a hook stop is a classified error, never a suggestion. A reply that ran into
+  the context window is kept and marked cut off. The failure is classified from the HTTP
+  status, then the terminal reason, then the message text, and the raw output is never shown,
+  stored or logged. Quota (a usage, credit or spend limit, or a 429 whose text says so), auth,
+  model and bad-request replies are fatal kinds, so a bulk run stops cleanly; a plain 429 is a
+  non-fatal rate limit and a too-long prompt (413) or a refusal only fails that one prompt.
+  The failure log line carries the specific label, the HTTP status and a terminal reason from
+  a fixed list, and never the result text.
+
+Residual risk (Claude), in plain words:
+
+- The login is shared with your own terminal claude and a bulk run spends your own plan
+  usage (capped at 10 findings, a usage-limit reply stops it). Claude serialises its own
+  OAuth token refresh with a cross-process lock, so a clash with your terminal is handled by
+  Claude rather than by Optimus, and a run that still loses is a failed call, not a wrong
+  fix. Optimus adds no lock and does not retry a failed refresh. If you are ever signed out,
+  run `claude` and sign in again.
+- Unlike Codex, the agent has no tool (`--tools ""`) and `--restricted` also confines
+  Claude's built-in file tools to the working directory, a scratch folder, so the run is not
+  meant to read the bench user's other files by absolute path even if a file tool were ever
+  available. `~/.claude` is still the directory the CLI updates: `.claude.json` (the global
+  config, a separate file from `.credentials.json`), `sessions/`, backups, the plugin store
+  and `history.jsonl` live there. With `--no-session-persistence` no transcript is written
+  (checked on claude 2.1.316 for a call refused as not logged in). Not verified without one
+  billed call: that `history.jsonl` and `sessions/` stay untouched by a real prompt and that
+  the subscription login survives `--safe-mode --restricted` end to end.
+- Admin-managed (policy) settings, for example `/etc/claude-code/managed-settings.json`, still
+  apply under `--safe-mode` and `--restricted` (per `claude --help`). A machine that has one
+  can change the model, permissions or environment of the run; Optimus cannot override it.
+- Linux only. The login Optimus points at is the plaintext `~/.claude/.credentials.json`. On
+  macOS Claude keeps it in the Keychain, and a Keychain lookup from the scratch `HOME` is
+  untested and may read as signed out, so that platform is not supported.
+- Anthropic account-level telemetry is limited by the environment switches above
+  (`DISABLE_TELEMETRY`, `DISABLE_AUTOUPDATER`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`).
+  Whether they take effect is unproven without a network capture, so treat telemetry as
+  not proven off.
+- The isolation rests on the installed claude honouring `--tools ""`, `--safe-mode` and
+  `--restricted`. Tested with claude 2.1.312 to 2.1.316; re-check before a newer one.
+- Anthropic's terms restrict automated use of a consumer Claude subscription. The Claude
+  option is for your own personal use on your own developer machine. Use Connection = API Key
+  for any shared, customer or product bench.
+
+Follow-up under discussion: OS-level confinement (bwrap/landlock) instead of the denylist.
 
 ## API key handling
 
@@ -369,7 +514,7 @@ installed on the site.
   unless the site enables raw-value consent. Capture-time redaction remains
   best effort; sharing a session can disclose its captured business data.
 - A write share also permits Refresh AI suggestions, Regenerate Reports,
-  Retry Analyze and Phase 2. Normal document edits are limited to title and
+  Retry Analyze and line profiling. Normal document edits are limited to title and
   notes. Session creation, identities, status, generated attachments, accounting
   and child rows belong to Optimus's internal writers. Generated File changes
   are guarded before core can move bytes; URL and content-hash aliases are
@@ -581,7 +726,7 @@ Already sent requests cannot be recalled. Settings consent changes are versioned
 
 ## Capture ownership and journal retention
 
-Phase 2 prepares bounded picks/source before SQL admission, records its actual
+Line profiling prepares bounded picks/source before SQL admission, records its actual
 capturing user, and reserves Redis input and the active flag atomically. Stops
 compare the exact active generation. Retry Analyze and Force Stop commit their
 SQL fence before stopping only the corresponding capture. A failed or interrupted
@@ -638,7 +783,7 @@ Code suggestions are saved for human review and are never automatically applied
 or executed. Automatic AI work may update suggestions and Steps to Reproduce;
 explicit user edits revoke automatic Steps replacement provenance.
 
-Before an AI request, source windows and Phase 2 line text are checked for the
+Before an AI request, source windows and line-profile line text are checked for the
 configured key, credential-shaped text and sensitive literal assignments.
 Detected credentials or a failed check withhold source grounding and require
 prose-only advice. This is a bounded minimization check, not a general proof that
@@ -652,7 +797,7 @@ cleartext key transport. Private LAN endpoints remain supported.
 
 Frontend metrics accept at most 512 KiB, with bounded depth/node counts and a
 per-user request limit (default 120/minute). Permission checks run first. PDF
-generation requires POST and the normal permission and rate checks. Batch Phase 2
+generation requires POST and the normal permission and rate checks. Batch line profiling
 retry failures return a fixed recovery message; exception text is not returned.
 
 Migrate automatically attempts the bounded historical Error Log key scrub. Large

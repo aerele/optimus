@@ -229,7 +229,7 @@ def test_phase2_section_appears_before_findings():
 
 def test_phase2_jump_nav_link_present():
 	"""The Jump-to nav must include a Line-Level Drilldown link
-	(conditional on the session having phase-2 runs)."""
+	(conditional on the session having line profiling runs)."""
 	template = _read_template()
 	assert 'href="#line-drilldown"' in template, (
 		"Jump-to nav missing #line-drilldown link - Line-Level Drilldown "

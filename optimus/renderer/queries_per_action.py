@@ -8,11 +8,13 @@ from __future__ import annotations
 from optimus.analyzers.base import (
 	is_framework_callsite_str,
 	is_profiler_own_query,
-	walk_callsite_str,
+	walk_callsite,
 )
 
 PER_ACTION_TOP = 20
 SECTION_ROW_LIMIT = 40
+# The name is emitted twice (cell and title), so cap it.
+MAX_FUNCTION_CHARS = 200
 
 
 def build_queries_per_action(actions, recordings_by_uuid, tracked_apps=()) -> dict:
@@ -41,22 +43,24 @@ def _visible_calls(calls, tracked_apps) -> tuple[list, int]:
 		if not isinstance(call, dict):
 			continue
 		stack = call.get("stack")
-		if is_profiler_own_query(stack):
+		if _is_own_query(stack):
 			continue
-		callsite = walk_callsite_str(stack) or _innermost(stack)
+		callsite, function = _callsite_and_function(stack)
 		if tracked_apps and is_framework_callsite_str(callsite, tracked_apps):
 			untracked += 1
 			continue
-		kept.append((call, callsite))
+		kept.append((call, (callsite, function)))
 	return kept, untracked
 
 
-def _row(label, call, callsite) -> dict:
+def _row(label, call, site) -> dict:
+	callsite, function = site
 	return {
 		"action": label,
 		"duration": call.get("duration") or 0,
 		"copies": call.get("normalized_copies") or 0,
 		"callsite": callsite or "",
+		"function": function,
 	}
 
 
@@ -64,9 +68,37 @@ def _duration(pair) -> float:
 	return pair[0].get("duration") or 0
 
 
-def _innermost(stack) -> str:
-	frame = stack[-1] if stack and isinstance(stack[-1], dict) else None
-	return f"{frame.get('filename')}:{frame.get('lineno')}" if frame else ""
+def _callsite_and_function(stack) -> tuple[str, str]:
+	"""Return ("file:line", function name) from the one frame the callsite names."""
+	frame = _safe_walk(stack) or _innermost(stack)
+	if not frame:
+		return "", ""
+	name = frame.get("function")
+	return (
+		f"{frame.get('filename', '?')}:{frame.get('lineno', '?')}",
+		name.strip()[:MAX_FUNCTION_CHARS] if isinstance(name, str) else "",
+	)
+
+
+def _is_own_query(stack) -> bool:
+	"""True for Optimus's own query; a malformed stack counts as not its own."""
+	try:
+		return is_profiler_own_query(stack)
+	except (AttributeError, TypeError):
+		return False
+
+
+def _safe_walk(stack) -> dict | None:
+	"""Return the callsite frame, or None for a missing or malformed stack."""
+	try:
+		return walk_callsite(stack)
+	except (AttributeError, TypeError):
+		return None
+
+
+def _innermost(stack) -> dict | None:
+	frame = stack[-1] if isinstance(stack, list) and stack else None
+	return frame if isinstance(frame, dict) else None
 
 
 def _get(obj, key):

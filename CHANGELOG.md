@@ -8,6 +8,426 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.135] - 2026-11-01
+
+### Fixed
+
+- Claude CLI: a cut-off reply (`max_tokens` or `model_context_window_exceeded`) is kept as truncated only when nothing else is wrong. The `terminal_reason` and `subtype` gate now runs first, so a cut-off that was also an aborted stream, a refusal or a hook stop is a classified failure and not a suggestion.
+- Claude CLI: "Context limit reached" (no HTTP status) is the per-prompt `context` kind and no longer a non-fatal `unknown` that counted toward the failure streak.
+- Claude CLI: a 403 whose text says usage, quota or billing (for example "Credit balance is too low") is the fatal `quota` kind and not "session expired". A 403 without such text and every 401 stay `auth`.
+
+---
+
+## [0.12.134] - 2026-11-01
+
+### Fixed
+
+- Claude CLI: the npm install (`@anthropic-ai/claude-code`, whose `bin/claude.exe` the `claude` link resolves to) is accepted again. It was refused as "not the native install" although the docs promised npm worked. A `claude.exe` is accepted only inside `claude-code/bin/`, next to the existing `cli.js` and native `versions/<semver>` shapes and still has to pass the ownership and permission check.
+- Claude CLI: a reply that did not end normally is never returned as a suggestion. `read_reply` now needs a `subtype` of `success` and a `terminal_reason` of `completed` (or none): a refusal (`stop_reason` or `terminal_reason`), an aborted stream or tool run, a hook stop and any other ending become a classified failure even when `is_error` is false. A reply that ran into the context window (`model_context_window_exceeded`) is kept and marked cut off.
+- Claude CLI: failures are classified from `api_error_status`, then `terminal_reason`, then the message text. The usage-limit text set is wider (reached or hit your ... limit, out of (extra) usage, credit balance, spend limit, billing, account on hold) and is the fatal `quota` kind, so a bulk on an exhausted plan stops at the first call. A 429 without such text is the non-fatal `rate_limited`; a 413 or "prompt too long" is the per-prompt `context` kind and a refusal is `refused`, so one oversize or declined prompt no longer stops the whole bulk. A plain 400 stays `config`. The unreachable top-level `error` / `api_retry` branch is removed.
+- Claude CLI: the failure log line carries the specific cause (`detail=`), the HTTP `status=` and a `terminal=` reason from a fixed list, so the first real run is diagnosable. The result text and any account detail are never logged.
+- Claude CLI: `optimus_claude_cli_model` accepts a context suffix (`sonnet[1m]`) and a value that is dropped (malformed, the placeholder `claude` or not text) now logs a fixed `model_alias_ignored` line instead of silently using Claude's default.
+
+### Changed
+
+- `_call_local_cli` runs the backend the validated provider names (`backend_key`) instead of re-reading the cached settings, so a Settings switch in the window between the check and the exec cannot run the other CLI.
+- Claude has a tested range (2.1.312 to 2.1.316) and Connect warns outside it, as for Codex. The two Codex-worded strings in the shared shell moved to backend data (`reworded_status_text`) and a backend method (`untested_version_message`).
+- `backend` is now required by `_cli_missing_text`, `_login_failure`, `_login_failure_text` and the real-login `_cli_sandbox` and `display` by `_out_of_time`, so a forgotten argument can no longer silently use Codex. Dead code removed (`_sign_in_hint`, the unreachable envelope branch in `ClaudeBackend.classify`, the Claude-only known failures that were never stderr-derived).
+- `NODE_EXTRA_CA_CERTS` reaches the CLI child (both backends), so a developer behind a TLS-inspecting proxy no longer gets a bare network error.
+- The AI-not-ready message uses generic wording when the saved Subscription CLI is unknown or unreadable, instead of naming Codex.
+- Optimus Settings: changing the Subscription CLI clears the stored Connect status of the previous CLI.
+
+### Residual risks (Claude), additions
+
+- Admin-managed (policy) settings, such as `/etc/claude-code/managed-settings.json`, still apply under `--safe-mode` and `--restricted`.
+- Linux only: the login is the plaintext `~/.claude/.credentials.json`. On macOS (Keychain) from the scratch `HOME` it is untested and may read as signed out.
+- The telemetry environment switches (`DISABLE_TELEMETRY`, `DISABLE_AUTOUPDATER`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`) are set but that they take effect is unproven. `sessions/` and the separate `~/.claude/.claude.json` global config are state the CLI keeps updating.
+- Docs corrected: Claude serialises its own token refresh (a cross-process lock), so the "can sign your terminal out" wording is softened; for Claude `--restricted` confines the file tools to the working directory, so "reads any file by absolute path" is Codex-specific.
+
+### Tests
+
+- `test_ai_claude_cli.py`: the real `claude.exe` npm layout (and look-alikes refused), 403/429/413/400 and each usage-text variant, `terminal_reason` classification, refusal and `aborted_*` replies with `is_error` false, the cut-off replies, the log line (specific label, status, terminal, no result text), the alias suffix and `model_alias_ignored`, backend threading, the Claude tested range, generic wording for an unknown choice, the status check with unreadable settings, the login probe `OSError`, `_out_of_time` naming and the JS status clearing.
+
+---
+
+## [0.12.133] - 2026-11-01
+
+### Added
+
+- A second subscription backend: **Claude CLI** (Anthropic's `claude`), picked with the Subscription CLI field (`ai_subscription_cli`, now "Codex CLI" or "Claude CLI") when Connection = Subscription. It mirrors the Codex backend: it uses your REAL terminal login in `~/.claude`, Optimus keeps no token and never logs in for you and Connect is only a read-only `claude auth status`. Connected means a Claude subscription login (`authMethod` `claude.ai`); an API-key login is refused with a pointer to Connection = API Key. Same gate as Codex (`developer_mode` and `optimus_allow_subscription_cli`), off by default and for personal use on your own developer machine only (Anthropic's terms restrict automated use of a consumer subscription).
+- The Claude run is `claude -p --output-format json --tools "" --strict-mcp-config --safe-mode --restricted --no-session-persistence --permission-prompts none` with the prompt on stdin: no tools, no MCP, no CLAUDE.md, skills, plugins or hooks (`--safe-mode`, so the Claude counterpart of the Codex skills leak is closed), no settings files (`--restricted`, so an `apiKeyHelper` or `env` block cannot swap the login) and no session transcript. Never `--bare`, a bypass permission mode or `--max-budget-usd`. No `--model` is passed by default (Claude's own default model); set `optimus_claude_cli_model` in the site config to an alias such as `sonnet` to choose one.
+- The child gets `CLAUDE_CONFIG_DIR` = your `~/.claude` for the status check and the run only, a scratch `HOME`, no `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or `CLAUDE_CODE_OAUTH_TOKEN` and `DISABLE_TELEMETRY`, `DISABLE_AUTOUPDATER` and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` set to 1.
+- Claude reports failures inside its JSON result, often with exit code 0. The reply reader fails closed: a result with `is_error`, non-JSON output, a cut-off envelope or no `result` text is a classified error (auth, quota, not found, bad request, transport), never a suggestion and never raw stdout. A usage-limit reply is the fatal `quota` kind, so a bulk run stops cleanly and the 10-finding bulk cap applies to Claude too. Connect and the logs carry no email, organisation or plan and the diagnostic prefix is `claude cli:`.
+
+### Changed
+
+- The generic CLI shell (`_call_local_cli`) now runs through a small `_CliBackend` seam (`_CodexBackend`, `_ClaudeBackend`): the login check, argv, reply reader, error classifier and copy differ per CLI, everything else is shared. The Codex backend behaves as before. `_exec_cli_once` returns a `_CliRun` and a backend may raise a classified error from its reply reader whatever the exit code.
+- The AI-not-ready message and the Connect button name the selected CLI. The provider identity now carries a `backend` key, so changing Subscription CLI stops queued jobs as "configuration changed" and the settings snapshot reads `ai_subscription_cli` (a never-saved field means Codex on both sides).
+
+### Residual risks (Claude)
+
+- `~/.claude` is shared with your own terminal claude. Claude serialises its own token refresh with a cross-process lock, so a clash is handled by Claude (if you are ever signed out, sign in again with `claude`). Claude has no known refresh-race text, so unlike Codex a failed refresh is not retried. A bulk run spends your own plan usage.
+- The CLI still updates its own state under `~/.claude` (`.claude.json`, backups, the plugin store). `--no-session-persistence` writes no transcript. Checked on claude 2.1.316 with a call refused as not logged in; whether `history.jsonl` gets a line from a real prompt and that the subscription login survives `--safe-mode --restricted` end to end, are not verified without one billed call.
+- A global `~/.claude/CLAUDE.md`, your skills, plugins and hooks are not read (`--safe-mode`). The isolation rests on the installed claude honouring `--tools ""`, `--safe-mode` and `--restricted`; re-check it before moving to a newer claude. Unlike Codex, the agent has no tool and `--restricted` confines Claude's file tools to the working directory. See SECURITY.md.
+
+### Tests
+
+- New `optimus/tests/test_ai_claude_cli.py` with a fake `claude` script: the discriminator and staleness identity (including the SELECT placeholder and bound-value count and a never-saved field), native and npm install checks, the real-login environment, the exact argv, the status check (PII free, memoized for 30 seconds, missing `~/.claude` is signed out), fail-closed reply parsing, `is_error` with exit 0 or 1, SIGTERM, no features probe, no credential file touched and the bulk cap.
+
+---
+
+## [0.12.132] - 2026-11-01
+
+### Changed (behaviour change, read before upgrading)
+
+- The Codex subscription backend (Connection = Subscription, Codex CLI) now uses your REAL terminal login in `~/.codex` instead of a separate sign-in that Optimus kept in `<site>/private/optimus-codex`. Optimus keeps no token of its own, never logs in for you and Connect is only a read-only `codex login status` check of your login. The earlier guarantee "your own ~/.codex is never read, copied or written" no longer holds: the codex child runs with `CODEX_HOME` set to your `~/.codex`, so a prompt injection that gets past the tool list can read or replace that sign-in. The child still gets a private scratch `HOME` and `TMPDIR` (your real home is not exposed through `HOME` or relative paths; a read-only agent can still read files the bench user can read by absolute path, and `~/.codex` also holds `config.toml` with possible MCP tokens, `sessions/` and `history.jsonl`), `--sandbox read-only --ephemeral` and every other isolation flag unchanged. Only the `codex login status` check and the `exec` see your `~/.codex`; the `features list` and `--version` probes get an empty scratch `CODEX_HOME`, so your `config.toml` cannot change the computed tool isolation.
+- Sign in with plain `codex login` in your own terminal. Every "not signed in" and Connect message now says that, instead of `CODEX_HOME=<site>/private/optimus-codex codex login`.
+- Accepted risks, now documented in SECURITY.md and docs/AI-FIXING.md: your login is shared with your own terminal codex, so a run can rarely clash with it on the in-place token refresh and sign your terminal session out (sign in again with `codex login`; the existing single retry of a lost refresh race is kept) and a bulk run spends your own plan usage and can use it up for a while.
+- Bulk runs are now bounded in subscription mode: the findings per run are capped at `SUBSCRIPTION_BULK_MAX_FINDINGS` (10) and a cap of 0 ("all") or any larger value becomes that maximum. This covers manual refresh, Regenerate all and the automatic run after analyze (**Maximum findings per AI refresh** and **Max auto-suggested findings per session**; their descriptions and docs/AI-REFRESH.md now say so). A run resumed from before the upgrade keeps the cap it was stored with. API-key providers keep their configured cap. A codex usage-limit reply was already a fatal `quota` error and still stops a bulk run cleanly.
+- The `ai_connection_type`, `ai_subscription_cli` and `ai_cli_path` field descriptions, SECURITY.md and docs/AI-FIXING.md no longer describe the Optimus-owned Codex home.
+
+### Fixed (review wave)
+
+- A first run with no `~/.codex` (or a file there) is now "not signed in" with the plain `codex login` hint, not a transient "try again" error: the check answers without starting codex, and codex's own `CODEX_HOME points to ... does not exist` / `is not a directory` text is recognised as a sign-out too. A bench user with no home directory gets a clear configuration error instead.
+- Your Codex skills no longer reach the model: the exec passes `-c skills.include_instructions=false` (codex otherwise lists every skill in `~/.codex/skills` in the prompt, even with `--ignore-user-config`). A global `~/.codex/AGENTS.md` still does: no codex flag disables it (checked on 0.166). This is an accepted, documented risk (SECURITY.md, docs/AI-FIXING.md); keep private text out of that file on a bench that uses this mode. A test renders the prompt with `codex debug prompt-input` (skipped without codex) and fails if a private skill appears.
+- Optimus uses the bench user's `~/.codex` and ignores a `CODEX_HOME` exported in a terminal or service; the worker's `HOME` may differ from your shell's. docs/AI-FIXING.md troubleshooting explains it, and a signed-out check now logs the fixed label `codex_dir_missing` or `codex_dir_present`.
+
+### Removed
+
+- The dedicated-home code (`_ensure_codex_home`, `_codex_home_path`, `_codex_login_command` and the `with_auth` plumbing and the dedicated-home branch in `_cli_sandbox` and `_build_cli_env`; `_build_cli_env` now just takes the `codex_home` it is given, and `_cli_sandbox(real_login=True)` passes the real `~/.codex`).
+
+### Migration
+
+- New patch `optimus.patches.v0_12_128.remove_dedicated_codex_home` deletes an existing `<site>/private/optimus-codex` folder on migrate (it holds a live refresh token and is orphaned now), printing one line. If it cannot delete the folder it prints a warning with the path and the migrate goes on; delete the folder by hand. The token is only deleted locally and is not revoked on the server: to revoke it, run `CODEX_HOME=<that folder> codex logout` before you migrate, and if a backup or snapshot holds that folder, sign those sessions out from your ChatGPT account. Both patch messages now say so. If you had signed in only to that folder, run `codex login` in your terminal afterwards.
+
+### Tests
+
+- The dedicated-home tests in `test_ai_subscription_cli.py` are rewritten to the real-login behaviour (CODEX_HOME is `~/.codex`, HOME is a private scratch dir, no credential file is opened, copied or written, `<site>/private/optimus-codex` is never created or read, the refresh-race retry still fires, messages say plain `codex login`, status stays free of account details). New tests cover the migrate patch and the bulk batch cap.
+
+---
+
+## [0.12.131] - 2026-10-31
+
+### Fixed
+
+- The Slow Query finding card now shows the complete query again, labelled "Full SQL, sensitive values hidden". This reverses the earlier removal of the query block from finding cards (v0.7.x); only Slow Query cards get it, other types keep their SQL in the queries tables. Statements over 2,000 characters sit in a collapsed block with a character count and are keyboard-scrollable.
+- The slowest-queries table and the Slow Query card are no longer clipped when exported to PDF or printed; a long card may break across pages.
+- Statements larger than 200,000 characters are stored up to that size with a visible "query truncated at N of M characters" note, which the label also mentions, and the cut is logged. A quoted value left open by the cut is dropped.
+- The card's SQL is redacted after the index advice is built, one finding at a time; if redaction fails for a finding its SQL is left out rather than shown.
+
+---
+
+## [0.12.130] - 2026-10-31
+
+### Changed
+
+- The phone number in the report header is now plain text instead of a clickable `tel:` link. The website, email and social links are unchanged.
+
+## [0.12.129] - 2026-10-31
+
+### Changed
+
+- Removed the "Tables written to this session" line from the "Time spent per database table" section. The table itself, including its Reads and Writes columns, is unchanged.
+
+## [0.12.128] - 2026-10-31
+
+### Fixed
+
+- The "#" column of the Server Resource table now starts at 1 and shows the same number the Actions table gives that action. Before, it showed a 0-based index, so it started at 0 and did not line up with the Actions table. Actions with no resource snapshot are still left out, so the numbers can skip. Framework actions show as "fw 1", "fw 2" to match the collapsed framework table, and the framework table now prints the same "fw " prefix in its own "#" column. An action hidden by Min Action Duration shows "-" with a tooltip saying so, and when Min Action Duration hides every action no numbers are invented.
+
+---
+
+## [0.12.127] - 2026-10-31
+
+### Fixed
+
+- The local Codex CLI auth retry now runs only after a plain non-zero exit (not a signal exit such as 137, nor 126/127) and only when the last lines of stderr are a token-refresh failure ("refresh token was already used or revoked", "token was revoked", "access token could not be refreshed"), not for any line containing "unauthorized". These texts are now their own stderr label, `auth_refresh_race`, checked before `auth_expired`, so the retry and the classifier use one pattern list and the same stderr tail. The user still gets an auth error with the `codex login` hint; after a retry the message says "Codex session expired after a retry.". The 2-second wait has +/- 50% jitter so parallel runs do not retry in step, and the retry is skipped when the longest wait would leave less than 5 seconds to run.
+- The Optimus log now records `auth_retry`, `auth_retry_ok` and `auth_retry_skipped` with the wait in seconds.
+- A relative Codex home path now raises a translatable configuration error that names the path, instead of an assertion.
+- The floating widget now always writes one console warning when its 30-second wait for the realtime socket gives up (the other widget traces still need `window.OPTIMUS_DEBUG = true`).
+
+### Tests
+
+- Also adds two assertions on the "Line profiling results saved" alert in the pill state harness (`optimus/tests/js/pill_state_harness.js`), which were outside the original scope of this PR.
+
+---
+
+## [0.12.126] - 2026-10-31
+
+### Changed
+
+- The "Phase 2" feature is now called "Line profiling" in what you see: the Optimus Session form buttons and dialogs (Line Profiling > Run Line-Profile Pass, Stop Line Profiling Run, Retry Line Profiling Analyze), the floating widget and status pill text, notifications and error messages, the Optimus Settings labels, and the report text. Reports now say "in the normal profile" instead of "in phase 1" in the line profiling fallback hint.
+- Error Log titles for the line profiling workers were renamed too (for example `optimus ai phase 2 worker availability` is now `optimus ai line profiling worker availability`), so saved Error Log filters on the old titles stop matching.
+- Messages that were built by joining strings now use placeholders so they can be translated. Site Translation overrides keyed on the old strings stop matching, and findings or reports stored by earlier runs keep the old wording until re-analysed.
+- No DocType name, fieldname, event, API method or setting key changed.
+
+---
+
+## [0.12.125] - 2026-10-30
+
+### Fixed
+
+- Line profiling (Line-Level Drilldown): a run no longer shows "Ready" before its
+  report exists. The results and findings are saved while the run is still
+  "Analyzing" (with `analyze_render_pending` set), the report is rebuilt and
+  attached, and only then is the run flipped to "Ready" (fenced to the worker
+  that owns the run by generation and token) and the "Phase 2 report generated"
+  popup shown. If the rebuild fails the run still becomes Ready with the flag
+  kept, meaning a report update is owed, so Regenerate Reports can finish it.
+- A saved run whose worker died before the report step is completed by the
+  queue recovery after 10 minutes (Ready, report update owed, one log line), and
+  by the legacy janitor sweep, instead of being marked Failed over a populated
+  drill-down. If the report did get attached meanwhile, the owed flag is cleared.
+- Retrying an expired saved run starts clean (stale results are dropped).
+- The report's drill-down panel and run list read one shared rule: a run with
+  persisted results reads as Ready. An AI report refresh no longer clears the
+  owed-report flag of a run that is still Analyzing.
+- Line profiling results are saved while the run is still "Analyzing"; the
+  phase-1 recheck counts that run as the newest one, so findings are judged
+  against it.
+- The Session form and floating widget agree with the report: a saved run is not
+  offered Retry, and the floating pill (in `optimus_pill_state.js`) says "results
+  saved" with an orange alert when the report update is owed.
+
+## [0.12.124] - 2026-10-30
+
+### Added
+
+- AI fix suggestions can now use the local Codex CLI signed in with ChatGPT instead of a cloud API key. In Optimus Settings > AI set Connection to "Subscription (local CLI)" and click Connect to check the CLI and the sign-in. The default stays "API Key", so existing setups are unchanged. Codex is the only CLI supported.
+- Subscription mode needs `developer_mode` and the `optimus_allow_subscription_cli` site flag: run `bench --site <site> set-config optimus_allow_subscription_cli 1`, then restart the bench (or run `bench clear-cache`). The blocked message and the field description now say so.
+- Subscription mode uses a Codex home that only Optimus uses, `<site>/private/optimus-codex` (created mode 0700). Sign in once with `CODEX_HOME=<bench>/sites/<site>/private/optimus-codex codex login`; the Connect button, the "not signed in" message, the settings field description, SECURITY.md and docs/AI-FIXING.md show the exact command. Your own `~/.codex` is never read, copied or written.
+- The analyze-time auto-suggest and the "Refresh AI suggestions" button both run through the CLI. A queued refresh re-reads the saved settings before every call, so turning AI off or switching the connection stops the rest of the job. A terminal CLI failure (missing CLI, signed out, usage limit, a rejected flag) stops a refresh at the first failure; a timeout, a rate limit or a network error does not.
+- The Connect button shows when it last checked, cannot be double clicked, and does not change the modified time of Optimus Settings.
+
+### Security
+
+- The CLI runs as a read-only, ephemeral agent with an allow-listed environment. `HOME` and `TMPDIR` point into a private scratch directory that is deleted afterwards (stale ones left by a killed worker are removed on the next run, with one log line), and `CODEX_HOME` is the Optimus-owned Codex home. The codex CLI refreshes its own sign-in there; Optimus copies, locks and writes back nothing.
+- On Linux the CLI child is started with `PR_SET_PDEATHSIG` so the kernel stops it when the worker dies (the direct child only), and a run that is abandoned is logged (`exec_abandoned`).
+- The reply file is opened without following links and must be a regular file. The capability filter also turns off features named like `daemon`, `skill` or `realtime` that the CLI reports as on.
+- Only the tool features the installed CLI lists are turned off (`--disable`), plus every capability-looking feature it reports as on. Before, a fixed list was always passed and one unknown name made every call fail. If `codex features list` cannot be read, the call is refused instead of running with a guess.
+- The CLI path (or the `PATH` hit) must be a `codex` launcher or a Node entrypoint owned by the bench user or root and not writable by group or others. A path that fails now says which check failed.
+- A CLI send marks the raw-value request as sent, so a re-ask after raw-value consent is revoked is refused. The guardrail re-ask is skipped for this mode because the CLI takes one flat prompt.
+- The reply goes through a pattern scrub for secrets. Known limits: the tool list is a denylist and the scrub is pattern based. Use this mode only on a developer bench with data you trust. Tested with codex 0.164 to 0.165; Connect warns outside that range. See SECURITY.md.
+
+### Fixed
+
+- A failure is read from the last lines of the CLI's error output only. A rate limit is a temporary "rate limited" error, a usage limit is the fatal "quota" error, and a bare `401` in echoed text is no longer a sign-out. A login check that fails without saying "not logged in", a process killed by the system, or a CLI or Node that cannot start is a temporary error, not a sign-out.
+- A failed run that may have reached OpenAI is recorded as "sent, outcome unknown" so it is not repeated automatically. Only a rejection before any answer counts as a known outcome.
+- A reply cut at the output limit ends with a "(truncated)" marker and is treated as incomplete by the guardrails.
+- A call stays inside its time limit: the sign-in check and the feature check come out of it, and the run stops with a timeout when too little is left. The sign-in check is remembered for 5 minutes and cleared when a run reports an expired session.
+- The CLI process group is always stopped when a call ends, and output is read with a size limit. A descendant that keeps the pipe open can no longer hang the call.
+- The unavailable message now tells a non-admin to ask a System Manager to open Optimus Settings and click Connect, and does not mention Connect while AI is off.
+- The Optimus Codex home is always an absolute path, so the CLI child (which runs in a scratch folder) finds the sign-in; before, Frappe's relative site path made Connect and every run fail on a real bench.
+- The CLI's real refresh-failure messages ("refresh token was already used", "token was revoked", "access token could not be refreshed", "log out and sign in") are an expired-session error with the `codex login` hint. Because parallel runs share one sign-in, a run that gets that error is tried once more after 2 seconds (when the time limit allows) before it fails.
+- The capability filter also turns off `goals`, `mentions`, `worktrees`, `write_stdin` and `collab` features. A corrupt `auth.json` ("Error checking login status") reads as signed out, and the Connect message says the token is checked on first use.
+
+---
+
+## [0.12.123] - 2026-10-29
+
+### Changed
+
+- The "Call chain" block on a finding card is now labelled "Drill-down", matching the existing Drill-down block. When a card has both, they sit together under a single "Drill-down" heading: the line-profiling chain first, then the sampled call path without a second heading, each keeping its own footer line. The Hint box now renders above both trees so it no longer separates them.
+- The message shown for framework-code lines that skip the AI now says "Follow the drill-down above" instead of "call chain".
+
+---
+
+## [0.12.122] - 2026-10-30
+
+### Added
+
+- When a profiling session finishes, fails or ends with no recorded requests, a popup shows the Optimus Session ID with a button that opens the record. It appears once per run even with several tabs open, only in a visible tab, wherever you are in Desk, except when you are already on that session's form.
+- The popup waits while you type in a text field or another dialog is open, and opens anyway after about 30 seconds. If it fails to open, the error goes to the browser console and it can still show on the next attempt or in another tab.
+- The pill and alert for a session with no recorded requests say "No data" instead of "Report ready", and so does the alert on the session form. The inline stop response carries `empty` so the widget can tell. The session form shows a red "Analysis failed" alert when analysis fails.
+
+### Fixed
+
+- The widget never received the session events on a fresh page load: it subscribed before Frappe had created the realtime socket, where `frappe.realtime.on` does nothing, so no popup, pill or alert update arrived. The widget now waits for the socket (checking every 250 ms, for up to 30 seconds) and registers its handlers exactly once.
+
+---
+
+## [0.12.121] - 2026-10-29
+
+### Added
+
+- The "Queries per action" table has a separate Function column showing the function that issued each query, next to the callsite. Long names are cut with an ellipsis (full name on hover and when copied) and wrap in PDF export; queries with no captured stack show a dash.
+
+---
+
+## [0.12.120] - 2026-10-29
+
+### Fixed
+
+- The Hot frames section now reliably separates your app's code from framework code. Before, the split guessed the app from a shortened file name, so frappe frames could appear under your app and, with Tracked Apps set, your own tracked app's frames could be pushed into the framework group. Each frame is now classified from its full file path, using the same rules as the rest of the report. Optimus's own code and frames with no file name are never shown as your app.
+- Hot frames no longer lose framework rows on large sessions: when the working set is trimmed, app frames are ranked by self time and framework frames by cumulative time, each in its own group.
+
+### Changed
+
+- Hot frames now has two labelled groups, "Your app's code" first and "Framework code" second, each showing its own top 20.
+- Rows are totalled by app-relative file path plus function, so two files whose shortened names match (a framework `user/user.py` and your app's `user/user.py`) stay separate rows with their own times, while the same file reached by a relative or absolute path is one row. Labels are lengthened only when two rows would otherwise read the same. If two rows still read the same at every length, each shows its last three path segments plus a short hash, never the full path.
+
+---
+
+## [0.12.119] - 2026-10-29
+
+### Added
+
+- Capture and surface DB lock contention. A query that hits a deadlock (`QueryDeadlockError`) or a lock-wait timeout (`QueryTimeoutError`) is recorded and reported as a High-severity "Lock Contention" finding. The Frappe recorder only logs queries that succeed, so these failed queries were invisible before. Optimus patches `Database.sql` once at class level, gated on an active Optimus session, records the contended callsite plus the normalized query (no row data) and re-raises the error unchanged. It keeps working when the recorder runs with "Record SQL" off. Run `bench migrate` to add the new finding type.
+- Findings are raised only for contention at a callsite in your own code (same app classification as the Redundant Call and N+1 analyzers). Lock errors Frappe catches itself (session touch, change-log write, dashboard refresh) are dropped even when your code is above them in the stack, deliberate `NOWAIT` probes are skipped, and a Postgres statement timeout is not reported as a lock wait.
+- The finding is actionable, names the callsite, lists every distinct contended query, shows the wall time the query waited before failing, and gives a fix hint. Within a root-cause group it outranks timed findings of the same severity. It is not sent to the LLM; it shows only its canned fix hint.
+- Stored events are bounded: at most 200 per recording (a truncation marker is added past that), the callsite plus a short tail of frames, and the error cut to its first line.
+- A background job that Frappe retries in the same worker after a deadlock or lock-wait timeout keeps its session and its lock events across the retry, so the deadlock that caused the retry is reported. If the session ends or the user is skipped before the retry starts, the retry runs unprofiled and the first attempt's lock events are not reported.
+- A lock error that is filtered out (`NOWAIT` probe, handled by Frappe, no callsite in your own code) is logged at debug level in the `optimus` logger with the reason.
+
+### Fixed
+
+- The session summary no longer calls a finding with no measured impact "the biggest issue this session".
+- Lock capture no longer swallows an RQ job timeout raised while a lock event is being recorded.
+
+---
+
+## [0.12.118] - 2026-10-29
+
+### Fixed
+
+- Profiling a flow that calls `frappe.enqueue(..., now=True)`, `is_async=False` or the legacy `async=False` no longer passes Optimus's internal markers to your method, which crashed methods that do not accept extra keyword arguments. Positional flags are read from frappe's own signature.
+- Background jobs queued with `enqueue_after_commit=True` are now tracked like any other job, so the report waits for them and includes their recording. A job whose transaction has not committed yet (up to two minutes after it was queued) is kept waiting and shown as "Queued" instead of "Stopped / Never ran". Jobs frappe skips as duplicates are not tracked.
+- Jobs started by another background job after you press Stop (while the report is still collecting jobs) are now captured and attributed to the same session. A job chain no longer revives a session that is already finished, and the job keys expire 24 hours after they are created.
+- A job that is still waiting in the queue when the wait ends is shown as "Queued" instead of "Running". A job that finishes after the report was saved now replaces a "Queued" row or a "Never ran" placeholder with its real result. A job RQ has no record of is shown as "Stopped" with an explanation, in a warning colour. A job still Queued or Running when the report was prepared gets a note saying so.
+
+### Added
+
+- Each background job in the report now says which action (or parent job) triggered it ("Triggered by POST ..."). Existing sessions are unaffected; a migration adds the column.
+
+---
+
+## [0.12.117] - 2026-10-29
+
+### Changed
+
+- A line-level (phase 2) run now rechecks the phase 1 findings against the newest ready run. When a finding's function was line-profiled, the finding shows the measured function time and the hottest line with its time, hit count and code. If the measured function time is under a quarter of the estimate, the finding is downgraded one severity step; a measurement is never used to raise severity. The finding's impact stays the phase 1 estimate, with the measured time shown beside it.
+- The recheck only judges when the numbers are comparable. Findings whose estimate is summed over many calls (N+1, repeated calls), and functions from a time-budgeted run, are shown as measured with no change to severity.
+- A finding is matched to a profiled function by file name, parent folder and function name; names shared by several profiled functions are not guessed. Findings the line profile did not cover say why they were not rechecked.
+- The recheck and the Line-Level Drilldown now use the same function index, so both show the same hottest line from the newest run.
+
+### Fixed
+
+- Running phase 2 again no longer adds a second Hot Line row for the same function. The row is updated in place, and old duplicate rows are removed.
+- A failure while rechecking no longer stops the phase 2 results from being saved. If a row cannot be written, the rows already rechecked are put back, so the findings table is never left half rechecked.
+
+---
+
+## [0.12.116] - 2026-10-29
+
+### Changed
+
+- The "Preparing report" and "Capturing background jobs" banners on the Optimus Session form are now a slim one-line strip with a thin progress bar instead of a large block, so they no longer push the form content down. They stay aligned and wrap cleanly on narrow screens and follow the Desk dark theme. The strip text is announced politely to screen readers, its contrast is higher, the drain text is escaped, and the bar and spinner animations stop when the user prefers reduced motion.
+
+---
+
+## [0.12.115] - 2026-10-29
+
+### Fixed
+
+- The small pill in the bottom-right corner no longer stays on "Analyzing" after the report is ready. It now checks the server when the page loads, when you come back to the tab, when the live connection returns and while it is waiting. It covers both the normal analyze after stopping and the second-pass analyze, and a page reload while a report is still being built brings the "Analyzing" pill back.
+- While waiting, the pill checks with a growing delay and gives up 15 minutes after the wait began, even if the server keeps answering "still analyzing". It then shows "Check report" instead of polling forever.
+- A late "analyzing" update can no longer replace a "Report ready" pill, and a slow server reply can no longer undo a click on the pill or a newly started recording.
+- A failed analyze and the "Check report" give-up state now have their own red and amber colours instead of the blue "ready" look, and a stop click discards any status reply that was already on its way.
+- These background checks no longer pop an error dialog when they fail, a failed second-pass analyze found after a reload no longer shows placeholder text, and a stuck "Phase 2 recording" is rechecked after a failed stop. The failed-analyze alert text is now translatable as a whole sentence.
+
+---
+
+## [0.12.114] - 2026-10-29
+
+### Fixed
+
+- A session with no recordings is now marked Ready only after its (empty) report is rendered and attached, like every other session. If the report cannot be produced, the session is marked Failed instead of showing Ready with no report. The Ready notification is now also sent for such sessions.
+
+## [0.12.113] - 2026-10-29
+
+### Fixed
+
+- A "Slow Background Job" finding in the Findings section now gets an AI fix suggestion like the other findings. Before, it was skipped and the card said it "does not carry enough code or SQL context". The prompt carries the last part of the job method name, the deepest hot frame with its share of the job's time, the source around it and the job's slowest queries (taken from the job's recording when the prompt is built). A job whose hot frame is framework code, or that names no source line, gets no AI call; the card shows a note saying why, and any older stored suggestion is hidden.
+
+### Action needed
+
+- This type is now eligible with no opt-in. To keep it away from the AI provider, add `Slow Background Job` to Excluded finding types in Optimus Settings.
+
+---
+
+## [0.12.112] - 2026-10-29
+
+### Fixed
+
+- Missing-index suggestions no longer propose an index that an existing index already serves for the same query. A composite index such as (a, b) counts for a query that filters `a` and `b` by equality, a FULLTEXT index no longer hides a real missing index, and a column used only inside a function (such as `DATE(col)` or Frappe's `ifnull(col, '')`) gets no suggestion because a plain index cannot serve it. The warning for that case lists the real options: a range rewrite, a functional index, or avoiding the code path that wraps the column.
+- `NOT (col = ...)`, `NOT EXISTS (...)`, `ANY`, `ALL` and `IN (...)` are no longer mistaken for function calls. `LIKE` with anything but a plain prefix literal, such as `LIKE CONCAT('%', x)`, counts as a scan, `IS NOT NULL` is not treated as a weak negation, and a top-level `UNION` is treated as ambiguous so a real suggestion is kept.
+- When a column leads an existing index but the only filter on it is `!=`, `NOT IN` or `NOT LIKE`, the warning says the index exists but may not be able to serve that filter.
+- Many leading `/* ... */` comments, deep parenthesis nesting or unterminated quotes in a recorded statement can no longer stall the analyze worker; the statement and write parsers now run in linear time.
+- The savings floor and the example queries are computed from the queries that still need the index, the first known column cardinality is kept (numeric strings and Decimal values count), and a non-string query or a parser error fails open instead of dropping every index finding. An RQ job timeout is no longer swallowed while reading table aliases.
+
+### Changed
+
+- Before suggesting an index, Optimus checks the other queries in the same session. It drops the suggestion when the column is updated, or the table is written, far more often than the index would help reads (`HOT_COLUMN_MIN_UPDATES` 5, `WRITE_HEAVY_MIN_WRITES` 50, ratio 10), and says why in the warning. Otherwise it adds a "Before adding, check:" note with the write counts and the flows that write, a table with at least `CAUTION_MIN_WRITES` (10) writes, a column with at most `LOW_CARDINALITY_MAX` (10) distinct values, and an existing composite index that already holds the column. The finding's JSON gains `cautions` and `write_impact`.
+- Write detection also reads aliased UPDATE statements and double-quoted table names; `UPDATE ... JOIN` and multi-table `UPDATE a, b SET` are not counted (stated in the module docstring), which only means fewer suppressions. A failed alias parse is logged at debug level.
+
+---
+
+## [0.12.111] - 2026-10-29
+
+### Changed
+
+- The Optimus Session form is reorganised so the most useful things come first. An Overview tab shows the status, top severity and report links, then the totals, the summary, the session details and your notes. Findings, the recorded actions and background jobs, line-profiling runs and the technical and AI usage details each get their own tab or collapsed section. Existing sessions pick this up on the next migrate, and no session data changes.
+
+---
+
+## [0.12.103] - 2026-10-29
+
+### Fixed
+
+- Frontend metrics sent when leaving a page during a session are no longer rejected with a CSRF error (400). The beacon now carries the CSRF token in its body.
+
+---
+
+## [0.12.102] - 2026-10-29
+
+### Fixed
+
+- Removing every row from Ignored Apps now ignores no app, instead of silently falling back to the 11 default framework apps. A one-time patch seeds the table on installs that predate the seed, so their behavior does not change.
+
+---
+
+## [0.12.101] - 2026-10-29
+
+### Fixed
+
+- Captured SQL now redacts values of columns that contain a secret name as one part, such as reset_password_key or api_secret. Previously only exact names were matched, so the password reset key hash reached the stored recordings.
+
+---
+
+## [0.12.100] - 2026-10-29
+
+### Fixed
+
+- Top Severity now counts only the findings the report shows. A session whose only finding has no callsite (such as Memory Pressure) no longer shows High in the list while its report says there is nothing to fix.
+
+---
+
+## [0.12.99] - 2026-10-29
+
+### Fixed
+
+- Saving a document that clears the cache (such as Print Settings) while a session is recording no longer hangs the server. Re-reading Optimus Settings recorded its own queries, which read the settings again in a loop.
+
+---
+
+## [0.12.94] - 2026-10-29
+
+### Fixed
+
+- A save that clears the cache (such as Print Settings) no longer ends the active recording session. Profiler keys are now kept by frappe.clear_cache(); the Optimus Settings cache is still cleared.
+
+---
+
 ## [0.12.92] - 2026-10-27
 
 ### Internal
@@ -76,6 +496,9 @@ versions may contain breaking changes see migration notes below).
 - Normalized EXPLAIN rows are coerced with `to_int` / `to_float`, so a string or
   `Decimal` value no longer drops that row's findings. `to_int` / `to_float` also
   treat `nan` / `inf` as missing instead of passing them to threshold checks.
+- Test coverage is now configured for the unit suite (line and branch; tests, integration tests and data patches excluded). Run `python -m pytest optimus/tests/ --cov --cov-report=term-missing:skip-covered`.
+- New behaviour tests for the session start/stop/retry endpoints, the request and background-job hooks, install/uninstall, the AI settings warning, the janitor and the Redis schema sentinel.
+- Removed an unused test fixture (`sidecar_with_pii.json`).
 
 
 

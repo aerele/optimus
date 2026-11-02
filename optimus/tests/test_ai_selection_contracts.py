@@ -241,6 +241,12 @@ def test_the_selection_carries_the_gated_and_excluded_counts():
 	assert out == list(out)
 
 
+def test_lock_contention_is_never_selected_for_an_ai_refresh():
+	out = analyze.eligible_findings([row("ok"), row("lock", finding_type="Lock Contention")], config())
+	assert names(out) == ["ok"]
+	assert (out.gated, out.excluded) == (0, 0)
+
+
 def test_an_empty_selection_still_has_counts():
 	out = analyze.eligible_findings([], config())
 	assert out == [] and (out.gated, out.excluded) == (0, 0)

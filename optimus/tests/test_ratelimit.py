@@ -7,8 +7,8 @@ Frappe's @rate_limit(key=...) reads ``key`` as a form field name, so its bucket 
 that field's value and a caller could open a fresh bucket by sending a new value.
 """
 
-import inspect
-import sys
+import ast
+from pathlib import Path
 
 import pytest
 
@@ -118,17 +118,55 @@ def test_non_dict_override_block_falls_back(monkeypatch):
 	assert _key("refill_ai_suggestions", "a@example.com", 3600) in fake.cache.store
 
 
-def test_frappe_rate_limit_user_based_canary():
-	"""Frappe #42815 adds ``@rate_limit(user_based=True)``; Frappe 16.18 does not have it. When
-	this fails, the installed Frappe has it: consider moving optimus.ratelimit onto it (keep the
-	counted-after-the-gate order) and delete this canary. Skipped on the baseline CI stub."""
-	rate_limiter = sys.modules.get("frappe.rate_limiter")
-	if rate_limiter is None:
-		rate_limiter = pytest.importorskip("frappe.rate_limiter")
-	if not getattr(rate_limiter, "__file__", None):
-		pytest.skip("baseline frappe stub: the canary needs a real Frappe")
-	params = inspect.signature(rate_limiter.rate_limit).parameters
-	assert "user_based" not in params, (
-		"Frappe now ships @rate_limit(user_based=True) (frappe/frappe#42815); see the "
-		"optimus.ratelimit module docstring"
+def _api_tree() -> ast.Module:
+	return ast.parse((Path(ratelimit.__file__).parent / "api.py").read_text(encoding="utf-8"))
+
+
+def test_optimus_keeps_count_after_gate_limiter():
+	"""Decision lock: Optimus keeps its own ``enforce_user_rate_limit`` and does not move onto
+	Frappe's ``@rate_limit(user_based=True)`` (frappe#42815, in Frappe 16 since 16.18).
+
+	Frappe's version is a decorator, so it runs before the function body and counts every call,
+	including one the permission gate denies and one a misconfigured site rejects. Optimus calls
+	``enforce_user_rate_limit`` inside each endpoint after its gate passed, so a denied call never
+	uses up a user's budget. A decorator cannot keep that count-after-the-gate order; a future
+	migration would silently let a denied or probing caller exhaust a legitimate user's budget.
+	"""
+	assert callable(ratelimit.enforce_user_rate_limit)
+	tree = _api_tree()
+	decorators = [
+		decorator
+		for node in ast.walk(tree)
+		if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+		for decorator in node.decorator_list
+	]
+	for decorator in decorators:
+		assert "rate_limit" not in ast.unparse(decorator), (
+			"an endpoint is decorated with a rate limit; Optimus counts after the gate instead "
+			"(see test_optimus_keeps_count_after_gate_limiter)"
+		)
+	assert "user_based" not in ast.unparse(tree)
+	counted = {
+		node.args[0].value
+		for node in ast.walk(tree)
+		if isinstance(node, ast.Call)
+		and ast.unparse(node.func) == "ratelimit.enforce_user_rate_limit"
+		and node.args
+		and isinstance(node.args[0], ast.Constant)
+	}
+	# the AI actions are counted by _ai_session_gate (a variable action), the rest by the endpoint
+	assert {"start", "stop", "download_pdf", "test_ai_connection", "check_cli_session"} <= counted
+	assert "ratelimit.enforce_user_rate_limit(action, **_AI_LIMITS[action])" in ast.unparse(tree)
+
+
+def test_ai_gate_counts_after_the_gate_checks():
+	"""The count sits last in ``_ai_session_gate``, after the permission and availability checks."""
+	gate = next(
+		node for node in ast.walk(_api_tree()) if isinstance(node, ast.FunctionDef) and node.name == "_ai_session_gate"
 	)
+	in_order = sorted(
+		(node for node in ast.walk(gate) if isinstance(node, ast.Call)), key=lambda n: (n.lineno, n.col_offset)
+	)
+	calls = [ast.unparse(node.func) for node in in_order]
+	assert calls.index("_session_action_gate") < calls.index("ratelimit.enforce_user_rate_limit")
+	assert calls.index("ai_fix.is_available") < calls.index("ratelimit.enforce_user_rate_limit")

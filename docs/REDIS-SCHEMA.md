@@ -21,7 +21,7 @@ backlog counter). The Frappe-managed MariaDB DocTypes
 Redis is the working memory.
 
 AI refresh ownership, attempts, usage and dispatch intent are durable SQL journal
-rows. Phase 2 analysis ownership and dispatch intent are also stored in SQL. RQ
+rows. Line profiling analysis ownership and dispatch intent are also stored in SQL. RQ
 and Redis accelerate delivery; they do not authorize a second provider call or
 replace SQL claim and ownership checks. The CI SQL matrix exercises MariaDB 10.6,
 MariaDB 11.8 snapshot isolation and PostgreSQL 16 concurrency. See
@@ -54,7 +54,7 @@ Every key pattern, in canonical placeholder form. Add to this table
 when you add a new key; the audit test asserts this table matches
 `redis_keys.KEY_PATTERNS` exactly.
 
-### 2.1 Per-session lifecycle (Phase 1)
+### 2.1 Per-session lifecycle (normal profile)
 
 | Pattern | Value | Encoding | TTL | Notes |
 |---|---|---|---|---|
@@ -72,6 +72,7 @@ when you add a new key; the audit test asserts this table matches
 | `profiler:sidecar:<recording_uuid>` | list[dict] | Frappe pickle | `SESSION_TTL_SECONDS` | Argument-log entries; optional `{"_truncated": True}` tail marker. |
 | `profiler:infra:<recording_uuid>` | dict | Frappe pickle | `SESSION_TTL_SECONDS` | CPU / RAM / DB / RQ delta. |
 | `profiler:resolved_doc:<recording_uuid>` | dict | Frappe pickle | `SESSION_TTL_SECONDS` | A created doc's save-assigned `{doctype, name}`, written by `after_request` and merged onto the recording as `resolved_target_doc` at analyze time. |
+| `profiler:lock_events:<recording_uuid>` | list[dict] | Frappe pickle | `SESSION_TTL_SECONDS` | DB lock-contention events (deadlocks / lock-wait timeouts) captured by `optimus.capture`'s class-level `Database.sql` patch; read into `rec["lock_events"]` by the lock_contention analyzer. Each entry: `kind`, `normalized_query`, `error` (first line only), `caller_stack` (the user callsite plus a short tail), `duration_ms`, `time`. |
 
 ### 2.3 Frontend metrics (v0.5.0+ split lists)
 
@@ -81,7 +82,7 @@ when you add a new key; the audit test asserts this table matches
 | `profiler:frontend:<session_uuid>:vitals` | list | Frappe pickle (entries) | `SESSION_TTL_SECONDS` | LTRIM'd to 200 entries. |
 | `profiler:frontend:<session_uuid>` | dict (legacy) | Frappe pickle | none | Pre-v0.5.1 combined shape. No code writes this any more; `delete_session_state` cleans it as a safety net for in-flight benches. |
 
-### 2.4 Phase-2 line-profile run state
+### 2.4 line-profile run state
 
 | Pattern | Value | Encoding | TTL | Notes |
 |---|---|---|---|---|

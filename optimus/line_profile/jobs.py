@@ -1,4 +1,4 @@
-"""Durable Phase 2 delivery and ownership.
+"""Durable line profiling delivery and ownership.
 
 SQL reserves each analysis generation before enqueue and fences every write.
 Redis only delivers jobs. A crashed analysis requires a bounded explicit retry;
@@ -21,7 +21,10 @@ TABLE = "Optimus Phase Two Run"
 QUEUE_SECONDS = queue_protocol.QUEUE_SECONDS
 JOB_SECONDS = 1500
 LEASE_SECONDS = JOB_SECONDS + 120
+# After the results are saved only the report step remains, so recovery needs not wait a full job lease.
+RENDER_LEASE_SECONDS = 600
 MAX_ATTEMPTS = 4
+# analyze_render_pending: Analyzing = results saved, report not attached yet; Ready = report update still owed.
 JOURNAL_FIELDS = (
 	"recording_user",
 	"analyze_generation", "analyze_requested_by", "analyze_worker_token", "analyze_lease_until",
@@ -53,7 +56,7 @@ def _validate_journal_row(row, before):
 		if not _RESULT_SAVE.get():
 			fields += ("status", "results_json", "warnings_json", "total_ms", "ended_at")
 	if any((row.get(key) or None) != (before.get(key) or None) for key in fields):
-		raise frappe.ValidationError(_("Phase 2 analysis state is managed by the server."))
+		raise frappe.ValidationError(_("Line profiling analysis state is managed by the server."))
 
 
 def validate_child_journal(doc):
@@ -64,7 +67,7 @@ def validate_child_journal(doc):
 
 def protect_child_journal(doc):
 	if any(doc.get(key) for key in JOURNAL_FIELDS):
-		raise frappe.ValidationError(_("Phase 2 analysis state is managed by the server."))
+		raise frappe.ValidationError(_("Line profiling analysis state is managed by the server."))
 
 
 def validate_parent_journal(doc):
@@ -79,11 +82,11 @@ def validate_parent_journal(doc):
 		before = previous.pop(row.get("name"), {})
 		_validate_journal_row(row, before)
 	if any(any(row.get(key) for key in JOURNAL_FIELDS) for row in previous.values()):
-		raise frappe.ValidationError(_("Phase 2 analysis state is managed by the server."))
+		raise frappe.ValidationError(_("Line profiling analysis state is managed by the server."))
 
 
 class MissingInput(ValueError):
-	"""Captured Phase 2 data expired or is malformed; do not save empty results."""
+	"""Captured line profiling data expired or is malformed; do not save empty results."""
 
 
 class InputChanged(ValueError):
@@ -96,6 +99,12 @@ class Phase2Failed(RuntimeError):
 
 def _now():
 	return time.time()
+
+
+def _stamp():
+	from frappe.utils import now_datetime
+
+	return now_datetime()
 
 
 def _locked(docname, run_uuid, *, wait=True):
@@ -166,7 +175,7 @@ def stop_captures(captures, *, cleanup=False):
 			raise guard.interrupt()
 		if failure_type:
 			failed += 1
-			_log("optimus ai Phase 2 capture recovery", RuntimeError(failure_type))
+			_log("optimus ai line profiling capture recovery", RuntimeError(failure_type))
 	return bool(cleared), failed
 
 
@@ -211,13 +220,14 @@ def _admit(docname, session_uuid, run_uuid, requested_by, *, generation, now, fr
 		return {"status": "refused", "reason": "retry_limit"}
 	if workers is not True:
 		if row["status"] != "Failed":
-			message = ("Phase 2 needs a worker listening on the long queue. Start a worker and retry analysis while the captured input is available."
-				if workers is False else "Phase 2 worker availability could not be checked. Check Redis and the long queue worker, then retry analysis.")
+			message = ("Line profiling needs a worker listening on the long queue. Start a worker and retry analysis while the captured input is available."
+				if workers is False else "Line profiling worker availability could not be checked. Check Redis and the long queue worker, then retry analysis.")
 			_write(row, status="Failed", analyze_dispatch_pending=0, warnings_json=json.dumps([message]))
 		return {"status": "refused", "reason": "no_worker" if workers is False else "queue_unavailable"}
 	_write(row, status="Analyzing", analyze_generation=generation, analyze_requested_by=requested_by,
 		analyze_worker_token=None, analyze_attempts=attempts + 1, analyze_lease_until=now + QUEUE_SECONDS,
-		analyze_dispatch_at=0, analyze_dispatch_pending=1)
+		analyze_dispatch_at=0, analyze_dispatch_pending=1, analyze_render_pending=0,
+		**({"results_json": None} if row.get("analyze_render_pending") else {}))
 	return {"status": "queued", "run": row}
 
 
@@ -231,7 +241,7 @@ def _claim(docname, run_uuid, generation, worker_token, *, now):
 		return None
 	if not _authorized(parent, row.get("analyze_requested_by")):
 		_write(row, status="Failed", analyze_dispatch_pending=0,
-			warnings_json=json.dumps(["Phase 2 analysis refused: permission changed. Recheck session access."]))
+			warnings_json=json.dumps(["Line profiling analysis refused: permission changed. Recheck session access."]))
 		return None
 	_write(row, analyze_worker_token=worker_token, analyze_dispatch_pending=0, analyze_lease_until=now + LEASE_SECONDS)
 	return {**row, "session_uuid": parent["session_uuid"]}
@@ -246,7 +256,7 @@ def _owns(row, run, now):
 def _complete(run, *, now, persist):
 	parent, row = _locked(run["parent"], run["run_uuid"])
 	if not (
-		_owns(row, run, now) and parent and parent["status"] == "Ready"
+		_owns(row, run, now) and not row.get("analyze_render_pending") and parent and parent["status"] == "Ready"
 		and parent.get("session_uuid") == run["session_uuid"]
 		and _authorized(parent, row.get("analyze_requested_by"))
 	):
@@ -257,20 +267,36 @@ def _complete(run, *, now, persist):
 		persist()
 	finally:
 		_RESULT_SAVE.reset(token)
-	_write(row, status="Ready", analyze_dispatch_pending=0, analyze_render_pending=1)
+	# The pending flag marks saved results; Ready is set by _finish once the report is attached.
+	_write(row, analyze_dispatch_pending=0, analyze_render_pending=1, analyze_lease_until=now + RENDER_LEASE_SECONDS)
+	return True
+
+
+def _finish(run, *, render_failed):
+	"""Flip this generation's saved run to Ready; False if it is not ours or already done."""
+	_parent, row = _locked(run["parent"], run["run_uuid"])
+	ours = (row and row.get("analyze_render_pending") and row.get("analyze_generation") == run["analyze_generation"]
+		and row.get("analyze_worker_token") == run["analyze_worker_token"])
+	if ours and row["status"] == "Ready" and not render_failed:
+		# Recovery completed the run while this render was still live; the report did get attached.
+		_write(row, analyze_render_pending=0)
+		return False
+	if not (ours and row["status"] == "Analyzing"):
+		return False
+	_write(row, status="Ready", ended_at=_stamp(), analyze_render_pending=int(render_failed))
 	return True
 
 
 def _fail(run, *, now, reason):
 	_parent, row = _locked(run["parent"], run["run_uuid"])
-	if not _owns(row, run, now):
+	if not _owns(row, run, now) or row.get("analyze_render_pending"):
 		return False
 	message = (
-		"Phase 2 samples changed during analysis. Wait for capture requests to finish, then retry analysis."
+		"Line profiling samples changed during analysis. Wait for capture requests to finish, then retry analysis."
 		if reason == "input_changed" else
-		"Phase 2 input is missing or invalid. Record a new line-profile pass."
+		"Line profiling input is missing or invalid. Record a new line-profile pass."
 		if reason == "input_missing" else
-		"Phase 2 analysis failed or was interrupted. Retry analysis while its captured input is available."
+		"Line profiling analysis failed or was interrupted. Retry analysis while its captured input is available."
 	)
 	_write(row, status="Failed", analyze_dispatch_pending=0, warnings_json=json.dumps([message]))
 	return True
@@ -280,7 +306,7 @@ def _completed(run):
 	"""Read back this worker's committed outcome after a lost acknowledgement."""
 	parent, row = _locked(run["parent"], run["run_uuid"])
 	return bool(parent and parent.get("session_uuid") == run["session_uuid"] and row
-		and row["status"] == "Ready"
+		and (row["status"] == "Ready" or row.get("analyze_render_pending"))
 		and row.get("analyze_generation") == run["analyze_generation"]
 		and row.get("analyze_worker_token") == run["analyze_worker_token"])
 
@@ -310,7 +336,7 @@ def _log(title, failure):
 
 def _identity(*values):
 	if any(not isinstance(value, str) or not value or len(value) > 140 for value in values):
-		raise ValueError("Invalid Phase 2 identity")
+		raise ValueError("Invalid line profiling identity")
 
 
 def request(docname, session_uuid, run_uuid, requested_by, *, from_recording=False):
@@ -339,16 +365,16 @@ def request(docname, session_uuid, run_uuid, requested_by, *, from_recording=Fal
 	}
 	if response["status"] == "Refused":
 		response["message"] = {
-			"no_worker": _("Phase 2 needs a worker listening on the long queue. Start a worker and retry analysis."),
-			"queue_unavailable": _("Phase 2 worker availability could not be checked. Check Redis and the long queue worker, then retry analysis."),
-			"busy": _("The session is busy. Wait a moment and retry Phase 2 analysis."),
-			"retry_limit": _("This Phase 2 run has reached its four-attempt limit. Record a new line-profile pass."),
+			"no_worker": _("Line profiling needs a worker listening on the long queue. Start a worker and retry analysis."),
+			"queue_unavailable": _("Line profiling worker availability could not be checked. Check Redis and the long queue worker, then retry analysis."),
+			"busy": _("The session is busy. Wait a moment and retry line profiling analysis."),
+			"retry_limit": _("This line profiling run has reached its four-attempt limit. Record a new line-profile pass."),
 			"permission": _("Your permission to update this session changed. Recheck session access."),
-			"ai_refresh": _("Wait for the AI refresh to finish or cancel it before retrying Phase 2."),
-			"not_ready": _("The session is no longer Ready. Reload it before retrying Phase 2."),
-			"not_retryable": _("This Phase 2 run cannot be retried in its current state. Reload the session."),
-			"not_found": _("This Phase 2 run is no longer available. Reload the session."),
-		}.get(out.get("reason"), _("Phase 2 analysis could not start. Reload the session to check its status."))
+			"ai_refresh": _("Wait for the AI refresh to finish or cancel it before retrying line profiling."),
+			"not_ready": _("The session is no longer Ready. Reload it before retrying line profiling."),
+			"not_retryable": _("This line profiling run cannot be retried in its current state. Reload the session."),
+			"not_found": _("This line profiling run is no longer available. Reload the session."),
+		}.get(out.get("reason"), _("Line profiling analysis could not start. Reload the session to check its status."))
 	return response
 
 
@@ -358,7 +384,7 @@ def _workers_listening(docname):
 	from optimus.analyze import _run_ai_step
 
 	listening, failed = _run_ai_step(lambda: bool(get_workers(queue=get_queue("long"))),
-		title="optimus ai phase 2 worker availability", docname=docname)
+		title="optimus ai line profiling worker availability", docname=docname)
 	return None if failed else listening
 
 
@@ -400,7 +426,7 @@ def _dispatch(run):
 	if failure is not None:
 		if store.is_lock_unavailable(failure):
 			return  # Durable intent remains pending for a later scheduler pass.
-		_log("optimus ai phase 2 enqueue", failure)
+		_log("optimus ai line profiling enqueue", failure)
 
 
 def _legacy_generation(docname, session_uuid, run_uuid):
@@ -441,7 +467,7 @@ def run(session_uuid, run_uuid, *, generation=None):
 			if not run_row:
 				return
 			if run_row["session_uuid"] != session_uuid:
-				raise Phase2Failed("Phase 2 session changed")
+				raise Phase2Failed("Line profiling session changed")
 			_notify(run_row, "phase_2_run_analyzing")
 			results, result, total_ms = analyzer._compute_run(docname, run_uuid)
 			_transaction(lambda: None)
@@ -452,8 +478,8 @@ def run(session_uuid, run_uuid, *, generation=None):
 				# This is outside the result transaction. Failure cannot revert a
 				# completed generation; even an ambiguous COMMIT is fenced by Ready.
 				from optimus.analyze import _run_ai_step
-				_run_ai_step(lambda: _postprocess(run_row), title="optimus ai phase 2 postprocess", docname=docname)
-				_run_ai_step(lambda: capture.cleanup_run(run_uuid), title="optimus ai phase 2 input cleanup", docname=docname)
+				_run_ai_step(lambda: _postprocess(run_row), title="optimus ai line profiling postprocess", docname=docname)
+				_run_ai_step(lambda: capture.cleanup_run(run_uuid), title="optimus ai line profiling input cleanup", docname=docname)
 				queue_analyze_time_ai(docname)
 	except Exception as exc:
 		failure = exc
@@ -474,9 +500,9 @@ def run(session_uuid, run_uuid, *, generation=None):
 		try:
 			with guard:
 				if failure is not None:
-					_log("optimus ai phase 2 worker", failure)
+					_log("optimus ai line profiling worker", failure)
 				if cleanup_error is not None:
-					_log("optimus ai phase 2 recovery", cleanup_error)
+					_log("optimus ai line profiling recovery", cleanup_error)
 		except Exception:
 			# SQL state (or its lease expiry) remains the visible recovery path.
 			# A logging outage must never replace a pending hard interrupt.
@@ -485,7 +511,7 @@ def run(session_uuid, run_uuid, *, generation=None):
 			failure = cleanup_error = run_row = result = results = None
 		if guard.pending():
 			raise guard.interrupt()
-		raise Phase2Failed("Phase 2 analysis failed; saved profiling results are retained")
+		raise Phase2Failed("Line profiling analysis failed; saved profiling results are retained")
 
 
 def _render(run):
@@ -506,8 +532,9 @@ def _postprocess(run):
 		failure = None
 		raise guard.interrupt()
 	if failure is not None:
-		_log("optimus ai phase 2 report", failure)
-	_notify({**run, "analyze_render_pending": failure is not None}, "phase_2_run_ready")
+		_log("optimus ai line profiling report", failure)
+	if _retry_sql(lambda: _finish(run, render_failed=failure is not None)):
+		_notify({**run, "analyze_render_pending": failure is not None}, "phase_2_run_ready")
 
 
 def _notify(run, event):
@@ -527,10 +554,14 @@ def _recover(docname, run_uuid, *, now):
 		return False
 	if (row.get("analyze_lease_until") or 0) > now:
 		return False
+	if row.get("analyze_render_pending"):
+		# Results were saved; only the report step stalled, so complete the run.
+		_write(row, status="Ready", ended_at=_stamp(), analyze_render_pending=1)
+		return "Ready"
 	_write(row, status="Failed", analyze_dispatch_pending=0, warnings_json=json.dumps([
-		"Phase 2 analysis expired before completion. Retry analysis while its captured input is available."
+		"Line profiling analysis expired before completion. Retry analysis while its captured input is available."
 	]))
-	return True
+	return "Failed"  # _recover returns False (untouched), "Ready" (saved results kept) or "Failed".
 
 
 def recover_pending():
@@ -540,9 +571,9 @@ def recover_pending():
 
 	if not ready(frappe, {TABLE: JOURNAL_FIELDS}):
 		return
-	_result, failed = _run_ai_step(_recover_pending, title="optimus ai phase 2 queue recovery")
+	_result, failed = _run_ai_step(_recover_pending, title="optimus ai line profiling queue recovery")
 	if failed:
-		raise Phase2Failed("Phase 2 queue recovery failed; committed work is retained")
+		raise Phase2Failed("Line profiling queue recovery failed; committed work is retained")
 
 
 def _recover_pending():
@@ -562,7 +593,11 @@ def _recover_pending():
 			raise
 		if changed:
 			row["session_uuid"] = frappe.db.get_value("Optimus Session", row["parent"], "session_uuid")
-			_notify(row, "phase_2_run_failed")
+			if changed == "Ready":
+				frappe.logger().warning(f"optimus line profiling run {row['run_uuid']} completed by recovery; report update pending")
+				_notify({**row, "analyze_render_pending": 1}, "phase_2_run_ready")
+			elif changed == "Failed":
+				_notify(row, "phase_2_run_failed")
 	# Separate scans prevent many live workers from hiding undelivered jobs.
 	rows = frappe.get_all(TABLE, filters={"status": "Analyzing", "analyze_dispatch_pending": 1,
 		"analyze_lease_until": [">", now]}, fields=["parent", "run_uuid", "analyze_generation"],
@@ -580,10 +615,13 @@ def expire_legacy(docname, run_uuid, *, status, cutoff):
 		return False
 	if status not in {"Recording", "Analyzing"}:
 		return False
+	if status == "Analyzing" and row.get("results_json"):
+		_write(row, status="Ready", ended_at=_stamp(), analyze_render_pending=1)
+		return True
 	message = (
-		"Phase 2 recording expired. Record a new line-profile pass and stop it after reproducing the flow."
+		"Line profiling recording expired. Record a new line-profile pass and stop it after reproducing the flow."
 		if status == "Recording" else
-		"Phase 2 analysis timed out or crashed. Retry analysis while its captured input is available."
+		"Line profiling analysis timed out or crashed. Retry analysis while its captured input is available."
 	)
 	_write(row, status="Failed", warnings_json=json.dumps([message]))
 	return True

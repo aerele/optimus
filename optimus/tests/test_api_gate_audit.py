@@ -11,7 +11,7 @@ Pins, over the parsed source (no bench needed):
 * every whitelisted function that writes, enqueues, commits or calls the LLM is POST-only;
 * every whitelisted parameter is annotated (Frappe semgrep ``missing-argument-type-hint``);
 * no endpoint calls another whitelisted endpoint (the nested-gate bug behind C3), except the
-  Phase 2 batch retry, which loops over the single-run endpoint;
+  Line profiling batch retry, which loops over the single-run endpoint;
 * no ``@rate_limit`` remains (its ``key=`` is a form field name, so callers could mint buckets);
 * the Desk JS reaches every POST-only endpoint through ``frappe.call({method: ...})`` (POST).
 

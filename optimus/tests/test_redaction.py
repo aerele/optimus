@@ -140,6 +140,16 @@ class TestRedactSqlLiterals:
 		out = redaction.redact_sql_literals('UPDATE x SET secret = "shh" WHERE id = 1')
 		assert "shh" not in out
 
+	def test_compound_secret_columns_redacted(self):
+		query = "SELECT name FROM `tabUser` WHERE `reset_password_key`='709dcc92' OR api_secret = 'abc'"
+		out = redaction.redact_sql_literals(query)
+		assert "709dcc92" not in out
+		assert "abc" not in out
+
+	def test_compound_non_secret_columns_pass_through(self):
+		query = "SELECT * FROM t WHERE job_card='JC-1' AND credit_in_account_currency=5"
+		assert redaction.redact_sql_literals(query) == query
+
 	def test_non_sensitive_query_passes_through(self):
 		query = "SELECT name, email FROM `tabUser` WHERE enabled = 1 ORDER BY name"
 		assert redaction.redact_sql_literals(query) == query

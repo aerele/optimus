@@ -56,7 +56,7 @@ def test_chain_leaf_pinned_to_related_query_line():
 	assert cs["function"] == "_check_user_exists"
 	assert cs["original_wrapper"]["function"] == "looped_validate"
 	assert cs["original_wrapper"]["lineno"] == 1
-	# Phase-2 crosslink aims at the leaf (raw name).
+	# Line profiling crosslink aims at the leaf (raw name).
 	assert cs["phase2_lookup_function"] == "_check_user_exists"
 	# Snippet is reused from the source finding (not re-read).
 	assert cs["source_snippet"] == n1["technical_detail"]["callsite"]["source_snippet"]
@@ -73,7 +73,7 @@ def test_doctype_suffixed_function_still_matches():
 	cs = _cs(shp)
 	assert cs["lineno"] == 25
 	assert cs.get("self_time_hot_line_pinned") is True
-	# Phase-2 lookup strips the suffix (raw name for the profiler index).
+	# Line profiling lookup strips the suffix (raw name for the profiler index).
 	assert cs["phase2_lookup_function"] == "_check_user_exists"
 
 

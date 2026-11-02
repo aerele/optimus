@@ -160,7 +160,7 @@ def _whitelist_methods() -> dict:
 
 @pytest.mark.parametrize(
 	"name",
-	["start", "stop", "mark_onboarding_seen", "force_stop_phase2", "test_ai_connection", "submit_frontend_metrics", "retry_analyze"],
+	["start", "stop", "mark_onboarding_seen", "force_stop_phase2", "test_ai_connection", "check_cli_session", "submit_frontend_metrics", "retry_analyze"],
 )
 def test_mutating_endpoint_is_post_only(name):
 	assert _whitelist_methods()[name] == ["POST"]
