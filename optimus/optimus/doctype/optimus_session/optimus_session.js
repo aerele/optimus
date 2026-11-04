@@ -574,6 +574,11 @@ function _phase2_armed_banner(frm, html) {
 	_single_banner(frm, "optimus-phase2-armed", "form-message orange", html);
 }
 
+// Set by the controller's onload with the same rule as api._session_action_gate.
+function _can_act(frm) {
+	return !!(frm.doc.__onload && frm.doc.__onload.optimus_can_act);
+}
+
 function render_phase2_button(frm) {
 	if (frm.is_new() || frm.doc.status !== "Ready") {
 		// Not a Ready session (or unsaved): drop any armed banner left in the
@@ -589,7 +594,11 @@ function render_phase2_button(frm) {
 		return r.status === "Recording";
 	});
 
-	if (recording) {
+	// Session actions follow the server gate; Force Stop Stuck Run only clears the caller's own captures.
+	const can_act = _can_act(frm);
+	if (recording && !can_act) {
+		_phase2_armed_banner(frm, null);
+	} else if (recording) {
 		var stop_btn = frm.add_custom_button(
 			__("Stop Line Profiling Run"),
 			function () {
@@ -645,7 +654,7 @@ function render_phase2_button(frm) {
 		frappe.msgprint(__("Save or discard your changes before queueing line profiling analysis."));
 		return false;
 	};
-	if (stuck_runs.length >= 2) {
+	if (can_act && stuck_runs.length >= 2) {
 		const batch = stuck_runs.slice(0, 5);
 		frm.add_custom_button(__("Retry next {0} line profiling runs", [batch.length]), () => {
 			if (!clean_form()) return;
@@ -665,7 +674,7 @@ function render_phase2_button(frm) {
 			});
 		}, __("Line Profiling"));
 	}
-	stuck_runs.forEach(row => {
+	(can_act ? stuck_runs : []).forEach(row => {
 		frm.add_custom_button(__("Retry Line Profiling Analyze ({0})", [row.run_uuid.slice(0, 8)]), () => {
 			if (!clean_form()) return;
 			frappe.call({
@@ -684,9 +693,11 @@ function render_phase2_button(frm) {
 		}, __("Line Profiling"));
 	});
 
-	frm.add_custom_button(__("Run Line-Profile Pass"), function () {
-		open_phase2_picker(frm);
-	}, __("Line Profiling"));
+	if (can_act) {
+		frm.add_custom_button(__("Run Line-Profile Pass"), function () {
+			open_phase2_picker(frm);
+		}, __("Line Profiling"));
+	}
 
 	// Recovery hatch: force-clear a stuck phase-2 active flag if a
 	// previous run never reached Stop (worker crash, tab close, etc.).
@@ -1097,6 +1108,7 @@ function subscribe_phase2_events(frm) {
 function render_retry_button(frm) {
 	if (frm.is_new()) return;
 	if (frm.doc.status !== "Failed") return;
+	if (!_can_act(frm)) return;
 
 	frm.add_custom_button(__("Retry Analyze"), () => {
 		frappe.confirm(
@@ -1136,6 +1148,7 @@ function render_regenerate_report_button(frm) {
 	if (frm.is_new()) return;
 	// Only makes sense once the session has content to render.
 	if (!["Ready", "Failed"].includes(frm.doc.status)) return;
+	if (!_can_act(frm)) return;
 
 	frm.add_custom_button(__("Regenerate Reports"), () => {
 		let message = __(

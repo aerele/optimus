@@ -27,6 +27,11 @@ class OptimusSession(Document):
 		validate_session_accounting(self)
 		validate_parent_journal(self)
 
+	def onload(self):
+		from optimus.api import can_act_on_session
+
+		self.set_onload("optimus_can_act", can_act_on_session(self))
+
 	def on_trash(self):
 		from optimus.ai_jobs import delete_session_state
 

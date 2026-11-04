@@ -8,6 +8,14 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.138] - 2026-11-04
+
+### Fixed
+
+- A user the session is shared with read-only no longer sees Regenerate Reports, Retry Analyze or the Line Profiling run, stop and retry buttons, which the server refuses for them ("You can't do this on this Optimus Session..."). The form now gets the same decision as the server gate (`optimus_can_act` in the form's onload) and shows these buttons only when it allows them. Force Stop Stuck Run stays, since it only clears the caller's own captures.
+
+---
+
 ## [0.12.137] - 2026-11-04
 
 ### Fixed
