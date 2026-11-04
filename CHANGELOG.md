@@ -8,6 +8,14 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.136] - 2026-11-04
+
+### Fixed
+
+- The recording pill's elapsed time is correct when the browser's time zone differs from the server's. It read the server's naive `started_at` as browser-local time, so a UTC browser on an Asia/Kolkata site showed `-330:-56` instead of `0:04`. The time is now read in the system time zone.
+
+---
+
 ## [0.12.135] - 2026-11-01
 
 ### Fixed
