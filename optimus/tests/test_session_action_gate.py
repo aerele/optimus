@@ -302,3 +302,35 @@ def test_run_gate_ignores_the_parent_status(monkeypatch):
 	_install(monkeypatch, perms=owner_perms(), runs=RUNS, row=session_row(status="Failed"))
 	ref, _ = api._phase2_run_gate("run-1", action="retry_phase2_analyze")
 	assert ref.status == "Failed"
+
+
+# --- can_act_on_session: the form's button gate mirrors _session_action_gate ------------------
+
+@pytest.mark.parametrize("label,user,roles,perms,allowed", MATRIX, ids=[r[0] for r in MATRIX])
+def test_can_act_matches_the_gate_matrix(monkeypatch, label, user, roles, perms, allowed):
+	fake = _install(monkeypatch, user=user, roles=roles, perms=perms)
+	assert api.can_act_on_session(SimpleNamespace(name=DOCNAME, owner=OWNER)) is allowed
+	assert ("Optimus Session", "write", DOCNAME, user) in fake.spies.has_permission
+
+
+def test_can_act_fails_closed_when_permission_engine_raises(monkeypatch):
+	def boom(doctype, ptype, doc, user):
+		raise RuntimeError("permission engine hiccup")
+
+	_install(monkeypatch, has_permission=boom)
+	assert api.can_act_on_session(SimpleNamespace(name=DOCNAME, owner=OWNER)) is False
+
+
+def test_can_act_needs_the_profiler_role(monkeypatch):
+	_install(monkeypatch, roles=(), perms=owner_perms(write=True))
+	assert api.can_act_on_session(SimpleNamespace(name=DOCNAME, owner=OWNER)) is False
+
+
+def test_session_onload_sends_can_act_to_the_form(monkeypatch):
+	from optimus.optimus.doctype.optimus_session.optimus_session import OptimusSession
+
+	monkeypatch.setattr(api, "can_act_on_session", lambda doc: doc.name == DOCNAME)
+	sent = {}
+	doc = SimpleNamespace(name=DOCNAME, set_onload=lambda key, value: sent.update({key: value}))
+	OptimusSession.onload(doc)
+	assert sent == {"optimus_can_act": True}
