@@ -159,13 +159,18 @@ class TestManagedArtifactBoundaries(FrappeTestCase):
 		deleted = []
 		callbacks = []
 		failure = [True]
+		deferred = []
 
 		def trash(file):
 			if file.attached_to_name == parent.name:
 				deleted.append(file.name)
 				if len(deleted) == 2 and failure[0]:
 					raise RuntimeError("PRIVATE-RETENTION-CANARY")
-			return real(file)
+			result = real(file)
+			if file.attached_to_name == parent.name and failure[0]:
+				# Frappe 16 removes the blob only after commit; Frappe 15 removes it in on_trash.
+				deferred.append(Path(file.get_full_path()).exists())
+			return result
 
 		original = ai_jobs.delete_session_state
 
@@ -185,9 +190,13 @@ class TestManagedArtifactBoundaries(FrappeTestCase):
 			self.assertTrue(frappe.db.exists("File", second.name))
 			self.assertEqual(callbacks, [])
 			missing = [f for f in (first, second) if not Path(f.get_full_path()).exists()]
-			self.assertEqual(len(missing), 1)
-			with self.assertRaises(frappe.ValidationError):
-				read_artifact(parent.name, missing[0].attached_to_field, missing[0].file_url)
+			self.assertEqual(len(deferred), 1)
+			if deferred[0]:
+				self.assertEqual(missing, [])
+			else:
+				self.assertEqual(len(missing), 1)
+				with self.assertRaises(frappe.ValidationError):
+					read_artifact(parent.name, missing[0].attached_to_field, missing[0].file_url)
 			frappe.db.rollback()
 			failure[0] = False
 			janitor._sweep_old_sessions()
