@@ -96,7 +96,7 @@ def _short_callsite(stack: list) -> str:
 	# Walk innermost-to-outermost, return first non-framework frame
 	for frame in reversed(stack):
 		fn = (frame.get("filename") or "").replace("\\", "/")
-		if "/frappe/" in fn or "/optimus/" in fn:
+		if "/frappe/" in fn or is_optimus_path(fn):
 			continue
 		return f"{fn}:{frame.get('lineno', 0)}"
 	# Fall back to the innermost frame
@@ -196,22 +196,9 @@ def _pyi_to_dict_tree(pyi_session_or_dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-# Module path prefixes treated as "framework" graft points roll back
-# past these so SQL leaves attach under user code, not under helpers.
-#
-# v0.5.1: the fragments used to include leading slashes ("/frappe/",
-# "/optimus/") so the substring `in` check would match an
-# absolute path like /Users/.../apps/frappe/frappe/handler.py. But
-# pyinstrument and our dict-tree normalizer store filenames as
-# RELATIVE paths (e.g. "frappe/handler.py"), which means the filter
-# was a silent no-op for every frame. Slow Hot Path then emitted
-# "99% of time was spent in application" (i.e. frappe/app.py::application)
-# instead of descending past the framework frame to the user code
-# below. Dropping the leading slashes makes the filter work against
-# both relative and absolute filenames a relative filename like
-# "frappe/handler.py" contains "frappe/" and an absolute filename
-# like "/Users/.../frappe/handler.py" also contains "frappe/".
-_FRAMEWORK_PATH_FRAGMENTS = ("frappe/", "optimus/")
+# Path fragments treated as "framework" graft points. No leading slash: stored filenames are
+# relative ("frappe/handler.py"), so a "/frappe/" fragment would never match.
+_FRAMEWORK_PATH_FRAGMENTS = ("frappe/",)  # Optimus's own paths: is_optimus_path, never a substring
 _FRAMEWORK_FUNCTION_PREFIXES = ("frappe.", "optimus.")
 
 
@@ -230,6 +217,8 @@ def _is_framework_frame(node_or_frame: dict) -> bool:
 		if fn.startswith(prefix):
 			return True
 	filename = (node_or_frame.get("filename") or "").replace("\\", "/")
+	if is_optimus_path(filename):
+		return True
 	for frag in _FRAMEWORK_PATH_FRAGMENTS:
 		if frag in filename:
 			return True
@@ -334,14 +323,9 @@ _PURE_HELPER_PATH_SUFFIXES = (
 	# hot-frames leaderboard is correct.
 )
 
-# v0.5.1: substring matches (via `in`). Whole directories of framework
-# helpers / infrastructure libraries. Fragment values MUST NOT have
-# leading slashes the stored filenames are typically relative
-# (`frappe/utils/foo.py`) and `/frappe/utils/` does not occur as a
-# substring of `frappe/utils/foo.py`. See the comment on
-# _FRAMEWORK_PATH_FRAGMENTS for the full history of this bug.
+# Substring matches (via `in`) on whole directories of framework helpers and libraries. No leading
+# slash, as for _FRAMEWORK_PATH_FRAGMENTS.
 _PURE_HELPER_PATH_SUBSTRINGS = (
-	"optimus/",
 	"frappe/utils/",          # typing_validations, response, redis_wrapper, etc.
 	# v0.5.2: frappe/model/utils/ is plumbing too is_virtual_doctype,
 	# get_parent_doc, etc. Called by the document loader and doesn't
@@ -450,6 +434,10 @@ def _is_pure_helper_frame(
 	filename = (node.get("filename") or "").replace("\\", "/")
 	if not filename:
 		return False
+
+	# Optimus's own code, not a user app or folder that is merely named like it.
+	if is_optimus_path(filename):
+		return True
 
 	# Any venv / system-packages path is third-party regardless of whether the lib
 	# is in the hardcoded set below a real ``site-packages/`` path is never the

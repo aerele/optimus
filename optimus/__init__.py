@@ -1,4 +1,4 @@
-__version__ = "0.12.141"
+__version__ = "0.12.142"
 
 
 def safe_commit() -> None:
@@ -138,6 +138,19 @@ def _track_enqueued_job(session_uuid, job_id, method) -> None:
 	_profiler_session.record_enqueued_job(session_uuid, job_id, method_str, parent)
 
 
+def _warn_untracked_job(job, deferred_job_id, session_uuid, exc) -> None:
+	"""Log a tracking failure instead of writing an Error Log row into the caller's transaction."""
+	try:
+		import frappe
+
+		job_id = getattr(job, "id", None) or deferred_job_id
+		frappe.logger("optimus").warning(
+			f"optimus: could not track job {job_id} for session {session_uuid}: {exc!r}"
+		)
+	except Exception:
+		pass
+
+
 def _patch_enqueue():
 	"""Install the enqueue wrapper. No-ops when frappe isn't installed (e.g.
 	running analyzer unit tests from a plain Python interpreter)."""
@@ -209,14 +222,7 @@ def _patch_enqueue():
 				if job_id:
 					_track_enqueued_job(active, job_id, method)
 		except Exception as exc:
-			# Log instead of writing an Error Log row into the caller's transaction.
-			try:
-				frappe.logger("optimus").warning(
-					f"optimus: could not track job {getattr(job, 'id', None) or deferred_job_id} "
-					f"for session {active}: {exc!r}"
-				)
-			except Exception:
-				pass
+			_warn_untracked_job(job, deferred_job_id, active, exc)
 
 		return job
 

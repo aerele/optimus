@@ -351,3 +351,73 @@ def test_load_recordings_bundle_none_without_file():
 
 	assert analyze._load_recordings_bundle(Doc()) is None
 	assert analyze._load_recordings_bundle(Doc2()) is None
+
+
+OWN_STACK = [
+	{"filename": "myapp/myapp/api.py", "lineno": 3, "function": "attach"},
+	{"filename": "optimus/optimus/managed.py", "lineno": 234, "function": "protect_file"},
+	{"filename": "frappe/frappe/database/database.py", "lineno": 200, "function": "sql"},
+]
+USER_STACK = [OWN_STACK[0], OWN_STACK[2]]
+
+
+def _recording(uuid, own, user):
+	calls = [{"query": "select own", "stack": OWN_STACK} for _ in range(own)]
+	calls += [{"query": "select user", "stack": USER_STACK} for _ in range(user)]
+	return {"uuid": uuid, "calls": calls}
+
+
+class _Levels:
+	"""Stands in for ``frappe.logger("optimus")``: records (level, text)."""
+
+	def __init__(self):
+		self.lines = []
+
+	def __getattr__(self, level):
+		return lambda text: self.lines.append((level, text))
+
+
+def _strip(monkeypatch, recordings):
+	import frappe
+
+	log = _Levels()
+	monkeypatch.setattr(frappe, "logger", lambda *a, **k: log, raising=False)
+	analyze._strip_own_calls(recordings, "sess-9")
+	return log.lines
+
+
+def test_analysis_strips_own_queries_and_logs_the_count_and_source_at_debug(monkeypatch):
+	recordings = [_recording("rec-1", 1, 1), _recording("rec-2", 1, 1)]
+	lines = _strip(monkeypatch, recordings)
+	assert [[c["query"] for c in r["calls"]] for r in recordings] == [["select user"], ["select user"]]
+	assert len(lines) == 1 and lines[0][0] == "debug"
+	assert "dropped 2 of 4" in lines[0][1] and "session sess-9" in lines[0][1]
+	assert "optimus/optimus/managed.py:protect_file x2" in lines[0][1]
+
+
+def test_a_session_that_lost_most_of_its_calls_is_logged_as_a_warning(monkeypatch):
+	lines = _strip(monkeypatch, [_recording("rec-1", 60, 20)])
+	assert [level for level, _text in lines] == ["warning"]
+	assert "dropped 60 of 80" in lines[0][1]
+
+
+@pytest.mark.parametrize("own,user", [(49, 1), (50, 50), (60, 61)])
+def test_a_small_or_minority_drop_stays_at_debug(monkeypatch, own, user):
+	lines = _strip(monkeypatch, [_recording("rec-1", own, user)])
+	assert [level for level, _text in lines] == ["debug"]
+
+
+def test_nothing_dropped_logs_nothing(monkeypatch):
+	assert _strip(monkeypatch, [_recording("rec-1", 0, 3)]) == []
+
+
+def test_a_failing_logger_never_fails_the_analysis(monkeypatch):
+	import frappe
+
+	def broken(*a, **k):
+		raise RuntimeError("no logger")
+
+	monkeypatch.setattr(frappe, "logger", broken, raising=False)
+	recordings = [_recording("rec-1", 60, 20)]
+	analyze._strip_own_calls(recordings, "sess-9")
+	assert len(recordings[0]["calls"]) == 20

@@ -54,6 +54,7 @@ from optimus.analyzers.base import (
 	AnalyzeContext,
 	dur,
 	is_error_log_hook_query,
+	is_optimus_path,
 	row_get,
 	strip_profiler_own_calls,
 )
@@ -886,6 +887,7 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		# each recording's pyi_session is dropped after call_tree finishes
 		# with it (handled in the analyzer itself).
 		recordings = list(_fetch_recordings(recording_uuids))
+		_strip_own_calls(recordings, session_uuid)
 		from optimus.recording_bundle import SnapshotUnavailable
 		if set(recording_uuids) - {rec.get("uuid") for rec in recordings}:
 			raise SnapshotUnavailable("snapshot_recording_missing")
@@ -1407,8 +1409,47 @@ def _fetch_recordings(recording_uuids: list[str]):
 		rec["pyi_session"] = pyi_session
 		rec["sidecar"] = sidecar
 		rec["lock_events"] = lock_events
-		strip_profiler_own_calls(rec)
 		yield rec
+
+
+# The own-query drop is logged at WARNING from this many dropped calls, when they are over half the session's.
+OWN_DROP_WARN_MIN = 50
+
+
+def _own_source(stack) -> str:
+	"""``file:function`` of the innermost Optimus frame of a dropped call's stack."""
+	for frame in reversed(stack if isinstance(stack, list) else []):
+		if isinstance(frame, dict) and is_optimus_path(frame.get("filename")):
+			return f"{frame.get('filename')}:{frame.get('function')}"
+	return "unknown"
+
+
+def _strip_own_calls(recordings: list, session_uuid: str) -> None:
+	"""Drop Optimus's own SQL calls from every recording; log dropped/total and the top sources,
+	at WARNING when they are over half the session's calls (and at least OWN_DROP_WARN_MIN)."""
+	total = dropped = 0
+	sources = Counter()
+	for rec in recordings:
+		if not isinstance(rec, dict):
+			continue
+		before = rec.get("calls") if isinstance(rec.get("calls"), list) else []
+		total += len(before)
+		count = strip_profiler_own_calls(rec)
+		if count:
+			dropped += count
+			kept = {id(call) for call in rec["calls"]}
+			sources.update(_own_source(call.get("stack")) for call in before if id(call) not in kept)
+	if not dropped:
+		return
+	try:
+		top = ", ".join(f"{source} x{n}" for source, n in sources.most_common(2))
+		level = "warning" if dropped >= OWN_DROP_WARN_MIN and dropped * 2 > total else "debug"
+		getattr(frappe.logger("optimus"), level)(
+			f"optimus: dropped {dropped} of {total} queries as Optimus's own from session {session_uuid}"
+			f" (top sources: {top})"
+		)
+	except Exception:
+		pass  # a log line never fails the analysis
 
 
 # Per-recording enrichment caps. On a session that hit the 200-recording

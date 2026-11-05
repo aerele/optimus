@@ -682,7 +682,7 @@ def is_framework_callsite_str(
 
 
 # Recorder stacks are ``<app>/...``; absolute paths carry ``apps/<app>/`` or ``site-packages/``.
-_OPTIMUS_PATH_RE = re.compile(r"^optimus/|(?:^|/)apps/optimus/|/site-packages/optimus/")
+_OPTIMUS_PATH_RE = re.compile(r"^optimus/|(?:^|/)apps/optimus/|/(?:site|dist)-packages/optimus/")
 _FRAPPE_PATH_RE = re.compile(r"(?:^|/)frappe/")
 
 
@@ -713,12 +713,9 @@ def _is_error_log_hook_frame(filename: str) -> bool:
 
 
 def is_error_log_hook_query(stack: list | None) -> bool:
-	"""True when a SQL call is the Error Log hook's own stored-key read: walking
-	innermost to outermost, the hook's frame (``_ERROR_LOG_HOOK_FRAME``) comes
-	before any user frame (one in neither ``frappe/`` nor ``optimus/``). The
-	same rule ``is_profiler_own_query`` and ``walk_callsite`` apply to the
-	hook; the session totals (``analyze._session_query_totals``) leave these
-	calls out."""
+	"""True when a SQL call is the Error Log hook's own stored-key read: walking innermost
+	to outermost, the hook's frame comes before any user frame. Narrower than
+	``is_profiler_own_query``, which also counts every other Optimus frame as own."""
 	if not stack:
 		return False
 	for frame in reversed(stack):
@@ -737,39 +734,63 @@ def is_error_log_hook_query(stack: list | None) -> bool:
 	return False
 
 
-def is_profiler_own_query(stack: list | None) -> bool:
-	"""True if a SQL call's Python stack originates from the profiler's own
-	instrumentation (e.g. the ``SHOW GLOBAL STATUS`` / ``SHOW VARIABLES`` snapshots
-	in ``optimus/infra_capture.py``). Filtering these keeps findings user-actionable.
+# Optimus wrappers that only call one Frappe function, keyed by (file suffix, function): the Frappe
+# functions each may wrap, or ANY_FRAPPE_FRAME for a target Frappe decorates. A query below such a
+# frame is the caller's. Register a new monkey-patch here, or in tests/test_pass_through_registry.py SITES.
+ANY_FRAPPE_FRAME = "*"
+_OPTIMUS_PASS_THROUGH: dict[tuple[str, str], frozenset[str]] = {
+	("optimus/capture.py", "wrapped"): frozenset({ANY_FRAPPE_FRAME}),
+	("optimus/__init__.py", "_profiler_enqueue"): frozenset({"enqueue"}),
+	("optimus/managed.py", "before_insert"): frozenset({"before_insert"}),
+}
 
-	Walk innermost to outermost:
-	- a user frame (not ``frappe/`` and not ``optimus/``) → False (keep the query).
-	- the Error Log hook's frame (``optimus/error_log_mask.py``) before any user
-	  frame → True: its stored-key read runs inside the user's ``log_error``.
-	- only ``frappe/`` + ``optimus/`` frames with at least one ``optimus/`` → True.
-	- only ``frappe/`` frames → False (legitimate framework query).
-	"""
-	if not stack:
-		return False
-	has_profiler_frame = False
-	for frame in reversed(stack):
+
+def _pass_through_targets(filename: str, function) -> frozenset[str] | None:
+	"""The Frappe functions a pass-through wrapper frame wraps, or None for any other frame."""
+	if not isinstance(function, str):
+		return None
+	for (suffix, name), targets in _OPTIMUS_PASS_THROUGH.items():
+		if function == name and (filename == suffix or filename.endswith("/" + suffix)):
+			return targets
+	return None
+
+
+def own_query_innermost_first(frames) -> bool:
+	"""``is_profiler_own_query`` over an iterable of frames, innermost first, read lazily so the
+	walk ends at the first deciding frame."""
+	inside = None  # function name of the Frappe frame just inside ("" when unnamed), else None
+	for frame in frames:
 		if not isinstance(frame, dict):
 			continue
 		filename = (frame.get("filename") or "").replace("\\", "/")
 		if not filename:
 			continue
+		function = frame.get("function")
 		if is_optimus_path(filename):
-			if _is_error_log_hook_frame(filename):
+			targets = _pass_through_targets(filename, function)
+			if _is_error_log_hook_frame(filename) or targets is None or inside is None:
 				return True
-			has_profiler_frame = True
+			if ANY_FRAPPE_FRAME not in targets and inside not in targets:
+				return True
+			inside = None
 			continue
-		if is_frappe_path(filename):
-			# Keep walking the profiler or user code may be further out.
-			continue
-		# Non-framework frame this is user code; the query's origin
-		# is the user's business logic, not our instrumentation.
-		return False
-	return has_profiler_frame
+		if not is_frappe_path(filename):
+			return False
+		inside = function if isinstance(function, str) else ""
+	return False
+
+
+def is_profiler_own_query(stack: list | None) -> bool:
+	"""True if a SQL call is Optimus's own work. ``stack`` is outermost-first; walk it
+	innermost to outermost:
+	- a ``frappe/`` frame: keep walking.
+	- a pass-through wrapper frame (``_OPTIMUS_PASS_THROUGH``) right outside the Frappe
+	  function it wraps: keep walking, the query is the caller's.
+	- any other ``optimus/`` frame, the Error Log hook included: own.
+	- any other frame: the user's.
+	A stack with no deciding frame (only Frappe and pass-through frames) is not own.
+	"""
+	return bool(stack) and own_query_innermost_first(reversed(stack))
 
 
 def strip_profiler_own_calls(recording: dict) -> int:
@@ -791,11 +812,11 @@ def walk_callsite(stack: list | None) -> dict | None:
 	outward and return the first frame not inside a framework directory
 	(``frappe/`` or Optimus). Returns a dict with ``filename``, ``lineno``,
 	``function``. Falls back to the innermost frame when every frame is in
-	``frappe/`` (so legitimate framework queries still surface), but returns None
-	when the stack is profiler instrumentation (``is_profiler_own_query``),
-	the Error Log hook's key read included.
+	``frappe/`` or a pass-through wrapper (so legitimate framework queries still
+	surface), but returns None when the query is Optimus's own
+	(``is_profiler_own_query``), even inside a user's flow.
 	"""
-	if not stack:
+	if not stack or is_profiler_own_query(stack):
 		return None
 
 	for frame in reversed(stack):
@@ -803,9 +824,6 @@ def walk_callsite(stack: list | None) -> dict | None:
 			continue
 		filename = (frame.get("filename") or "").replace("\\", "/")
 		lineno = frame.get("lineno")
-		if _is_error_log_hook_frame(filename):
-			# The Error Log hook's key read: Optimus's own query.
-			return None
 		if not filename or lineno is None:
 			continue
 		# v0.5.1: substring (not startswith) matches bench and absolute
@@ -814,11 +832,6 @@ def walk_callsite(stack: list | None) -> dict | None:
 		if is_optimus_path(filename) or is_frappe_path(filename):
 			continue
 		return frame
-
-	# Fallback: every frame was in the framework. If the profiler itself
-	# is in the stack, this is our own instrumentation drop it.
-	if is_profiler_own_query(stack):
-		return None
 
 	# Pure frappe/* fallback: return the deepest frame so legitimate
 	# framework queries (migrations, fixtures, background tasks) still

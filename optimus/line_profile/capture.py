@@ -21,6 +21,7 @@ import importlib
 import inspect
 import json
 import pickle
+import re
 import sys
 import threading
 from dataclasses import dataclass
@@ -369,6 +370,21 @@ def validate_picks(picks):
 			raise CaptureError(_("Each selected function needs a known source label."))
 
 
+_PATH_IN_REASON_RE = re.compile(r"(?:[A-Za-z]:)?[/\\][^\s)'\"]*")
+
+
+def _no_eligible_pick_message(resolved: list[dict]) -> str:
+	"""The error for a run where no pick is eligible: up to five picks with their reasons, paths removed."""
+	reasons = [
+		f"{r['dotted_path']}: {_PATH_IN_REASON_RE.sub('...', str(r['ineligible_reason']))[:200]}"
+		for r in resolved[:5]
+		if r.get("ineligible_reason")
+	]
+	if not reasons:
+		return _("No selected function has eligible source. Check the selected paths.")
+	return _("No selected function can be line-profiled: {0}").format("; ".join(reasons))
+
+
 @_interrupt_boundary
 def prepare_line_profile_picks(picks: list[dict], *, server_expanded=frozenset()) -> PreparedCapture:
 	"""Resolve and snapshot before acquiring SQL admission locks."""
@@ -409,7 +425,7 @@ def prepare_line_profile_picks(picks: list[dict], *, server_expanded=frozenset()
 
 	eligible = [r for r in resolved if r.get("eligible")]
 	if not eligible:
-		raise CaptureError(_("No selected function has eligible source. Check the selected paths."))
+		raise CaptureError(_no_eligible_pick_message(resolved))
 
 	# Snapshot source for each eligible pick. Stored as a dict keyed by
 	# dotted_path so aggregate_samples can pull lines per pick.

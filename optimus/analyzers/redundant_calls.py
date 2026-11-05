@@ -22,6 +22,7 @@ from optimus.analyzers.base import (
 	cut_at_bench_apps,
 	installed_apps_allowlist,
 	is_framework_callsite,
+	own_query_innermost_first,
 	walk_callsite,
 )
 
@@ -146,29 +147,11 @@ def _apps_relative_stack(stack: list) -> list:
 	return list(_relative_frames(stack))
 
 
-def _app_root(filename: str) -> str:
-	"""First segment of an apps-relative filename (``apps/<app>/...`` or ``<app>/...``)."""
-	if filename.startswith("apps/"):
-		filename = filename[len("apps/"):]
-	return filename.split("/", 1)[0]
-
-
-def _is_optimus_own(stack: list) -> bool:
-	"""True when the innermost frame outside ``frappe/`` (``stack`` is innermost-first, as
-	capture records it) is Optimus's own code. Optimus reads its settings from the cache
-	on every recorded query (``_profiler_register`` -> ``_read_extras`` ->
-	``settings.get_config``), so the sidecar logs a cache lookup per query; the walk skips
-	Optimus's frames and would blame that lookup on the user's query line. Matched on the
-	app root after the bench cut, so an app merely named like Optimus is not skipped."""
-	for frame in _relative_frames(stack):
-		filename = str(frame.get("filename") or "").replace("\\", "/")
-		if not filename:
-			continue
-		root = _app_root(filename)
-		if root == "frappe":
-			continue
-		return root == "optimus"
-	return False
+def _is_optimus_own(caller_stack: list) -> bool:
+	"""True when a sidecar entry's stack (innermost-first, as capture records it) is Optimus's
+	own work, by the rule shared with the SQL calls. Optimus reads its settings from the cache
+	on every recorded query, so the sidecar logs a lookup per query that is not the user's."""
+	return own_query_innermost_first(_relative_frames(caller_stack))
 
 
 def _callsite_key(callsite: dict | None) -> tuple | None:
