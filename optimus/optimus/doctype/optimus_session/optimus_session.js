@@ -246,8 +246,10 @@ function _ai_progress_banner(frm, state) {
 			Math.max(run.uncertain || 0, run.blocked_uncertain || 0), run.not_reached || 0, usage.tokens_reported || 0]);
 	if (usage.incomplete_attempts) text += " " + __("Provider usage is incomplete; these counts are not an exact bill.");
 	if (run.failed) text += " " + __("Saved suggestions are kept.") + " " + _ai_error_guidance();
-	if (run.render_pending) text += " " + __("Saved answers still need a report update. Use Regenerate Reports after the refresh stops.");
-	if (run.end_reason) text += " " + _ai_end_message(run);
+	if (run.render_pending) text += " " + (_can_act(frm)
+		? __("Saved answers still need a report update. Use Regenerate Reports after the refresh stops.")
+		: __("Saved answers still need a report update. Ask the session owner to regenerate the report."));
+	if (run.end_reason) text += " " + _ai_end_message(run, frm);
 	if (state.busy) text += " " + __("Save is paused while AI updates this session; your edits are kept. Cancel the refresh to resume editing safely.");
 	_ai_status_banner(frm, state, text, state.busy && state.can_act, "blue");
 }
@@ -298,10 +300,12 @@ function _ai_status_banner(frm, state, text, cancel, color) {
 	});
 }
 
-function _ai_end_message(run) {
+function _ai_end_message(run, frm) {
 	if (run.end_reason === "breaker") return __("Repeated provider errors or a provider limit stopped this run. Check the provider configuration.") + " " + _ai_error_guidance();
 	if (run.end_reason === "deadline") return __("The refresh time limit was reached.");
-	if (run.end_reason === "render_failed") return __("Report update could not be confirmed. Reload the session; use Regenerate Reports if needed.");
+	if (run.end_reason === "render_failed") return _can_act(frm)
+		? __("Report update could not be confirmed. Reload the session; use Regenerate Reports if needed.")
+		: __("Report update could not be confirmed. Reload the session, or ask the session owner to regenerate the report.");
 	if (["uncertain", "lease_expired", "worker_interrupted"].includes(run.end_reason)) return __("An interrupted call may have been billed. It will not be repeated automatically.");
 	if (run.end_reason === "history_limit") return __("Refresh history reached its safety limit. Ask an administrator to review the retained attempts.");
 	if (run.end_reason === "not_ready") return __("The session changed and is no longer Ready for AI work.");
@@ -597,7 +601,7 @@ function render_phase2_button(frm) {
 	// Session actions follow the server gate; Force Stop Stuck Run only clears the caller's own captures.
 	const can_act = _can_act(frm);
 	if (recording && !can_act) {
-		_phase2_armed_banner(frm, null);
+		_phase2_armed_banner(frm, __("Line profiling is recording on this session. The session owner can stop it."));
 	} else if (recording) {
 		var stop_btn = frm.add_custom_button(
 			__("Stop Line Profiling Run"),
@@ -642,7 +646,8 @@ function render_phase2_button(frm) {
 		const saving = rows.some(row => row.status === "Analyzing" && row.analyze_render_pending);
 		const pending = rows.some(row => row.status === "Ready" && row.analyze_render_pending);
 		_phase2_armed_banner(frm, saving ? __("Line profiling results are saved. Saving the report...")
-			: pending ? __("Line profiling results are saved. Use Regenerate Reports to update the report.") : null);
+			: pending ? (can_act ? __("Line profiling results are saved. Use Regenerate Reports to update the report.")
+				: __("Line profiling results are saved. Ask the session owner to regenerate the report.")) : null);
 	}
 
 	// Retrying attaches to live work or queues a bounded new generation.
@@ -1089,7 +1094,8 @@ function subscribe_phase2_events(frm) {
 				if (event === "phase_2_run_ready") {
 					frappe.show_alert({
 						message: payload.render_pending
-							? __("Line profiling results saved. Use Regenerate Reports to update the report.")
+							? (_can_act(frm) ? __("Line profiling results saved. Use Regenerate Reports to update the report.")
+								: __("Line profiling results saved. Ask the session owner to regenerate the report."))
 							: __("Line profiling report ready"),
 						indicator: payload.render_pending ? "orange" : "green",
 					});

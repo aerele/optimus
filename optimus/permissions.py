@@ -164,7 +164,8 @@ def may_act_on_session(*, user: str, owner: str, can_read: bool, can_write: bool
 	change it. The owner match ignores email case, and a blank owner or user never matches.
 
 	Pure: the caller passes Frappe's two permission answers, so this stays testable without a
-	site. The API gate and background AI worker supply these permission answers.
+	site. The API gate, the background AI worker and ``api.can_act_on_session`` (which hides the
+	session form's action buttons) supply these permission answers.
 	"""
 	if not can_read:
 		return False

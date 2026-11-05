@@ -413,7 +413,7 @@ def _sweep_stuck_analyzing():
 		{"name": ("in", [r["name"] for r in stuck]), "status": "Analyzing", "modified": ["<", cutoff]},
 		{
 			"status": "Failed",
-			"analyzer_warnings": "Analyze job timed out, crashed, or its analyze heartbeat lapsed (the optimus log names a failed or yielded heartbeat). Use Retry Analyze on this session; saved reports and retained input are kept.",
+			"analyzer_warnings": "Analyze job timed out, crashed, or its analyze heartbeat lapsed (the optimus log names a failed or yielded heartbeat). The session owner, or anyone who can edit it, can use Retry Analyze; saved reports and retained input are kept.",
 		},
 	)
 	safe_commit()

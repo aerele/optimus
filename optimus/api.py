@@ -140,16 +140,23 @@ class SessionRef:
 
 def can_act_on_session(doc) -> bool:
 	"""Whether the session user passes ``_session_action_gate``'s permission check on ``doc``; fails closed."""
+	engine_failed = False
 	try:
 		user = frappe.session.user
-		return is_profiler_user(user) and may_act_on_session(
+		allowed = is_profiler_user(user) and may_act_on_session(
 			user=user,
 			owner=doc.owner or "",
 			can_read=bool(frappe.has_permission("Optimus Session", "read", doc.name, user=user)),
 			can_write=bool(frappe.has_permission("Optimus Session", "write", doc.name, user=user)),
 		)
 	except Exception:
-		return False
+		engine_failed = True
+		allowed = False
+	if engine_failed:
+		safe_call.log_error_line(
+			f"optimus.can_act_on_session: has_permission raised for {doc.name}; hiding session actions"
+		)
+	return bool(allowed)
 
 
 def _session_action_gate(
