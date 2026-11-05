@@ -143,12 +143,13 @@ def can_act_on_session(doc) -> bool:
 	engine_failed = False
 	try:
 		user = frappe.session.user
-		allowed = is_profiler_user(user) and may_act_on_session(
-			user=user,
-			owner=doc.owner or "",
-			can_read=bool(frappe.has_permission("Optimus Session", "read", doc.name, user=user)),
-			can_write=bool(frappe.has_permission("Optimus Session", "write", doc.name, user=user)),
-		)
+		allowed = False
+		if is_profiler_user(user):
+			can_read = frappe.has_permission("Optimus Session", "read", doc.name, user=user)
+			can_write = frappe.has_permission("Optimus Session", "write", doc.name, user=user)
+			allowed = may_act_on_session(
+				user=user, owner=doc.owner or "", can_read=bool(can_read), can_write=bool(can_write)
+			)
 	except Exception:
 		engine_failed = True
 		allowed = False
