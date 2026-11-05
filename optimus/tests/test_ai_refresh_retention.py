@@ -80,28 +80,74 @@ def test_capture_cleanup_waits_for_parent_commit_and_does_not_commit_itself(rete
 	assert cleaned == ["fake-capture", "legacy-capture"]
 
 
-@pytest.mark.parametrize("status", ["Recording", "Ready"])
-def test_deleting_a_recording_session_ends_the_recording_after_commit(retention, monkeypatch, status):
-	from optimus import analyze, session
-	callbacks, cleared, cleaned = [], [], []
-	db = retention.db
-	db.after_commit = SimpleNamespace(add=callbacks.append)
-	doc = SimpleNamespace(name="fake-session-doc", session_uuid="fake-session", user="fake-user",
-		status=status, phase_2_runs=[])
-	monkeypatch.setattr(ai_jobs, "frappe", SimpleNamespace(db=db))
-	monkeypatch.setattr(session, "clear_active_session_if", lambda user, uuid: cleared.append((user, uuid)))
+@pytest.fixture
+def deleted(retention, monkeypatch):
+	"""Deletion hook with the pointer, recording drop, capture and log calls recorded in order."""
+	from optimus import analyze, safe_call, session
+	from optimus.line_profile import capture
+	env = SimpleNamespace(callbacks=[], calls=[], logged=[], clear_result=True, clear_raises=False)
+	retention.db.after_commit = SimpleNamespace(add=env.callbacks.append)
+
+	def clear(user, uuid):
+		env.calls.append(("clear", user, uuid))
+		if env.clear_raises:
+			raise RuntimeError("fake redis failure")
+		return env.clear_result
+
+	monkeypatch.setattr(ai_jobs, "frappe", SimpleNamespace(db=retention.db,
+		logger=lambda name: SimpleNamespace(error=lambda *a: env.logged.append(a[0] % a[1:]))))
+	monkeypatch.setattr(session, "clear_active_session_if", clear)
 	monkeypatch.setattr(session, "get_recordings", lambda uuid: ["fake-recording"])
-	monkeypatch.setattr(analyze, "_cleanup_redis", lambda uuid, recs: cleaned.append((uuid, recs)))
-	with db.transaction():
-		ai_jobs.delete_session_state(doc)
-		assert not cleared and not cleaned
-	if status != "Recording":
-		assert callbacks == []
-		return
-	assert len(callbacks) == 1
-	callbacks[0]()
-	assert cleared == [("fake-user", "fake-session")]
-	assert cleaned == [("fake-session", ["fake-recording"])]
+	monkeypatch.setattr(analyze, "_cleanup_redis", lambda uuid, recs: env.calls.append(("drop", uuid, recs)))
+	monkeypatch.setattr(capture, "stop_line_profile_pass", lambda run, user: env.calls.append(("stop", run, user)))
+	monkeypatch.setattr(capture, "cleanup_run", lambda run: env.calls.append(("cleanup", run)))
+	monkeypatch.setattr(safe_call, "log_error_line", env.logged.append)
+
+	def delete(status, runs=()):
+		doc = SimpleNamespace(name="fake-session-doc", session_uuid="fake-session", user="fake-user",
+			status=status, phase_2_runs=[SimpleNamespace(run_uuid=run) for run in runs])
+		with retention.db.transaction():
+			ai_jobs.delete_session_state(doc)
+			assert env.calls == []
+		for callback in env.callbacks:
+			callback()
+
+	env.delete = delete
+	return env
+
+
+_ENDED = [("clear", "fake-user", "fake-session"), ("drop", "fake-session", ["fake-recording"])]
+
+
+@pytest.mark.parametrize("status", ["Recording", "Ready"])
+def test_deleting_a_recording_session_ends_the_recording_after_commit(deleted, status):
+	deleted.delete(status)
+	assert len(deleted.callbacks) == (1 if status == "Recording" else 0)
+	assert deleted.calls == (_ENDED if status == "Recording" else [])
+	assert deleted.logged == []
+
+
+def test_a_recording_session_with_line_profiling_captures_ends_both(deleted):
+	deleted.delete("Recording", runs=["fake-capture"])
+	assert len(deleted.callbacks) == 1
+	assert deleted.calls == _ENDED + [("stop", "fake-capture", "fake-user"), ("cleanup", "fake-capture")]
+
+
+def test_a_failed_pointer_clear_is_logged_and_the_other_steps_still_run(deleted):
+	deleted.clear_raises = True
+	deleted.delete("Recording", runs=["fake-capture"])
+	assert deleted.calls == _ENDED + [("stop", "fake-capture", "fake-user"), ("cleanup", "fake-capture")]
+	assert len(deleted.logged) == 1
+	assert "optimus deleted session recording fake-session" in deleted.logged[0]
+	assert "raised" in deleted.logged[0] and "click Stop" in deleted.logged[0]
+
+
+def test_a_pointer_race_that_never_settles_is_logged(deleted):
+	deleted.clear_result = None
+	deleted.delete("Recording")
+	assert deleted.calls == _ENDED
+	assert len(deleted.logged) == 1
+	assert "kept changing" in deleted.logged[0] and "click Stop" in deleted.logged[0]
 
 
 def test_session_controller_runs_the_retention_fence(monkeypatch):
