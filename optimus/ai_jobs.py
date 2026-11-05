@@ -1689,28 +1689,54 @@ def delete_session_state(doc):
 		frappe.db.after_commit.add(lambda: _cleanup_deleted_captures(captures, recording))
 
 
-def _end_deleted_recording(user, session_uuid):
-	"""Stop the user recording into a deleted session and drop its captured requests."""
+def _guarded_cleanup_step(step, failed: str) -> str | None:
+	"""Run one after-commit cleanup step; return its problem, or ``failed`` if it raised."""
+	problem = None
+	guard = safe_call.InterruptGuard(base=True)
+	try:
+		with guard:
+			problem = step()
+	except Exception:
+		problem = failed
+	if guard.pending():
+		raise guard.interrupt()
+	return problem
+
+
+def _end_deleted_recording(user: str, session_uuid: str) -> None:
+	"""Clear the pointer to a deleted session, then drop its captured requests, as two steps."""
 	from optimus import analyze, session
-	session.clear_active_session_if(user, session_uuid)
-	analyze._cleanup_redis(session_uuid, session.get_recordings(session_uuid))
+
+	title = f"optimus deleted session recording {session_uuid}"
+
+	def clear() -> str | None:
+		if session.clear_active_session_if(user, session_uuid) is None:
+			return "the recording pointer kept changing"
+		return None
+
+	problem = _guarded_cleanup_step(clear, "clearing the recording pointer raised")
+	if problem:
+		safe_call.log_error_line(f"{title}: {problem}; the user keeps recording until they click Stop")
+	problem = _guarded_cleanup_step(
+		lambda: analyze._cleanup_redis(session_uuid, session.get_recordings(session_uuid)),
+		"dropping its captured requests raised",
+	)
+	if problem:
+		safe_call.log_error_line(f"{title}: {problem}")
 
 
-def _cleanup_deleted_captures(captures, recording=None):
+def _cleanup_deleted_captures(captures: tuple, recording: tuple[str, str] | None = None) -> None:
 	from optimus.line_profile import capture
 
-	def drop_capture(run_uuid, user):
-		capture.stop_line_profile_pass(run_uuid, user)
-		capture.cleanup_run(run_uuid)
-
-	steps = [lambda: _end_deleted_recording(*recording)] if recording else []
-	steps += [lambda run=run, user=user: drop_capture(run, user) for run, user in captures]
+	if recording:
+		_end_deleted_recording(*recording)
 	failures = 0
-	for step in steps:
+	for run_uuid, user in captures:
 		guard = safe_call.InterruptGuard(base=True)
 		try:
 			with guard:
-				step()
+				capture.stop_line_profile_pass(run_uuid, user)
+				capture.cleanup_run(run_uuid)
 		except Exception:
 			failures += 1
 		if guard.pending():
