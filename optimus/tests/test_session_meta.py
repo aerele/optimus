@@ -29,6 +29,10 @@ class FakeCache:
 			def set(self, key, value, ex=None):
 				import pickle
 				cache.store[key] = pickle.loads(value)
+			def get(self, key):
+				import pickle
+				return pickle.dumps(cache.store[key]) if key in cache.store else None
+			def delete(self, key): cache.store.pop(key, None)
 			def execute(self): pass
 		return Pipeline()
 
@@ -143,3 +147,12 @@ def test_register_recording_refreshes_ttl_when_session_still_active(fake_cache):
 
 	# Pointer remains set with the same session.
 	assert session.get_active_session_for(user) == session_uuid
+
+
+def test_clear_active_session_if_clears_only_the_given_session(fake_cache):
+	session.set_active_session("fake-user", "fake-session")
+	assert session.clear_active_session_if("fake-user", "other-session") is False
+	assert session.get_active_session_for("fake-user") == "fake-session"
+	assert session.clear_active_session_if("fake-user", "fake-session") is True
+	assert session.get_active_session_for("fake-user") is None
+	assert session.clear_active_session_if("fake-user", "fake-session") is False

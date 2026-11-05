@@ -80,6 +80,30 @@ def test_capture_cleanup_waits_for_parent_commit_and_does_not_commit_itself(rete
 	assert cleaned == ["fake-capture", "legacy-capture"]
 
 
+@pytest.mark.parametrize("status", ["Recording", "Ready"])
+def test_deleting_a_recording_session_ends_the_recording_after_commit(retention, monkeypatch, status):
+	from optimus import analyze, session
+	callbacks, cleared, cleaned = [], [], []
+	db = retention.db
+	db.after_commit = SimpleNamespace(add=callbacks.append)
+	doc = SimpleNamespace(name="fake-session-doc", session_uuid="fake-session", user="fake-user",
+		status=status, phase_2_runs=[])
+	monkeypatch.setattr(ai_jobs, "frappe", SimpleNamespace(db=db))
+	monkeypatch.setattr(session, "clear_active_session_if", lambda user, uuid: cleared.append((user, uuid)))
+	monkeypatch.setattr(session, "get_recordings", lambda uuid: ["fake-recording"])
+	monkeypatch.setattr(analyze, "_cleanup_redis", lambda uuid, recs: cleaned.append((uuid, recs)))
+	with db.transaction():
+		ai_jobs.delete_session_state(doc)
+		assert not cleared and not cleaned
+	if status != "Recording":
+		assert callbacks == []
+		return
+	assert len(callbacks) == 1
+	callbacks[0]()
+	assert cleared == [("fake-user", "fake-session")]
+	assert cleaned == [("fake-session", ["fake-recording"])]
+
+
 def test_session_controller_runs_the_retention_fence(monkeypatch):
 	from optimus.optimus.doctype.optimus_session.optimus_session import OptimusSession
 	seen = []
