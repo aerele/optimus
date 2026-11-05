@@ -22,6 +22,7 @@ function desk(opts = {}) {
  const doc={activeElement:null,visibilityState:'visible'};
  class Dialog {
   constructor(cfg){ if(opts.beforeBuild) opts.beforeBuild(); if(opts.dialogThrows && opts.throwsLeft-- !== 0) throw new Error('boom'); this.cfg=cfg; dialogs.push(this); }
+  get $wrapper(){ return this._w||(this._w={addClass(){},on:(ev,sel,fn)=>{(this.clicks=this.clicks||{})[sel]=fn;}}); }
   show(){ this.shown=true; }
   hide(){ this.shown=false; if(this.onhide) this.onhide(); }
  }
@@ -38,7 +39,7 @@ function desk(opts = {}) {
   localStorage:storage,Math,__:(t,a)=>a?t.replace('{0}',a[0]):t,
   __sd:(display,label)=>pills.push({display,label}),
   frappe:{session:{user:'owner'},set_route:()=>{},get_route:()=>opts.route||[],
-   ui:{Dialog,open_dialogs:opts.openDialogs||[]},utils:{escape_html:s=>String(s)},
+   ui:{Dialog,open_dialogs:opts.openDialogs||[]},utils:{escape_html:s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'),get_form_link:(dt,n)=>'/desk/optimus/optimus-session/'+n},
    realtime:{socket:opts.noSocket?undefined:{},on:(n,fn)=>{handlers[n]=fn;(opts.onCalls||[]).push(n);}},show_alert:a=>alerts.push(a)}};
  vm.createContext(ctx);
  vm.runInContext(fs.readFileSync(process.argv[2],'utf8'),ctx);
@@ -80,6 +81,7 @@ for (const [name, data, title] of [
  assert.equal(d.dialogs.length, 1);
  assert.equal(d.dialogs[0].cfg.title, title);
  assert.ok(d.dialogs[0].cfg.fields[0].options.includes('OS-1'));
+ assert.ok(!d.dialogs[0].cfg.fields[0].options.includes('Session ID'));
 }
 """)
 
@@ -318,16 +320,73 @@ assert.equal(o.dialogs.length, 1);
 """)
 
 
-def test_failed_popup_has_its_own_copy_and_label():
+def test_failed_popup_has_its_own_copy():
 	_run(r"""
 const d = desk();
 d.handlers.optimus_session_failed(ev());
-assert.equal(d.dialogs[0].cfg.primary_action_label, 'Review and Retry');
 assert.ok(d.dialogs[0].cfg.fields[0].options.includes('review the error and retry'));
 const r = desk();
 r.handlers.optimus_session_ready(ev());
-assert.equal(r.dialogs[0].cfg.primary_action_label, 'Open Session');
+assert.ok(r.dialogs[0].cfg.fields[0].options.includes('Your Optimus Session is ready'));
 """)
+
+
+def test_popup_has_no_button_and_no_session_id():
+	_run(r"""
+for (const [name, data] of [['optimus_session_ready', ev({event_id:'a'})],
+                            ['optimus_session_ready', ev({event_id:'b', empty:true})],
+                            ['optimus_session_failed', ev({event_id:'c'})]]) {
+ const d = desk();
+ d.handlers[name](data);
+ const cfg = d.dialogs[0].cfg;
+ assert.equal(cfg.primary_action, undefined);
+ assert.equal(cfg.primary_action_label, undefined);
+ assert.ok(!/Session ID|Open Session|Review and Retry/.test(cfg.fields[0].options));
+}
+""")
+
+
+def test_popup_shows_the_session_title_as_a_form_link_on_one_line():
+	_run(r"""
+const d = desk();
+d.handlers.optimus_session_ready(ev({docname:'OS-1', title:'Quote flow'}));
+const html = d.dialogs[0].cfg.fields[0].options;
+assert.equal((html.match(/<p>/g) || []).length, 1);
+assert.match(html, /^<p>Profiling is complete\. Your Optimus Session is ready\. <a class="optimus-session-link" href="\/desk\/optimus\/optimus-session\/OS-1">Quote flow<\/a><\/p>$/);
+assert.ok(!html.includes('Session ID'));
+assert.ok(!html.includes('>OS-1<'));
+""")
+
+
+def test_popup_link_falls_back_to_the_session_name_without_a_title():
+	_run(r"""
+const d = desk();
+d.handlers.optimus_session_ready(ev({docname:'OS-1'}));
+assert.ok(d.dialogs[0].cfg.fields[0].options.includes('>OS-1</a>'));
+const e = desk();
+e.handlers.optimus_session_ready(ev({docname:'OS-1', title:''}));
+assert.ok(e.dialogs[0].cfg.fields[0].options.includes('>OS-1</a>'));
+""")
+
+
+def test_popup_link_text_is_escaped_and_closes_the_dialog():
+	_run(r"""
+const d = desk();
+d.handlers.optimus_session_ready(ev({title:'<img src=x onerror=1>'}));
+const html = d.dialogs[0].cfg.fields[0].options;
+assert.ok(!html.includes('<img'));
+assert.ok(html.includes('&lt;img src=x onerror=1&gt;'));
+const dlg = d.dialogs[0];
+assert.ok(dlg.clicks['a.optimus-session-link']);
+dlg.clicks['a.optimus-session-link']();
+assert.equal(dlg.shown, false);
+""")
+
+
+def test_popup_link_is_underlined_in_the_widget_css():
+	css = WIDGET_JS.parents[1].joinpath("css", "floating_widget.css").read_text(encoding="utf-8")
+	rule = css[css.index(".optimus-session-popup a.optimus-session-link"):]
+	assert "text-decoration: underline" in rule.split("}", 1)[0]
 
 
 def test_popup_failure_is_logged_with_console_warn():

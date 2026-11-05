@@ -802,21 +802,20 @@
 			empty: __("Optimus Session has no data"),
 			failed: __("Optimus analysis failed"),
 		};
+		const url = frappe.utils.get_form_link("Optimus Session", item.docname);
+		const link = '<a class="optimus-session-link" href="' + frappe.utils.escape_html(url) + '">'
+			+ frappe.utils.escape_html(item.title || item.docname) + "</a>";
 		const d = new frappe.ui.Dialog({
 			title: titles[item.kind],
 			fields: [{
 				fieldtype: "HTML",
 				fieldname: "body",
-				options: "<p>" + frappe.utils.escape_html(messages[item.kind]) + "</p>"
-					+ "<p><b>" + frappe.utils.escape_html(__("Session ID: {0}", [item.docname])) + "</b></p>",
+				options: "<p>" + frappe.utils.escape_html(messages[item.kind]) + " " + link + "</p>",
 			}],
-			primary_action_label: item.kind === "failed" ? __("Review and Retry") : __("Open Session"),
-			primary_action: () => {
-				d.hide();
-				frappe.set_route("Form", "Optimus Session", item.docname);
-			},
 		});
 		if (d.$wrapper && d.$wrapper.addClass) d.$wrapper.addClass("optimus-session-popup");
+		// Following the link opens the session, so close the dialog behind it.
+		if (d.$wrapper && d.$wrapper.on) d.$wrapper.on("click", "a.optimus-session-link", () => d.hide());
 		d.onhide = () => {
 			popupBusy = false;
 			flushPopups();
@@ -871,7 +870,7 @@
 			if (isOnSessionForm(docname)) return;
 			const key = "optimus_popup_shown:" + docname + ":" + kind;
 			const token = String(data.event_id || data.session_uuid || "");
-			popupQueue.push({ docname, kind, key, token });
+			popupQueue.push({ docname, kind, key, token, title: data.title || "" });
 			flushPopups();
 		} catch (e) {
 			console.warn("[optimus] session popup failed", e);

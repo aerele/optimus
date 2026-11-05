@@ -171,3 +171,8 @@
 		animation: none;
 	}
 }
+
+/* The session link in the session-complete popup reads as a link without hovering. */
+.optimus-session-popup a.optimus-session-link {
+	text-decoration: underline;
+}
