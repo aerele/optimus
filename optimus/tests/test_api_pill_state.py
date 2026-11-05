@@ -140,7 +140,8 @@ def test_in_flight_lookup_finds_phase2_run_analyzing(env):
 
 
 @pytest.mark.parametrize(
-	"run_status,phase", [("Analyzing", "analyzing"), ("Ready", "ready"), ("Failed", "failed")]
+	"run_status,phase",
+	[("Recording", "recording"), ("Analyzing", "analyzing"), ("Ready", "ready"), ("Failed", "failed")],
 )
 def test_phase2_run_status_by_ids(env, run_status, phase):
 	env(
@@ -155,3 +156,25 @@ def test_phase2_unknown_run_is_idle(env):
 	env(sessions=[_s("OS-1", "u1", "Ready")])
 	assert api.pill_state(session_uuid="u1", run_uuid="zz") == {"phase": "idle"}
 
+
+def _run(status, run_uuid="r1"):
+	return {"parent": "OS-1", "parenttype": "Optimus Session", "run_uuid": run_uuid, "status": status}
+
+
+def test_line_profiling_recording_is_reported_after_a_reload(env):
+	env(sessions=[_s("OS-1", "u1", "Ready")], runs=[_run("Recording")], lp_active="r1")
+	assert api.pill_state() == {
+		"phase": "recording", "scope": "phase2", "session_uuid": "u1", "docname": "OS-1", "run_uuid": "r1",
+	}
+
+
+def test_line_profiling_recording_on_another_users_session_is_reported(env):
+	env(sessions=[_s("OS-1", "u1", "Ready", user="bob")], runs=[_run("Recording")], lp_active="r1")
+	assert (api.pill_state()["phase"], api.pill_state()["run_uuid"]) == ("recording", "r1")
+
+
+def test_a_stale_line_profiling_flag_falls_back_to_the_in_flight_lookup(env):
+	env(sessions=[_s("OS-1", "u1", "Ready")], runs=[_run("Analyzing")], lp_active="r1")
+	assert (api.pill_state()["phase"], api.pill_state()["scope"]) == ("analyzing", "phase2")
+	env(sessions=[_s("OS-1", "u1", "Ready")], lp_active="gone")
+	assert api.pill_state() == {"phase": "idle"}
