@@ -208,6 +208,30 @@ def clear_active_session(user: str) -> None:
 	frappe.cache.delete_value(_active_key(user))
 
 
+def clear_active_session_if(user: str, session_uuid: str) -> bool:
+	"""Clear the user's pointer only while it still points at ``session_uuid``."""
+	from redis.exceptions import WatchError
+
+	key = frappe.cache.make_key(_active_key(user))
+	try:
+		with frappe.cache.pipeline() as pipe:
+			pipe.watch(key)
+			raw = pipe.get(key)
+			value = pickle.loads(raw) if raw else None
+			if isinstance(value, bytes):
+				value = value.decode()
+			if value != session_uuid:
+				return False
+			pipe.multi()
+			pipe.delete(key)
+			pipe.execute()
+	except WatchError:
+		return False
+	finally:
+		frappe.local.cache.pop(key, None)
+	return True
+
+
 # ----- session metadata ----------------------------------------------------
 
 

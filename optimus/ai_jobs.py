@@ -1684,19 +1684,33 @@ def delete_session_state(doc):
 	store.delete_session_journal(doc.name, doc.session_uuid)
 	captures = tuple((row.run_uuid, getattr(row, "recording_user", None) or doc.user)
 		for row in doc.phase_2_runs or [] if row.run_uuid)
-	if captures:
-		frappe.db.after_commit.add(lambda: _cleanup_deleted_captures(captures))
+	recording = (doc.user, doc.session_uuid) if getattr(doc, "status", None) == "Recording" else None
+	if captures or recording:
+		frappe.db.after_commit.add(lambda: _cleanup_deleted_captures(captures, recording))
 
 
-def _cleanup_deleted_captures(captures):
+def _end_deleted_recording(user, session_uuid):
+	"""Stop the user recording into a deleted session and drop its captured requests."""
+	from optimus import analyze, session
+	session.clear_active_session_if(user, session_uuid)
+	analyze._cleanup_redis(session_uuid, session.get_recordings(session_uuid))
+
+
+def _cleanup_deleted_captures(captures, recording=None):
 	from optimus.line_profile import capture
+
+	def drop_capture(run_uuid, user):
+		capture.stop_line_profile_pass(run_uuid, user)
+		capture.cleanup_run(run_uuid)
+
+	steps = [lambda: _end_deleted_recording(*recording)] if recording else []
+	steps += [lambda run=run, user=user: drop_capture(run, user) for run, user in captures]
 	failures = 0
-	for run_uuid, user in captures:
+	for step in steps:
 		guard = safe_call.InterruptGuard(base=True)
 		try:
 			with guard:
-				capture.stop_line_profile_pass(run_uuid, user)
-				capture.cleanup_run(run_uuid)
+				step()
 		except Exception:
 			failures += 1
 		if guard.pending():
