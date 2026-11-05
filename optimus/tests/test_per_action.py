@@ -734,3 +734,20 @@ def test_action_emits_no_findings(n_plus_one_recording, empty_context):
 	"""per_action only builds Optimus Action rows, no findings."""
 	result = per_action.analyze([n_plus_one_recording], empty_context)
 	assert result.findings == []
+
+
+def test_long_path_fits_the_data_fields(empty_context):
+	"""A path over 140 chars must not overflow action_label or path (VARCHAR(140))."""
+	path = "/" + "a" * 160
+	recording = {"uuid": "t1", "path": path, "method": "GET", "cmd": None, "event_type": "HTTP Request", "duration": 5.0, "calls": []}
+	action = per_action.analyze([recording], empty_context).actions[0]
+	assert len(action["action_label"]) == 140
+	assert action["action_label"].startswith("GET /aaa") and action["action_label"].endswith("...")
+	assert len(action["path"]) == 140
+	assert action["path"].startswith(path[:137])
+
+
+def test_path_at_the_limit_is_kept_whole(empty_context):
+	path = "/" + "a" * 139
+	recording = {"uuid": "t1", "path": path, "method": "GET", "cmd": None, "event_type": "HTTP Request", "duration": 5.0, "calls": []}
+	assert per_action.analyze([recording], empty_context).actions[0]["path"] == path

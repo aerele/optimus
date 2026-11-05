@@ -8,6 +8,14 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.137] - 2026-11-04
+
+### Fixed
+
+- A session that recorded a request path over 140 characters (a long attachment URL, a long document name or any long 404) no longer fails analyze with "Value too big". The action's label and path are cut to 140 characters with a trailing `...`, the size of their Data fields.
+
+---
+
 ## [0.12.136] - 2026-11-04
 
 ### Fixed

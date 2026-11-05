@@ -18,6 +18,10 @@ import json
 
 from optimus.analyzers.base import AnalyzerResult, is_error_log_hook_query
 
+# action_label and path are Data fields (VARCHAR(140)); a longer value fails the whole save.
+_DATA_MAX_CHARS = 140
+_ELLIPSIS = "..."
+
 
 def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	actions = [_build_action(r) for r in recordings]
@@ -33,16 +37,22 @@ def _build_action(recording: dict) -> dict:
 	]
 	durations = [c.get("duration", 0) for c in calls]
 	return {
-		"action_label": _label(recording),
+		"action_label": _fit(_label(recording)),
 		"event_type": recording.get("event_type") or "HTTP Request",
 		"http_method": recording.get("method") or "",
-		"path": (recording.get("path") or "")[:500],
+		"path": _fit(recording.get("path") or ""),
 		"recording_uuid": recording.get("uuid") or "",
 		"duration_ms": round(recording.get("duration", 0), 2),
 		"queries_count": len(calls),
 		"query_time_ms": round(sum(durations), 2),
 		"slowest_query_ms": round(max(durations, default=0), 2),
 	}
+
+
+def _fit(value: str) -> str:
+	if len(value) <= _DATA_MAX_CHARS:
+		return value
+	return value[: _DATA_MAX_CHARS - len(_ELLIPSIS)] + _ELLIPSIS
 
 
 def _label(recording: dict) -> str:
