@@ -8,6 +8,14 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.141] - 2026-11-05
+
+### Fixed
+
+- Deleting a session while it is still recording now ends the recording. Before, the recording user kept recording into the deleted session: every request was still captured, the pill showed Recording, and Stop found no session. Its captured requests are dropped too.
+
+---
+
 ## [0.12.140] - 2026-11-05
 
 ### Fixed

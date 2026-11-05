@@ -208,6 +208,37 @@ def clear_active_session(user: str) -> None:
 	frappe.cache.delete_value(_active_key(user))
 
 
+CLEAR_ACTIVE_ATTEMPTS = 5
+
+
+def clear_active_session_if(user: str, session_uuid: str) -> bool | None:
+	"""Clear the user's pointer only while it still points at ``session_uuid``.
+
+	True when cleared, False when it points elsewhere, None when every attempt lost a race.
+	"""
+	from redis.exceptions import WatchError
+
+	key = frappe.cache.make_key(_active_key(user))
+	# set_active_session writes protocol 4; Frappe 16's own set_value writes protocol 5.
+	expected = {pickle.dumps(session_uuid, protocol=protocol) for protocol in (4, 5)}
+	try:
+		for _ in range(CLEAR_ACTIVE_ATTEMPTS):
+			try:
+				with frappe.cache.pipeline() as pipe:
+					pipe.watch(key)
+					if pipe.get(key) not in expected:
+						return False
+					pipe.multi()
+					pipe.delete(key)
+					pipe.execute()
+					return True
+			except WatchError:
+				continue  # A request renewed or replaced the pointer; read it again.
+	finally:
+		frappe.local.cache.pop(key, None)
+	return None
+
+
 # ----- session metadata ----------------------------------------------------
 
 

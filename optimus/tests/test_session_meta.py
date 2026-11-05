@@ -12,41 +12,71 @@ from optimus import session
 
 
 class FakeCache:
+	"""Dict-backed cache whose pipeline honours WATCH: a write to a watched key aborts EXEC."""
+
 	def __init__(self):
 		self.store = {}
+		self.versions = {}
+		# Runs after a pipeline read, standing in for a request landing before EXEC.
+		self.after_get = None
+
+	def touch(self, key):
+		self.versions[key] = self.versions.get(key, 0) + 1
 
 	def make_key(self, key):
 		return key
 
 	def pipeline(self):
+		import pickle
+
+		from redis.exceptions import WatchError
+
 		cache = self
 		class Pipeline:
+			def __init__(self): self.watched, self.queued = {}, None
 			def __enter__(self): return self
 			def __exit__(self, *args): pass
-			def watch(self, *keys): pass
+			def watch(self, *keys): self.watched = {key: cache.versions.get(key, 0) for key in keys}
 			def exists(self, *keys): return sum(key in cache.store for key in keys)
-			def multi(self): pass
-			def set(self, key, value, ex=None):
-				import pickle
-				cache.store[key] = pickle.loads(value)
-			def execute(self): pass
+			def multi(self): self.queued = []
+			def set(self, key, value, ex=None): self.queued.append(("set", key, pickle.loads(value)))
+			def get(self, key):
+				raw = pickle.dumps(cache.store[key], protocol=4) if key in cache.store else None
+				if cache.after_get:
+					cache.after_get(key)
+				return raw
+			def delete(self, key): self.queued.append(("delete", key, None))
+			def execute(self):
+				if any(cache.versions.get(key, 0) != seen for key, seen in self.watched.items()):
+					raise WatchError("watched key changed")
+				for op, key, value in self.queued:
+					if op == "set":
+						cache.store[key] = value
+					else:
+						cache.store.pop(key, None)
+					cache.touch(key)
 		return Pipeline()
 
 	def set_value(self, key, value, expires_in_sec=None):
 		self.store[key] = value
+		self.touch(key)
 
 	def get_value(self, key):
 		return self.store.get(key)
 
 	def delete_value(self, key):
 		self.store.pop(key, None)
+		self.touch(key)
 
 	def expire_key(self, key, time):
 		# Mirror Redis EXPIRE semantics: returns 1 if the key exists
 		# and TTL was refreshed; 0 (no-op) if the key is missing.
 		# Our FakeCache doesn't track TTL, but the existence check is
 		# what callers rely on.
-		return 1 if key in self.store else 0
+		if key not in self.store:
+			return 0
+		self.touch(key)  # Redis counts EXPIRE as a write to a watched key.
+		return 1
 
 	def sadd(self, key, value):
 		s = self.store.setdefault(key, set())
@@ -143,3 +173,52 @@ def test_register_recording_refreshes_ttl_when_session_still_active(fake_cache):
 
 	# Pointer remains set with the same session.
 	assert session.get_active_session_for(user) == session_uuid
+
+
+def test_clear_active_session_if_clears_only_the_given_session(fake_cache):
+	session.set_active_session("fake-user", "fake-session")
+	assert session.clear_active_session_if("fake-user", "other-session") is False
+	assert session.get_active_session_for("fake-user") == "fake-session"
+	assert session.clear_active_session_if("fake-user", "fake-session") is True
+	assert session.get_active_session_for("fake-user") is None
+	assert session.clear_active_session_if("fake-user", "fake-session") is False
+
+
+def _renew_pointer(fake_cache, times):
+	"""A recorded request renews the pointer between WATCH and EXEC ``times`` times."""
+	left = [times]
+
+	def renew(key):
+		if left[0]:
+			left[0] -= 1
+			fake_cache.expire_key(key, 600)
+
+	fake_cache.after_get = renew
+	return left
+
+
+def test_clear_active_session_if_retries_after_a_renewal(fake_cache):
+	session.set_active_session("fake-user", "fake-session")
+	left = _renew_pointer(fake_cache, 2)
+	assert session.clear_active_session_if("fake-user", "fake-session") is True
+	assert left == [0]
+	assert session.get_active_session_for("fake-user") is None
+
+
+def test_clear_active_session_if_reports_a_race_it_never_won(fake_cache):
+	session.set_active_session("fake-user", "fake-session")
+	_renew_pointer(fake_cache, session.CLEAR_ACTIVE_ATTEMPTS)
+	assert session.clear_active_session_if("fake-user", "fake-session") is None
+	assert session.get_active_session_for("fake-user") == "fake-session"
+
+
+def test_clear_active_session_if_keeps_a_newer_pointer(fake_cache):
+	session.set_active_session("fake-user", "fake-session")
+
+	def replace(key):
+		fake_cache.store[key] = "newer-session"
+		fake_cache.touch(key)
+
+	fake_cache.after_get = replace
+	assert session.clear_active_session_if("fake-user", "fake-session") is False
+	assert session.get_active_session_for("fake-user") == "newer-session"
