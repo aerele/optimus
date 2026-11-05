@@ -26,6 +26,9 @@ class FakeDb:
 			rows = [r for r in self.runs if self._match(r, filters)]
 		return rows[: limit or None]
 
+	def get_value(self, doctype, name, field):
+		return next((s[field] for s in self.sessions if s["name"] == name), None)
+
 	@staticmethod
 	def _match(row, filters):
 		for key, cond in (filters or {}).items():
@@ -42,8 +45,12 @@ class FakeDb:
 
 @pytest.fixture
 def env(monkeypatch):
-	def build(sessions=(), runs=(), active=None):
+	from optimus.line_profile import capture
+
+	def build(sessions=(), runs=(), active=None, lp_active=None):
 		db = FakeDb(list(sessions), list(runs))
+		monkeypatch.setattr(api.frappe, "db", db, raising=False)
+		monkeypatch.setattr(capture, "is_active", lambda user, fresh=False: lp_active)
 		monkeypatch.setattr(api, "_require_profiler_user", lambda: "alice", raising=False)
 		monkeypatch.setattr(api.frappe, "get_all", db.get_all, raising=False)
 		monkeypatch.setattr(api, "now_datetime", lambda: datetime(2026, 10, 26, 12, 0))
@@ -147,3 +154,4 @@ def test_phase2_run_status_by_ids(env, run_status, phase):
 def test_phase2_unknown_run_is_idle(env):
 	env(sessions=[_s("OS-1", "u1", "Ready")])
 	assert api.pill_state(session_uuid="u1", run_uuid="zz") == {"phase": "idle"}
+
