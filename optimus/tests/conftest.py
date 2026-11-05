@@ -73,7 +73,7 @@ except ImportError:
 	def _stub_throw(msg=None, exc=None, **kw):
 		raise (exc or _StubValidationError)(msg or "stub frappe.throw")
 
-	def _stub_logger():
+	def _stub_logger(*args, **kw):
 		return _types.SimpleNamespace(
 			warning=lambda *a, **kw: None,
 			info=lambda *a, **kw: None,

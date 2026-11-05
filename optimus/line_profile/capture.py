@@ -23,6 +23,7 @@ import json
 import pickle
 import sys
 import threading
+import tokenize
 from dataclasses import dataclass
 from functools import wraps
 
@@ -180,8 +181,9 @@ def _capture_source_lines(fn) -> list[dict]:
 		if not lines:
 			return []
 		first_lineno = code.co_firstlineno
-		source_lines = inspect.getblock(lines[first_lineno - 1:])
-	except (OSError, TypeError, ValueError):
+		# getblock reads "" as end of input; re-add the newline the reader strips.
+		source_lines = inspect.getblock([line + "\n" for line in lines[first_lineno - 1:]])
+	except (OSError, TypeError, ValueError, SyntaxError, tokenize.TokenError):
 		return []
 	return [{"lineno": first_lineno + i, "content": line.rstrip("\n")} for i, line in enumerate(source_lines)]
 
@@ -420,7 +422,9 @@ def prepare_line_profile_picks(picks: list[dict], *, server_expanded=frozenset()
 		fn = _resolve_attr(r["dotted_path"])
 		lines = _capture_source_lines(fn) if fn else []
 		if not lines:
-			raise CaptureError(_("A selected function has no readable source. Choose another function."))
+			frappe.logger("optimus").warning(f"line profiling dropped {r['dotted_path']}: no readable source")
+			resolved.remove(r)
+			continue
 		snapshot_bytes += len(json.dumps(lines).encode()) + len(r["dotted_path"].encode()) + 8
 		if snapshot_bytes > MAX_CAPTURE_BYTES:
 			raise CaptureError(_("Selected source exceeds the capture size limit. Select fewer functions."))
@@ -432,6 +436,9 @@ def prepare_line_profile_picks(picks: list[dict], *, server_expanded=frozenset()
 			"first_lineno": r["lineno"],
 			"source": r["source"],
 		})
+
+	if not picks_meta:
+		raise CaptureError(_("No selected function has eligible source. Check the selected paths."))
 
 	_validate_captured_picks([{**pick, "source_lines": source_snapshot[pick["dotted_path"]]} for pick in picks_meta])
 	picks_json, source_json = json.dumps(picks_meta), json.dumps(source_snapshot)
