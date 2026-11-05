@@ -8,6 +8,15 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.140] - 2026-11-05
+
+### Fixed
+
+- A line profiling run that is still recording stays on the pill after a page reload. Before, the reloaded pill showed Profiler and the run could only be stopped from the session form. Clicking the pill now stops the run, as it does before a reload.
+- The session form no longer counts a recording line profiling run as "Line profiling analyzing…". That run already has its own armed banner.
+
+---
+
 ## [0.12.138] - 2026-11-04
 
 ### Fixed

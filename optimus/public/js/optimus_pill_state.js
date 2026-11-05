@@ -162,13 +162,18 @@
 			if (isTransient(display) || display === "ready") {
 				return null;
 			}
+			const phase2 = srv.scope === "phase2";
+			const ui = phase2
+				? { display: "recording", label: "Line profiling recording…", elapsed: "click pill or form to stop" }
+				: { display: "recording", label: "Recording", elapsed: "" };
 			return {
 				state: withState(state, {
 					active: true, display: "recording", session_uuid: srv.session_uuid,
 					docname: srv.docname, label: srv.label, started_at: srv.started_at,
+					phase2: phase2, run_uuid: phase2 ? srv.run_uuid : null,
 				}),
 				// Already recording: keep the running elapsed text.
-				ui: display === "recording" ? null : { display: "recording", label: "Recording", elapsed: "" },
+				ui: display === "recording" ? null : ui,
 				alert: null,
 			};
 		}
@@ -201,7 +206,7 @@
 	// Nothing in flight: clear "analyzing"; "stopping" waits for its own request.
 	function serverIdle(state) {
 		if (state.phase2 && state.display === "recording") {
-			// pill_state does not track phase-2 recording.
+			// A run on another user's session reads as idle in the tracked lookup.
 			return null;
 		}
 		if (state.display === "recording" || state.display === "analyzing") {

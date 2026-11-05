@@ -120,6 +120,17 @@ test("stale recording snapshot is ignored once stopping/analyzing/ready", () => 
 	assert.strictEqual(Pill.reduceServer(Pill.initialState(), { phase: "recording", session_uuid: "s1" }, T0).state.display, "recording");
 });
 
+test("reload recovery: a line profiling recording comes back with its run", () => {
+	const r = Pill.reduceServer(Pill.initialState(), { phase: "recording", scope: "phase2", session_uuid: "s1", docname: "OS-1", run_uuid: "r1" }, T0);
+	assert.strictEqual(r.state.display, "recording");
+	assert.strictEqual(r.state.phase2, true);
+	assert.strictEqual(r.state.run_uuid, "r1");
+	assert.strictEqual(r.ui.label, "Line profiling recording…");
+	const p1 = Pill.reduceServer(Pill.initialState(), { phase: "recording", scope: "session", session_uuid: "s1" }, T0);
+	assert.strictEqual(p1.state.phase2, false);
+	assert.strictEqual(p1.state.run_uuid, null);
+});
+
 test("duplicate ready (event then poll) toasts once", () => {
 	const first = ev(analyzing(), "optimus_session_ready");
 	const again = Pill.reduceServer(first.state, { phase: "ready", scope: "session", session_uuid: "s1", docname: "OS-1" }, T0 + 1);

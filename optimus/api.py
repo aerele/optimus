@@ -779,7 +779,27 @@ def pill_state(session_uuid: str | None = None, run_uuid: str | None = None) -> 
 		}
 	if session_uuid:
 		return _pill_state_for(user, session_uuid, run_uuid)
-	return _pill_state_in_flight(user)
+	return _pill_state_lp_recording(user) or _pill_state_in_flight(user)
+
+
+def _pill_state_lp_recording(user: str) -> dict | None:
+	"""The caller's own line profiling run that is still recording, if any."""
+	from optimus.line_profile import capture as _lp_capture
+
+	run_uuid = _lp_capture.is_active(user, fresh=True)
+	if not run_uuid:
+		return None
+	run = frappe.get_all(
+		"Optimus Phase Two Run",
+		filters={"parenttype": "Optimus Session", "run_uuid": run_uuid, "status": "Recording"},
+		fields=["parent"],
+		limit=1,
+	)
+	if not run:
+		return None
+	docname = run[0]["parent"]
+	session_uuid = frappe.db.get_value("Optimus Session", docname, "session_uuid")
+	return _pill_payload("phase2", session_uuid, docname, "Recording", run_uuid)
 
 
 def _pill_state_for(user: str, session_uuid: str, run_uuid: str | None) -> dict:
@@ -844,8 +864,8 @@ def _pill_payload(scope: str, session_uuid, docname, status, run_uuid=None) -> d
 	elif status == "Failed":
 		phase = "failed"
 	elif status == "Recording":
-		# The pill tracks analyze only, not phase-2 recording.
-		phase = "idle"
+		# A line profiling run records; a session row alone is not proof of a live recording.
+		phase = "recording" if run_uuid else "idle"
 	else:
 		phase = "analyzing"
 	out = {"phase": phase, "scope": scope, "session_uuid": session_uuid, "docname": docname}
