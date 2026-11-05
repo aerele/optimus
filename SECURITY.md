@@ -58,7 +58,9 @@ the highest-value security considerations:
    Refresh AI suggestions, Regenerate Reports, Retry Analyze and line profiling
    actions use `api._session_action_gate`: the caller needs the profiler
    role, read access, and ownership or write permission. Read-only sharing
-   does not permit these actions. Mutating endpoints require POST, so
+   does not permit these actions. The session form applies the same rule
+   (`api.can_act_on_session`) to hide these buttons; the gate stays the
+   authority. Mutating endpoints require POST, so
    Frappe applies its CSRF protection. AI and report actions count per-user
    fixed-window limits (`optimus/ratelimit.py`) after permission checks. Defaults:
    `refill_ai_suggestions` 6 per hour; `regenerate_reports` 30 per minute;

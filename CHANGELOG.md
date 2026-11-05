@@ -8,6 +8,14 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.138] - 2026-11-04
+
+### Fixed
+
+- A user with a read-only share of a session no longer sees Regenerate Reports, Retry Analyze or the Line Profiling run, stop and retry buttons, which the server refuses for them. Their notes say to ask the session owner instead.
+
+---
+
 ## [0.12.137] - 2026-11-04
 
 ### Fixed

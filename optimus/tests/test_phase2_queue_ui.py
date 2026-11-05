@@ -21,7 +21,7 @@ vm.createContext(ctx);vm.runInContext(fs.readFileSync(process.argv[1],"utf8"),ct
 ctx._phase2_armed_banner=()=>{};
 let dirty=false, reloads=0;
 const frm={is_new:()=>false,is_dirty:()=>dirty,reload_doc:()=>{reloads++;},
- doc:{session_uuid:"fake-session",status:"Ready",phase_2_runs:Array.from({length:8},(_,i)=>({run_uuid:"fake-run-"+i,status:"Failed"}))},
+ doc:{__onload:{optimus_can_act:true},session_uuid:"fake-session",status:"Ready",phase_2_runs:Array.from({length:8},(_,i)=>({run_uuid:"fake-run-"+i,status:"Failed"}))},
  add_custom_button:(name,fn)=>buttons.set(name,fn)};
 ctx.render_phase2_button(frm);
 const batch=[...buttons].find(([name])=>/Retry (all|next)/.test(name))[1];
