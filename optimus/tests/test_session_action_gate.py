@@ -314,11 +314,16 @@ def test_can_act_matches_the_gate_matrix(monkeypatch, label, user, roles, perms,
 
 
 def test_can_act_fails_closed_when_permission_engine_raises(monkeypatch):
+	import frappe
+
 	def boom(doctype, ptype, doc, user):
 		raise RuntimeError("permission engine hiccup")
 
+	lines = []
+	monkeypatch.setattr(frappe, "logger", lambda *a, **k: SimpleNamespace(error=lines.append), raising=False)
 	_install(monkeypatch, has_permission=boom)
 	assert api.can_act_on_session(SimpleNamespace(name=DOCNAME, owner=OWNER)) is False
+	assert lines == [f"optimus.can_act_on_session: has_permission raised for {DOCNAME}; hiding session actions"]
 
 
 def test_can_act_needs_the_profiler_role(monkeypatch):
@@ -326,11 +331,12 @@ def test_can_act_needs_the_profiler_role(monkeypatch):
 	assert api.can_act_on_session(SimpleNamespace(name=DOCNAME, owner=OWNER)) is False
 
 
-def test_session_onload_sends_can_act_to_the_form(monkeypatch):
+@pytest.mark.parametrize("allowed", [True, False])
+def test_session_onload_sends_can_act_to_the_form(monkeypatch, allowed):
 	from optimus.optimus.doctype.optimus_session.optimus_session import OptimusSession
 
-	monkeypatch.setattr(api, "can_act_on_session", lambda doc: doc.name == DOCNAME)
+	monkeypatch.setattr(api, "can_act_on_session", lambda doc: allowed if doc.name == DOCNAME else None)
 	sent = {}
 	doc = SimpleNamespace(name=DOCNAME, set_onload=lambda key, value: sent.update({key: value}))
 	OptimusSession.onload(doc)
-	assert sent == {"optimus_can_act": True}
+	assert sent == {"optimus_can_act": allowed}
