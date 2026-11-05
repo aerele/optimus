@@ -988,11 +988,20 @@
 		}
 	}
 
+	// started_at is naive server wall-clock time, so read it in the system time zone.
+	function startedAtMs(startedAt) {
+		const tz = (frappe.boot.time_zone && frappe.boot.time_zone.system)
+			|| (frappe.sys_defaults && frappe.sys_defaults.time_zone);
+		const m = window.moment;
+		if (tz && m && m.tz) return m.tz(startedAt, tz).valueOf();
+		return new Date(startedAt).getTime();
+	}
+
 	function computeElapsed() {
 		if (!currentState.started_at) return "";
-		const start = new Date(currentState.started_at).getTime();
+		const start = startedAtMs(currentState.started_at);
 		if (isNaN(start)) return "";
-		const seconds = Math.floor((Date.now() - start) / 1000);
+		const seconds = Math.max(0, Math.floor((Date.now() - start) / 1000));
 		const m = Math.floor(seconds / 60);
 		const s = seconds % 60;
 		return `${m}:${s.toString().padStart(2, "0")}`;

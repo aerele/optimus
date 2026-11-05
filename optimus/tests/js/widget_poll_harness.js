@@ -39,12 +39,13 @@ function load() {
 	vm.runInContext(fs.readFileSync(path.join(JS, "optimus_pill_state.js"), "utf8"), ctx);
 	const code = fs.readFileSync(path.join(JS, "floating_widget.js"), "utf8").replace(
 		/\}\)\(\);\s*$/,
-		"widget = makeWidget();\nglobalThis.t = { applyResult, refreshStatus, onClick, confirmAndStop, stopPhase2, get widget() { return widget; }, startElapsedTimer," +
+		"widget = makeWidget();\nglobalThis.t = { applyResult, refreshStatus, onClick, confirmAndStop, stopPhase2, get widget() { return widget; }, startElapsedTimer, computeElapsed," +
 		" get state() { return currentState; }, set state(v) { currentState = v; }, Pill };})();"
 	);
 	ctx.makeWidget = makeWidget;
 	vm.runInContext(code, ctx);
 	env.t = ctx.t;
+	env.ctx = ctx;
 	env.live = () => env.timers.filter((x) => x.live);
 	// Fire the next live timer, advancing the clock to it.
 	env.fire = () => {
@@ -180,6 +181,16 @@ test("a resync that resets a recording pill stops the elapsed timer", () => {
 	env.calls[0].callback({ message: { phase: "idle" } });
 	assert.strictEqual(env.t.state.display, "inactive");
 	assert.ok(env.cleared > cleared, "elapsed interval was left running");
+});
+
+test("elapsed reads the naive started_at in the system time zone", () => {
+	const env = load();
+	env.ctx.frappe.boot = { time_zone: { system: "Asia/Kolkata", user: "Asia/Kolkata" } };
+	// moment.tz stub for the one zone this test uses (IST is a fixed +05:30).
+	env.ctx.window.moment = { tz: (s, tz) => ({ valueOf: () => (tz === "Asia/Kolkata" ? Date.parse(s + "+05:30") : NaN) }) };
+	env.now = Date.parse("2026-11-04T17:49:17+05:30");
+	env.t.state = Object.assign(env.t.Pill.initialState(), { display: "recording", started_at: "2026-11-04T17:49:12.400777" });
+	assert.strictEqual(env.t.computeElapsed(), "0:04");
 });
 
 let failed = 0;
