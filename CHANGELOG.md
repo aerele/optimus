@@ -8,12 +8,29 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.139] - 2026-11-05
+## [0.12.142] - 2026-11-06
 
 ### Changed
 
 - The popup that appears when a profiling session finishes now shows the session's title, underlined, as a normal Frappe link to the session, on the same line as the message. If a session has no title, the link shows its name (ID). The "Open Session" and "Review and Retry" button is gone, and so is the "Session ID" line. The popup for a failed analysis and for an empty session use the same layout.
 - The session events now carry the session title so the popup can show it. The title goes only to the people who already receive these events.
+
+---
+
+## [0.12.141] - 2026-11-05
+
+### Fixed
+
+- Deleting a session while it is still recording now ends the recording. Before, the recording user kept recording into the deleted session: every request was still captured, the pill showed Recording, and Stop found no session. Its captured requests are dropped too.
+
+---
+
+## [0.12.140] - 2026-11-05
+
+### Fixed
+
+- A line profiling run that is still recording stays on the pill after a page reload. Before, the reloaded pill showed Profiler and the run could only be stopped from the session form. Clicking the pill now stops the run, as it does before a reload.
+- The session form no longer counts a recording line profiling run as "Line profiling analyzing…". That run already has its own armed banner.
 
 ---
 

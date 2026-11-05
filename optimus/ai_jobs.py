@@ -1684,12 +1684,52 @@ def delete_session_state(doc):
 	store.delete_session_journal(doc.name, doc.session_uuid)
 	captures = tuple((row.run_uuid, getattr(row, "recording_user", None) or doc.user)
 		for row in doc.phase_2_runs or [] if row.run_uuid)
-	if captures:
-		frappe.db.after_commit.add(lambda: _cleanup_deleted_captures(captures))
+	recording = (doc.user, doc.session_uuid) if getattr(doc, "status", None) == "Recording" else None
+	if captures or recording:
+		frappe.db.after_commit.add(lambda: _cleanup_deleted_captures(captures, recording))
 
 
-def _cleanup_deleted_captures(captures):
+def _guarded_cleanup_step(step, failed: str) -> str | None:
+	"""Run one after-commit cleanup step; return its problem, or ``failed`` if it raised."""
+	problem = None
+	guard = safe_call.InterruptGuard(base=True)
+	try:
+		with guard:
+			problem = step()
+	except Exception:
+		problem = failed
+	if guard.pending():
+		raise guard.interrupt()
+	return problem
+
+
+def _end_deleted_recording(user: str, session_uuid: str) -> None:
+	"""Clear the pointer to a deleted session, then drop its captured requests, as two steps."""
+	from optimus import analyze, session
+
+	title = f"optimus deleted session recording {session_uuid}"
+
+	def clear() -> str | None:
+		if session.clear_active_session_if(user, session_uuid) is None:
+			return "the recording pointer kept changing"
+		return None
+
+	problem = _guarded_cleanup_step(clear, "clearing the recording pointer raised")
+	if problem:
+		safe_call.log_error_line(f"{title}: {problem}; the user keeps recording until they click Stop")
+	problem = _guarded_cleanup_step(
+		lambda: analyze._cleanup_redis(session_uuid, session.get_recordings(session_uuid)),
+		"dropping its captured requests raised",
+	)
+	if problem:
+		safe_call.log_error_line(f"{title}: {problem}")
+
+
+def _cleanup_deleted_captures(captures: tuple, recording: tuple[str, str] | None = None) -> None:
 	from optimus.line_profile import capture
+
+	if recording:
+		_end_deleted_recording(*recording)
 	failures = 0
 	for run_uuid, user in captures:
 		guard = safe_call.InterruptGuard(base=True)

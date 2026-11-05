@@ -1214,9 +1214,8 @@ function render_regenerate_report_button(frm) {
 // run finishes (the phase_2_run_ready realtime event reloads the form).
 function render_phase2_progress(frm) {
 	if (frm.is_new()) return;
-	const in_flight = (frm.doc.phase_2_runs || []).filter(
-		(r) => r.status === "Recording" || r.status === "Analyzing"
-	);
+	// Recording runs have their own armed banner.
+	const in_flight = (frm.doc.phase_2_runs || []).filter((r) => r.status === "Analyzing");
 	if (!in_flight.length) return;
 	frm.dashboard.add_indicator(
 		__("Line profiling analyzing… ({0} run{1} in progress)", [

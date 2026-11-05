@@ -183,6 +183,18 @@ test("a resync that resets a recording pill stops the elapsed timer", () => {
 	assert.ok(env.cleared > cleared, "elapsed interval was left running");
 });
 
+test("a reload recovers a line profiling recording and its click stops the run", () => {
+	const env = load();
+	env.t.refreshStatus();
+	env.calls[0].callback({ message: { phase: "recording", scope: "phase2", session_uuid: "s1", docname: "OS-1", run_uuid: "r1" } });
+	assert.strictEqual(env.t.widget.label.textContent, "Line profiling recording…");
+	assert.strictEqual(env.t.widget.elapsed.textContent, "click pill or form to stop");
+	assert.strictEqual(env.intervals, 0, "no elapsed timer for line profiling");
+	env.t.onClick();
+	assert.strictEqual(env.calls[1].method, "optimus.api.stop_line_profile_pass");
+	assert.strictEqual(env.calls[1].args.run_uuid, "r1");
+});
+
 test("elapsed reads the naive started_at in the system time zone", () => {
 	const env = load();
 	env.ctx.frappe.boot = { time_zone: { system: "Asia/Kolkata", user: "Asia/Kolkata" } };

@@ -338,8 +338,12 @@
 				const prev = currentState.display;
 				applyResult(Pill.reduceServer(currentState, (r && r.message) || {}, Date.now()));
 				if (currentState.display === "recording" && prev !== "recording") {
-					startElapsedTimer();
-					setDisplay("recording", "Recording", computeElapsed());
+					if (currentState.phase2) {
+						setDisplay("recording", "Line profiling recording…", "click pill or form to stop");
+					} else {
+						startElapsedTimer();
+						setDisplay("recording", "Recording", computeElapsed());
+					}
 					if (widget) widget.setAttribute("data-session-uuid", currentState.session_uuid || "");
 				}
 				if (done) done();
