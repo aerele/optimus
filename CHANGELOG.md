@@ -8,6 +8,20 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.165] - 2026-11-07
+
+### Fixed
+
+- A request whose form data is nested thousands of levels deep (or whose JSON text field is) is now redacted: the over-deep part is replaced by `<REDACTED:nested too deep>`, so the secret inside is never stored, and the report no longer fails to render. Before, the nesting crashed the redaction, the form data was kept as sent, and the report broke on it. Normal requests, nested up to 100 levels, are unchanged. Recordings stored before this version are cut the same way when the report is built.
+- If redaction of a request's form data or headers fails for any other reason, the recording now holds `<REDACTED:redaction failed>` in their place instead of the raw values, and one line naming only the error class is logged at error level, at most once a minute.
+- Request data that refers to itself, or shares the same sub-part so many times that walking it would take forever, no longer hangs the request: the repeated part is replaced by `<REDACTED:circular>` or, past 100,000 containers, `<REDACTED:too large>`. Sets, `dict.keys()` and `dict.items()` are redacted like lists and dicts; bytes, `dict.values()` and any other object are replaced by `<REDACTED:unsupported type>` instead of being kept as is.
+- A request whose `cmd` is not text (for example `{"cmd": 5}` in a JSON body) no longer writes an Error Log entry for every request, is no longer skipped from profiling, and no longer breaks the actions table. Recordings already stored with such a value are read as having no `cmd`.
+- The "Generated" time of a report and the time on an AI fix now show in the site's time zone instead of UTC or the server's own zone. Times already stored are unchanged and are converted when shown.
+- A redundant-call check no longer fails on an argument nested past the recursion limit; that entry is skipped and counted.
+- Not covered: call-tree depth limits, and the SQL redaction paths, are unchanged.
+
+---
+
 ## [0.12.144] - 2026-11-06
 
 ### Security

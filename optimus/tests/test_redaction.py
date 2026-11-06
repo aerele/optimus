@@ -102,11 +102,11 @@ class TestRedactSensitive:
 		assert redaction.redact_sensitive({"doc": clean})["doc"] == clean
 		assert redaction.redact_sensitive({"doc": "{not json"})["doc"] == "{not json"
 
-	def test_deeply_nested_json_string_keeps_other_keys_redacted(self):
+	def test_deeply_nested_json_string_becomes_the_marker_and_keeps_other_keys_redacted(self):
 		deep = "[" * 100000 + "]" * 100000
 		out = redaction.redact_sensitive({"pwd": "hunter2", "doc": deep})
 		assert out["pwd"] == "<REDACTED:pwd>"
-		assert out["doc"] == deep
+		assert out["doc"] == redaction.NESTED_TOO_DEEP
 
 	def test_set_value_value_named_by_sensitive_fieldname(self):
 		out = redaction.redact_sensitive({"doctype": "User", "fieldname": "new_password", "value": "Hunter2!"})

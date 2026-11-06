@@ -1,4 +1,4 @@
-__version__ = "0.12.144"
+__version__ = "0.12.165"
 
 
 def safe_commit() -> None:
@@ -264,6 +264,21 @@ _patch_enqueue()
 # the renderer's defense-in-depth redaction.
 
 
+def _omit_unredacted_request(recorder, failure):
+	"""Last resort when form_dict / headers could not be redacted: store a marker in their
+	place and log the exception class once (never the values). Never raises."""
+	marker = {"_optimus": "<REDACTED:redaction failed>"}
+	for name in ("form_dict", "headers"):
+		if getattr(recorder, name, None) is not None:
+			setattr(recorder, name, dict(marker))
+	try:
+		from optimus import safe_call
+
+		safe_call.log_error_line(f"optimus: request redaction failed ({type(failure).__name__}); values omitted")
+	except Exception:
+		pass
+
+
 def _omit_unredacted_query(data):
 	"""Last resort when redaction itself could not run: store no SQL instead of the raw text.
 	The constants are imported here, not at the top, so a broken redaction module cannot stop the
@@ -330,6 +345,9 @@ def _patch_recorder():
 
 	def _profiler_init(self, *args, **kwargs):
 		_original_init(self, *args, **kwargs)
+		if getattr(self, "cmd", None) is not None and not isinstance(self.cmd, str):
+			self.cmd = ""
+		failure = None
 		try:
 			from optimus.redaction import redact_sensitive
 
@@ -338,11 +356,12 @@ def _patch_recorder():
 				self.form_dict = redact_sensitive(self.form_dict, extra_keys=extra_keys)
 			if isinstance(getattr(self, "headers", None), dict):
 				self.headers = redact_sensitive(self.headers, extra_keys=extra_keys)
-		except Exception:
-			# Never break the user's request because OUR scrubber failed.
-			# Renderer-side defense-in-depth still catches anything that
-			# slipped through.
-			pass
+		except Exception as exc:
+			# Never break the user's request because OUR scrubber failed, and never keep the
+			# raw values either: the recording stores a marker in their place.
+			failure = exc
+		if failure is not None:
+			_omit_unredacted_request(self, failure)
 
 	def _profiler_register(self, data):
 		try:

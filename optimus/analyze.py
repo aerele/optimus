@@ -1340,6 +1340,14 @@ def _bundle_entries(bundle) -> dict:
 	return entries if isinstance(entries, dict) else bundle
 
 
+def _clean_cmd(recording: dict) -> None:
+	"""A recording made before capture cleaned its ``cmd`` may carry a number or a list
+	(Frappe stores ``form_dict.cmd`` as sent); every reader of ``cmd`` expects text."""
+	cmd = recording.get("cmd")
+	if cmd is not None and not isinstance(cmd, str):
+		recording["cmd"] = ""
+
+
 def _fetch_recordings(recording_uuids: list[str]):
 	"""Stream recording dicts from Redis one at a time (a generator, so the
 	pipeline can free each pyi_session between recordings instead of holding all
@@ -1408,6 +1416,7 @@ def _fetch_recordings(recording_uuids: list[str]):
 		rec["pyi_session"] = pyi_session
 		rec["sidecar"] = sidecar
 		rec["lock_events"] = lock_events
+		_clean_cmd(rec)
 		strip_profiler_own_calls(rec)
 		yield rec
 
@@ -3044,6 +3053,7 @@ def load_recordings_light(doc, uuids=None, *, memo=None) -> list[dict]:
 			rec = memo[memo_key].get(uuid)
 		if isinstance(rec, dict) and rec:
 			light = {key: value for key, value in rec.items() if key not in {"pyi_session", "sidecar", "tree_b64"}}
+			_clean_cmd(light)
 			strip_profiler_own_calls(light)
 			result.append(light)
 	return result
