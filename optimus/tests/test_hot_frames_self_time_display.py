@@ -5,7 +5,7 @@
 
 Stored rows come in three shapes: reports up to 0.7.0 (only ``total_ms`` = cumulative),
 reports from 2026-05-20 to 0.12.142 (``total_ms`` 0 + ``total_cumulative_ms``) and rows
-from 0.12.143 on (``self_time_measured``, ``total_ms`` = self, ``total_cumulative_ms`` = Total).
+from 0.12.146 on (``self_time_measured``, ``total_ms`` = self, ``total_cumulative_ms`` = Total).
 """
 
 import json
