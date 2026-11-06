@@ -1,4 +1,4 @@
-__version__ = "0.12.153"
+__version__ = "0.12.160"
 
 
 def safe_commit() -> None:
@@ -88,16 +88,34 @@ def _is_synchronous_enqueue(args, kwargs, positions=_ENQUEUE_POSITIONS) -> bool:
 		return False
 
 
-# Jobs Optimus queues for itself. Tagging one with the user's *next* session would
-# record the analysis into that session, so they never carry a session marker.
-_INTERNAL_JOB_METHODS = frozenset({"optimus.analyze.run"})
+_OPTIMUS_PREFIX = "optimus."
+_RUN_SCHEDULED_JOB = "frappe.core.doctype.scheduled_job_type.scheduled_job_type.run_scheduled_job"
 
 
-def is_internal_job(method) -> bool:
-	"""True for a job Optimus queued for itself, given as a dotted path or a callable."""
-	if not isinstance(method, str):
-		method = f"{getattr(method, '__module__', '')}.{getattr(method, '__qualname__', '')}"
-	return method in _INTERNAL_JOB_METHODS
+def _method_path(method) -> str:
+	if isinstance(method, str):
+		return method
+	return f"{getattr(method, '__module__', '')}.{getattr(method, '__qualname__', '')}"
+
+
+def is_internal_job(method, kwargs=None) -> bool:
+	"""True for a job Optimus runs for itself: an ``optimus.`` method, or a cron whose
+	``job_type`` is one. Tagging one with the user's *next* session would record it there."""
+	path = _method_path(method)
+	if path.startswith(_OPTIMUS_PREFIX):
+		return True
+	return path == _RUN_SCHEDULED_JOB and str((kwargs or {}).get("job_type", "")).startswith(_OPTIMUS_PREFIX)
+
+
+def _is_scheduler_enqueue(method, local) -> bool:
+	"""A cron queued by the scheduler (no web request) is not part of the user's flow."""
+	return _method_path(method) == _RUN_SCHEDULED_JOB and getattr(local, "request", None) is None
+
+
+def _outside_user_flow(method, kwargs, local) -> bool:
+	if getattr(local, "optimus_internal_job", False) or getattr(local, "optimus_analyzing", False):
+		return True
+	return is_internal_job(method, kwargs) or _is_scheduler_enqueue(method, local)
 
 
 def _live_bg_session(session_uuid, user, _profiler_session):
@@ -175,7 +193,7 @@ def _patch_enqueue():
 			from optimus import session as _profiler_session
 
 			user = getattr(frappe.session, "user", None) if hasattr(frappe, "session") else None
-			if user and user != "Guest" and not is_internal_job(method):
+			if user and user != "Guest" and not _outside_user_flow(method, kwargs, getattr(frappe, "local", None)):
 				active = _enqueue_session_for(user, _profiler_session)
 				# Inline calls would pass the marker to the method as a kwarg.
 				if active and not synchronous:

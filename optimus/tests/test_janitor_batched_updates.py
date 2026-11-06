@@ -14,6 +14,8 @@ import importlib
 import sys
 import types
 
+import pytest
+
 
 def _install_frappe_stub(monkeypatch):
 	"""Build a minimal ``frappe`` stub the janitor module can import. All
@@ -28,6 +30,8 @@ def _install_frappe_stub(monkeypatch):
 	stub._logger = types.SimpleNamespace(info=lambda msg: None)
 	stub._get_all_return = {}  # keyed by doctype → list of rows
 	stub._enqueue_calls = []
+	stub._get_value_calls = []
+	stub._bumped = set()  # rows another sweep already claimed or touched
 
 	class _DB:
 		def get_all(self, doctype, filters=None, fields=None, **kwargs):
@@ -35,6 +39,8 @@ def _install_frappe_stub(monkeypatch):
 			return list(stub._get_all_return.get(doctype, []))
 
 		def set_value(self, doctype, name_or_filters, fieldname_or_dict, *args, **kwargs):
+			if isinstance(name_or_filters, str):
+				stub._bumped.add(name_or_filters)  # a write bumps modified past any cutoff
 			stub._set_value_calls.append((doctype, name_or_filters, fieldname_or_dict))
 			return True
 
@@ -44,7 +50,10 @@ def _install_frappe_stub(monkeypatch):
 		def rollback(self):
 			pass
 
-		def get_value(self, *args, **kwargs):
+		def get_value(self, doctype, filters=None, fieldname=None, **kwargs):
+			stub._get_value_calls.append((doctype, filters, fieldname, kwargs))
+			if kwargs.get("for_update") and isinstance(filters, dict) and filters["name"] not in stub._bumped:
+				return filters["name"]
 			return None
 
 		def sql(self, *args, **kwargs):
@@ -270,26 +279,94 @@ class TestSweepStuckAnalyzing:
 # --------------------------------------------------------------------------
 
 class TestSweepStaleStopping:
-	def test_reenqueues_each_stale_stopping_row(self, monkeypatch):
-		stub = _install_frappe_stub(monkeypatch)
+	STATUSES = ["Stopping", "Capturing Background Jobs"]
+
+	def _two_stale(self, stub):
 		stub._get_all_return["Optimus Session"] = [
 			{"name": "PS-1", "session_uuid": "u1"},
 			{"name": "PS-2", "session_uuid": "u2"},
 		]
+
+	def test_reenqueues_each_stale_stopping_row(self, monkeypatch):
+		stub = _install_frappe_stub(monkeypatch)
+		self._two_stale(stub)
 		janitor = _reload_janitor(monkeypatch)
 		janitor._sweep_stale_stopping()
 
-		# One batched set_value re-affirming Stopping (bumps modified → backoff).
-		set_value_calls = [c for c in stub._set_value_calls if c[0] == "Optimus Session"]
-		assert len(set_value_calls) == 1
-		_, filters, fields = set_value_calls[0]
-		assert filters["name"] == ("in", ["PS-1", "PS-2"])
-		assert filters["status"] == ["in", ["Stopping", "Capturing Background Jobs"]]
-		assert fields["status"] == "Stopping"
-		# Analyze re-enqueued once per stranded row.
-		assert len(stub._enqueue_calls) == 2
+		# Each row is re-affirmed as Stopping on its own (bumps modified, so a
+		# still-stuck row backs off one window) and analyze is queued once per row.
+		set_values = [c for c in stub._set_value_calls if c[0] == "Optimus Session"]
+		assert [(c[1], c[2]) for c in set_values] == [("PS-1", {"status": "Stopping"}), ("PS-2", {"status": "Stopping"})]
 		methods = [c[0][0] for c in stub._enqueue_calls]
 		assert methods == ["optimus.analyze.run", "optimus.analyze.run"]
+
+	def test_the_claim_locks_the_row_and_rechecks_status_and_age(self, monkeypatch):
+		stub = _install_frappe_stub(monkeypatch)
+		self._two_stale(stub)
+		janitor = _reload_janitor(monkeypatch)
+		janitor._sweep_stale_stopping()
+
+		_, filters, _, kwargs = stub._get_value_calls[0]
+		assert kwargs["for_update"] is True
+		assert filters["name"] == "PS-1"
+		assert filters["status"] == ["in", self.STATUSES]
+		assert filters["modified"][0] == "<"
+
+	@pytest.mark.parametrize("bumped", [False, True])
+	def test_every_claim_commits_to_release_the_lock(self, monkeypatch, bumped):
+		stub = _install_frappe_stub(monkeypatch)
+		stub._get_all_return["Optimus Session"] = [{"name": "PS-1", "session_uuid": "u1"}]
+		if bumped:
+			stub._bumped.add("PS-1")
+		janitor = _reload_janitor(monkeypatch)
+		commits = []
+		monkeypatch.setattr(janitor, "safe_commit", lambda: commits.append(1))
+		janitor._sweep_stale_stopping()
+		assert len(commits) == 1
+
+	def test_two_sweeps_over_one_stale_row_enqueue_once(self, monkeypatch):
+		stub = _install_frappe_stub(monkeypatch)
+		stub._get_all_return["Optimus Session"] = [{"name": "PS-1", "session_uuid": "u1"}]
+		janitor = _reload_janitor(monkeypatch)
+		janitor._sweep_stale_stopping()
+		janitor._sweep_stale_stopping()  # both listed the row before either claimed it
+		assert len(stub._enqueue_calls) == 1
+
+	def test_a_row_touched_between_listing_and_claim_is_skipped(self, monkeypatch):
+		stub = _install_frappe_stub(monkeypatch)
+		self._two_stale(stub)
+		stub._bumped.add("PS-1")
+		janitor = _reload_janitor(monkeypatch)
+		janitor._sweep_stale_stopping()
+
+		assert [c[1]["session_uuid"] for c in stub._enqueue_calls] == ["u2"]
+		assert [c[1] for c in stub._set_value_calls] == ["PS-2"]
+
+	def test_the_enqueue_carries_a_fixed_job_id_and_deduplicates(self, monkeypatch):
+		stub = _install_frappe_stub(monkeypatch)
+		stub._get_all_return["Optimus Session"] = [{"name": "PS-1", "session_uuid": "u1"}]
+		janitor = _reload_janitor(monkeypatch)
+		janitor._sweep_stale_stopping()
+
+		kwargs = stub._enqueue_calls[0][1]
+		assert kwargs["job_id"] == "optimus-analyze-u1"
+		assert kwargs["deduplicate"] is True
+		assert kwargs["session_uuid"] == "u1" and kwargs["queue"] == "long"
+
+	def test_a_failed_enqueue_does_not_stop_the_other_rows(self, monkeypatch):
+		stub = _install_frappe_stub(monkeypatch)
+		self._two_stale(stub)
+		seen = []
+
+		def flaky(*a, **kw):
+			seen.append(kw["session_uuid"])
+			if kw["session_uuid"] == "u1":
+				raise RuntimeError("redis down")
+
+		stub.enqueue = flaky
+		janitor = _reload_janitor(monkeypatch)
+		janitor._sweep_stale_stopping()
+		assert seen == ["u1", "u2"]
 
 	def test_filters_on_stopping_status(self, monkeypatch):
 		stub = _install_frappe_stub(monkeypatch)
