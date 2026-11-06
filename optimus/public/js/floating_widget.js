@@ -818,8 +818,10 @@
 			}],
 		});
 		if (d.$wrapper && d.$wrapper.addClass) d.$wrapper.addClass("optimus-session-popup");
-		// A plain click navigates this tab to the session, so close the dialog behind it. A modified
-		// or non-primary click opens a new tab or window and leaves this page, so keep the popup.
+		// A plain primary click navigates this tab to the session, so close the dialog behind it.
+		// For a modified or non-primary click (ctrl / meta / shift / alt / middle) the browser may
+		// open a new tab or window, so keep the popup. If Desk's router instead navigates this tab,
+		// it closes the dialog itself (hide_open_dialog), so nothing is left dangling either way.
 		if (d.$wrapper && d.$wrapper.on) {
 			d.$wrapper.on("click", "a.optimus-session-link", (e) => {
 				if (e && (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey || e.button)) return;

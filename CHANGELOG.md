@@ -14,6 +14,7 @@ versions may contain breaking changes see migration notes below).
 
 - The popup that appears when a profiling session finishes now shows the session's title, underlined, as a normal Frappe link to the session, on the same line as the message. If a session has no title, the link shows its name (ID). The "Open Session" and "Review and Retry" button is gone, and so is the "Session ID" line. The popup for a failed analysis and for an empty session use the same layout.
 - The session events now carry the session title so the popup can show it. The title goes only to the people who already receive these events.
+- A long title with no spaces now wraps inside the popup instead of overflowing it sideways.
 
 ---
 
