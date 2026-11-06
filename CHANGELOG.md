@@ -8,6 +8,15 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.167] - 2026-11-07
+
+### Internal
+
+- Tests that needed a real Frappe now also run in the Frappe-free CI against small stand-ins: the single-flight flag against a copy of Frappe v16's Redis value API (including its swallowing of connection errors), the health-window query, and the Guest denial of the frontend metrics endpoint. `download_pdf` is now checked to be POST-only.
+- CI now fails when a test is skipped without a listed reason (`optimus/tests/ci_skips.py`), so a test can no longer stop running unnoticed. It applies only where Frappe is not installed; bench runs are unchanged. Every integration test module must be in `integration.yml` or on a manual-only list with a reason. The bench-only tests still run manually. No product code changed.
+
+---
+
 ## [0.12.147] - 2026-11-06
 
 ### Internal
