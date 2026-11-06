@@ -8,6 +8,21 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.144] - 2026-11-06
+
+### Security
+
+- Secrets in the SQL a report shows are now hidden in far more shapes. Before, only `column = 'value'` was caught, so a password set by `INSERT ... VALUES (...)` (including the stored password row Frappe writes), a value behind `CAST(...)`, `CASE ... END` (the shape `bulk_update` writes), a function, a hex or negative number, `!=`, `<>`, `BETWEEN`, `REGEXP`, `SIMILAR TO`, or written the other way round (`'value' = password`) appeared in the report as typed. Settings rows keyed by a field name (`api_key`, `client_secret`, webhook and SMS parameters), JSON in version and request-log rows (`"Authorization": "Bearer ..."`) and values shaped like a stored hash or encrypted secret are masked too.
+- A statement Optimus cannot read safely (an unterminated quote, a comment that hides a quote, an `INSERT` with no column list) is no longer shown as typed. Every literal in it is masked and the statement stays visible, or the statement is replaced by `[SQL omitted: could not be read safely]` when even its quotes cannot be trusted. EXPLAIN is skipped for such a statement, it is not counted as an exact duplicate of another, and it gets no index suggestion. If the redaction code itself fails, the SQL is omitted instead of stored raw, and one warning naming only the error class is logged per process.
+- The default hidden names now also cover card numbers, bank account numbers, IBAN, CVV, session ids, `sessiondata`, `authorization_code`, `salt`, `passkey`, `hmac` and credentials. The plain words `credit`, `card` and `bank` are no longer on the SQL list, so a `tabGL Entry` `credit > 100` filter is no longer masked. Names you add in Optimus Settings now match in any letter case.
+- The SQL sent to an AI provider under raw-value consent is stripped for the same names as before and for every new one, so nothing newly reaches the provider.
+- A statement longer than 256 KB, with more than 120,000 tokens, or with a long run of unclosed `$tag$` quotes is omitted without being read, so a huge bulk insert cannot slow a request. Identifiers and JSON keys are matched in camelCase too (`accessToken`, `clientSecret`, `secretKey`). Also masked now: `IDENTIFIED BY '...'`, `PASSWORD()` and `AES_*()` arguments, `ARRAY[...]`, `REPLACE(...)`, `CONCAT(...)`, `&&`, `@@`, `MEMBER OF`, `data->>'password'`, and `field IN (...)` settings rows.
+- On a statement that goes through the slower path, comments are replaced by one space. The `-- [Optimus: query truncated ...]` note at the end of a cut query is kept. A statement that was cut inside a quote is now omitted instead of shown cut. One existing test (`test_slow_query_full_sql_render`) now ends its long query with a value instead of a comment.
+- The default names are exact words and underscore compounds. Spellings such as `secrets`, `mypassword`, `accesstoken`, `pin` and `pan` are not default names: add them under Sensitive SQL Columns in Optimus Settings.
+- Sessions recorded before this version keep their old SQL. Regenerate Reports rewrites only the HTML and PDF report. The Desk form and the exported session JSON keep the values stored when the session was recorded, so delete any session that profiled a login, password change or API key flow.
+
+---
+
 ## [0.12.141] - 2026-11-05
 
 ### Fixed

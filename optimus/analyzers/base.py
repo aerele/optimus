@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from optimus.error_log_mask import HOOK_FRAME_SUFFIX
+from optimus.redaction import SQL_TRUNCATION_MARKER
 
 # The one shape of a Frappe DocType table name (``tab<DocType name>``) that raw SQL, the
 # index advisor and the index generator may interpolate or emit. Use ``.fullmatch()``:
@@ -440,7 +441,6 @@ QUERY_TEXT_LIMIT = 500
 
 # Upper bound on SQL kept per query by cap_sql. Keep in step with QUERY_TEXT_LIMIT above.
 MAX_SQL_CHARS = 200_000
-SQL_TRUNCATION_MARKER = "-- [Optimus: query truncated"
 _cap_log = logging.getLogger(__name__)
 _capped_total = 0
 

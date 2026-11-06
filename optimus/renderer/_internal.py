@@ -38,9 +38,11 @@ from optimus.analyzers.base import (
 # pre-patch contract, plus any code path where the patch didn't fire).
 # Settings-driven extras: ``OptimusConfig.sensitive_sql_columns`` /
 # ``sensitive_form_keys`` (additive never replaces the defaults).
+from optimus.dbdialect import redaction_dialect
 from optimus.redaction import redact_call_queries as _redact_call_queries_base
 from optimus.redaction import redact_sensitive as _redact_sensitive_base
 from optimus.redaction import redact_sql_literals as _redact_sql_literals_base
+from optimus.redaction_log import log_redaction_failure
 
 # v0.10.0+: Pygments syntax highlighting + the diff-block helpers moved to
 # ``optimus/renderer/syntax.py``. They're imported here under the same
@@ -85,14 +87,16 @@ def _redact_sql_literals(sql_str: str) -> str:
 	``optimus.redaction.redact_sql_literals``, reading the live
 	extra-columns list from settings."""
 	_, extra_cols = _settings_extras()
-	return _redact_sql_literals_base(sql_str, extra_columns=extra_cols)
+	return _redact_sql_literals_base(sql_str, extra_columns=extra_cols, dialect=redaction_dialect())
 
 
 def _redact_call_queries(calls) -> None:
 	"""Mutate ``calls`` in place, redacting each query's SQL literals via
 	``optimus.redaction.redact_call_queries`` with the live extra columns."""
 	_, extra_cols = _settings_extras()
-	_redact_call_queries_base(calls, extra_columns=extra_cols)
+	_redact_call_queries_base(
+		calls, extra_columns=extra_cols, dialect=redaction_dialect(), on_error=log_redaction_failure
+	)
 
 
 # Slow Query SQL longer than this many characters renders in a collapsed <details>.
@@ -105,6 +109,7 @@ def redact_finding_sql(findings) -> None:
 	Fails closed: a finding whose SQL cannot be redacted (a regex error or a
 	non-string value) loses its SQL block instead of showing it raw.
 	"""
+	dialect = redaction_dialect()
 	for finding in findings:
 		detail = finding.get("technical_detail")
 		if finding.get("finding_type") != "Slow Query" or not isinstance(detail, dict):
@@ -116,7 +121,9 @@ def redact_finding_sql(findings) -> None:
 			sql = detail["normalized_query"]
 			if not isinstance(sql, str):
 				raise TypeError(f"query is {type(sql).__name__}, not str")
-			detail["normalized_query"] = _redact_sql_literals_base(sql, extra_columns=extra_cols, strict=True)
+			detail["normalized_query"] = _redact_sql_literals_base(
+				sql, extra_columns=extra_cols, strict=True, dialect=dialect
+			)
 		except Exception as error:
 			logging.getLogger(__name__).warning(
 				"Slow Query SQL dropped from the report, redaction failed: %s", type(error).__name__

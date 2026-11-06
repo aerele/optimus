@@ -58,6 +58,7 @@ from optimus.analyzers.base import (
 	strip_profiler_own_calls,
 )
 from optimus.dbdialect import get_dialect
+from optimus.redaction import LITERALS_MASKED_KEY, OMITTED_SQL
 
 # v0.3.0: per-analyzer wall-clock budget. If the cumulative analyze
 # elapsed time crosses this threshold, remaining analyzers are skipped
@@ -1550,6 +1551,13 @@ def _enrich_recordings(recordings: list[dict]) -> list[str]:
 			except Exception:
 				pass
 
+			# A statement masked whole no longer has its real values, and Frappe's own
+			# EXPLAIN may already be stored: skip before the result and shape caches.
+			if call.get(LITERALS_MASKED_KEY):
+				call["explain_result"] = []
+				call["explain_warning"] = EXPLAIN_SKIPPED_MASKED
+				continue
+
 			# Skip EXPLAIN if already populated
 			if call.get("explain_result"):
 				continue
@@ -1641,6 +1649,7 @@ def _enrich_recordings(recordings: list[dict]) -> list[str]:
 				mark_duplicates(recording)
 		except Exception:
 			pass
+		_separate_masked_calls(recording)
 
 	if truncated_queries:
 		pct = (
@@ -1736,6 +1745,21 @@ def _collapse_pg_in_lists(query):
 	return "".join(chunks)
 
 
+EXPLAIN_SKIPPED_MASKED = "EXPLAIN skipped: the statement's literals are masked"
+
+
+def _separate_masked_calls(recording):
+	"""A statement masked whole looks the same whatever its values were, so it must not be
+	reported as an exact duplicate of another one, and an omitted statement must not group."""
+	for index, call in enumerate(recording.get("calls") or []):
+		if not call.get(LITERALS_MASKED_KEY):
+			continue
+		call["exact_copies"] = 1
+		if OMITTED_SQL in (call.get("query"), call.get("normalized_query")):
+			call["normalized_query"] = f"[SQL omitted: call {index + 1}]"
+			call["normalized_copies"] = 1
+
+
 def _mark_postgres_duplicates(recording, enriched, enriched_raw, past_cap):
 	"""Keep PG schema identity, with parsing confined to the enrichment cap."""
 	calls = recording.get("calls") or []
@@ -1759,7 +1783,12 @@ def _mark_postgres_duplicates(recording, enriched, enriched_raw, past_cap):
 		call.update(index=index, exact_copies=exact[query], normalized_copies=normalized[call["normalized_query"]])
 
 
-_LITERAL_RE = re.compile(r"'(?:[^'\\]|\\.|'')*'|\"(?:[^\"\\]|\\.)*\"|\b\d+(?:\.\d+)?\b")
+# A normaliser for grouping calls by shape, deliberately not the redactor: it only has to
+# be cheap and to turn literal values into one placeholder.
+_LITERAL_RE = re.compile(
+	r"'(?:[^'\\]|\\.|'')*(?:'|\Z)|\"(?:[^\"\\]|\\.)*(?:\"|\Z)"
+	r"|\b(?:0[xX][0-9A-Fa-f]+|0[bB][01]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b"
+)
 _IN_LIST_RE = re.compile(r"\bin\s*\(\s*\?(?:\s*,\s*\?)*\s*\)")
 
 

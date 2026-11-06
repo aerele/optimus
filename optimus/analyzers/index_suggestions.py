@@ -406,6 +406,9 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 			# The enrichment cap bounds the DESCRIBE / SHOW INDEX lookups too.
 			if call.get("past_enrich_cap"):
 				continue
+			# Its values were masked whole, so the shape of a LIKE or a range is gone.
+			if call.get("optimus_literals_masked"):
+				continue
 
 			raw = call.get("query")
 			if not isinstance(raw, str) or not raw:
