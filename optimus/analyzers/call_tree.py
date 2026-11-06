@@ -147,10 +147,27 @@ def _normalize_dict_tree(node: dict) -> dict:
 	}
 
 
+# Names pyinstrument gives its synthetic frames; the fallback when a frame has no ``is_synthetic``.
+_SYNTHETIC_FRAME_NAMES = frozenset({"[self]", "[await]", "[out-of-context]", "[root]"})
+
+
+def _is_synthetic_frame(frame) -> bool:
+	flag = getattr(frame, "is_synthetic", None)
+	if flag is not None:
+		return bool(flag)
+	return getattr(frame, "function", "") in _SYNTHETIC_FRAME_NAMES
+
+
 def _walk_pyi_frame(frame) -> dict:
-	"""Convert one pyinstrument frame (and its descendants) into our dict shape."""
-	# pyinstrument's Frame object exposes:
-	#   function, file_path_short, line_no, self_time, time, children
+	"""Convert one pyinstrument frame (and its descendants) into our dict shape.
+
+	A frame has no self time attribute; its own time is ``time`` minus its real
+	children's time. The synthetic ``[self]`` children pyinstrument adds per sample
+	are dropped. ``time`` is read without a default so an API change fails loudly.
+	"""
+	children = [c for c in getattr(frame, "children", ()) if not _is_synthetic_frame(c)]
+	cumulative_s = frame.time
+	self_s = max(0.0, cumulative_s - sum(c.time for c in children))
 	return {
 		"function": getattr(frame, "function", "<unknown>"),
 		"filename": (
@@ -159,10 +176,10 @@ def _walk_pyi_frame(frame) -> dict:
 			or ""
 		),
 		"lineno": getattr(frame, "line_no", 0),
-		"self_ms": float(getattr(frame, "self_time", 0)) * 1000,
-		"cumulative_ms": float(getattr(frame, "time", 0)) * 1000,
+		"self_ms": round(self_s * 1000, 3),
+		"cumulative_ms": round(cumulative_s * 1000, 3),
 		"kind": "python",
-		"children": [_walk_pyi_frame(c) for c in getattr(frame, "children", [])],
+		"children": [_walk_pyi_frame(c) for c in children],
 	}
 
 
@@ -689,7 +706,6 @@ def _prune_recursive(node: dict, threshold: float) -> None:
 	children = node.get("children", [])
 	kept = []
 	dropped_count = 0
-	dropped_self_ms = 0.0
 	dropped_cumulative_ms = 0.0
 	for child in children:
 		# Never prune SQL leaves they're always meaningful
@@ -698,7 +714,6 @@ def _prune_recursive(node: dict, threshold: float) -> None:
 			continue
 		if child.get("cumulative_ms", 0) < threshold:
 			dropped_count += 1
-			dropped_self_ms += child.get("self_ms", 0)
 			dropped_cumulative_ms += child.get("cumulative_ms", 0)
 			continue
 		_prune_recursive(child, threshold)
@@ -708,7 +723,8 @@ def _prune_recursive(node: dict, threshold: float) -> None:
 			"function": f"[other: {dropped_count} frames]",
 			"filename": "",
 			"lineno": 0,
-			"self_ms": dropped_self_ms,
+			# Its time was spent inside the dropped frames, so it is the placeholder's own time.
+			"self_ms": dropped_cumulative_ms,
 			"cumulative_ms": dropped_cumulative_ms,
 			"kind": "python",
 			"children": [],
@@ -741,10 +757,14 @@ def _soft_cap_recursive(node: dict, max_nodes: int, state: dict) -> None:
 	kept = []
 	omitted_count = 0
 	omitted_ms = 0.0
+	omitted_python_ms = 0.0
 	for child in children:
 		if state["count"] >= max_nodes:
 			omitted_count += 1
 			omitted_ms += child.get("cumulative_ms", 0)
+			# SQL leaves are not python time: their wait is already inside a python frame's own time.
+			if child.get("kind") == "python":
+				omitted_python_ms += child.get("cumulative_ms", 0)
 			continue
 		_soft_cap_recursive(child, max_nodes, state)
 		kept.append(child)
@@ -753,7 +773,7 @@ def _soft_cap_recursive(node: dict, max_nodes: int, state: dict) -> None:
 			"function": f"[{omitted_count} more frames omitted]",
 			"filename": "",
 			"lineno": 0,
-			"self_ms": 0.0,
+			"self_ms": omitted_python_ms,
 			"cumulative_ms": omitted_ms,
 			"kind": "python",
 			"children": [],
@@ -1356,12 +1376,12 @@ def _row_labels(identities) -> dict:
 
 
 def _trim_occurrences(occurrences: dict, frame_class: dict) -> dict:
-	"""Keep the top rows per group (app by self time, framework by cumulative) and prune frame_class."""
+	"""Keep the top rows per group by Total (outermost cumulative) and prune frame_class."""
 	keep = HOT_FRAMES_INTERMEDIATE_CAP // 2
 	kept: dict = defaultdict(list)
-	for is_framework, col in ((False, 1), (True, 2)):
+	for is_framework in (False, True):
 		group = [kv for kv in occurrences.items() if frame_class.get(kv[0], False) is is_framework]
-		group.sort(key=lambda kv: sum(o[col] for o in kv[1]), reverse=True)
+		group.sort(key=lambda kv: sum(o[2] for o in kv[1]), reverse=True)
 		kept.update(group[:keep])
 	for k in [k for k in frame_class if k not in kept]:
 		del frame_class[k]
@@ -1380,13 +1400,17 @@ def _aggregate_hot_frames(
 	               no action_ref)
 	  leaderboard list of top-N dicts for hot_frames_json
 	"""
-	# {(full_path, function): [(action_idx, self_ms, cumulative_ms), ...]}
+	# {(full_path, function): [(action_idx, self_ms, total_ms), ...]}; total_ms is the node's
+	# cumulative_ms for the outermost occurrence on its path and 0 for a nested one.
 	occurrences: dict = defaultdict(list)
 	# {(full_path, function): is_framework}
 	frame_class: dict = {}
+	self_time_measured = _total_python_self_ms(per_action_trees) > 0
 
 	for action_idx, tree in enumerate(per_action_trees):
-		_walk_for_aggregation(tree, action_idx, occurrences, tracked_apps, installed_apps, frame_class)
+		_walk_for_aggregation(
+			tree, action_idx, occurrences, tracked_apps, installed_apps, frame_class, set()
+		)
 		# Cap intermediate map size to bound memory.
 		if len(occurrences) > HOT_FRAMES_INTERMEDIATE_CAP * 2:
 			occurrences = _trim_occurrences(occurrences, frame_class)
@@ -1399,16 +1423,14 @@ def _aggregate_hot_frames(
 		key = labels[ident]
 		distinct_actions = {idx for idx, _, _ in occs}
 		total_self_ms = sum(self_ms for _, self_ms, _ in occs)
-		total_cum_ms = sum(cum_ms for _, _, cum_ms in occs)
+		total_outermost_ms = sum(total for _, _, total in occs)
 		row = {
 			"function": key,
-			# A.AE1: self-sum is the precise "time in this function
-			# across the whole tree" metric what the user-app
-			# variant displays.
+			# Stored meaning: ``total_ms`` is the self-sum, ``total_cumulative_ms`` is the Total
+			# (outermost occurrences only, so recursion counts once).
 			"total_ms": round(total_self_ms, 2),
-			# Cumulative-sum what the framework variant displays.
-			# See _walk_for_aggregation's comment for the why.
-			"total_cumulative_ms": round(total_cum_ms, 2),
+			"total_cumulative_ms": round(total_outermost_ms, 2),
+			"self_time_measured": self_time_measured,
 			"occurrences": len(occs),
 			"distinct_actions": len(distinct_actions),
 			"action_refs": sorted(distinct_actions),
@@ -1446,15 +1468,16 @@ def _aggregate_hot_frames(
 			})
 
 	# Cap each group separately so app frames cannot crowd out the framework group.
+	# Both groups rank by Total, the same key the report sorts by.
 	custom_rows = sorted(
 		(r for r in leaderboard_rows if not r["is_framework"]),
-		key=lambda r: r["total_ms"], reverse=True,
+		key=lambda r: r["total_cumulative_ms"], reverse=True,
 	)[:HOT_FRAMES_LEADERBOARD_SIZE]
 	framework_rows = sorted(
 		(r for r in leaderboard_rows if r["is_framework"]),
 		key=lambda r: r["total_cumulative_ms"], reverse=True,
 	)[:HOT_FRAMES_LEADERBOARD_SIZE]
-	leaderboard = sorted(custom_rows + framework_rows, key=lambda r: r["total_ms"], reverse=True)
+	leaderboard = sorted(custom_rows + framework_rows, key=lambda r: r["total_cumulative_ms"], reverse=True)
 
 	return findings, leaderboard
 
@@ -1464,21 +1487,20 @@ def _walk_for_aggregation(
 	tracked_apps: tuple[str, ...] | None = None,
 	installed_apps: frozenset[str] | None = None,
 	frame_class: dict | None = None,
+	active: set | None = None,
 ) -> None:
+	"""Record each frame's self time and Total contribution per identity.
+
+	``active`` holds the identities on the path from the root to ``node``. A frame whose
+	identity is already active (recursion, re-entry) contributes 0 to Total, so a function's
+	Total counts each outermost call once and never exceeds its action's time.
+	"""
+	if active is None:
+		active = set()
+	entered = None
 	if node.get("kind") == "python":
-		# v0.5.1: skip PURE HELPER frames only, not all framework code.
-		# This is the narrower _is_pure_helper_frame check we want to
-		# keep Document.run_method, permission checks, naming and other
-		# application-layer Frappe code in the leaderboard because they
-		# can be legitimate optimization targets (e.g. a slow doc-event
-		# hook bubbles up as Document.run_method). Only frappe/utils/*,
-		# frappe/handler.py, frappe/app.py and infrastructure libs
-		# (werkzeug, rq, etc.) are suppressed.
-		#
-		# An earlier v0.5.1 draft used the broader _is_framework_frame
-		# here, which hid ALL frappe/* frames that was too aggressive
-		# and blinded the analyzer to real application-layer bottlenecks
-		# inside Frappe that users could act on.
+		# Skip pure helper frames only, not all framework code: application-layer Frappe code
+		# (Document.run_method, permissions, naming) stays visible as an optimization target.
 		if not _is_pure_helper_frame(node, tracked_apps, installed_apps):
 			key = _frame_identity(node.get("function", ""), node.get("filename", ""))
 			if key:
@@ -1486,28 +1508,21 @@ def _walk_for_aggregation(
 					frame_class[key] = _is_framework_frame_file(
 						node.get("filename", ""), tracked_apps, installed_apps
 					)
-				# v0.7.x A.AE1: track self_ms (immune to recursion
-				# double-counting) for the user-app variant that's
-				# the exact "time in this function's body across the
-				# whole action's tree" answer.
-				#
-				# v0.7.x: also track cumulative_ms because the
-				# framework variant of the hot-frames table needs it.
-				# Framework wrapper frames have sub-sampler-interval
-				# self_ms (rounds to 0); aggregated → 0 across rows.
-				# The framework column displays cumulative_ms instead
-				# (renderer.build_hot_frames_table chooses per
-				# variant). Risk: nested same-name framework frames
-				# would double-count cumulative acceptable on the
-				# collapsed-by-default framework table, where the
-				# column is informational rather than decision-grade.
-				occurrences[key].append(
-					(action_idx, node.get("self_ms", 0), node.get("cumulative_ms", 0))
-				)
+				nested = key in active
+				occurrences[key].append((
+					action_idx,
+					node.get("self_ms", 0),
+					0 if nested else node.get("cumulative_ms", 0),
+				))
+				if not nested:
+					active.add(key)
+					entered = key
 	for child in node.get("children", []):
 		_walk_for_aggregation(
-			child, action_idx, occurrences, tracked_apps, installed_apps, frame_class
+			child, action_idx, occurrences, tracked_apps, installed_apps, frame_class, active
 		)
+	if entered is not None:
+		active.discard(entered)
 
 
 def _is_framework_frame_file(filename: str, tracked_apps, installed_apps) -> bool:
@@ -1675,6 +1690,10 @@ def _sum_self_python(node: dict) -> float:
 	return total
 
 
+def _total_python_self_ms(trees: list) -> float:
+	return sum(_sum_self_python(t) for t in trees)
+
+
 def _conf_float(key: str, default: float) -> float:
 	try:
 		import frappe
@@ -1711,6 +1730,8 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 	aggregate: dict = {}
 	per_action_trees: list = []
 	sql_total_ms = 0.0
+	# SQL time of actions that have a tree; only that wait sits inside the python self time.
+	tree_sql_ms = 0.0
 
 	# Threshold config (read once)
 	prune_pct = _conf_float("optimus_tree_prune_threshold_pct", DEFAULT_PRUNE_THRESHOLD_PCT)
@@ -1742,7 +1763,8 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 			if isinstance(c, dict) and not is_error_log_hook_query(c.get("stack"))
 		]
 		# Track SQL time even if no pyi tree
-		sql_total_ms += sum(c.get("duration", 0) for c in calls)
+		action_sql_ms = sum(c.get("duration", 0) for c in calls)
+		sql_total_ms += action_sql_ms
 
 		# Action label / wall time from context if available, else fall back
 		action_label = "?"
@@ -1778,6 +1800,7 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 			# stored tree here ensures they never appear in the
 			# report regardless of sampling luck.
 			tree = _strip_profiler_frames(tree)
+			tree_sql_ms += action_sql_ms
 		except Exception:
 			context.warnings.append(
 				f"Reconciliation failed for action {action_idx} (see error log)"
@@ -1815,9 +1838,18 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 	# Donut breakdown
 	breakdown = _build_session_breakdown(per_action_trees, sql_total_ms=sql_total_ms)
 
+	# Time was sampled but no frame has own time: hot frames can show Total only.
+	sampled = any(t.get("cumulative_ms", 0) > 0 for t in per_action_trees)
+	if sampled and breakdown["python_ms"] <= 0:
+		context.warnings.append(
+			"Self time could not be measured: the call trees carry no own time per function, "
+			"so hot frames show Total time only."
+		)
+
 	aggregate["hot_frames"] = leaderboard
 	aggregate["session_time_breakdown"] = breakdown
-	aggregate["total_python_ms"] = breakdown["python_ms"]
+	# Python self time includes the wait on SQL, which total_sql_ms already counts.
+	aggregate["total_python_ms"] = round(max(0.0, breakdown["python_ms"] - tree_sql_ms), 2)
 	aggregate["total_sql_ms"] = breakdown["sql_ms"]
 
 	return AnalyzerResult(findings=findings, aggregate=aggregate)
