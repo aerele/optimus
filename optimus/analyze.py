@@ -765,15 +765,22 @@ def _arm_phase2(docname: str, context) -> None:
 	from optimus.settings import get_ignored_apps
 	_ignored_apps = get_ignored_apps()
 	candidates, _ = _lp_picker.filter_out_ignored_apps(candidates, _ignored_apps)
-	picks = [
-		{"dotted_path": c["dotted_path"], "source": "curated"}
-		for c in candidates
-		if c.get("recommended") and c.get("dotted_path")
-	]
+	hottest = sorted(
+		(c for c in candidates if c.get("recommended") and _lp_capture.is_valid_dotted_path(c.get("dotted_path"))),
+		key=lambda c: float(c.get("cumulative_ms") or 0),
+		reverse=True,
+	)[:_lp_capture.MAX_PICKS]
+	picks = [{"dotted_path": c["dotted_path"], "source": "curated"} for c in hottest]
 	if not picks:
 		return
 
-	prepared = _lp_capture.prepare_line_profile_picks(picks)
+	try:
+		prepared = _lp_capture.prepare_line_profile_picks(picks, server_chosen=True)
+	except _lp_capture.CaptureError:
+		prepared = None
+	if prepared is None:
+		safe_call.log_error_line(f"optimus auto-arm line profiling: none of {len(picks)} hot function(s) could be captured")
+		return
 	run_uuid = _uuid.uuid4().hex
 	from optimus.api import _lock_phase2_for_write, _persist_phase2_capture
 	from optimus.line_profile.jobs import _authorized
@@ -793,6 +800,9 @@ def _arm_phase2(docname: str, context) -> None:
 	# form tell them a pass is armed and what to do next (re-run + Stop),
 	# since arming alone does nothing until the flow re-executes.
 	functions = [r["dotted_path"].rsplit(".", 1)[-1] for r in eligible][:5]
+	skipped = _lp_capture.skipped_functions(resolved)
+	if skipped:
+		safe_call.log_error_line(f"optimus auto-arm line profiling: skipped {len(resolved) - len(eligible)} hot function(s)")
 	from optimus.realtime import publish_session_event
 	publish_session_event(
 		"optimus_phase2_armed",
@@ -801,6 +811,8 @@ def _arm_phase2(docname: str, context) -> None:
 			"run_uuid": run_uuid,
 			"count": len(eligible),
 			"functions": functions,
+			"skipped": skipped,
+			"skipped_count": len(resolved) - len(eligible),
 		},
 	)
 

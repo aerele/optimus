@@ -212,6 +212,13 @@ def _mismatch_reason(block: list[str], code) -> str | None:
 	return None
 
 
+def _refuse_overlong(code) -> None:
+	"""Refuse a function longer than the per-function cap before it is parsed."""
+	last = max((lineno for _start, _end, lineno in code.co_lines() if lineno), default=code.co_firstlineno)
+	if last - code.co_firstlineno + 1 > MAX_PICK_SOURCE_LINES:
+		raise SourceUnavailable(_("it is longer than {0} lines").format(MAX_PICK_SOURCE_LINES))
+
+
 @_interrupt_boundary
 def _capture_source_lines(fn) -> list[dict]:
 	"""Snapshot only bounded, permitted on-disk source for the selected callable.
@@ -228,6 +235,7 @@ def _capture_source_lines(fn) -> list[dict]:
 		lines = source._source_lines(code.co_filename)
 		if not lines:
 			return []
+		_refuse_overlong(code)
 		return _function_block(lines, code)
 	except (OSError, TypeError, ValueError):
 		return []
@@ -245,6 +253,7 @@ MAX_CAPTURE_BYTES = 16 * 1024 * 1024
 MAX_SAMPLE_BATCHES = 10_000
 MAX_SAMPLE_RECORDS = 250_000
 MAX_SOURCE_LINES = 100_000
+MAX_PICK_SOURCE_LINES = 5_000
 MAX_SOURCE_LINE_CHARS = 20_000
 
 
@@ -412,13 +421,16 @@ class PreparedCapture:
 	source_json: str
 
 
+def is_valid_dotted_path(dotted) -> bool:
+	return (isinstance(dotted, str) and 1 <= len(dotted) <= 500 and "." in dotted
+		and all(part.isidentifier() for part in dotted.split(".")))
+
+
 def validate_picks(picks):
 	if not isinstance(picks, list) or not 1 <= len(picks) <= MAX_PICKS:
 		raise CaptureError(_("Select between 1 and 100 functions to line-profile."))
 	for entry in picks:
-		dotted = entry.get("dotted_path") if isinstance(entry, dict) else None
-		if (not isinstance(dotted, str) or not 1 <= len(dotted) <= 500 or "." not in dotted
-			or not all(part.isidentifier() for part in dotted.split("."))):
+		if not is_valid_dotted_path(entry.get("dotted_path") if isinstance(entry, dict) else None):
 			raise CaptureError(_("Each selected function needs a valid dotted path."))
 		source = entry.get("source", "freeform")
 		if not isinstance(source, str) or source not in {"freeform", "curated", "auto_expand"}:
@@ -438,7 +450,20 @@ def _pick_source(fn) -> tuple[list[dict], str | None]:
 	return lines, None
 
 
-def _pick_snapshot(pick: dict) -> list[dict] | None:
+def skipped_functions(resolved, limit=5) -> list[dict]:
+	"""The first ``limit`` skipped functions as ``{function, reason}`` for display."""
+	return [
+		{"function": r["dotted_path"].rsplit(".", 1)[-1], "reason": r.get("ineligible_reason") or ""}
+		for r in resolved if not r.get("eligible")
+	][:limit]
+
+
+def _skip_pick(pick: dict, reason: str) -> None:
+	pick["eligible"] = False
+	pick["ineligible_reason"] = reason
+
+
+def _pick_snapshot(pick: dict, *, skip: bool) -> list[dict] | None:
 	"""The pick's whole source rows, or None when a server-chosen pick is skipped.
 
 	A function the user chose that cannot be captured whole refuses the run, naming it.
@@ -446,9 +471,8 @@ def _pick_snapshot(pick: dict) -> list[dict] | None:
 	lines, reason = _pick_source(_resolve_attr(pick["dotted_path"]))
 	if reason is None:
 		return lines
-	if pick["source"] == "auto_expand":
-		pick["eligible"] = False
-		pick["ineligible_reason"] = _("Its source is unavailable: {0}.").format(reason)
+	if skip:
+		_skip_pick(pick, _("Its source is unavailable: {0}.").format(reason))
 		return None
 	raise CaptureError(
 		_("Source for {0} is unavailable because {1}. Restart the workers if its file changed, "
@@ -456,16 +480,65 @@ def _pick_snapshot(pick: dict) -> list[dict] | None:
 	)
 
 
+def _pick_meta(resolved: dict) -> dict:
+	return {
+		"dotted_path": resolved["dotted_path"],
+		"qualname": resolved["qualname"],
+		"file": resolved["file"],
+		"first_lineno": resolved["lineno"],
+		"source": resolved["source"],
+	}
+
+
+def _refuse_over_limit(resolved: dict, *, server_chosen: bool, reason: str) -> None:
+	"""A server-chosen pick over a run limit is skipped; a user's pick refuses the run."""
+	if not server_chosen:
+		raise CaptureError(_("Selected source exceeds the capture limits. Select fewer functions."))
+	_skip_pick(resolved, reason)
+
+
+def _snapshot_picks(eligible: list[dict], *, server_chosen: bool) -> tuple[list[dict], dict]:
+	"""Source rows for each eligible pick, keeping the running line and byte totals within the run limits."""
+	snapshot: dict[str, list[dict]] = {}
+	metas: list[dict] = []
+	total_lines = total_bytes = 0
+	for resolved in eligible:
+		if total_lines >= MAX_SOURCE_LINES:
+			_refuse_over_limit(resolved, server_chosen=server_chosen,
+				reason=_("The run's source line limit was reached."))
+			continue
+		lines = _pick_snapshot(resolved, skip=server_chosen or resolved["source"] == "auto_expand")
+		if lines is None:
+			continue
+		meta = _pick_meta(resolved)
+		size = sum(len(json.dumps(part)) for part in (meta, resolved["dotted_path"], lines)) + 6
+		if total_lines + len(lines) > MAX_SOURCE_LINES or total_bytes + size > MAX_CAPTURE_BYTES:
+			_refuse_over_limit(resolved, server_chosen=server_chosen,
+				reason=_("The run's source size limit was reached."))
+			continue
+		total_lines += len(lines)
+		total_bytes += size
+		snapshot[resolved["dotted_path"]] = lines
+		metas.append(meta)
+	return metas, snapshot
+
+
 @_interrupt_boundary
-def prepare_line_profile_picks(picks: list[dict], *, server_expanded=frozenset()) -> PreparedCapture:
-	"""Resolve and snapshot before acquiring SQL admission locks."""
+def prepare_line_profile_picks(
+	picks: list[dict], *, server_expanded=frozenset(), server_chosen=False,
+) -> PreparedCapture:
+	"""Resolve and snapshot before acquiring SQL admission locks.
+
+	``server_chosen`` is set only by server code that picked the functions itself:
+	a function it cannot read or fit is skipped with a reason instead of refusing the run.
+	"""
 	_require_line_profiler()
 	from optimus.line_profile import picker
 
 	validate_picks(picks)
 	from optimus.renderer.source import _installed_apps
 	installed = _installed_apps()
-	if any(entry["dotted_path"].split(".", 1)[0] not in installed
+	if not server_chosen and any(entry["dotted_path"].split(".", 1)[0] not in installed
 		and entry["dotted_path"] not in server_expanded for entry in picks):
 		raise CaptureError(_("Select a function from an installed app."))
 	resolved: list[dict] = []
@@ -476,10 +549,10 @@ def prepare_line_profile_picks(picks: list[dict], *, server_expanded=frozenset()
 			continue
 		seen.add(dotted)
 		if dotted.split(".", 1)[0] not in installed:
-			# Only the private, server-derived expansion set reaches this path.
+			# Only server-derived picks reach this path.
 			# Keep it visible as skipped; never import a library from client input.
-			resolved.append({"dotted_path": dotted, "source": "auto_expand", "eligible": False,
-				"ineligible_reason": _("This auto-expanded function is outside installed apps.")})
+			resolved.append({"dotted_path": dotted, "source": entry.get("source", "freeform"), "eligible": False,
+				"ineligible_reason": _("It is outside the installed apps.")})
 			continue
 		try:
 			meta = picker.resolve_freeform(dotted)
@@ -498,26 +571,7 @@ def prepare_line_profile_picks(picks: list[dict], *, server_expanded=frozenset()
 	if not eligible:
 		raise CaptureError(_("No selected function has eligible source. Check the selected paths."))
 
-	# Snapshot source for each eligible pick. Stored as a dict keyed by
-	# dotted_path so aggregate_samples can pull lines per pick.
-	source_snapshot: dict[str, list[dict]] = {}
-	picks_meta: list[dict] = []
-	snapshot_bytes = 0
-	for r in eligible:
-		lines = _pick_snapshot(r)
-		if lines is None:
-			continue
-		snapshot_bytes += len(json.dumps(lines).encode()) + len(r["dotted_path"].encode()) + 8
-		if snapshot_bytes > MAX_CAPTURE_BYTES:
-			raise CaptureError(_("Selected source exceeds the capture size limit. Select fewer functions."))
-		source_snapshot[r["dotted_path"]] = lines
-		picks_meta.append({
-			"dotted_path": r["dotted_path"],
-			"qualname": r["qualname"],
-			"file": r["file"],
-			"first_lineno": r["lineno"],
-			"source": r["source"],
-		})
+	picks_meta, source_snapshot = _snapshot_picks(eligible, server_chosen=server_chosen)
 	if not picks_meta:
 		raise CaptureError(_("No selected function has eligible source. Check the selected paths."))
 
@@ -525,10 +579,7 @@ def prepare_line_profile_picks(picks: list[dict], *, server_expanded=frozenset()
 		_validate_captured_picks([{**pick, "source_lines": source_snapshot[pick["dotted_path"]]} for pick in picks_meta])
 	except CaptureInputError as exc:
 		raise CaptureError(_("The selected source cannot be captured: {0}. Select fewer functions.").format(str(exc))) from None
-	picks_json, source_json = json.dumps(picks_meta), json.dumps(source_snapshot)
-	if len(picks_json.encode()) + len(source_json.encode()) > MAX_CAPTURE_BYTES:
-		raise CaptureError(_("Selected source exceeds the capture size limit. Select fewer functions."))
-	return PreparedCapture(tuple(resolved), picks_json, source_json)
+	return PreparedCapture(tuple(resolved), json.dumps(picks_meta), json.dumps(source_snapshot))
 
 
 def start_line_profile_pass(

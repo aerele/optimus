@@ -457,7 +457,7 @@ function subscribe_session_progress(frm) {
 				message: __(
 					"Line profiling armed for {0} hot path(s){1}. Re-run your flow, then click Stop Line Profiling Run to capture the exact lines.",
 					[p.count || 0, fns ? " (" + frappe.utils.escape_html(fns) + ")" : ""]
-				),
+				) + _phase2_skipped_text(p.skipped || [], p.skipped_count),
 				indicator: "orange",
 			},
 			12
@@ -583,13 +583,57 @@ function _can_act(frm) {
 	return !!(frm.doc.__onload && frm.doc.__onload.optimus_can_act);
 }
 
+const PHASE2_SKIPPED_SHOWN = 5;
+
+// " Skipped: name (reason), ... and N more." from [{function, reason}], HTML-escaped.
+function _phase2_skipped_text(items, total) {
+	if (!items.length) return "";
+	const shown = items.slice(0, PHASE2_SKIPPED_SHOWN).map(
+		(i) => frappe.utils.escape_html(i.function) + " (" + frappe.utils.escape_html(i.reason) + ")"
+	);
+	const more = Math.max(total || items.length, items.length) - shown.length;
+	return " " + __("Skipped:") + " " + shown.join(", ") + (more > 0 ? " " + __("and {0} more", [more]) : "") + ".";
+}
+
+function _phase2_run_skips(row) {
+	let picks = [];
+	try {
+		picks = JSON.parse(row.picks_json || "[]");
+	} catch (e) { /* a run row without readable picks has nothing to show */ }
+	return (Array.isArray(picks) ? picks : [])
+		.filter((p) => p && p.eligible === false)
+		.map((p) => ({ function: String(p.dotted_path || "").split(".").pop(), reason: p.ineligible_reason || "" }));
+}
+
+// The notice for the newest Line Profiling run, only when that run skipped functions, so a
+// later clean run does not leave a stale notice. It stays after the "armed" alert is gone.
+function _phase2_skipped_banner(frm) {
+	const rows = frm.doc.phase_2_runs || [];
+	const row = rows[rows.length - 1];
+	const skips = row ? _phase2_run_skips(row) : [];
+	if (!skips.length) {
+		_single_banner(frm, "optimus-phase2-skipped", "form-message yellow", null);
+		return;
+	}
+	const $banner = _single_banner(
+		frm,
+		"optimus-phase2-skipped",
+		"form-message yellow",
+		__("Line profiling run {0} could not include {1} function(s).", [row.run_uuid.slice(0, 8), skips.length]) +
+			_phase2_skipped_text(skips, skips.length)
+	);
+	if ($banner) $banner.attr("role", "status");
+}
+
 function render_phase2_button(frm) {
 	if (frm.is_new() || frm.doc.status !== "Ready") {
 		// Not a Ready session (or unsaved): drop any armed banner left in the
 		// reused form wrapper by a session that was mid-Recording.
 		_phase2_armed_banner(frm, null);
+		_single_banner(frm, "optimus-phase2-skipped", "form-message yellow", null);
 		return;
 	}
+	_phase2_skipped_banner(frm);
 
 	// If there's an in-flight Recording row, surface Stop as the primary
 	// affordance that's what the user is looking for after they've
@@ -1065,7 +1109,10 @@ function start_phase2(frm, picks, auto_expand) {
 					(expansions.length > 1 ? " (+ " + (expansions.length - 1) + " more)" : "")
 				);
 			}
-			frappe.show_alert({ message: msg, indicator: "blue" });
+			const skips = resolved.filter(function (p) { return !p.eligible; }).map(function (p) {
+				return { function: String(p.dotted_path || "").split(".").pop(), reason: p.ineligible_reason || "" };
+			});
+			frappe.show_alert({ message: msg + _phase2_skipped_text(skips, skips.length), indicator: "blue" });
 			frm.dashboard.add_indicator(
 				__("Line profiling recording run {0}...", [run_uuid.slice(0, 8)]),
 				"blue"

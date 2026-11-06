@@ -8,6 +8,14 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.162] - 2026-11-07
+
+### Fixed
+
+- Automatic line profiling now skips a function it cannot read, or one longer than 5,000 lines, instead of giving up on the whole run. It also takes the 100 slowest functions when more than 100 qualify, instead of refusing, and skips a function that would push the run over the source size limits, or that comes from an app that is not installed. The skipped functions and the reason for each are listed in an alert when the run starts and in a notice on the session form, which stays after the alert is gone. When nothing at all could be captured, one line is written to the log and no run starts. A function you pick yourself is still refused with a message naming it. The 5,000-line limit now also applies to functions you pick yourself: a longer one is refused with that reason, where before it was accepted up to the 100,000-line run limit. Nothing to run on upgrade.
+
+---
+
 ## [0.12.146] - 2026-11-06
 
 ### Fixed
