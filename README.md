@@ -1,6 +1,6 @@
 # Optimus
 
-**A flow-aware performance profiler for Frappe and ERPNext.** Records a real business workflow (Sales Invoice save → submit → Delivery Note → submit → …), joins it with server resource state and browser-side timings and produces two downloadable HTML reports you can actually act on: a **Safe Report** to share with a third-party dev shop without leaking customer data and a **Raw Report** for internal debugging with full stack traces and SQL literals.
+**A flow-aware performance profiler for Frappe and ERPNext.** Records a real business workflow (Sales Invoice save → submit → Delivery Note → submit → …), joins it with server resource state and browser-side timings and produces a downloadable HTML report you can actually act on, with full stack traces and SQL literals for internal debugging.
 
 > **Status:** `v0.12.26`: production-ready. MIT-licensed. 1820 unit tests + 39 integration tests in CI on every pull request and on merge to `main` (ruff + pytest on Python 3.14; bench-driven integration suite on Frappe v16). See the [CHANGELOG](./CHANGELOG.md) for the full feature history, including the v0.7.0 rename from `frappe_profiler` → `optimus`.
 
@@ -13,7 +13,7 @@
 - [Install](#install)
 - [60-second quickstart](#60-second-quickstart)
 - [Using Optimus](#using-optimus)
-- [The customer → partner handoff](#the-customer-partner-handoff)
+- [Sharing a report](#sharing-a-report)
 - [Finding types](#finding-types)
 - [How it works](#how-it-works)
 - [Dependencies](#dependencies)
@@ -39,7 +39,7 @@
 
 - **On-demand profiler for specific slow flows.** You press Start, run your slow flow, press Stop and get a report. No always-on overhead. No data egress. No external service.
 - **Flow-aware.** Automatically captures the entire chain of HTTP requests **and** background jobs triggered by one business operation e.g. a single Sales Invoice `submit` that enqueues GL posting, stock updates and GST calculation shows up as one session, not four disconnected transactions. The only profiler that does this for Frappe.
-- **Customer-safe report.** Safe mode replaces SQL literals with `?`, strips docnames and filters from URLs, redacts headers and form data and bleach-sanitizes any user-typed notes. Shareable with a third-party dev shop over email without leaking PII.
+- **One self-contained report.** Values under sensitive header and form keys are masked and user-typed notes are bleach-sanitized. Everything else, including SQL literals and stack traces, is in the file, so treat it as sensitive (see [Sharing a report](#sharing-a-report)).
 - **ERPNext-native findings.** N+1 detection blames `erpnext/accounts/gl_entry.py:211` instead of `frappe/database/database.py:sql`. Findings know about Document hooks, permission queries, naming series and child table patterns.
 - **Server + browser + infra in one report.** v0.5.0 adds per-action CPU/RSS/DB pool/RQ queue snapshots and per-XHR timings with Web Vitals, joined to the matching recording by correlation header. You can tell *code-slow* from *server-slow* and *backend-slow* from *network-slow*.
 
@@ -77,7 +77,7 @@ After install, an **Optimus User** role is created automatically. All existing S
 4. Run your flow save a Sales Invoice, submit it, wait for background jobs, whatever you want profiled.
 5. Click the pill again to **Stop**. The pill turns orange ("Analyzing…") while the analyze pipeline runs (typically 2–15 seconds).
 6. Click the pill once more (now blue, "Report ready") to jump to the session form.
-7. Click **Download Safe Report** or **Download Safe Report (PDF)**. Email it to whoever needs it.
+7. Click **Download Report** (or **Open Report**). Read [Sharing a report](#sharing-a-report) before sending it to anyone.
 
 That's the whole workflow. No configuration required.
 
@@ -107,7 +107,7 @@ The Start dialog lets you set:
 - **Label**: what shows up in the session list. Pick something
   searchable (`SI submit, 100 items` beats `test`).
 - **Steps to Reproduce / Notes**: a rich-text block. Rendered at the
-  top of both reports. Use it to give context to whoever reads the
+  top of the report. Use it to give context to whoever reads the
   report ("Customer says save takes 8s; happens on every SI ≥ 50
   items").
 - **Capture Python call tree**: leave on for actionable findings.
@@ -122,11 +122,10 @@ read-only sections:
 
 1. **Status + timing**: Recording / Analyzing / Ready / Failed; start
    time; analyze wall-clock duration; counts of actions and findings.
-2. **Reports**: two file links plus action buttons:
-   - **Download Safe Report** / **Open Safe Report**: the customer-
-     safe HTML. Email-shareable.
-   - **Download Raw Report** / **Open Raw Report**: the un-redacted
-     version. A `File.has_permission` hook runs in Frappe's permission
+2. **Report**: a file link plus action buttons:
+   - **Download Report** / **Open Report**: the HTML report. Download asks
+     for confirmation because the file holds literal SQL values, request
+     headers and stack traces. A `File.has_permission` hook runs in Frappe's permission
      checks (the File form, REST, `frappe.has_permission`) and lets
      only a System Manager or the recording user through; a direct
      download URL bypasses the hook and grants access to anyone who
@@ -137,7 +136,7 @@ read-only sections:
      error. After 10 minutes the recordings are gone re-analyze
      can still re-render reports from the persisted DocType data,
      but cannot recompute findings.
-   - **Regenerate Reports**: re-renders both HTML files from the
+   - **Regenerate Reports**: re-renders the HTML file from the
      persisted Action/Finding rows. Cheaper than a full re-analyze;
      useful after an Optimus upgrade that improves the renderer. It
      does not re-run the analyzer and does not call the AI provider;
@@ -146,27 +145,22 @@ read-only sections:
      with AI enabled).
    - **Line Profiling → Run Line-Profile Pass**: opens the picker dialog (see
      below).
-   - **Pin as Baseline** / **Unpin Baseline**: see _Baseline
-     comparison_ below.
 3. **Captured actions + findings**: child tables you can drill into
    without opening the report.
 
-### Report modes: Safe vs Raw
+### What the report contains
 
-| Aspect | Safe Report | Raw Report |
-|---|---|---|
-| Audience | Customer, third-party dev shop, any external party | Internal engineers with prod access |
-| SQL literals | Replaced with `?` | Preserved verbatim |
-| URLs | `/app/sales-invoice/SI-2026-00123/edit` becomes `/app/sales-invoice/<name>/edit`; filters / source_name redacted | Preserved verbatim |
-| Headers + form data | `Authorization`, `Cookie`, CSRF, anything matching `password\|secret\|token\|api[-_]?key\|...` → `[REDACTED]` | Preserved verbatim |
-| User notes | bleach-sanitized HTML (strips `<script>`, `onclick`, `javascript:` URLs) | Same bleach runs in both modes for XSS safety |
-| Custom-app function names | Hashed to `<app>:<short>` | Preserved verbatim |
-| Permission gate | None (anyone with the URL can open) | System Manager or the user who recorded the session |
-| Self-contained | Yes no CDN fonts, no external scripts, no `@import` (canary test in CI) | Yes |
+There is one report, rendered from `templates/report.html`. It is not
+redacted: SQL literals, URLs and stack traces are all in the file.
 
-Both reports render from the same `templates/report.html` and the same
-persisted data Safe mode is a renderer-time redaction pass, not a
-separate capture.
+| Aspect | Behavior |
+|---|---|
+| SQL literals | Preserved verbatim, except values of columns in the default sensitive list and in *Sensitive SQL Columns*, which are redacted at capture |
+| Headers + form data | Values under sensitive keys (`Authorization`, `Cookie`, CSRF, anything matching `password\|secret\|token\|api[-_]?key\|...`) become `<REDACTED:keyname>` at capture (SQL literals of sensitive columns become `'<REDACTED>'`) |
+| User notes | bleach-sanitized HTML (strips `<script>`, `onclick`, `javascript:` URLs) |
+| Permission gate | `File.has_permission` hook: System Manager or the recording user (direct `/private/files` downloads bypass it, see above) |
+| Self-contained | Yes: no CDN fonts, no external scripts, no `@import` (`test_report_a11y.py` and `tests_integration/test_safe_report_self_contained_on_real_bench.py`) |
+| PDF | Generated on request through the `download_pdf` API (there is no PDF button); once generated it is shown in the read-only **Report (PDF)** field |
 
 ### Line profiling
 
@@ -231,68 +225,19 @@ inventory and local-LLM recipes.
 how many findings got deterministic advice or a note instead (gated), and how many
 were skipped because their type is excluded.
 
-### Baseline comparison
-
-You're not done until the customer agrees the fix worked. Optimus's
-baseline comparison gives you a side-by-side report:
-
-1. On a Ready "before" session, click **Pin as Baseline**.
-2. Capture a "after" session of the same flow (same label is
-   convenient but not required the comparison matches actions by
-   label, falling back to path).
-3. Open the after-session's Safe or Raw report. Three new sections
-   appear at the top:
-   - **Session-level delta**: total wall time, query count, SQL/Python
-     ms, with old → new.
-   - **Per-action comparison**: matched actions with before/after
-     stats.
-   - **Findings compared to baseline**: Fixed / New / Unchanged with
-     delta.
-4. The customer signs off on concrete numbers, not "it feels faster".
-
-To swap the baseline, unpin the old one and pin the new one.
-
 ---
 
-## The customer → partner handoff
+## Sharing a report
 
-This is the primary use case and the feature set is built around it.
-
-**Traditional workflow**: how 90% of ERPNext performance debugging happens today:
-
-> Customer: *"Saving a Sales Invoice is slow."*
-> Partner: *"Can you check the slow query log?"*
-> Customer: *"..."*
-> Partner: *"Send me a screenshot."*
-> *(30 minutes of back-and-forth follow)*
-
-**With optimus:**
-
-1. **Customer records** the slow flow (one dialog, one click, no technical knowledge required).
-2. **Customer downloads Safe Report** from the session form. Safe mode redacts:
-   - SQL literals → `?`
-   - Request headers (`Authorization`, `Cookie`, CSRF tokens, anything matching `password|secret|token|api[-_]?key|card_number|cvv|ssn|aadhar|pan_number`) → `[REDACTED]`
-   - Form data → same redaction
-   - URLs: `/app/sales-invoice/SI-2026-00123/edit` → `/app/sales-invoice/<name>/edit`; `?filters=[...]`, `?source_name=X` → `?filters=?, ?source_name=?`
-   - User-typed notes → bleach-sanitized HTML (strips `<script>`, `onclick`, `javascript:` URLs)
-   - Python function names from custom apps → `my_acme_app:discounts` (app-level, not module-level)
-   - SQL identifiers (table/column/function names) are NOT redacted they're code, not customer data
-3. **Customer emails the .html or .pdf** to the partner. No VPN, no SSH, no shared credentials.
-4. **Partner opens the file on their laptop offline.** The report is fully self-contained no CDN fonts, no external scripts, no `@import`. Tested in CI via `test_safe_report_self_contained.py`.
-5. **Partner diagnoses and fixes.** Every finding has a plain-language `customer_description`, a technical detail with callsite + query + suggested DDL and an estimated impact in ms.
-6. **Partner re-records** the fixed flow and pins the original slow session as a baseline. The new report auto-renders three comparison sections:
-   - **Session-level delta**: total wall time, query count, SQL/Python ms (old vs new)
-   - **Per-action comparison**: matched actions (by label, fallback to path) with before/after stats
-   - **Findings compared to baseline**: which findings were **Fixed**, which are **New** regressions, which are **Unchanged** with delta
-7. **Customer signs off** with concrete numbers instead of "it feels faster."
+The report contains sensitive data: literal SQL values, request headers and stack traces. Sensitive header and form keys are masked, as are values of sensitive SQL columns, but nothing else is. Redact it yourself before sharing it outside your organization, and share it only with people who are allowed to see that data. **Download Report** asks you to confirm this for the same reason.
 
 ---
 
 ## Finding types
 
-v0.5.1 emits 18 finding types across 10 analyzers. Every finding has a severity (High/Medium/Low) and an estimated impact in ms.
+Optimus emits 23 finding types: 19 from the 11 built-in analyzers (tables below), plus 4 listed under _Other types_. Every finding has a severity (High/Medium/Low) and an estimated impact in ms.
 
-### Database / SQL (6 types: from v0.2.0)
+### Database / SQL (8 types)
 
 | Type | Trigger | Actionable detail |
 |---|---|---|
@@ -305,7 +250,7 @@ v0.5.1 emits 18 finding types across 10 analyzers. Every finding has a severity 
 | **Missing Index** | `DBOptimizer` suggests an index AND the column exists AND is not already indexed AND is btree-compatible (v0.5.1 verifies against `information_schema` before emitting) | Table, column, verified DDL (with prefix length for TEXT/BLOB), example queries |
 | **Lock Contention** | A query failed with a deadlock or lock-wait timeout at a callsite in your own code (Frappe-handled errors and `NOWAIT` probes are skipped) | Callsite, the failed queries, time waited, *"keep transactions short, lock rows in a consistent order"* |
 
-### Python call tree (4 types: v0.3.0)
+### Python call tree (4 types)
 
 | Type | Trigger | Actionable detail |
 |---|---|---|
@@ -314,7 +259,7 @@ v0.5.1 emits 18 finding types across 10 analyzers. Every finding has a severity 
 | **Repeated Hot Frame** | The same `file::function` appears in ≥3 actions and consumes ≥500 ms across the session | User-actionable: optimizing this function helps every flow that touches it. v0.5.1 filter skips plumbing (werkzeug, frappe.handler, frappe.utils) but keeps `Document.run_method`, `has_permission`, `make_autoname`, etc. |
 | **Redundant Call** | The same `frappe.get_doc(doctype, name)` / `frappe.cache.get_value(key)` / `has_permission(...)` fired N times from the same callsite (thresholds 5/10/10, configurable) | Callsite + arg hash + *"cache or hoist this call"* |
 
-### Infrastructure (4 types: v0.5.0)
+### Infrastructure (4 types)
 
 | Type | Trigger | Actionable detail |
 |---|---|---|
@@ -323,13 +268,22 @@ v0.5.1 emits 18 finding types across 10 analyzers. Every finding has a severity 
 | **DB Pool Saturation** | `threads_connected / max_connections > 0.9` across ≥2 actions (v0.5.1 uses the correct ratio after an earlier version used the wrong one) | *"raise `max_connections` or reduce gunicorn workers to match"* |
 | **Background Queue Backlog** | Any RQ queue (`default`/`short`/`long`) peaked > 50 during the session | *"your worker count is too low for the load; check if your flow enqueues work"* |
 
-### Frontend (3 types: v0.5.0)
+### Frontend (3 types)
 
 | Type | Trigger | Actionable detail |
 |---|---|---|
 | **Slow Frontend Render** | Largest Contentful Paint (LCP) > 2500 ms on any page (Medium), > 4000 ms (High) | Page URL, LCP/FCP/CLS/TTFB, *"check TTFB vs render time split"* |
 | **Network Overhead** | `xhr_duration - backend_duration > 500 ms` AND `> backend × 1.5` | XHR duration vs backend duration, response size, *"large response, CDN, or TLS handshake issue"* |
 | **Heavy Response** | Single XHR response > 500 KB | URL, size, *"paginate or limit field lists"* |
+
+### Other types (4 types)
+
+| Type | Trigger | Actionable detail |
+|---|---|---|
+| **Framework N+1** | The N+1 pattern, but at a callsite in Frappe or another framework app. Always Low severity | Cumulative query count and time at that callsite, for information |
+| **Slow Background Job** | A slow `RQ Job` action whose call tree has no hot-path finding | The deepest frame in your own code with its time |
+| **Hot Line** | Line profiling: one line takes at least the Hot Line percent of its function's time and the minimum ms (see the Hot Line settings) | The line, its time and share |
+| **Function Not Invoked** | Line profiling: a picked function was never called during the run | The function's dotted path |
 
 ---
 
@@ -341,9 +295,9 @@ Five sentences:
 2. **Per-user activation via hook ordering.** Frappe's `before_request` runs `frappe.recorder.record()` first (no-op without a global flag); our `before_request` runs second and calls `record(force=True)` only if the current user has an active session in our Redis pointer.
 3. **Background-job session inheritance via a `frappe.enqueue` patch.** We wrap the canonical `enqueue` to inject `_profiler_session_id` into job kwargs whenever the calling user has an active session; the worker's `before_job` hook pops the marker (so the user's method never sees it) and activates recording for the job.
 4. **Frontend capture wraps WHATWG primitives, not Frappe APIs.** `optimus_frontend.js` hooks `window.fetch` and `XMLHttpRequest.prototype.open/send` directly the same approach every production APM library uses. Survives future Frappe upgrades because `fetch` and `XHR` are stable web platform standards, while jQuery `ajaxComplete` hooks would break when Frappe drops jQuery.
-5. **Ten analyzers, all pure functions.** Per-action breakdown, top-N slow queries, N+1 (by callsite), EXPLAIN flags, index suggestions (verified against schema), per-table breakdown, Python call tree (v0.3.0), redundant calls (v0.3.0), infra pressure (v0.5.0), frontend timings (v0.5.0). Each is independently testable from JSON fixtures with no Frappe DB access.
+5. **Eleven analyzers, all pure functions.** Per-action breakdown, top-N slow queries, N+1 (by callsite), EXPLAIN flags, index suggestions (verified against schema), per-table breakdown, Python call tree (v0.3.0), redundant calls (v0.3.0), lock contention, infra pressure (v0.5.0), frontend timings (v0.5.0). Each is independently testable from JSON fixtures with no Frappe DB access.
 
-For the full architecture (data-flow diagrams, hook order, edge cases, extension points), read the inline docstrings in [`optimus/analyze.py`](./optimus/analyze.py) and [`optimus/renderer.py`](./optimus/renderer.py).
+For the full architecture (data-flow diagrams, hook order, edge cases, extension points), read the inline docstrings in [`optimus/analyze.py`](./optimus/analyze.py) and [`optimus/renderer/`](./optimus/renderer/).
 
 ---
 
@@ -362,19 +316,19 @@ Deliberately minimal. **Only one non-Frappe dependency is declared** in `pyproje
 | Package | Role in the profiler |
 |---|---|
 | **`frappe.recorder`** | Frappe's built-in SQL recorder. Captures every query + Python stack during a request. We reuse it unchanged for SQL capture; session tracking and analyze pipeline live on top. |
-| **[`sqlparse`](https://pypi.org/project/sqlparse/)** | SQL tokenizer / pretty-printer. Formats queries in the Raw report and normalizes whitespace for the **Top Queries** leaderboard. |
+| **[`sqlparse`](https://pypi.org/project/sqlparse/)** | SQL tokenizer / pretty-printer. Formats queries in the report and normalizes whitespace for the **Top Queries** leaderboard. |
 | **[`sql_metadata`](https://pypi.org/project/sql-metadata/)** | SQL parser used by `index_suggestions.py` to extract WHERE/JOIN columns for the **Missing Index** finding's suggested DDL, and by the table breakdown and index-recipe code. Parser limitations are caught and downgraded to Analyzer Notes warnings never a hard failure. |
 | **[`psutil`](https://pypi.org/project/psutil/)** | CPU %, worker RSS, load average, swap. Powers the **Server Resource** panel + **Memory Pressure** / **Resource Contention** findings. |
 | **[`rq`](https://pypi.org/project/rq/)** | Redis Queue reads queue depth (default/short/long) for the **Background Queue Backlog** finding. |
 | **`redis`** (via `frappe.cache`) | Storage of recordings, sidecar argument logs, pyinstrument session pickles. |
-| **[`Jinja2`](https://pypi.org/project/Jinja2/)** | Report template (`templates/report.html`) the single source of truth for both Safe and Raw modes. |
+| **[`Jinja2`](https://pypi.org/project/Jinja2/)** | Report template (`templates/report.html`) the single source of truth for the report. |
 
 ### Standard-library workhorses (no install, always present)
 
 | Module | Role |
 |---|---|
 | `sys._getframe` | Cheap caller-stack capture in the sidecar wraps on `frappe.get_doc` / `cache.get_value` / `has_permission`. The instrumentation backbone for **Redundant Call** findings. |
-| `hashlib` | SHA-256 of `identifier_raw` → `identifier_safe` so PII never ends up in Safe-mode finding titles (see `capture.py`). |
+| `hashlib` | SHA-256 of `identifier_raw` → `identifier_safe`, the hash bucket key for redundant-call detection (see `capture.py`). |
 | `pickle` | pyinstrument session tree serialization in Redis. |
 | `dataclasses`, `collections.Counter` / `defaultdict`, `re`, `json`, `urllib` | Analyzer plumbing. |
 
@@ -408,7 +362,6 @@ These do real analytical work without pulling a dependency:
 | Infra metrics per action | ✗ | ✓ (always-on) | Basic | ✓ (per-action snapshots) |
 | Browser XHR + Web Vitals | ✗ | ✓ | ✗ | ✓ (v0.5.0) |
 | ERPNext-native findings | ✗ | Generic | Generic | **✓ (native)** |
-| Customer-safe redacted export | ✗ | ✗ | ✗ | **✓ (unique)** |
 | On-prem / no data egress | ✓ | ✗ | ✗ | ✓ |
 | Always-on monitoring | ✗ | ✓ | ✓ | ✗ (opt-in) |
 | Alerting / pager integration | ✗ | ✓ | ✓ | ✗ |
@@ -417,7 +370,7 @@ These do real analytical work without pulling a dependency:
 
 **Positioning:** commercial APMs are always-on monitoring for *"something regressed, find it."* optimus is on-demand debugging for *"this specific customer flow is slow, what should my dev shop fix."* They're complementary, not competitive. Most ERPNext shops run only optimus because Datadog is expensive and leaks customer data off-site.
 
-For the specific job of *"debug a slow ERPNext workflow and hand the report to a partner shop,"* optimus produces a better report than any commercial APM because of callsite-grouped N+1, framework-native findings, flow-aware session and customer-safe export. None of those exist anywhere else at any price.
+For the specific job of *"debug a slow ERPNext workflow and hand the report to a partner shop,"* optimus produces a better report than any commercial APM because of callsite-grouped N+1, framework-native findings and flow-aware session. None of those exist anywhere else at any price.
 
 ---
 
@@ -469,10 +422,9 @@ If a session hits the recordings cap, the analyze report shows a warning under `
 
 When a session moves to `Ready`, the source recordings in Redis (`RECORDER_REQUEST_HASH`, `RECORDER_REQUEST_SPARSE_HASH`), the per-session keys (`profiler:session:*`, `profiler:infra:*`, `profiler:frontend:*`) and the pyinstrument tree blobs are deleted. Redis returns to baseline. The `Optimus Session` DocType row and the attached HTML report files are the durable record.
 
-### Two report modes
+### The report file
 
-- **`safe_report_file`**: Normalized SQL, redacted URLs/headers/form data, sanitized notes, redacted custom-app function names. Safe to email to a third-party.
-- **`raw_report_file`**: Full data: raw SQL with literals, request headers, form data, complete stack traces. A `File.has_permission` hook (`optimus.permissions.file_has_permission`) runs in Frappe's permission checks (the File form, REST, `frappe.has_permission`) and lets only a System Manager or the recording user through. Direct `/private/files` downloads bypass this hook and allow a parent Session read-sharee access to raw HTML, PDF and recordings. The hidden `recordings_file` field remains at permlevel 0, so its URL can be returned when the parent is read through REST. A Session read share does not restrict the recipient to sanitized output; share a separately reviewed safe export when raw access is inappropriate.
+- **`raw_report_file`**: The one report. Full data: raw SQL with literals, request headers, form data, complete stack traces. A `File.has_permission` hook (`optimus.permissions.file_has_permission`) runs in Frappe's permission checks (the File form, REST, `frappe.has_permission`) and lets only a System Manager or the recording user through. Direct `/private/files` downloads bypass this hook and allow a parent Session read-sharee access to raw HTML, PDF and recordings. The hidden `recordings_file` field remains at permlevel 0, so its URL can be returned when the parent is read through REST. A Session read share does not restrict the recipient to sanitized output; there is no redacted export, so do not share the Session when raw access is inappropriate.
 
 ---
 
@@ -508,7 +460,7 @@ populated.
 | Field | Default | Purpose |
 |---|---|---|
 | **Profiler Enabled** | ✓ on | Master kill-switch. When off, no requests or background jobs are profiled even when users have active sessions. Use it to pause site-wide instrumentation without touching individual widgets. |
-| **Session Retention (days)** | `30` | Optimus Session rows older than this only in `Ready` or `Failed` state are deleted by the daily housekeeping job, along with their attached HTML reports and `File` rows. `0` = keep forever. _Reference: Strict 90 · Recommended 30 · Relaxed 7._ |
+| **Session Retention (days)** | `30` | Optimus Session rows older than this only in `Ready` or `Failed` state are deleted by the daily housekeeping job, along with their attached HTML reports and `File` rows. `0` = keep forever. **Strict keeps sessions for only 1 day.** _Reference: Strict 1 · Recommended 30 · Relaxed 7._ |
 
 #### Apps section
 
@@ -548,7 +500,7 @@ case-insensitive.
 
 | Field | Default | Purpose |
 |---|---|---|
-| **Max Queries per Recording** | `2000` | Per-recording cap on queries enriched (`sqlparse` + `EXPLAIN` + normalization) by analyze. Anything beyond is truncated with a banner at the top of the report. Each query costs one `EXPLAIN` round-trip raising the cap scales analyze time roughly linearly. Raise to `5000` / `10000` for legitimately heavy flows (e.g. Manufacturing Plan Submit creating 100+ child orders). _Reference: Strict 5000 · Recommended 2000 · Relaxed 1000._ |
+| **Max Queries per Recording** | `2000` | Per-recording cap on queries enriched (`sqlparse` + `EXPLAIN` + normalization) by analyze. Queries beyond the cap are only grouped by shape (they still count in totals, N+1 and Top Queries) and the report shows a warning. `0` = no limit. Each query costs one `EXPLAIN` round-trip raising the cap scales analyze time roughly linearly. Raise to `5000` / `10000` for legitimately heavy flows (e.g. Manufacturing Plan Submit creating 100+ child orders). _Reference: Strict 0 · Recommended 2000 · Relaxed 1000._ |
 | **Sampler Interval (ms)** | `1.0` | pyinstrument statistical-sampler interval. Lower = finer call-tree resolution but higher overhead. `1ms` is recommended; raise to `5–10ms` for prod-like profiling. Floor: `0.1`. _Reference: Strict 0.5 · Recommended 1.0 · Relaxed 5.0._ |
 | **Hide framework / internal database tables** | ✓ on | When on, the "Time spent per database table" section drops Frappe schema/meta tables (`tabDocType`, `tabSingles`, `tabPatch Log`, etc.), framework-internal tables and `information_schema.*`. Touched by every request via framework machinery not user-actionable. Other sections (top-queries leaderboard, per-action drill-down, recordings) are unaffected. Uncheck to see them all. |
 | **Wait for Background Jobs (seconds)** | `300` | How long the analyze job watches the bg jobs the profiled flow enqueued, waiting for each to reach a terminal state (Completed / Failed / Timeout). Hard-capped at `300`. `0` = don't wait. On a single-worker bench the analyze job yields the worker between checks so those jobs can run; if the scheduler is disabled, the wait is skipped. Jobs still running at the ceiling appear as `Running` in the report click _Retry Analyze_ once they finish to capture their data. _Reference: Strict 300 · Recommended 300 · Relaxed 60._ |
@@ -560,8 +512,8 @@ or analyzed.
 
 | Field | Default | Purpose |
 |---|---|---|
-| **Min Action Duration to Show (ms)** | `0` | Drop actions shorter than this from the per-action breakdown. `0` = show everything. Useful for declutter when a flow generates many sub-millisecond background polls. _Reference: Strict 0 · Recommended 0 · Relaxed 50._ |
-| **Render durations in seconds above (ms)** | `1000` | Durations above this render as seconds (e.g. `5234ms` → `5.23s`); below it, ms is preserved. Set to a very large value (e.g. `99999999`) to effectively disable. _Reference: Strict 500 · Recommended 1000 · Relaxed 99999999._ |
+| **Min Action Duration to Show (ms)** | `0` | Drop actions shorter than this from the per-action breakdown. `0` = show everything. Useful for declutter when a flow generates many sub-millisecond background polls. _Reference: Strict 1 · Recommended 0 · Relaxed 50._ |
+| **Render durations in seconds above (ms)** | `1000` | Durations above this render as seconds (e.g. `5234ms` → `5.23s`); below it, ms is preserved. `0` turns it off (always milliseconds). _Reference: Strict 500 · Recommended 1000 · Relaxed 99999999._ |
 
 ---
 
@@ -571,7 +523,7 @@ or analyzed.
 
 | Field | Default | Purpose |
 |---|---|---|
-| **Sensitivity Profile** | `Recommended` | One-knob preset for the 9 detection thresholds below. **Strict** catches more (lower thresholds, more findings, more noise). **Relaxed** catches less. **Recommended** is the shipped default and automatically tracks future tuning across upgrades. **Custom** lets you hand-tune the individual fields they stay locked under the named presets. Display filters, line profiling, capture, retention and AI settings are **not** affected by the profile. |
+| **Sensitivity Profile** | `Recommended` | One-knob preset that sets 19 fields: session retention, capture (max queries, sampler interval, background-job wait), display filters, the analyzer detection thresholds, line profiling defaults and the AI auto-suggest cap. **Strict deletes Ready/Failed sessions after 1 day** (Recommended 30, Relaxed 7). **Strict** catches more (lower thresholds, more findings, more noise). **Relaxed** catches less. **Recommended** is the shipped default and automatically tracks future tuning across upgrades. **Custom** lets you hand-tune the individual fields they stay locked under the named presets. The reference values listed in each row below are what the three presets set. |
 
 #### Analyzer Thresholds section
 
@@ -606,10 +558,10 @@ user override these per run.
 
 | Field | Default | Purpose |
 |---|---|---|
-| **Max Runs per Session** | `10` | Cap on how many line profiling runs are retained per Optimus Session. When exceeded, the oldest run's full results are archived to a private `File` and only row metadata is kept. _Strict 25 · Recommended 10 · Relaxed 5._ |
+| **Line Profiling: Max Runs per Session** | `10` | Cap on how many line profiling runs one Optimus Session can hold. Once the session has this many, new runs are refused (and auto-arm stops). `0` = no limit. _Strict 0 · Recommended 10 · Relaxed 5._ |
 | **Default Auto-Expand Hot Chain** | ✓ on | When on, the picker dialog's `Auto-expand hot chain` checkbox starts ticked. Auto-expansion walks each pick down the profile's call tree to instrument the full hot chain in one shot. |
-| **Auto-Expand: Max Depth** | `10` | How many levels deep auto-expand will follow. _Strict 15 · Recommended 10 · Relaxed 5._ |
-| **Auto-Expand: Minimum Child Time (ms)** | `50` | Auto-expand stops descending when the next-hottest child consumes less than this. Lower = follow deeper into smaller hot spots. _Strict 25 · Recommended 50 · Relaxed 100._ |
+| **Auto-Expand: Max Depth** | `10` | How many levels deep auto-expand will follow (`0` = walk to the leaf). _Strict 0 · Recommended 10 · Relaxed 5._ |
+| **Auto-Expand: Minimum Child Time (ms)** | `50` | Auto-expand stops descending when the next-hottest child consumes less than this. Lower = follow deeper into smaller hot spots. _Strict 10 · Recommended 50 · Relaxed 100._ |
 
 ---
 
@@ -690,7 +642,7 @@ as pre-DocType fallbacks. The DocType row wins if both are set.
 | `optimus_explain_cache_ttl_seconds` | `3600` | How long `EXPLAIN` results are cached in Redis across analyze runs. `0` disables the cross-session cache. |
 | `optimus_analyze_gc_collect` | `True` | After analyze frees the pyinstrument session blob, call `gc.collect()` to return RAM to the OS. Safe-on default. Set `False` only if you've measured and the collect pause matters. |
 | `optimus_analyze_nice` | `5` | `os.nice` increment for the async analyze worker lower CPU priority so it doesn't fight live requests. `0` disables. Linux only; ignored on macOS. |
-| `optimus_singleflight_max_wait_seconds` | `600` | When two re-analyzes race for the same session, the second waits up to this long (with polite re-enqueue) for the first to finish. `0` disables single-flight. |
+| `optimus_singleflight_max_wait_seconds` | `600` | Only one session runs the heavy analyze phase at a time; when another session is analyzing, this one waits up to this many seconds (with polite re-enqueue) for it to finish, then proceeds anyway. `0` disables single-flight. |
 | `optimus_enrich_throttle_every` | `0` | Sleep every N enriched queries during analyze (for EXPLAIN). `0` = no throttle (default). Raise to e.g. `200` on shared MariaDB instances where back-to-back EXPLAINs cause noisy-neighbor issues. |
 | `optimus_enrich_throttle_sleep_ms` | `5` | Sleep length when the throttle above fires. |
 
@@ -752,7 +704,7 @@ Set per session via the widget's start dialog or `api.start(...)`:
 |---|---|---|
 | `label` (str, required) | | Human-readable session label. |
 | `capture_python_tree` (bool) | `True` | Capture pyinstrument call tree + sidecar wraps for redundant-call detection. Disable to get v0.2.0 SQL-only behavior with ~10–30% overhead instead of 1.5–2×. |
-| `notes` (str) | `""` | Free-form "Steps to Reproduce / Notes" Text Editor content. Rendered at the top of both Safe and Raw reports. Bleach-sanitized before render safe to include rich formatting but `<script>` tags are stripped. |
+| `notes` (str) | `""` | Free-form "Steps to Reproduce / Notes" Text Editor content. Rendered at the top of the report. Bleach-sanitized before render safe to include rich formatting but `<script>` tags are stripped. |
 
 Example Python call:
 
@@ -845,13 +797,11 @@ After `bench migrate`, verify in this order:
    >>> len(doc.actions), len(doc.findings)
    ```
 
-7. **Safe Report is self-contained:** open `doc.safe_report_file` in a browser with network disabled. It must render fully no missing fonts, no broken layout. Tested in CI via `test_safe_report_self_contained.py`.
+7. **Report is self-contained:** open `doc.raw_report_file` in a browser with network disabled. It must render fully no missing fonts, no broken layout. Tested via `test_report_a11y.py` and `tests_integration/test_safe_report_self_contained_on_real_bench.py`.
 
 8. **Scheduler-disabled fallback:** `bench --site <site> disable-scheduler`, reload Desk, run a session, click Stop. The widget should transition straight from "Stopping…" to "Report ready" (no intermediate "Analyzing…"). Re-enable: `bench --site <site> enable-scheduler`.
 
-9. **Baseline comparison:** pin a Ready session as baseline, record a second session with the same label, verify the second report has three comparison sections at the top.
-
-10. **PDF export:** open a Ready session, click "Download Safe Report (PDF)". First click generates in ~2 seconds and caches; subsequent clicks are instant.
+9. **PDF export:** there is no PDF button. Call the `download_pdf` API (POST) for a Ready session. The first call generates the PDF and caches it in **Report (PDF)**; later calls reuse it.
 
 ---
 
