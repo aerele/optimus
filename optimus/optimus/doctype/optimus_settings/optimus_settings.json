@@ -483,11 +483,11 @@
   {
    "fieldname": "ai_description",
    "fieldtype": "HTML",
-   "options": "<p class=\"text-muted small\">Enable optional background AI for eligible findings and Steps to Reproduce. <b>Refresh AI suggestions</b> queues work after profiling is Ready; saved profiling results remain available if AI fails. Requests can include finding titles, metrics, file and function names, source-code windows, schema names and SQL structure. <b>Code and context are sent to your configured provider.</b> A local endpoint keeps requests within the environment you control. <a href=\"https://github.com/aerele/optimus/blob/main/docs/AI-FIXING.md\" target=\"_blank\" rel=\"noopener noreferrer\">Read the data-flow and deployment guide</a> before enabling AI.</p>"
+   "options": "<p class=\"text-muted small\"><b>Enabling AI also sends findings automatically.</b> After each analysis, findings are sent to your configured provider, up to the automatic-suggestion limit below. Privacy mode controls whether raw values are included. To stop automatic sending, untick <i>Run AI suggestions automatically after profiling</i>; you can still use Refresh AI suggestions by hand.</p><p class=\"text-muted small\">Enable optional background AI for eligible findings and Steps to Reproduce. <b>Refresh AI suggestions</b> queues work after profiling is Ready; saved profiling results remain available if AI fails. Requests can include finding titles, metrics, file and function names, source-code windows, schema names and SQL structure. <b>Code and context are sent to your configured provider.</b> A local endpoint keeps requests within the environment you control. <a href=\"https://github.com/aerele/optimus/blob/main/docs/AI-FIXING.md\" target=\"_blank\" rel=\"noopener noreferrer\">Read the data-flow and deployment guide</a> before enabling AI.</p>"
   },
   {
    "default": "0",
-   "description": "The master on/off switch for AI fix suggestions. Off by default.",
+   "description": "The master on/off switch for AI fix suggestions. Off by default. When on, findings are also sent to your AI provider automatically after each analysis; untick the automatic option below to stop that.",
    "fieldname": "ai_enabled",
    "fieldtype": "Check",
    "label": "Enable AI Fix Suggestions"
@@ -613,7 +613,7 @@
   {
    "default": "1",
    "depends_on": "eval:doc.ai_enabled",
-   "description": "After profiling is saved as Ready, queue the finding fixes and/or captured Steps selected above. This uses provider tokens and requires a background worker. Turning off stops further queued or running automatic work; an already dispatched call may still finish. If line profiling is armed, its completion can start this work. When off, request AI through Refresh AI suggestions.",
+   "description": "On by default. Untick to turn automatic sending off. After profiling is saved as Ready, the finding fixes and/or captured Steps selected above are queued and sent automatically to your AI provider (the privacy setting below controls raw values). This uses provider tokens and requires a background worker. Turning off stops further queued or running automatic work; an already dispatched call may still finish. If line profiling is armed, its completion can start this work. When off, request AI through Refresh AI suggestions.",
    "fieldname": "ai_auto_suggest",
    "fieldtype": "Check",
    "label": "Run AI suggestions automatically after profiling"
@@ -685,7 +685,7 @@
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-10-31 12:00:00.000000",
+ "modified": "2026-11-07 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Optimus",
  "name": "Optimus Settings",

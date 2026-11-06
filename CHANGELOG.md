@@ -8,6 +8,14 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.156] - 2026-11-07
+
+### Fixed
+
+- Optimus Settings now says plainly that turning on AI Fix Suggestions also sends findings to your AI provider automatically after each analysis, up to the automatic-suggestion limit. The text also says that privacy mode controls whether raw values are included, and that unticking "Run AI suggestions automatically after profiling" turns automatic sending off. Behaviour is unchanged: automatic sending is still on by default once AI is enabled, and nothing is migrated.
+
+---
+
 ## [0.12.147] - 2026-11-06
 
 ### Internal
