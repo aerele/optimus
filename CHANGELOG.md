@@ -8,6 +8,14 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.147] - 2026-11-06
+
+### Internal
+
+- The inline-stop "empty session" test now replaces `frappe.db` wholesale with a fake instead of patching an attribute on it, so it passes on a real bench as well as in CI. On a bench `frappe.db` is an unbound LocalProxy, so patching an attribute resolved the unbound `frappe.local` and raised during test setup. No product code changed.
+
+---
+
 ## [0.12.143] - 2026-11-06
 
 ### Changed
