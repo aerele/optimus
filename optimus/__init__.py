@@ -1,4 +1,4 @@
-__version__ = "0.12.144"
+__version__ = "0.12.161"
 
 
 def safe_commit() -> None:
@@ -331,11 +331,15 @@ def _patch_recorder():
 	def _profiler_init(self, *args, **kwargs):
 		_original_init(self, *args, **kwargs)
 		try:
-			from optimus.redaction import redact_sensitive
+			from optimus.redaction import is_key_bearing_endpoint, redact_sensitive
 
 			extra_keys, _ = _read_extras()
 			if isinstance(getattr(self, "form_dict", None), dict):
-				self.form_dict = redact_sensitive(self.form_dict, extra_keys=extra_keys)
+				self.form_dict = redact_sensitive(
+					self.form_dict,
+					extra_keys=extra_keys,
+					mask_key=is_key_bearing_endpoint(getattr(self, "path", None), getattr(self, "cmd", None)),
+				)
 			if isinstance(getattr(self, "headers", None), dict):
 				self.headers = redact_sensitive(self.headers, extra_keys=extra_keys)
 		except Exception:

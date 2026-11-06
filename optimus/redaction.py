@@ -29,6 +29,10 @@ import json
 import re
 from functools import lru_cache
 from typing import NamedTuple
+from urllib.parse import quote, unquote_plus
+
+_KEY_CACHE_MAX = 4096
+URL_PLACEHOLDER = "<REDACTED>"
 
 # Canonical default patterns. These match the historical renderer-side
 # values 1:1 so the relocation is behavior-preserving; the test suite
@@ -50,28 +54,61 @@ DEFAULT_SENSITIVE_KEYS: tuple[str, ...] = (
 def is_sensitive_key(key, *, extra: tuple[str, ...] = ()) -> bool:
 	"""Return True when ``key`` looks like a sensitive identifier.
 
-	Substring (case-insensitive) match against the default patterns
-	plus any caller-supplied extras. Substring (not equality) so that
-	``recovery_password`` or ``user_token_v2`` still match.
+	Substring (case-insensitive) match against the default patterns plus any
+	caller-supplied extras, so ``recovery_password`` or ``user_token_v2`` still
+	match. A name that is exactly a SQL-list name once normalised to snake_case
+	(``X-Api-Key``, ``accessKey``, ``sid``) matches too: those are too short or
+	too hyphenated for the substring rule.
 	"""
 	if not isinstance(key, str) or not key:
 		return False
-	lower = key.lower()
-	patterns = DEFAULT_SENSITIVE_KEYS + tuple(extra or ())
-	return any(p in lower for p in patterns)
+	extra = tuple(extra or ())
+	if len(key) > _IDENTIFIER_MAX:
+		return _substring_hit(key.lower(), extra)
+	return _sensitive_name(key, extra)
 
 
-def redact_sensitive(payload, *, extra_keys: tuple[str, ...] = ()):
+def _substring_hit(lower: str, extra: tuple[str, ...]) -> bool:
+	return any(p in lower for p in DEFAULT_SENSITIVE_KEYS + extra)
+
+
+@lru_cache(maxsize=_KEY_CACHE_MAX)
+def _sensitive_name(key: str, extra: tuple[str, ...]) -> bool:
+	"""``is_sensitive_key`` for a key of at most 128 characters; memoised, as the same few names
+	repeat across every row of a form_dict or header set."""
+	if _substring_hit(key.lower(), extra):
+		return True
+	name = _normalize_name(key)
+	if _names(()).name.fullmatch(name) is not None:
+		return True
+	return (
+		name in _HEADER_SECRET_NAMES
+		or not _HEADER_SECRET_PARTS.isdisjoint(name.split("_"))
+		or _SIGNATURE_NAME.search(name) is not None
+	)
+
+
+def is_key_bearing_endpoint(path, cmd) -> bool:
+	"""True for a request whose bare ``key`` argument is a credential (a password-reset
+	or print-share key). Frappe merges query arguments into ``form_dict``, so the key
+	of ``/update-password?key=...`` is recorded there."""
+	target = f"{path if isinstance(path, str) else ''} {cmd if isinstance(cmd, str) else ''}".lower()
+	return any(token in target for token in _KEY_BEARING_ENDPOINTS)
+
+
+def redact_sensitive(payload, *, extra_keys: tuple[str, ...] = (), mask_key: bool = False):
 	"""Walk a dict / list / tuple and return a deep copy with values
-	under sensitive keys replaced by ``"<REDACTED:keyname>"``. Non-
-	container scalars pass through unchanged.
+	under sensitive keys replaced by ``"<REDACTED:keyname>"``. A string value
+	that is a URL has its sensitive query values masked (:func:`redact_url`).
+	``mask_key`` also masks the top-level bare ``key`` (see
+	:func:`is_key_bearing_endpoint`). Other scalars pass through unchanged.
 
 	Pure never mutates the input.
 	"""
 	if isinstance(payload, dict):
 		out = {}
 		for k, v in payload.items():
-			if is_sensitive_key(k, extra=extra_keys):
+			if is_sensitive_key(k, extra=extra_keys) or (mask_key and _is_bare_key(k)):
 				out[k] = f"<REDACTED:{k}>"
 			else:
 				out[k] = redact_sensitive(v, extra_keys=extra_keys)
@@ -81,12 +118,59 @@ def redact_sensitive(payload, *, extra_keys: tuple[str, ...] = ()):
 			out["value"] = f"<REDACTED:{field}>"
 		return out
 	if isinstance(payload, list):
-		return [redact_sensitive(item, extra_keys=extra_keys) for item in payload]
+		return _mask_filter_value([redact_sensitive(item, extra_keys=extra_keys) for item in payload], extra_keys)
 	if isinstance(payload, tuple):
 		return tuple(redact_sensitive(item, extra_keys=extra_keys) for item in payload)
 	if isinstance(payload, str):
-		return _redact_json_string(payload, extra_keys)
+		return _redact_string(payload, extra_keys)
 	return payload
+
+
+def _mask_filter_value(row: list, extra_keys: tuple[str, ...]) -> list:
+	"""A Frappe filter row ``[doctype, field, op, value]`` or ``[field, op, value]`` whose field is
+	sensitive, with its value masked: the key-based walk cannot see a secret in a list."""
+	if len(row) not in (3, 4):
+		return row
+	field = row[len(row) - 3]
+	if is_sensitive_key(field, extra=extra_keys):
+		row[-1] = f"<REDACTED:{field}>"
+	return row
+
+
+def _is_bare_key(name) -> bool:
+	return isinstance(name, str) and name.lower() == "key"
+
+
+def _redact_string(text: str, extra_keys: tuple[str, ...]) -> str:
+	if text.lstrip().startswith(("{", "[")):
+		redacted = _redact_json_string(text, extra_keys)
+		if redacted != text:
+			return redacted
+	return _redact_url_text(text, extra_keys)
+
+
+def _redact_url_text(text: str, extra_keys: tuple[str, ...]) -> str:
+	"""``text`` that is a URL, or holds URL-shaped words, with their secrets masked; prose is untouched."""
+	if not _may_hold_url(text):
+		return text
+	return _CANDIDATE_RUN.sub(lambda m: redact_url_run(m.group(0), extra_keys), text)
+
+
+def redact_url_run(run: str, extra_keys: tuple[str, ...] = (), placeholder: str = URL_PLACEHOLDER) -> str:
+	"""``redact_url`` for a URL found in running text: trailing punctuation (``).,;``, an unbalanced
+	``]``) is not part of the URL and is put back after it."""
+	end = len(run)
+	unmatched = run.count("]") - run.count("[")
+	while end and (run[end - 1] in _TRAILING or (run[end - 1] == "]" and unmatched > 0)):
+		unmatched -= run[end - 1] == "]"
+		end -= 1
+	return redact_url(run[:end], extra_keys, placeholder) + run[end:]
+
+
+def _may_hold_url(text: str) -> bool:
+	if ("?" in text or "#" in text) and "=" in text:
+		return True
+	return "//" in text and "@" in text
 
 
 def _redact_json_string(text: str, extra_keys: tuple[str, ...]) -> str:
@@ -101,6 +185,152 @@ def _redact_json_string(text: str, extra_keys: tuple[str, ...]) -> str:
 	except (ValueError, RecursionError):
 		return text
 	return text if redacted == parsed else json.dumps(redacted)
+
+
+# ---------------------------------------------------------------------------
+# URL query secrets. Values are replaced in place, so a URL with nothing to mask
+# comes back byte for byte (no parse-and-rebuild that would rewrite ``+`` or ``%20``).
+# ONE rule names the secret parameters: ``is_secret_param``.
+# ---------------------------------------------------------------------------
+
+URL_MAX_CHARS = 8192
+_KEY_BEARING_ENDPOINTS = (
+	"update-password",
+	"update_password",
+	"printview",
+	"download_pdf",
+	"test_password_strength",
+)
+# Parameter names that are secrets in a URL but not as a form field or header name (an exact
+# name or a ``_sig`` / ``_signature`` ending, so ``item_code`` and ``session_user`` stay visible):
+# Frappe's share/reset ``key`` and signed-link ``_signature``, OAuth ``code``, ``jwt``, ``session``,
+# cloud-signed-URL ``X-Amz-Signature`` (``X-Amz-Credential`` and ``-Security-Token`` match the name list).
+_URL_SECRET_NAMES = frozenset(
+	{
+		"key", "signature", "sig", "code", "auth", "jwt", "bearer", "session", "pin", "refresh", "reset_key",
+	}
+)
+_URL_SECRET_SUFFIX = re.compile(r"_(?:signature|sig)$")
+# Header and field names that are secrets by exact normalised name, by a part of it, or by a
+# ``_signature`` ending (``X-Hub-Signature-256``); a bare ``signature`` is not one.
+_HEADER_SECRET_NAMES = frozenset(
+	{"x_session", "www_authenticate", "proxy_authenticate", "authentication", "sec_websocket_key", "sec_web_socket_key"}
+)
+_HEADER_SECRET_PARTS = frozenset({"jwt", "assertion"})
+_SIGNATURE_NAME = re.compile(r"_signature(?:_\d+)?$")
+_PARAM_SPLIT = re.compile(r"([&;])")
+# Text holds URLs between whitespace, quotes and angle brackets; a run of anything else is a candidate when it has a ``?`` or ``#`` followed by an ``=``, or an ``@``
+# (anchored at the start of a run, so a long run without one is scanned once, not from every
+# position, and prose costs no Python call per word).
+_CANDIDATE_RUN = re.compile(r"""(?<![^\s'"<>])[^\s'"<>?#@]*(?:[?#][^\s'"<>=]*=|@)[^\s'"<>]*""")
+_TRAILING = frozenset(").,;")
+_USERINFO = re.compile(r"((?:[A-Za-z][A-Za-z0-9+.-]*:)?//)[^/?#]*@")
+_JSON_VALUE_STARTS = ("%7b", "%5b", "{", "[")
+_NAME_SEPARATORS = re.compile(r"[-. ]")
+
+
+def redact_url_field(row, field: str, extra_keys: tuple[str, ...] = ()):
+	"""``row`` (a dict) with its ``field`` URL masked; a copy only when it changes."""
+	if not isinstance(row, dict):
+		return row
+	value = row.get(field)
+	masked = redact_url(value, extra_keys)
+	return row if masked == value else {**row, field: masked}
+
+
+def _normalize_name(key: str) -> str:
+	"""``X-Api-Key`` -> ``x_api_key``, ``accessKey`` -> ``access_key``."""
+	return _NAME_SEPARATORS.sub("_", _snake_case(key))
+
+
+def is_secret_param(name: str, extra: tuple[str, ...] = ()) -> bool:
+	"""True when the query/fragment parameter ``name`` (still percent-encoded) holds a secret.
+	A name too long to be a real parameter counts as one."""
+	if len(name) > _IDENTIFIER_MAX:
+		return True
+	return _secret_param(name, tuple(extra or ()))
+
+
+@lru_cache(maxsize=_KEY_CACHE_MAX)
+def _secret_param(name: str, extra: tuple[str, ...]) -> bool:
+	decoded = unquote_plus(name).strip()
+	if "%" in decoded:
+		decoded = unquote_plus(decoded).strip()
+	if is_sensitive_key(decoded, extra=extra):
+		return True
+	normalised = _normalize_name(decoded)
+	return normalised in _URL_SECRET_NAMES or _URL_SECRET_SUFFIX.search(normalised) is not None
+
+
+def redact_url(text, extra_keys: tuple[str, ...] = (), placeholder: str = URL_PLACEHOLDER):
+	"""``text`` with the value of every secret query or fragment parameter replaced by
+	``placeholder``; the rest is unchanged. A URL over 8 KiB, or one that cannot be read, has
+	its query omitted instead. Pure, linear, never raises; non-strings pass through."""
+	if not isinstance(text, str):
+		return text
+	text = _mask_userinfo(text, placeholder)
+	cut = min((i for i in (text.find("?"), text.find("#")) if i >= 0), default=-1)
+	if cut < 0:
+		return text
+	if len(text) > URL_MAX_CHARS:
+		return _omit_query(text, cut)
+	if "=" not in text:
+		return text
+	try:
+		return _mask_url(text, tuple(extra_keys or ()), placeholder)
+	except (ValueError, RecursionError):
+		return _omit_query(text, cut)
+
+
+def _mask_userinfo(text: str, placeholder: str) -> str:
+	"""``//user:pass@host`` -> ``//<placeholder>@host`` (up to the last ``@`` of the authority)."""
+	if "@" not in text:
+		return text
+	return _USERINFO.sub(lambda m: m.group(1) + placeholder + "@", text, count=1)
+
+
+def _omit_query(text: str, cut: int) -> str:
+	return text[:cut] + ("?<query omitted>" if text[cut] == "?" else "#<fragment omitted>")
+
+
+def _mask_url(text: str, extra: tuple[str, ...], placeholder: str) -> str:
+	before, hash_sep, fragment = text.partition("#")
+	base, query_sep, query = before.partition("?")
+	out = base + query_sep + _mask_params(query, extra, placeholder) + hash_sep
+	route, route_sep, route_query = fragment.partition("?")
+	if route_sep:
+		return out + route + route_sep + _mask_params(route_query, extra, placeholder)
+	return out + _mask_params(fragment, extra, placeholder)
+
+
+def _mask_params(segment: str, extra: tuple[str, ...], placeholder: str) -> str:
+	parts = _PARAM_SPLIT.split(segment)
+	for i in range(0, len(parts), 2):
+		parts[i] = _mask_param(parts[i], extra, placeholder)
+	return "".join(parts)
+
+
+def _mask_param(part: str, extra: tuple[str, ...], placeholder: str) -> str:
+	name, eq, value = part.partition("=")
+	if eq:
+		if value and is_secret_param(name, extra):
+			return f"{name}={placeholder}"
+		return f"{name}={_mask_json_value(value, extra)}"
+	if "%" not in part:
+		return part
+	name, eq, _ = unquote_plus(part).partition("=")
+	if eq and is_secret_param(name, extra):
+		return f"{quote(name, safe='')}={placeholder}"
+	return part
+
+
+def _mask_json_value(value: str, extra: tuple[str, ...]) -> str:
+	"""A JSON-valued parameter (``filters=%7B...%7D``) with its secrets masked inside."""
+	if not value.lower().startswith(_JSON_VALUE_STARTS):
+		return value
+	decoded = unquote_plus(value)
+	redacted = _redact_json_string(decoded, extra)
+	return value if redacted == decoded else quote(redacted, safe="")
 
 
 # ---------------------------------------------------------------------------
@@ -1152,6 +1382,11 @@ _SECRET_PATTERNS: tuple[re.Pattern, ...] = (
 	),
 )
 
+# The rest of a URL after its scheme, for the query-parameter rule (``is_secret_param``). Anchored on
+# "://" so a long run of letters is not rescanned from every position; a backslash ends it so a
+# JSON-escaped quote after the URL survives.
+_URL_TAIL = re.compile(r"""://[^\s'"<>\\]+""")
+
 # A literal shorter than this is never replaced: it would shred ordinary words
 # (tests and misconfigured sites use keys like "k"); real provider keys are
 # far longer. The one minimum key length of the AI key handling: ai_fix, the
@@ -1223,4 +1458,6 @@ def scrub_secrets(text: str, *, literals: tuple[str, ...] = ()) -> str:
 			out = out.replace(api_key, SECRET_PLACEHOLDER)
 	for pattern in _SECRET_PATTERNS:
 		out = pattern.sub(lambda m: m.group(1) + SECRET_PLACEHOLDER + (m.group(4) or ""), out)
+	if "://" in out:
+		out = _URL_TAIL.sub(lambda m: redact_url_run(m.group(0), placeholder=SECRET_PLACEHOLDER), out)
 	return out

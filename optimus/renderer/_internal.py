@@ -39,6 +39,7 @@ from optimus.analyzers.base import (
 # Settings-driven extras: ``OptimusConfig.sensitive_sql_columns`` /
 # ``sensitive_form_keys`` (additive never replaces the defaults).
 from optimus.dbdialect import redaction_dialect
+from optimus.redaction import is_key_bearing_endpoint as _is_key_bearing_endpoint
 from optimus.redaction import redact_call_queries as _redact_call_queries_base
 from optimus.redaction import redact_sensitive as _redact_sensitive_base
 from optimus.redaction import redact_sql_literals as _redact_sql_literals_base
@@ -74,12 +75,23 @@ def _settings_extras() -> tuple[tuple[str, ...], tuple[str, ...]]:
 		return ((), ())
 
 
-def _redact_sensitive(payload):
+def _redact_sensitive(payload, mask_key=False):
 	"""Redact sensitive keys from ``payload`` via
 	``optimus.redaction.redact_sensitive``, reading the live extra-keys
 	list from settings."""
 	extra_keys, _ = _settings_extras()
-	return _redact_sensitive_base(payload, extra_keys=extra_keys)
+	return _redact_sensitive_base(payload, extra_keys=extra_keys, mask_key=mask_key)
+
+
+def _redact_request_fields(rec: dict) -> None:
+	"""Mask ``rec``'s form_dict and headers in place: sensitive names, URL query secrets, and the
+	bare ``key`` of a key-bearing endpoint (reset and share links)."""
+	if isinstance(rec.get("form_dict"), dict):
+		rec["form_dict"] = _redact_sensitive(
+			rec["form_dict"], mask_key=_is_key_bearing_endpoint(rec.get("path"), rec.get("cmd"))
+		)
+	if isinstance(rec.get("headers"), dict):
+		rec["headers"] = _redact_sensitive(rec["headers"])
 
 
 def _redact_sql_literals(sql_str: str) -> str:
@@ -383,10 +395,7 @@ def render(
 			rec_copy = dict(r)
 			# Phase K hardening: scrub sensitive-keyed values from
 			# form_dict + headers before they reach the rendered HTML.
-			if isinstance(rec_copy.get("form_dict"), dict):
-				rec_copy["form_dict"] = _redact_sensitive(rec_copy["form_dict"])
-			if isinstance(rec_copy.get("headers"), dict):
-				rec_copy["headers"] = _redact_sensitive(rec_copy["headers"])
+			_redact_request_fields(rec_copy)
 			# Phase K hardening (v0.7 GA polish): best-effort SQL
 			# parameter redaction over each call's query string. The
 			# recorder bakes parameter values into the raw SQL; we

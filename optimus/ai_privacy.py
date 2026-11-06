@@ -64,11 +64,12 @@ def opted_in(value) -> bool:
 def action_recording(rec) -> dict | None:
 	"""Bound and type-check only the metadata used for an AI Steps label."""
 	from optimus.ai_fix import _InterruptGuard
+	from optimus.redaction import redact_url
 
 	if not isinstance(rec, dict):
 		return None
 	def text(value, limit=2048):
-		return value.strip()[:limit] if isinstance(value, str) else ""
+		return redact_url(value.strip()[:limit]) if isinstance(value, str) else ""
 
 	result = {key: text(rec.get(key)) for key in ("cmd", "path", "method", "event_type")}
 	duration = rec.get("duration")

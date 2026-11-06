@@ -982,6 +982,18 @@ def _frontend_payload_bounded(value):
 	return True
 
 
+def _mask_frontend_urls(rows: list[dict], field: str) -> list[dict]:
+	"""``rows`` with each row's URL ``field`` masked, so no secret query value reaches Redis."""
+	from optimus.redaction import redact_url_field
+	from optimus.settings import get_config
+
+	try:
+		extra_keys = tuple(get_config().sensitive_form_keys or ())
+	except Exception:
+		extra_keys = ()
+	return [redact_url_field(row, field, extra_keys) for row in rows]
+
+
 @frappe.whitelist(methods=["POST"])
 def submit_frontend_metrics(payload: str) -> dict:
 	"""Receive a batch of frontend metrics (XHR timings + Web Vitals) as a
@@ -1029,8 +1041,8 @@ def submit_frontend_metrics(payload: str) -> dict:
 	# doesn't push MAX entries through Redis only to have them trimmed.
 	import json as _json
 
-	xhr = (data.get("xhr") or [])[-SOFT_CAP_FRONTEND_XHR:]
-	vitals = (data.get("vitals") or [])[-SOFT_CAP_FRONTEND_VITALS:]
+	xhr = _mask_frontend_urls((data.get("xhr") or [])[-SOFT_CAP_FRONTEND_XHR:], "url")
+	vitals = _mask_frontend_urls((data.get("vitals") or [])[-SOFT_CAP_FRONTEND_VITALS:], "page_url")
 
 	xhr_key = _frontend_xhr_key(session_uuid)
 	vitals_key = _frontend_vitals_key(session_uuid)
