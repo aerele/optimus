@@ -23,6 +23,8 @@ DEFAULT_RETENTION_DAYS = 90
 # Hard cap on how many sessions we delete per run. Prevents a single
 # janitor call from locking up the DB on a site with a huge backlog.
 MAX_DELETIONS_PER_RUN = 100
+# The sweep runs daily, so the backlog marker must outlive it.
+RETENTION_BACKLOG_TTL_SECONDS = 25 * 3600
 
 # A Ready session's own Redis cleanup runs within this long of it turning Ready.
 READY_CLEANUP_GRACE_HOURS = 1
@@ -271,17 +273,15 @@ def _sweep_old_sessions():
 			frappe.cache.set_value(
 				redis_keys.retention_backlog(),
 				redis_schema.wrap_value(backlog),
-				expires_in_sec=3600,
+				expires_in_sec=RETENTION_BACKLOG_TTL_SECONDS,
 			)
 		except Exception:
 			pass
-		try:
-			frappe.logger().warning(
-				f"optimus janitor: MAX_DELETIONS_PER_RUN ({MAX_DELETIONS_PER_RUN}) "
-				f"hit; ~{backlog} stale session(s) remain after this batch"
-			)
-		except Exception:
-			pass
+		safe_call.log_error_line(
+			f"optimus janitor: MAX_DELETIONS_PER_RUN ({MAX_DELETIONS_PER_RUN}) "
+			f"hit; ~{backlog} stale session(s) remain after this batch",
+			dedupe_key="janitor deletion cap hit",
+		)
 	else:
 		# Backlog cleared - reset the counter so monitoring sees the
 		# recovery on the next pass.
@@ -290,7 +290,7 @@ def _sweep_old_sessions():
 			frappe.cache.set_value(
 				redis_keys.retention_backlog(),
 				redis_schema.wrap_value(0),
-				expires_in_sec=3600,
+				expires_in_sec=RETENTION_BACKLOG_TTL_SECONDS,
 			)
 		except Exception:
 			pass

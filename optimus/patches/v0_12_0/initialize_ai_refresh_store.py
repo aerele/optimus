@@ -12,14 +12,21 @@ import re
 import frappe
 
 JOURNAL_DOCTYPES = ("Optimus AI Refresh Run", "Optimus AI Refresh Attempt")
+# Read by status on every scheduler tick. The table-qualified path is used instead of a
+# DocField search_index because PostgreSQL would name that index "status" and collide.
+SCAN_INDEXES = {"Optimus Phase Two Run": ("status",)}
 
 
 def execute():
+	seed_control()
+	ensure_indexes()
+
+
+def seed_control():
 	if not frappe.db.exists("Optimus AI Refresh Control", "site"):
 		frappe.get_doc({"doctype": "Optimus AI Refresh Control", "scope": "site"}).insert(
 			ignore_permissions=True
 		)
-	ensure_indexes()
 
 
 def ensure_indexes():
@@ -35,20 +42,28 @@ def ensure_indexes():
 	``<table>_<column>_index``. It is created only when no index covers the column, so the
 	table that did get Frappe's index gets no second one. Frappe's later schema syncs leave
 	the extra index alone: it sees an index on the column and has nothing to add. MariaDB
-	names an index per table, so it has no collision and nothing is done there.
+	names an index per table, so it has no collision: only the scan indexes (``SCAN_INDEXES``)
+	are added there.
 
 	Frappe v15's PostgreSQL database has no ``db_schema``: the schema is then read from the
 	site config, as Frappe v15 reads it, and is "public" when the config names none."""
 	if frappe.db.db_type != "postgres":
+		_ensure_scan_indexes()
 		return
 	schema = getattr(frappe.db, "db_schema", None) or frappe.conf.get("db_schema") or "public"
-	for doctype in JOURNAL_DOCTYPES:
-		table = "tab" + doctype
-		columns = [
+	plan = {
+		doctype: [
 			field.fieldname
 			for field in frappe.get_meta(doctype).fields
 			if field.search_index and not field.unique
 		]
+		for doctype in JOURNAL_DOCTYPES
+	}
+	plan.update({doctype: list(columns) for doctype, columns in SCAN_INDEXES.items()})
+	for doctype, columns in plan.items():
+		table = "tab" + doctype
+		if not frappe.db.table_exists(doctype):
+			continue
 		definitions = [
 			row[0]
 			for row in frappe.db.sql(
@@ -62,3 +77,10 @@ def ensure_indexes():
 			):
 				continue
 			frappe.db.add_index(doctype, [column], index_name=f"{table}_{column}_index")
+
+
+def _ensure_scan_indexes():
+	"""MariaDB names an index per table, so ``add_index`` is idempotent and collision free."""
+	for doctype, columns in SCAN_INDEXES.items():
+		if frappe.db.table_exists(doctype):
+			frappe.db.add_index(doctype, list(columns), index_name=f"tab{doctype}_{columns[0]}_index")

@@ -100,16 +100,18 @@ def _require_session_permission(session_uuid: str, permission_type: str = "read"
 			frappe.DoesNotExistError,
 			title=_("Optimus"),
 		)
+	check_failed = False
+	allowed = False
 	try:
 		allowed = frappe.has_permission("Optimus Session", permission_type, docname)
 	except Exception:
-		try:
-			frappe.logger().warning(
-				"optimus._require_session_permission: has_permission raised "
-				f"for {docname} / {permission_type}; denying (fail-closed)"
-			)
-		except Exception:
-			pass
+		check_failed = True
+	if check_failed:
+		safe_call.log_error_line(
+			"optimus._require_session_permission: has_permission raised "
+			f"for {docname} / {permission_type}; denying (fail-closed)",
+			dedupe_key=f"has_permission raised for {permission_type}",
+		)
 		frappe.throw(
 			_("You do not have permission to access this Optimus Session."),
 			frappe.PermissionError,
@@ -739,10 +741,11 @@ def _enqueue_analyze(session_uuid: str, docname: str | None = None) -> bool:
 				# the caller treats it like any other inline result.
 				return True
 
-		frappe.logger().warning(
+		safe_call.log_error_line(
 			f"optimus: scheduler disabled; running analyze "
 			f"inline for session {session_uuid}. Caller will block "
-			f"until analyze completes."
+			f"until analyze completes.",
+			dedupe_key="scheduler disabled; running analyze inline",
 		)
 		try:
 			frappe.enqueue(

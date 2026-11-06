@@ -153,33 +153,87 @@ def best_effort(
 
 _RECENT_LINES: dict[tuple[str | None, str], float] = {}
 _RECENT_LINES_CAP = 64
+_ERRLOG_KEY_PREFIX = "optimus:errlog:"
 
 
-def log_error_line(message: str, *, dedupe_seconds: float = 60.0) -> None:
-	"""One ``frappe.logger("optimus")`` line at ERROR (Frappe drops lower levels on a
-	production site), skipped when the same text was logged on the same site in the last
-	``dedupe_seconds`` so a failure that repeats per finding writes one line. It never raises (an RQ job
-	timeout excepted) and must be called outside any ``except``."""
-	import time
-
+def _current_site() -> str | None:
 	def _site() -> str | None:
 		import frappe
 
 		return getattr(getattr(frappe, "local", None), "site", None)
 
-	# keyed by site: the log file is per site and one worker serves several sites
-	key = (best_effort(_site, None), message)
+	return best_effort(_site, None)
+
+
+def _claim_slot(kind: str, text: str, dedupe_seconds: float) -> bool:
+	"""True when this (site, kind, text) has not been logged in the last
+	``dedupe_seconds``. The process dict answers repeats inside one process; a Redis
+	``SET NX EX`` key shares the window across the web workers and the RQ work horses
+	(a horse is forked per job, so a dict alone dies with it). A broken Redis falls back
+	to the process dict. The key holds a stable title or reason class, never an id."""
+	import time
+
+	key = (_current_site(), f"{kind}:{text}")
 	now = time.monotonic()
 	last = _RECENT_LINES.get(key)
 	if last is not None and now - last < dedupe_seconds:
-		return
+		return False
 	if len(_RECENT_LINES) >= _RECENT_LINES_CAP:
 		_RECENT_LINES.clear()
 	_RECENT_LINES[key] = now
+
+	def _redis_claim() -> bool:
+		import hashlib
+
+		import frappe
+
+		digest = hashlib.sha1(f"{kind}:{text}".encode()).hexdigest()[:16]
+		name = frappe.cache.make_key(f"{_ERRLOG_KEY_PREFIX}{kind}:{digest}")
+		# A raw SET is the only way to get NX; the key comes from make_key, so it carries
+		# the site prefix that set_value would add.
+		return bool(
+			frappe.cache.set(  # nosemgrep: frappe-cache-breaks-multitenancy
+				name, 1, nx=True, ex=max(1, int(dedupe_seconds))
+			)
+		)
+
+	return best_effort(_redis_claim, True)
+
+
+def log_error_line(message: str, *, dedupe_seconds: float = 60.0, dedupe_key: str | None = None) -> None:
+	"""One ``frappe.logger("optimus")`` line at ERROR (Frappe drops lower levels on a
+	production site), skipped when the same line was logged on the same site in the last
+	``dedupe_seconds`` (per process, and across processes through Redis) so a failure
+	that repeats per finding or per request writes one line. ``dedupe_key`` is the
+	stable text to dedupe on when ``message`` carries an id that changes per event. It
+	never raises (an RQ job timeout excepted) and should be called outside any
+	``except``."""
+	if not _claim_slot("line", dedupe_key or message, dedupe_seconds):
+		return
 
 	def _write() -> None:
 		import frappe
 
 		frappe.logger("optimus").error(message)
+
+	best_effort(_write, None)
+
+
+def log_hook_error(title: str, *, message: str | None = None, dedupe_seconds: float = 60.0) -> None:
+	"""``frappe.log_error(title=...)`` for a failing request or job hook, at most once
+	per ``dedupe_seconds`` per title (see ``_claim_slot``) and never raising, so a
+	failing logger, a lost connection or an aborted transaction cannot turn a customer
+	request into a 500. Call it inside the ``except``: Frappe reads the active
+	exception for the traceback. Keep ids out of ``title``; ``message`` may carry them."""
+	if not _claim_slot("title", title, dedupe_seconds):
+		return
+
+	def _write() -> None:
+		import frappe
+
+		if message:
+			frappe.log_error(title=title, message=message)
+			return
+		frappe.log_error(title=title)
 
 	best_effort(_write, None)

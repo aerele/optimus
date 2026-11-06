@@ -21,7 +21,7 @@ import frappe
 import frappe.recorder  # imported at module top so function-local `import frappe.recorder` doesn't rebind `frappe` as a local variable (Python scope rule: any `import frappe.X` inside a function makes `frappe` a function-local for the entire scope, breaking earlier `frappe.local` reads caused by Python 3.14 stricter scope detection on a pre-existing pattern)
 
 from optimus import capture as _capture
-from optimus import safe_commit, session
+from optimus import safe_call, safe_commit, session
 from optimus.timing import RECORDING_DATA_TTL_SECONDS
 
 # v0.5.1: Skip-list for instrumentation-noise endpoints. Any HTTP request
@@ -267,7 +267,7 @@ def before_request(*args, **kwargs):
 			from optimus import infra_capture
 			frappe.local.optimus_infra_start = infra_capture.snapshot()
 		except Exception:
-			frappe.log_error(title="optimus infra start snapshot")
+			safe_call.log_hook_error("optimus infra start snapshot")
 
 		# v0.3.0: gate the new pyinstrument + sidecar capture on the
 		# session's capture_python_tree flag. Setting
@@ -283,7 +283,7 @@ def before_request(*args, **kwargs):
 			)
 	except Exception:
 		# Never let a profiler bug break a customer request. Log and move on.
-		frappe.log_error(title="optimus before_request")
+		safe_call.log_hook_error("optimus before_request")
 
 
 def after_request(*args, **kwargs):
@@ -317,13 +317,13 @@ def after_request(*args, **kwargs):
 			# registered against our session. The cap_warning is already
 			# written to session meta; log here so the drop is visible
 			# in the error log / journalctl for debugging.
-			frappe.logger().warning(
-				f"optimus: recording cap hit for session "
-				f"{session_uuid}, dropped {recording_uuid}"
+			safe_call.log_error_line(
+				f"optimus: recording cap hit for session {session_uuid}, dropped {recording_uuid}",
+				dedupe_key="recording cap hit",
 			)
 			_discard_dropped_recording(recorder, purge_stored=False)
 	except Exception:
-		frappe.log_error(title="optimus after_request")
+		safe_call.log_hook_error("optimus after_request")
 	finally:
 		dropped = getattr(frappe.local, "optimus_capture_dropped", False)
 		# v0.3.0: dump pyinstrument session and sidecar log to Redis under
@@ -348,7 +348,7 @@ def after_request(*args, **kwargs):
 					expires_in_sec=RECORDING_DATA_TTL_SECONDS,
 				)
 		except Exception:
-			frappe.log_error(title="optimus infra end snapshot")
+			safe_call.log_hook_error("optimus infra end snapshot")
 
 		# Stash a new doc's save-assigned name (vs the browser's "new-…" placeholder) on an Optimus sidecar key, not an RMW of the recorder hash (unwritten at after_request time for HTTP); analyze merges it back as resolved_target_doc. Best-effort.
 		try:
@@ -368,7 +368,7 @@ def after_request(*args, **kwargs):
 						expires_in_sec=RECORDING_DATA_TTL_SECONDS,
 					)
 		except Exception:
-			frappe.log_error(title="optimus resolve target doc")
+			safe_call.log_hook_error("optimus resolve target doc")
 
 		# v0.5.0: correlation header for optimus_frontend.js. Must set
 		# Access-Control-Expose-Headers or browsers will refuse to surface
@@ -399,7 +399,7 @@ def after_request(*args, **kwargs):
 					response=kwargs.get("response"),
 				)
 		except Exception:
-			frappe.log_error(title="optimus header injection")
+			safe_call.log_hook_error("optimus header injection")
 
 		# Clear the per-request markers so they don't leak across requests
 		# (frappe.local is per-request anyway, but explicit is good).
@@ -476,8 +476,8 @@ def before_job(method=None, kwargs=None, **rest):
 		if not isinstance(kwargs, dict):
 			# Unexpected frappe should always pass a dict. Log once so
 			# we can debug if it ever happens in practice.
-			frappe.log_error(
-				title="optimus before_job unexpected kwargs",
+			safe_call.log_hook_error(
+				"optimus before_job unexpected kwargs",
 				message=f"kwargs type: {type(kwargs).__name__}, method: {method}",
 			)
 			return
@@ -560,7 +560,7 @@ def before_job(method=None, kwargs=None, **rest):
 			from optimus import infra_capture
 			frappe.local.optimus_infra_start = infra_capture.snapshot()
 		except Exception:
-			frappe.log_error(title="optimus infra start snapshot (job)")
+			safe_call.log_hook_error("optimus infra start snapshot (job)")
 
 		# v0.3.0: gate the new pyinstrument + sidecar capture on the
 		# session's capture_python_tree flag. Mirrors before_request.
@@ -572,7 +572,7 @@ def before_job(method=None, kwargs=None, **rest):
 				interval_ms=_resolve_sampler_interval_ms(),
 			)
 	except Exception:
-		frappe.log_error(title="optimus before_job")
+		safe_call.log_hook_error("optimus before_job")
 
 
 def after_job(method=None, kwargs=None, result=None, **rest):
@@ -595,13 +595,13 @@ def after_job(method=None, kwargs=None, result=None, **rest):
 			session_uuid, recording_uuid, user=user
 		)
 		if not registered:
-			frappe.logger().warning(
-				f"optimus: recording cap hit for session "
-				f"{session_uuid}, dropped job {recording_uuid}"
+			safe_call.log_error_line(
+				f"optimus: recording cap hit for session {session_uuid}, dropped job {recording_uuid}",
+				dedupe_key="recording cap hit",
 			)
 			_discard_dropped_recording(recorder, purge_stored=True)
 	except Exception:
-		frappe.log_error(title="optimus after_job")
+		safe_call.log_hook_error("optimus after_job")
 	finally:
 		dropped = getattr(frappe.local, "optimus_capture_dropped", False)
 		recording_uuid_for_dump = getattr(
@@ -624,7 +624,7 @@ def after_job(method=None, kwargs=None, result=None, **rest):
 					expires_in_sec=RECORDING_DATA_TTL_SECONDS,
 				)
 		except Exception:
-			frappe.log_error(title="optimus infra end snapshot (job)")
+			safe_call.log_hook_error("optimus infra end snapshot (job)")
 
 		# v0.6.0: this job ran drop its RQ id from the session's
 		# pending-jobs set so analyze.run's wait can end early. Best-effort.
@@ -729,7 +729,7 @@ def _dump_capture_state_to_redis(recording_uuid: str | None) -> None:
 				expires_in_sec=RECORDING_DATA_TTL_SECONDS,
 			)
 		except Exception:
-			frappe.log_error(title="optimus pyi dump")
+			safe_call.log_hook_error("optimus pyi dump")
 
 	sidecar = getattr(frappe.local, "optimus_sidecar", None)
 	if sidecar:
@@ -747,7 +747,7 @@ def _dump_capture_state_to_redis(recording_uuid: str | None) -> None:
 				expires_in_sec=RECORDING_DATA_TTL_SECONDS,
 			)
 		except Exception:
-			frappe.log_error(title="optimus sidecar dump")
+			safe_call.log_hook_error("optimus sidecar dump")
 
 	lock_events = getattr(frappe.local, "optimus_lock_events", None)
 	if lock_events:
@@ -763,7 +763,7 @@ def _dump_capture_state_to_redis(recording_uuid: str | None) -> None:
 				expires_in_sec=RECORDING_DATA_TTL_SECONDS,
 			)
 		except Exception:
-			frappe.log_error(title="optimus lock events dump")
+			safe_call.log_hook_error("optimus lock events dump")
 
 	_clear_capture_locals()
 
