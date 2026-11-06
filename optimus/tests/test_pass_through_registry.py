@@ -184,20 +184,23 @@ def _root_name(target):
 	return target.id if isinstance(target, ast.Name) else None
 
 
-def _is_tag_or_state(target, names):
-	"""A write onto self/cls, onto a function defined in the file (a tag), or into per-request state."""
-	if _root_name(target) in {"self", "cls"} | names.functions:
-		return True
-	chain = target
-	while isinstance(chain, ast.Attribute):
-		if chain.attr in STATE_NAMESPACES:
-			return True
-		chain = chain.value
-	return False
+def _is_tag(target, names):
+	"""A write onto self/cls, or onto a function defined in the file (a marker left on a wrapper)."""
+	return _root_name(target) in {"self", "cls"} | names.functions
+
+
+def _writes_into_state(obj):
+	"""True when ``obj`` (the object an attribute is written ONTO) is a per-request state holder such
+	as ``frappe.local`` or ``frappe.flags``: a write onto one of those stores data, it patches no code.
+
+	Only the immediate object counts. A longer chain that passes THROUGH a holder to reach a real
+	object (``frappe.local.db.sql`` patches the request's live db ``sql`` method) is a patch, so the
+	holder name is not matched when it is merely a link in the path to the attribute being set."""
+	return isinstance(obj, ast.Attribute) and obj.attr in STATE_NAMESPACES
 
 
 def _is_patch(target, value, names, saved):
-	if _is_tag_or_state(target, names):
+	if _is_tag(target, names) or _writes_into_state(target.value):
 		return False
 	wraps_current = isinstance(value, ast.Call) and ast.unparse(target) in {
 		ast.unparse(arg) for arg in value.args
@@ -210,7 +213,7 @@ def _is_patch(target, value, names, saved):
 
 
 def _is_setattr_patch(obj, name, value, names, reads, saved):
-	if _is_tag_or_state(obj, names):
+	if _is_tag(obj, names) or _writes_into_state(obj):
 		return False
 	obj_text, name_text = ast.unparse(obj), ast.unparse(name)
 	read = (obj_text, name_text) in reads
@@ -266,6 +269,14 @@ UNREGISTERED_WRAPPERS = {
 	"patch at module level": (
 		"import frappe\n\nfrappe.cache_value = guard(frappe.cache_value)\n",
 		("<module>", "frappe.cache_value"),
+	),
+	"wrap through the request-local db": (
+		"import frappe\n\ndef install():\n\tfrappe.local.db.sql = build(frappe.local.db.sql)\n",
+		("install", "frappe.local.db.sql"),
+	),
+	"setattr through the request-local db": (
+		"import frappe\n\ndef install():\n\tsetattr(frappe.local.db, 'sql', build(frappe.local.db.sql))\n",
+		("install", "setattr(frappe.local.db, 'sql', build(frappe.local.db.sql))"),
 	),
 	"lambda onto a class": (
 		"from frappe.model.document import Document\n\nDocument.on_trash = lambda self: None\n",
