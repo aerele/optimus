@@ -870,6 +870,8 @@ def own_query_frame(stack: list | None) -> dict | None:
 	return None if frames is None else own_query_deciding_frame(frames)
 
 
+# Known benign false positive: a developer's custom analyzer (the ``optimus_analyzers`` hook) that calls an
+# Optimus helper issuing SQL is kept and logged at ERROR as noise. It loses no data.
 def _developer_code_outside(frames: list, deciding, tracked_apps, installed_apps) -> bool:
 	"""True when, walking outward from ``deciding`` (innermost-first ``frames``), a developer-app frame
 	comes before any known place Optimus runs inside a user's flow (``_is_known_own_entry``). Optimus
@@ -929,6 +931,9 @@ def own_query_verdict(
 
 # Set on a recording by ``strip_own_calls``: how many of its calls were dropped as Optimus's own. The
 # strip can run before the renderer (the analysis, the light loader), so the count rides on the recording.
+# It also persists into the recordings snapshot (the analysis strips the same recording the snapshot saves,
+# so the snapshot's calls are already stripped), and a refreshed report's footer note reads it from there:
+# without it the note would say nothing (pinned by test_analyze_fetch).
 OWN_EXCLUDED_KEY = "_optimus_own_excluded"
 
 

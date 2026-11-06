@@ -14,16 +14,21 @@ from optimus.analyzers.base import _OPTIMUS_HOOK_ENTRY_POINTS, _is_hook_entry_po
 
 PACKAGE = Path(__file__).resolve().parents[1]
 
-# Hook kinds whose handlers Frappe calls from inside the user's code (a save, a read, a permission check).
-USER_FLOW_HOOKS = (
-	"doc_events",
-	"has_permission",
-	"permission_query_conditions",
-	"override_whitelisted_methods",
-	"override_doctype_class",
-	"override_doctype_dashboards",
-	"extend_doctype_class",
-)
+# Hook kinds whose optimus.* handlers Frappe never calls from inside a user's code: an install or migrate
+# step, the boot, the request and job entry points and the scheduler run with only framework frames outside.
+# Every other key in hooks.py is examined, so a NEW hook kind (jinja, on_session_creation, a permission or
+# override kind) fails the guard until it is classified here or its handlers are registered.
+NON_USER_FLOW_HOOKS = frozenset({
+	"after_install",
+	"before_uninstall",
+	"after_migrate",
+	"boot_session",
+	"before_request",
+	"after_request",
+	"before_job",
+	"after_job",
+	"scheduler_events",
+})
 
 # Entry points that are not hooks.py values, with why they are still a frame under a user's SQL call.
 EXTRA_ENTRY_POINTS = {
@@ -50,9 +55,14 @@ def _entry_key(dotted):
 	return module.replace(".", "/") + ".py", function
 
 
+def _hook_kinds(module=hooks):
+	"""Every hook key ``module`` defines (its public attributes), whatever its kind."""
+	return {name for name in vars(module) if not name.startswith("_")}
+
+
 def _user_flow_handlers(module=hooks):
 	found = set()
-	for kind in USER_FLOW_HOOKS:
+	for kind in _hook_kinds(module) - NON_USER_FLOW_HOOKS:
 		for dotted in _dotted_values(getattr(module, kind, None) or {}):
 			if dotted.startswith("optimus."):
 				found.add(_entry_key(dotted))
@@ -61,6 +71,7 @@ def _user_flow_handlers(module=hooks):
 
 def test_there_are_user_flow_hooks_to_classify():
 	assert {"protect_file", "file_has_permission", "mask_error_log"} <= {f for _p, f in _user_flow_handlers()}
+	assert {"doc_events", "has_permission"} <= _hook_kinds() - NON_USER_FLOW_HOOKS
 
 
 def test_every_user_flow_hook_is_classified():
@@ -71,12 +82,47 @@ def test_every_user_flow_hook_is_classified():
 	)
 
 
+def _unclassified(module):
+	return _user_flow_handlers(module) - set(_OPTIMUS_HOOK_ENTRY_POINTS) - set(EXCLUDED)
+
+
 def test_a_newly_added_hook_fails_the_guard():
 	class Planted:
 		doc_events = {"ToDo": {"validate": "optimus.new_module.check_todo"}}
 
-	new = _user_flow_handlers(Planted) - set(_OPTIMUS_HOOK_ENTRY_POINTS) - set(EXCLUDED)
-	assert new == {("optimus/new_module.py", "check_todo")}
+	assert _unclassified(Planted) == {("optimus/new_module.py", "check_todo")}
+
+
+@pytest.mark.parametrize("kind,value", [
+	("jinja", {"methods": ["optimus.jinja_utils.format_value"]}),
+	("on_session_creation", "optimus.session_hooks.on_login"),
+	("permission_query_conditions", {"ToDo": "optimus.perms.query"}),
+	("override_whitelisted_methods", {"frappe.client.get": "optimus.overrides.get"}),
+	("some_future_hook_kind", ["optimus.future.handler"]),
+])
+def test_a_newly_added_hook_kind_fails_the_guard(kind, value):
+	"""A handler under a hook KIND the guard has never seen is unclassified by default."""
+	Planted = type("Planted", (), {kind: value})
+	assert len(_unclassified(Planted)) == 1
+
+
+def test_a_non_user_flow_kind_is_not_examined():
+	Planted = type("Planted", (), {"before_request": ["optimus.hooks_callbacks.new_step"]})
+	assert _unclassified(Planted) == set()
+
+
+def test_the_non_user_flow_set_names_only_kinds_hooks_py_defines():
+	assert NON_USER_FLOW_HOOKS <= _hook_kinds()
+
+
+def test_every_handler_under_a_non_user_flow_kind_is_a_function_that_exists():
+	for kind in NON_USER_FLOW_HOOKS:
+		for dotted in _dotted_values(getattr(hooks, kind)):
+			if not dotted.startswith("optimus."):
+				continue
+			suffix, name = _entry_key(dotted)
+			tree = ast.parse((PACKAGE.parent / suffix).read_text())
+			assert any(isinstance(n, ast.FunctionDef) and n.name == name for n in ast.walk(tree)), dotted
 
 
 def test_the_registry_has_no_stale_entries():

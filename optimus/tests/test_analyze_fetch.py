@@ -536,3 +536,83 @@ def test_one_malformed_frame_or_call_never_fails_the_own_call_strip(monkeypatch,
 	assert [c["query"] for c in recording["calls"] if isinstance(c, dict) and "query" in c] == ["user", "bare"]
 	assert len(lines) == 1 and "dropped 1 of 5" in lines[0][1]
 	assert "optimus/optimus/managed.py:protect_file x1" in lines[0][1]
+
+
+def _persisted_snapshot(monkeypatch, store, rec_uuid):
+	"""Run the real persist step against ``store``; the bundle it would save, decoded."""
+	import frappe
+
+	from optimus import session as ps_session
+
+	monkeypatch.setattr(frappe, "log_error", lambda **kw: None, raising=False)
+	monkeypatch.setattr(ps_session, "get_session_meta", lambda u: {"user": "x@y"}, raising=True)
+	monkeypatch.setattr(frappe, "db", SimpleNamespace(get_value=lambda *a: None, set_value=lambda *a: None))
+	monkeypatch.setattr(analyze, "safe_commit", lambda: None)
+	saved = {}
+	monkeypatch.setattr(
+		analyze, "_save_report_file",
+		lambda *, content, **kw: saved.update(content=content) or "/private/files/snapshot.json.gz",
+		raising=True,
+	)
+	analyze._persist_recordings_file("DOCNAME", "sess-1", [rec_uuid])
+	return json.loads(gzip.decompress(saved["content"]).decode("utf-8"))
+
+
+def test_the_persisted_snapshot_carries_the_own_excluded_count_a_refreshed_footer_reads(monkeypatch):
+	"""The analysis strips the recording it fetched from the cache, and the snapshot persists that same
+	recording: its calls are already stripped, so the stamp is the only record of how many were excluded.
+	A refresh reads the snapshot, so without the stamp its footer note would say nothing."""
+	import frappe
+	from frappe.recorder import RECORDER_REQUEST_HASH
+
+	from optimus import renderer
+	from optimus.analyzers.base import OWN_EXCLUDED_KEY
+	from optimus.tests.test_own_queries_excluded_note import _session_doc
+
+	rec_uuid = "rec-keep"
+	own_calls = [{"query": "select own", "stack": OWN_STACK} for _ in range(3)]
+	store = {
+		(RECORDER_REQUEST_HASH, rec_uuid): {
+			"uuid": rec_uuid, "calls": [*own_calls, {"query": "select user", "stack": USER_STACK}],
+		},
+		f"profiler:tree:{rec_uuid}": _signed_tree({"fake": "tree"}),
+	}
+	monkeypatch.setattr(frappe, "cache", FakeCache(store), raising=False)
+
+	# analysis: fetch, then strip the fetched recordings in place
+	recordings = list(analyze._fetch_recordings([rec_uuid]))
+	_strip(monkeypatch, recordings)
+	assert recordings[0][OWN_EXCLUDED_KEY] == 3
+
+	# persist: the snapshot's recording is already stripped and carries the stamp
+	bundle = _persisted_snapshot(monkeypatch, store, rec_uuid)
+	persisted = bundle["recordings"][rec_uuid]["rec"]
+	assert [c["query"] for c in persisted["calls"]] == ["select user"]
+	assert persisted[OWN_EXCLUDED_KEY] == 3
+
+	# refresh: Redis is gone, the light loader reads the snapshot and the footer still counts
+	monkeypatch.setattr(frappe, "cache", FakeCache({}), raising=False)
+	monkeypatch.setattr(analyze, "_load_recordings_bundle", lambda doc: bundle)
+	light = analyze.load_recordings_light(
+		SimpleNamespace(name="fake-doc", session_uuid="sess-1", recordings_file="fake-file"), [rec_uuid]
+	)
+	assert light[0][OWN_EXCLUDED_KEY] == 3
+	html = renderer.render(_session_doc(), recordings=light)
+	assert "3 queries from Optimus&#39;s own code were excluded from this report" in html
+
+
+def test_a_snapshot_with_nothing_excluded_carries_no_stamp(monkeypatch):
+	import frappe
+	from frappe.recorder import RECORDER_REQUEST_HASH
+
+	from optimus.analyzers.base import OWN_EXCLUDED_KEY
+
+	rec_uuid = "rec-clean"
+	store = {
+		(RECORDER_REQUEST_HASH, rec_uuid): {"uuid": rec_uuid, "calls": [{"query": "q", "stack": USER_STACK}]},
+		f"profiler:tree:{rec_uuid}": _signed_tree({"fake": "tree"}),
+	}
+	monkeypatch.setattr(frappe, "cache", FakeCache(store), raising=False)
+	_strip(monkeypatch, list(analyze._fetch_recordings([rec_uuid])))
+	bundle = _persisted_snapshot(monkeypatch, store, rec_uuid)
+	assert OWN_EXCLUDED_KEY not in bundle["recordings"][rec_uuid]["rec"]
