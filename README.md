@@ -132,11 +132,13 @@ read-only sections:
      download URL bypasses the hook and grants access to anyone who
      can read the parent Optimus Session, including a read-sharee.
    - **Re-analyze**: re-runs the analyze pipeline from the captured
-     recordings (which live in Redis for 10 minutes after Stop).
+     recordings. Call trees and timings expire from Redis 6 hours after
+     they are captured; the SQL recordings stay until the session is
+     analyzed or cleaned up, so SQL findings can still be recomputed.
      Useful when a session ends `Failed` because of a transient
-     error. After 10 minutes the recordings are gone re-analyze
-     can still re-render reports from the persisted DocType data,
-     but cannot recompute findings.
+     error. Once the SQL recordings are gone re-analyze can still
+     re-render reports from the persisted DocType data, but cannot
+     recompute findings.
    - **Regenerate Reports**: re-renders both HTML files from the
      persisted Action/Finding rows. Cheaper than a full re-analyze;
      useful after an Optimus upgrade that improves the renderer. It
@@ -454,7 +456,8 @@ Background jobs spawned by the recording user's actions are automatically captur
 | Cap | Default | Configurable via |
 |---|---|---|
 | Max recordings per session | 200 | `optimus_max_recordings_per_session` |
-| Session duration | 10 minutes | (matches recorder TTL, not configurable) |
+| Idle timeout | 10 minutes | The session stops after 10 minutes without activity (matches recorder TTL, not configurable) |
+| Captured data retention | 6 hours | Per-request call trees, infrastructure readings and browser timings expire from Redis 6 hours after capture (`optimus/timing.py`), or when analysis completes and cleans them up. SQL recordings have no expiry and stay until the session is analyzed or cleaned up |
 | Analyze total wall clock | 20 minutes | (5-min headroom under RQ long-queue 25-min timeout) |
 | Per-analyzer soft cap | 60 seconds | (soft warning, doesn't halt) |
 | Inline-analyze recording count (scheduler-disabled path) | 50 | `optimus_inline_analyze_limit` |
@@ -651,6 +654,8 @@ sections. The index setting is read-only and has no effect.
 and Steps document names/session title are omitted unless explicitly enabled.
 Code, finding titles and schema names can still contain private information.
 Use type exclusions or disable AI when sharing that context is unacceptable.
+Captured request data stays in Redis until analysis completes and cleans
+it up; call trees and timings also expire 6 hours after capture.
 Settings changes are recorded in Version history. Provider URLs are validated,
 and changing the destination clears an unchanged stored key. See the
 [security boundaries and deployment limits](SECURITY.md) and

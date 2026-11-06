@@ -28,6 +28,7 @@ from functools import wraps
 
 from optimus import redis_keys as _redis_keys
 from optimus.line_profile import diff
+from optimus.timing import SESSION_TTL_SECONDS
 
 # ---------------------------------------------------------------------------
 # Optional dependencies guarded so the pure layer loads everywhere
@@ -88,7 +89,6 @@ def _require_line_profiler() -> None:
 # byte-identical to the pre-v0.12.20 local helpers, so on-disk Redis
 # values from older bench versions resolve unchanged.
 
-SESSION_TTL_SECONDS = 10 * 60  # match phase-1's session TTL
 DATA_TTL_SECONDS = 24 * 60 * 60  # orphaned inputs must not survive indefinitely
 
 

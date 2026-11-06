@@ -108,6 +108,18 @@ def _install_frappe_stub(monkeypatch):
 	analyze_mod.is_singleflight_holder = lambda uuid: uuid is not None and uuid == stub._holder_uuid
 	monkeypatch.setitem(sys.modules, "optimus.analyze", analyze_mod)
 
+	# api.claim_for_stop locks the row and moves it Recording -> Stopping, returning
+	# its name, or None when the row already left Recording. Tests list the rows
+	# another caller already took in stub._taken.
+	stub._taken = set()
+	stub._claimed = []
+	api_mod = types.ModuleType("optimus.api")
+	def claim_for_stop(name):
+		stub._claimed.append(name)
+		return None if name in stub._taken else name
+	api_mod.claim_for_stop = claim_for_stop
+	monkeypatch.setitem(sys.modules, "optimus.api", api_mod)
+
 	return stub
 
 
@@ -125,7 +137,7 @@ def _reload_janitor(monkeypatch):
 # --------------------------------------------------------------------------
 
 class TestSweepStaleRecording:
-	def test_one_set_value_call_for_N_rows(self, monkeypatch):
+	def test_each_stale_row_is_claimed_and_analyzed_once(self, monkeypatch):
 		stub = _install_frappe_stub(monkeypatch)
 		stub._get_all_return["Optimus Session"] = [
 			{"name": "PS-1", "session_uuid": "u1", "user": "a@b.com"},
@@ -135,23 +147,30 @@ class TestSweepStaleRecording:
 		janitor = _reload_janitor(monkeypatch)
 		janitor._sweep_stale_recording()
 
-		# EXACTLY ONE set_value call, filtered by name IN [...].
-		set_value_calls = [c for c in stub._set_value_calls if c[0] == "Optimus Session"]
-		assert len(set_value_calls) == 1
-		doctype, filters, fields = set_value_calls[0]
-		assert doctype == "Optimus Session"
-		assert filters == {"name": ("in", ["PS-1", "PS-2", "PS-3"])}
-		assert fields["status"] == "Stopping"
-		assert "stopped_at" in fields
-		# Per-row enqueue side effects still fire once per row.
-		assert len(stub._enqueue_calls) == 3
+		assert stub._claimed == ["PS-1", "PS-2", "PS-3"]
+		assert [c[1]["session_uuid"] for c in stub._enqueue_calls] == ["u1", "u2", "u3"]
+		# No unlocked bulk status write: the claim does the transition under a row lock.
+		assert [c for c in stub._set_value_calls if c[0] == "Optimus Session"] == []
 
-	def test_no_set_value_when_no_stale_rows(self, monkeypatch):
+	def test_a_row_another_caller_already_took_is_not_analyzed_a_second_time(self, monkeypatch):
+		"""A Stop click that won the race has already queued analyze for this row."""
+		stub = _install_frappe_stub(monkeypatch)
+		stub._get_all_return["Optimus Session"] = [
+			{"name": "PS-TAKEN", "session_uuid": "u-taken", "user": "a@b.com"},
+			{"name": "PS-FREE", "session_uuid": "u-free", "user": "c@d.com"},
+		]
+		stub._taken = {"PS-TAKEN"}
+		janitor = _reload_janitor(monkeypatch)
+		janitor._sweep_stale_recording()
+
+		assert [c[1]["session_uuid"] for c in stub._enqueue_calls] == ["u-free"]
+
+	def test_no_claim_when_no_stale_rows(self, monkeypatch):
 		stub = _install_frappe_stub(monkeypatch)
 		stub._get_all_return["Optimus Session"] = []
 		janitor = _reload_janitor(monkeypatch)
 		janitor._sweep_stale_recording()
-		assert stub._set_value_calls == []
+		assert stub._claimed == [] and stub._enqueue_calls == []
 
 	def test_live_recording_with_active_pointer_is_not_stopped(self, monkeypatch):
 		"""A long but LIVE recording (Redis active pointer still points to it)
@@ -166,11 +185,8 @@ class TestSweepStaleRecording:
 		janitor = _reload_janitor(monkeypatch)
 		janitor._sweep_stale_recording()
 
-		set_value_calls = [c for c in stub._set_value_calls if c[0] == "Optimus Session"]
-		assert len(set_value_calls) == 1
-		_, filters, _ = set_value_calls[0]
-		assert filters == {"name": ("in", ["PS-GONE"])}     # only the walked-away one
-		assert len(stub._enqueue_calls) == 1                # analyze enqueued once
+		assert stub._claimed == ["PS-GONE"]
+		assert len(stub._enqueue_calls) == 1
 
 	def test_pointer_moved_to_new_session_is_kept(self, monkeypatch):
 		"""Stopping a stale session must not clear a pointer that now names the user's new session."""

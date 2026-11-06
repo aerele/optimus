@@ -12,17 +12,8 @@ row ``Stopping`` and enqueue analyze.run (which retries once, then ``Failed``).
 import frappe
 from frappe.utils import add_to_date, now_datetime
 
-from optimus import safe_commit, session
-
-# Sessions stuck in Recording for longer than this are force-stopped.
-# This is intentionally longer than the Redis TTL (10 minutes) to give
-# the natural auto-stop a chance to work first.
-STALE_RECORDING_MINUTES = 11
-
-# Sessions stuck in Analyzing longer than this are assumed to have a
-# crashed worker. The analyze job's RQ timeout is 25 minutes (long
-# queue), so we wait a bit more before declaring it dead.
-STALE_ANALYZING_MINUTES = 30
+from optimus import safe_call, safe_commit, session
+from optimus.timing import STALE_ANALYZING_MINUTES, STALE_RECORDING_MINUTES
 
 # Default retention for successfully-analyzed sessions. After this many
 # days, sessions in Ready or Failed state are deleted by the daily
@@ -32,6 +23,12 @@ DEFAULT_RETENTION_DAYS = 90
 # Hard cap on how many sessions we delete per run. Prevents a single
 # janitor call from locking up the DB on a site with a huge backlog.
 MAX_DELETIONS_PER_RUN = 100
+
+# A Ready session's own Redis cleanup runs within this long of it turning Ready.
+READY_CLEANUP_GRACE_HOURS = 1
+
+# A line about the orphan sweep is written at most this often per worker.
+_SWEEP_LOG_DEDUPE_SECONDS = 6 * 60 * 60
 
 
 def sweep_stale_sessions():
@@ -115,11 +112,13 @@ def _sweep_failed_snapshot_inputs():
 
 
 def _sweep_orphan_redis_state():
-	"""Delete profiler:session:*:* Redis keys with no matching Optimus Session
-	row (leaked by analyzes that failed and never retried).
+	"""Clean the Redis state of sessions that no longer need it: those with no
+	Optimus Session row (leaked by analyzes that failed and never retried, or a
+	deleted Failed row) and Ready ones a late background job left keys on.
 
-	Safe to run repeatedly. Uses SCAN with small batches so large keyspaces
-	don't block Redis.
+	Each goes through ``analyze._cleanup_redis``, which removes its recordings'
+	entries too, not just the session keys. Safe to run repeatedly. Uses SCAN
+	with small batches so large keyspaces don't block Redis.
 	"""
 	from optimus import redis_keys
 
@@ -142,7 +141,8 @@ def _sweep_orphan_redis_state():
 	# are frontend metrics is still discovered. (profiler:session:<uuid>:* and
 	# profiler:frontend:<uuid>:*). Per-RECORDING keys profiler:tree/sidecar/
 	# infra:<recording_uuid> carry a recording uuid (no session linkage in the
-	# key), so they can't be orphan-checked here; they rely on SESSION_TTL expiry.
+	# key), so they can't be orphan-checked here; they expire after
+	# RECORDING_DATA_TTL_SECONDS (optimus/timing.py) or go with their session's cleanup.
 	markers = ("profiler:session:", "profiler:frontend:")
 
 	# Collect session UUIDs from the Redis keyspace
@@ -170,47 +170,48 @@ def _sweep_orphan_redis_state():
 	if not uuids_in_redis:
 		return
 
-	# Batch the existence check via a single IN query
-	existing_rows = frappe.db.get_all(
-		"Optimus Session",
-		filters={"session_uuid": ["in", list(uuids_in_redis)]},
-		fields=["session_uuid"],
+	rows = {
+		row["session_uuid"]: row
+		for row in frappe.db.get_all(
+			"Optimus Session",
+			filters={"session_uuid": ["in", list(uuids_in_redis)]},
+			fields=["session_uuid", "status", "modified"],
+		)
+	}
+	# A Ready session no longer needs its Redis state; a late background job re-creates
+	# some after the session's own cleanup ran. Give a session that only just finished
+	# time to run that cleanup, which still reads Redis, before removing it here.
+	ready_cutoff = add_to_date(now_datetime(), hours=-READY_CLEANUP_GRACE_HOURS)
+	orphans = sorted(uuids_in_redis - rows.keys())
+	leftovers = sorted(
+		uuid for uuid, row in rows.items() if row["status"] == "Ready" and row["modified"] < ready_cutoff
 	)
-	existing_uuids = {r["session_uuid"] for r in existing_rows}
-	orphan_uuids = uuids_in_redis - existing_uuids
+	cleaned_orphans = orphans[:MAX_DELETIONS_PER_RUN]
+	cleaned_leftovers = leftovers[: MAX_DELETIONS_PER_RUN - len(cleaned_orphans)]
 
-	if not orphan_uuids:
-		return
+	cleaned_orphans = [uuid for uuid in cleaned_orphans if _cleaned_up(uuid)]
+	cleaned_leftovers = [uuid for uuid in cleaned_leftovers if _cleaned_up(uuid)]
 
-	# Delete ALL per-session keys for each orphan (redis_keys is the inventory).
-	# The earlier sweep deleted only :meta + :recordings, leaving :pending_jobs,
-	# :jobs and the three frontend keys to leak forever.
-	deleted = 0
-	for uuid in orphan_uuids:
-		for builder in (
-			redis_keys.session_meta,
-			redis_keys.session_recordings,
-			redis_keys.session_pending_jobs,
-			redis_keys.session_jobs,
-			redis_keys.frontend_xhr,
-			redis_keys.frontend_vitals,
-			redis_keys.frontend_legacy,
-		):
-			key = f"{site_prefix}{builder(uuid)}"
-			try:
-				if redis_conn.delete(key):
-					deleted += 1
-			except Exception:
-				pass
+	# frappe.logger() is silent at the production level, so use the helper that writes at ERROR.
+	if cleaned_orphans:
+		safe_call.log_error_line(
+			f"optimus orphan sweep cleaned Redis state of {len(cleaned_orphans)} sessions with no row",
+			dedupe_seconds=_SWEEP_LOG_DEDUPE_SECONDS,
+		)
+	if cleaned_leftovers:
+		safe_call.log_error_line(
+			f"optimus orphan sweep cleaned Redis state left on {len(cleaned_leftovers)} Ready sessions "
+			"(expected after a background job finished late)",
+			dedupe_seconds=_SWEEP_LOG_DEDUPE_SECONDS,
+		)
 
-	if deleted:
-		try:
-			frappe.logger().info(
-				f"optimus orphan sweep deleted {deleted} Redis keys "
-				f"across {len(orphan_uuids)} orphaned sessions"
-			)
-		except Exception:
-			pass
+
+def _cleaned_up(uuid: str) -> bool:
+	"""Clean one session's Redis state; True only when its recordings set is really gone."""
+	from optimus import analyze
+
+	analyze._cleanup_redis(uuid, [])  # lists the registered recordings itself
+	return not session.get_recordings(uuid)
 
 
 def _sweep_old_sessions():
@@ -355,16 +356,14 @@ def _sweep_stale_recording():
 	if not stale:
 		return
 
-	# v0.6.x: single batched UPDATE for every stale row instead of one
-	# UPDATE+COMMIT per row (was N round-trips on a backlog).
-	frappe.db.set_value(
-		"Optimus Session",
-		{"name": ("in", [r["name"] for r in stale])},
-		{"status": "Stopping", "stopped_at": now_datetime()},
-	)
-	safe_commit()
+	from optimus.api import claim_for_stop
 
 	for row in stale:
+		# Locked per-row transition: a Stop click may have taken this row since the
+		# query above, and it has queued analyze already. Analyze only what we changed.
+		if not claim_for_stop(row["name"]):
+			continue
+
 		# Clear the pointer only while it still names this session; the user may have started a new one.
 		try:
 			if session.get_active_session_for(row["user"]) == row["session_uuid"]:

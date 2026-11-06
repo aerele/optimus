@@ -519,7 +519,7 @@
 						<div style="background: #fffbeb; border: 1px solid #fbbf24; border-radius: 4px; padding: 10px 12px; margin-top: 10px; font-size: 0.85rem; color: #92400e;">
 							<strong>Note:</strong> Recording adds ~1.5–2× wall-clock overhead per request while it's running.
 							Only your traffic will be captured other users on this site are not affected.
-							The session auto-stops after 10 minutes.
+							The session auto-stops after 10 minutes without activity, and stops recording once it reaches the per-session request limit. Captured data stays in Redis for up to 6 hours, until analysis completes.
 						</div>
 					`,
 				},

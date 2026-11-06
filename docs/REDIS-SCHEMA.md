@@ -68,18 +68,18 @@ when you add a new key; the audit test asserts this table matches
 
 | Pattern | Value | Encoding | TTL | Notes |
 |---|---|---|---|---|
-| `profiler:tree:<recording_uuid>` | bytes | **HMAC-signed pickle** | `SESSION_TTL_SECONDS` | 32-byte HMAC-SHA256 prefix + pickled pyinstrument `Profiler.last_session`. See § 6 "HMAC envelope". |
-| `profiler:sidecar:<recording_uuid>` | list[dict] | Frappe pickle | `SESSION_TTL_SECONDS` | Argument-log entries; optional `{"_truncated": True}` tail marker. |
-| `profiler:infra:<recording_uuid>` | dict | Frappe pickle | `SESSION_TTL_SECONDS` | CPU / RAM / DB / RQ delta. |
-| `profiler:resolved_doc:<recording_uuid>` | dict | Frappe pickle | `SESSION_TTL_SECONDS` | A created doc's save-assigned `{doctype, name}`, written by `after_request` and merged onto the recording as `resolved_target_doc` at analyze time. |
-| `profiler:lock_events:<recording_uuid>` | list[dict] | Frappe pickle | `SESSION_TTL_SECONDS` | DB lock-contention events (deadlocks / lock-wait timeouts) captured by `optimus.capture`'s class-level `Database.sql` patch; read into `rec["lock_events"]` by the lock_contention analyzer. Each entry: `kind`, `normalized_query`, `error` (first line only), `caller_stack` (the user callsite plus a short tail), `duration_ms`, `time`. |
+| `profiler:tree:<recording_uuid>` | bytes | **HMAC-signed pickle** | `RECORDING_DATA_TTL_SECONDS` (6 h, until cleanup) | 32-byte HMAC-SHA256 prefix + pickled pyinstrument `Profiler.last_session`. See § 6 "HMAC envelope". |
+| `profiler:sidecar:<recording_uuid>` | list[dict] | Frappe pickle | `RECORDING_DATA_TTL_SECONDS` (6 h, until cleanup) | Argument-log entries; optional `{"_truncated": True}` tail marker. |
+| `profiler:infra:<recording_uuid>` | dict | Frappe pickle | `RECORDING_DATA_TTL_SECONDS` (6 h, until cleanup) | CPU / RAM / DB / RQ delta. |
+| `profiler:resolved_doc:<recording_uuid>` | dict | Frappe pickle | `RECORDING_DATA_TTL_SECONDS` (6 h, until cleanup) | A created doc's save-assigned `{doctype, name}`, written by `after_request` and merged onto the recording as `resolved_target_doc` at analyze time. |
+| `profiler:lock_events:<recording_uuid>` | list[dict] | Frappe pickle | `RECORDING_DATA_TTL_SECONDS` (6 h, until cleanup) | DB lock-contention events (deadlocks / lock-wait timeouts) captured by `optimus.capture`'s class-level `Database.sql` patch; read into `rec["lock_events"]` by the lock_contention analyzer. Each entry: `kind`, `normalized_query`, `error` (first line only), `caller_stack` (the user callsite plus a short tail), `duration_ms`, `time`. |
 
 ### 2.3 Frontend metrics (v0.5.0+ split lists)
 
 | Pattern | Value | Encoding | TTL | Notes |
 |---|---|---|---|---|
-| `profiler:frontend:<session_uuid>:xhr` | list | Frappe pickle (entries) | `SESSION_TTL_SECONDS` (set via `expire_key`) | LTRIM'd to 1000 entries. |
-| `profiler:frontend:<session_uuid>:vitals` | list | Frappe pickle (entries) | `SESSION_TTL_SECONDS` | LTRIM'd to 200 entries. |
+| `profiler:frontend:<session_uuid>:xhr` | list | Frappe pickle (entries) | `RECORDING_DATA_TTL_SECONDS` (6 h, set via `expire_key`) | LTRIM'd to 1000 entries. |
+| `profiler:frontend:<session_uuid>:vitals` | list | Frappe pickle (entries) | `RECORDING_DATA_TTL_SECONDS` (6 h, until cleanup) | LTRIM'd to 200 entries. |
 | `profiler:frontend:<session_uuid>` | dict (legacy) | Frappe pickle | none | Pre-v0.5.1 combined shape. No code writes this any more; `delete_session_state` cleans it as a safety net for in-flight benches. |
 
 ### 2.4 line-profile run state
@@ -258,7 +258,7 @@ Adding a Redis-backed feature? Four steps:
    - The audit test `test_redis_keys_match_documented_schema` will fail if you forget; it's a one-line edit.
 
 3. **Decide the TTL.**
-   - Per-session/per-recording artefacts: `SESSION_TTL_SECONDS` + delete in `delete_session_state` / `cleanup_run`.
+   - Per-session/per-recording artefacts: `RECORDING_DATA_TTL_SECONDS` (`optimus/timing.py`) + delete in `delete_session_state` / `cleanup_run`.
    - Cross-session caches: an explicit `expires_in_sec` or a manual invalidation hook.
    - If neither applies, document the policy here.
 
