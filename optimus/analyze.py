@@ -296,6 +296,22 @@ def _note_heartbeat_problem(session_uuid: str, problem: str) -> None:
 	safe_call.log_error_line(f"optimus: analyze {session_uuid}: {problem}")
 
 
+def _sql_off_warning(recordings: list[dict]) -> str | None:
+	"""One plain note when some actions shared a Frappe Recorder that had SQL recording off."""
+	count = 0
+	for rec in recordings:
+		rec_uuid = rec.get("uuid")
+		if rec_uuid and frappe.cache.get_value(_redis_keys.sql_off(rec_uuid)):
+			count += 1
+	if not count:
+		return None
+	subject = "1 action was" if count == 1 else f"{count} actions were"
+	return (
+		f"{subject} recorded while Frappe's Recorder was running with SQL recording "
+		"turned off, so their queries are missing."
+	)
+
+
 def _touch_singleflight(session_uuid: str) -> bool:
 	"""Refresh the single-flight flag's TTL while this session holds it, or take it back
 	when it lapsed and nobody took it. Never writes over another session's flag (taken
@@ -934,6 +950,10 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		meta = session.get_session_meta(session_uuid) or {}
 		if meta.get("cap_warning"):
 			context.warnings.append(meta["cap_warning"])
+
+		sql_off_warning = _sql_off_warning(recordings)
+		if sql_off_warning:
+			context.warnings.append(sql_off_warning)
 
 		# v0.5.0: load the frontend metrics posted by optimus_frontend.js
 		# for consumption by the frontend_timings analyzer. Reads from the
@@ -3624,5 +3644,9 @@ def _cleanup_redis(session_uuid: str, recording_uuids: list[str]) -> None:
 			pass  # best-effort cleanup
 		try:
 			frappe.cache.delete_value(_redis_keys.resolved_doc(uuid))
+		except Exception:
+			pass
+		try:
+			frappe.cache.delete_value(_redis_keys.sql_off(uuid))
 		except Exception:
 			pass

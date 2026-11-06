@@ -93,7 +93,7 @@ def test_emitted_event_type_is_a_select_option():
 
 @pytest.mark.parametrize("hostile", [["Background Job"], {"a": 1}, None, 5, "x" * 5000, "Background Job "])
 def test_hostile_event_type_never_raises_and_is_not_a_job(hostile):
-	rec = {**_job_v16(), "event_type": hostile}
+	rec = {**HTTP_V16, "event_type": hostile, "cmd": None, "method": "GET", "path": "/" + JOB_PATH}
 	assert not per_action.is_background_job(hostile)
 	assert per_action._label(rec).startswith("GET ")
 	per_action.humanized_label(rec)
@@ -284,3 +284,44 @@ def test_actions_carry_no_inline_finding_field():
 	actions = [{"action_label": "save", "duration_ms": 1}]
 	out = build_report_context(_doc(), _ctx(actions=actions, findings=findings))
 	assert all("finding_inline_html" not in a for a in out["actions"] + out["actions_framework"])
+
+
+UNKNOWN_JOB_TYPES = ["Function Call", "RQ Job", None, "", "Scheduled Job"]
+
+
+@pytest.mark.parametrize("event_type", UNKNOWN_JOB_TYPES)
+def test_job_shaped_recording_of_any_type_emits_a_valid_select_option(event_type):
+	field = next(f for f in json.loads(ACTION_JSON.read_text())["fields"] if f["fieldname"] == "event_type")
+	action = per_action._build_action({**_job_v16(), "event_type": event_type})
+	assert action["event_type"] == "Background Job"
+	assert action["event_type"] in field["options"].split("\n")
+	assert action["action_label"] == JOB_LABEL
+
+
+@pytest.mark.parametrize("event_type", ["Function Call", None, "", "Other"])
+def test_request_shaped_recording_of_any_type_is_an_http_request(event_type):
+	action = per_action._build_action({**HTTP_V16, "event_type": event_type})
+	assert action["event_type"] == "HTTP Request"
+	assert action["action_label"] == "frappe.client.save"
+
+
+def test_path_with_a_leading_slash_and_no_method_is_an_http_request():
+	rec = {**HTTP_V16, "event_type": "Function Call", "method": None, "cmd": None}
+	assert per_action._build_action(rec)["event_type"] == "HTTP Request"
+
+
+def test_pathless_unknown_recording_is_a_job_with_a_bare_label():
+	rec = {"uuid": "x", "event_type": "Function Call", "duration": 1.0, "calls": []}
+	action = per_action._build_action(rec)
+	assert action["event_type"] == "Background Job"
+	assert action["action_label"] == "RQ Job"
+
+
+def test_unknown_type_with_only_a_method_is_an_http_request():
+	rec = {"uuid": "x", "event_type": "Function Call", "method": "GET", "path": "x", "calls": []}
+	assert per_action._build_action(rec)["event_type"] == "HTTP Request"
+
+
+def test_unknown_type_with_only_a_cmd_is_an_http_request():
+	rec = {"uuid": "x", "event_type": "Function Call", "cmd": "frappe.ping", "path": "x", "calls": []}
+	assert per_action._build_action(rec)["event_type"] == "HTTP Request"

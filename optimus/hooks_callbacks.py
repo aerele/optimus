@@ -9,7 +9,7 @@ that request only (per-user isolation: other users' concurrent traffic is NOT
 recorded). After the request, the new recording UUID is registered with the
 session so the analyze pipeline can find every recording in a flow.
 
-Activation uses ``frappe.recorder.record(force=True)`` rather than
+Activation uses ``frappe.recorder.record(force=True)`` (via ``capture.record_forced``) rather than
 ``frappe.recorder.start()`` (which would record every request from every
 user). Frappe's own ``after_request`` runs before ours, so the recording is
 already dumped to Redis by the time we register its UUID.
@@ -55,6 +55,24 @@ _IGNORED_CMD_PREFIXES = (
 	# plumbing, not user code.
 	"frappe.core.doctype.recorder.recorder.",
 )
+
+
+def _has_live_recorder() -> bool:
+	"""True when Frappe's own Recorder is already recording this request or job."""
+	recorder = getattr(frappe.local, "_recorder", None)
+	return recorder is not None and _capture.is_recording(recorder)
+
+
+def _flag_sql_recording_off(recorder, recording_uuid) -> None:
+	"""Remember a recording whose shared Frappe Recorder had SQL recording off (its queries are missing)."""
+	config = getattr(recorder, "config", None)
+	if getattr(config, "record_sql", True):
+		return
+	from optimus import redis_keys
+
+	frappe.cache.set_value(
+		redis_keys.sql_off(recording_uuid), True, expires_in_sec=session.SESSION_TTL_SECONDS
+	)
 
 
 def _extract_cmd_from_request() -> str:
@@ -237,7 +255,7 @@ def before_request(*args, **kwargs):
 		# instance do NOT create a second Recorder because that would
 		# overwrite frappe.local._recorder and orphan the first one's
 		# SQL patch, corrupting both recordings.
-		if getattr(frappe.local, "_recorder", None) is not None:
+		if _has_live_recorder():
 			return
 
 		# Force-activate the existing recorder for THIS request only.
@@ -245,7 +263,7 @@ def before_request(*args, **kwargs):
 		# global RECORDER_INTERCEPT_FLAG, leaving the standalone
 		# Recorder UI's flag untouched.
 		# (frappe.recorder is imported at module top see comment there.)
-		frappe.recorder.record(force=True)
+		_capture.record_forced()
 
 		# v0.5.1: snapshot infra metrics FIRST, BEFORE pyinstrument starts.
 		# Pre-v0.5.1 the order was reversed: _start_pyi_session was called
@@ -303,6 +321,8 @@ def after_request(*args, **kwargs):
 		recording_uuid = getattr(recorder, "uuid", None)
 		if not recording_uuid:
 			return
+
+		_flag_sql_recording_off(recorder, recording_uuid)
 
 		# Pass the current user so register_recording can refresh the
 		# active-session TTL (Round 2 fix #2) without re-reading meta.
@@ -538,11 +558,11 @@ def before_job(method=None, kwargs=None, **rest):
 		# Same clobber protection as before_request: if the standalone
 		# recorder already activated (global flag + frappe's own
 		# before_job hook), piggyback on its instance.
-		if getattr(frappe.local, "_recorder", None) is not None:
+		if _has_live_recorder():
 			return
 
 		# (frappe.recorder is imported at module top see comment there.)
-		frappe.recorder.record(force=True)
+		_capture.record_forced()
 
 		# v0.5.1: snapshot BEFORE _start_pyi_session mirrors the order
 		# fix in before_request. See the rationale comment there.
@@ -579,6 +599,8 @@ def after_job(method=None, kwargs=None, result=None, **rest):
 		recording_uuid = getattr(recorder, "uuid", None)
 		if not recording_uuid:
 			return
+
+		_flag_sql_recording_off(recorder, recording_uuid)
 
 		user = getattr(frappe.session, "user", None)
 		registered = session.register_recording(
