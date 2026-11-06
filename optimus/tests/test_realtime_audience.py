@@ -74,3 +74,15 @@ def test_emitter_failure_still_attempts_document_room(audience, monkeypatch):
 	monkeypatch.setattr(frappe, "publish_realtime", emit)
 	realtime.publish_session_event("private", {"docname": "session-doc"})
 	assert len(audience.calls) == 2
+
+
+def test_session_title_is_added_to_the_event(audience):
+	audience.row = {"name": "session-doc", "user": "recorder@example.invalid", "title": "Quote flow"}
+	analyze._publish_session_event("optimus_session_ready", session_uuid="session-uuid", docname="session-doc")
+	assert audience.calls and all(payload["title"] == "Quote flow" for _, payload, _ in audience.calls)
+	assert audience.lookups[0][0][2] == ["name", "user", "title"]
+
+
+def test_event_has_no_title_key_for_an_untitled_session(audience):
+	analyze._publish_session_event("optimus_session_ready", session_uuid="session-uuid", docname="session-doc")
+	assert audience.calls and all("title" not in payload for _, payload, _ in audience.calls)
