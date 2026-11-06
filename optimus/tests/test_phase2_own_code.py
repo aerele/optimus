@@ -186,11 +186,14 @@ class TestOptimusCodeIsNotProfiled:
 		assert [m["dotted_path"] for m in json.loads(prepared.picks_json)] == ["zz_p2app.api.plain"]
 
 	def test_all_ineligible_names_each_pick_and_its_reason(self, app):
-		with pytest.raises(capture.CaptureError) as caught:
+		with pytest.raises(capture.NoEligiblePickError) as caught:
 			capture.prepare_line_profile_picks([{"dotted_path": "optimus.analyzers.base.is_optimus_path"}])
 		assert str(caught.value) == (
 			f"No selected function can be line-profiled: optimus.analyzers.base.is_optimus_path: {OWN_CODE_REASON}"
 		)
+
+	def test_the_no_eligible_error_is_a_capture_error_so_the_manual_path_still_shows_it(self):
+		assert issubclass(capture.NoEligiblePickError, capture.CaptureError)
 
 	def test_all_ineligible_lists_at_most_five_picks_and_no_filesystem_paths(self, app, monkeypatch):
 		def refuse(dotted):
@@ -227,3 +230,17 @@ class TestOptimusCodeIsNotProfiled:
 		assert not picker.is_optimus_code_file("<server_script: x>")
 		assert not picker.is_optimus_code_file("")
 		assert not picker.is_optimus_code_file(None)
+
+	@pytest.mark.parametrize("error", [OSError("unreadable"), ValueError("embedded null byte")])
+	def test_a_path_that_cannot_be_resolved_is_not_own_code(self, monkeypatch, error):
+		def refuse(path):
+			raise error
+
+		monkeypatch.setattr(picker.os.path, "realpath", refuse)
+		assert not picker.is_optimus_code_file("/any/path/capture.py")
+
+	def test_a_run_without_any_reason_still_gets_the_plain_message(self, app, monkeypatch):
+		monkeypatch.setattr(picker, "resolve_freeform", lambda dotted: {"dotted_path": dotted, "eligible": False})
+		with pytest.raises(capture.NoEligiblePickError) as caught:
+			capture.prepare_line_profile_picks([{"dotted_path": "zz_p2app.api.plain"}])
+		assert str(caught.value) == "No selected function has eligible source. Check the selected paths."

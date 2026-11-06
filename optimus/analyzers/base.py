@@ -687,17 +687,31 @@ _FRAPPE_PATH_RE = re.compile(r"(?:^|/)frappe/")
 
 
 def is_optimus_path(filename: str | None) -> bool:
-	"""True if ``filename`` is inside the Optimus app, not a user app's ``optimus/`` folder."""
-	if not filename:
+	"""True if ``filename`` is inside the Optimus app, not a user app's ``optimus/`` folder.
+
+	This reads the filename TEXT of a recorded stack frame, which may come from another machine
+	or an older session, so it cannot resolve real paths. Live code is checked the other way, by
+	``optimus.line_profile.picker.is_optimus_code_file`` (realpath against the installed package).
+	The two stay separate on purpose: change one rule, check the other."""
+	if not isinstance(filename, str) or not filename:
 		return False
 	return bool(_OPTIMUS_PATH_RE.search(filename.replace("\\", "/")))
 
 
 def is_frappe_path(filename: str | None) -> bool:
 	"""True if ``filename`` is inside the Frappe app (matched on a path boundary)."""
-	if not filename:
+	if not isinstance(filename, str) or not filename:
 		return False
 	return bool(_FRAPPE_PATH_RE.search(filename.replace("\\", "/")))
+
+
+def _frame_filename(frame) -> str:
+	"""A frame's filename with forward slashes, or "" for a malformed frame (not a dict, or a
+	missing or non-string filename), so one bad frame is skipped instead of failing the walk."""
+	if not isinstance(frame, dict):
+		return ""
+	filename = frame.get("filename")
+	return filename.replace("\\", "/") if isinstance(filename, str) else ""
 
 
 # The Error Log hook's module. It reads the stored AI key on every Error Log
@@ -719,9 +733,7 @@ def is_error_log_hook_query(stack: list | None) -> bool:
 	if not stack:
 		return False
 	for frame in reversed(stack):
-		if not isinstance(frame, dict):
-			continue
-		filename = (frame.get("filename") or "").replace("\\", "/")
+		filename = _frame_filename(frame)
 		if not filename:
 			continue
 		if is_optimus_path(filename):
@@ -755,29 +767,33 @@ def _pass_through_targets(filename: str, function) -> frozenset[str] | None:
 	return None
 
 
-def own_query_innermost_first(frames) -> bool:
-	"""``is_profiler_own_query`` over an iterable of frames, innermost first, read lazily so the
-	walk ends at the first deciding frame."""
+def own_query_deciding_frame(frames) -> dict | None:
+	"""The Optimus frame that makes a call Optimus's own, or None when the call is not its own.
+	``frames`` runs innermost first and is read lazily so the walk ends at the deciding frame.
+	A malformed frame (see ``_frame_filename``) is skipped."""
 	inside = None  # function name of the Frappe frame just inside ("" when unnamed), else None
 	for frame in frames:
-		if not isinstance(frame, dict):
-			continue
-		filename = (frame.get("filename") or "").replace("\\", "/")
+		filename = _frame_filename(frame)
 		if not filename:
 			continue
 		function = frame.get("function")
 		if is_optimus_path(filename):
 			targets = _pass_through_targets(filename, function)
 			if _is_error_log_hook_frame(filename) or targets is None or inside is None:
-				return True
+				return frame
 			if ANY_FRAPPE_FRAME not in targets and inside not in targets:
-				return True
+				return frame
 			inside = None
 			continue
 		if not is_frappe_path(filename):
-			return False
+			return None
 		inside = function if isinstance(function, str) else ""
-	return False
+	return None
+
+
+def own_query_innermost_first(frames) -> bool:
+	"""``is_profiler_own_query`` over an iterable of frames, innermost first."""
+	return own_query_deciding_frame(frames) is not None
 
 
 def is_profiler_own_query(stack: list | None) -> bool:
@@ -789,8 +805,20 @@ def is_profiler_own_query(stack: list | None) -> bool:
 	- any other ``optimus/`` frame, the Error Log hook included: own.
 	- any other frame: the user's.
 	A stack with no deciding frame (only Frappe and pass-through frames) is not own.
+	A stack that cannot be walked innermost first, and any malformed frame in it, is not own.
 	"""
-	return bool(stack) and own_query_innermost_first(reversed(stack))
+	return own_query_frame(stack) is not None
+
+
+def own_query_frame(stack: list | None) -> dict | None:
+	"""The Optimus frame that makes ``stack`` (outermost first) Optimus's own, else None."""
+	if not stack or isinstance(stack, (str, bytes, dict)):
+		return None
+	try:
+		frames = reversed(stack)
+	except TypeError:
+		return None
+	return own_query_deciding_frame(frames)
 
 
 def strip_profiler_own_calls(recording: dict) -> int:
@@ -816,14 +844,12 @@ def walk_callsite(stack: list | None) -> dict | None:
 	surface), but returns None when the query is Optimus's own
 	(``is_profiler_own_query``), even inside a user's flow.
 	"""
-	if not stack or is_profiler_own_query(stack):
+	if not isinstance(stack, (list, tuple)) or not stack or is_profiler_own_query(stack):
 		return None
 
 	for frame in reversed(stack):
-		if not isinstance(frame, dict):
-			continue
-		filename = (frame.get("filename") or "").replace("\\", "/")
-		lineno = frame.get("lineno")
+		filename = _frame_filename(frame)
+		lineno = frame.get("lineno") if filename else None
 		if not filename or lineno is None:
 			continue
 		# v0.5.1: substring (not startswith) matches bench and absolute
@@ -837,7 +863,7 @@ def walk_callsite(stack: list | None) -> dict | None:
 	# framework queries (migrations, fixtures, background tasks) still
 	# produce a finding.
 	last = stack[-1] if isinstance(stack[-1], dict) else None
-	if last and last.get("filename") and last.get("lineno") is not None:
+	if last and _frame_filename(last) and last.get("lineno") is not None:
 		return last
 	return None
 

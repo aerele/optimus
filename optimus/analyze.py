@@ -54,7 +54,7 @@ from optimus.analyzers.base import (
 	AnalyzeContext,
 	dur,
 	is_error_log_hook_query,
-	is_optimus_path,
+	own_query_frame,
 	row_get,
 	strip_profiler_own_calls,
 )
@@ -774,7 +774,10 @@ def _arm_phase2(docname: str, context) -> None:
 	if not picks:
 		return
 
-	prepared = _lp_capture.prepare_line_profile_picks(picks)
+	try:
+		prepared = _lp_capture.prepare_line_profile_picks(picks)
+	except _lp_capture.NoEligiblePickError:
+		return  # every recommended function is ineligible (for example Optimus's own code): nothing to arm
 	run_uuid = _uuid.uuid4().hex
 	from optimus.api import _lock_phase2_for_write, _persist_phase2_capture
 	from optimus.line_profile.jobs import _authorized
@@ -1412,21 +1415,24 @@ def _fetch_recordings(recording_uuids: list[str]):
 		yield rec
 
 
-# The own-query drop is logged at WARNING from this many dropped calls, when they are over half the session's.
-OWN_DROP_WARN_MIN = 50
+# The own-query drop is logged at ERROR from this many dropped calls, when they are over half the
+# session's. That is far more than Optimus's own work: a wrapper missing from the pass-through table
+# is hiding the user's queries. Frappe's logger keeps ERROR and above by default, so production sees it.
+OWN_DROP_ALERT_MIN = 50
 
 
 def _own_source(stack) -> str:
-	"""``file:function`` of the innermost Optimus frame of a dropped call's stack."""
-	for frame in reversed(stack if isinstance(stack, list) else []):
-		if isinstance(frame, dict) and is_optimus_path(frame.get("filename")):
-			return f"{frame.get('filename')}:{frame.get('function')}"
-	return "unknown"
+	"""``file:function`` of the Optimus frame that made a dropped call's stack Optimus's own."""
+	frame = own_query_frame(stack)
+	if frame is None:
+		return "unknown"
+	function = frame.get("function")
+	return f"{frame.get('filename')}:{function if isinstance(function, str) else '?'}"
 
 
 def _strip_own_calls(recordings: list, session_uuid: str) -> None:
 	"""Drop Optimus's own SQL calls from every recording; log dropped/total and the top sources,
-	at WARNING when they are over half the session's calls (and at least OWN_DROP_WARN_MIN)."""
+	at ERROR when they are over half the session's calls (and at least OWN_DROP_ALERT_MIN)."""
 	total = dropped = 0
 	sources = Counter()
 	for rec in recordings:
@@ -1438,12 +1444,14 @@ def _strip_own_calls(recordings: list, session_uuid: str) -> None:
 		if count:
 			dropped += count
 			kept = {id(call) for call in rec["calls"]}
-			sources.update(_own_source(call.get("stack")) for call in before if id(call) not in kept)
+			sources.update(
+				_own_source(call.get("stack")) for call in before if isinstance(call, dict) and id(call) not in kept
+			)
 	if not dropped:
 		return
 	try:
 		top = ", ".join(f"{source} x{n}" for source, n in sources.most_common(2))
-		level = "warning" if dropped >= OWN_DROP_WARN_MIN and dropped * 2 > total else "debug"
+		level = "error" if dropped >= OWN_DROP_ALERT_MIN and dropped * 2 > total else "debug"
 		getattr(frappe.logger("optimus"), level)(
 			f"optimus: dropped {dropped} of {total} queries as Optimus's own from session {session_uuid}"
 			f" (top sources: {top})"

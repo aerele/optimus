@@ -347,6 +347,11 @@ class CaptureError(Exception):
 	should communicate to the customer (e.g. all picks ineligible)."""
 
 
+class NoEligiblePickError(CaptureError):
+	"""Raised when none of the selected functions can be line-profiled. The manual path shows it to
+	the user; auto-arm treats it as "nothing to arm" (``analyze._arm_phase2``)."""
+
+
 MAX_PICKS = 100
 
 
@@ -425,7 +430,7 @@ def prepare_line_profile_picks(picks: list[dict], *, server_expanded=frozenset()
 
 	eligible = [r for r in resolved if r.get("eligible")]
 	if not eligible:
-		raise CaptureError(_no_eligible_pick_message(resolved))
+		raise NoEligiblePickError(_no_eligible_pick_message(resolved))
 
 	# Snapshot source for each eligible pick. Stored as a dict keyed by
 	# dotted_path so aggregate_samples can pull lines per pick.

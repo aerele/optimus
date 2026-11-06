@@ -5,6 +5,8 @@
 
 import copy
 
+import pytest
+
 from optimus.analyzers import per_action, table_breakdown, top_queries
 from optimus.analyzers.base import (
 	is_frappe_path,
@@ -229,3 +231,8 @@ def test_callsite_treats_myoptimus_app_as_user_code():
 	stack = [_frame("apps/myoptimus/myoptimus/a.py", 5), OWN_STACK[1]]
 	assert not is_profiler_own_query(stack)
 	assert walk_callsite_str(stack) == "apps/myoptimus/myoptimus/a.py:5"
+
+
+@pytest.mark.parametrize("value", [None, "", 7, ["frappe/x.py"], b"frappe/x.py"])
+def test_a_filename_that_is_not_text_is_in_neither_app(value):
+	assert not is_frappe_path(value) and not is_optimus_path(value)

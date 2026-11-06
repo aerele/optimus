@@ -47,7 +47,13 @@ UNRESOLVED_REASON = "The wrapped function cannot be resolved"
 
 
 def is_optimus_code_file(filename) -> bool:
-	"""True for a file inside the installed Optimus package (not a user app that is merely named like it)."""
+	"""True for a file inside the installed Optimus package (not a user app that is merely named like it).
+
+	This takes the real file of LIVE code (an imported function's ``co_filename``), so it resolves
+	symlinks and compares against the installed package. The report side
+	(``optimus.analyzers.base.is_optimus_path``) takes the filename TEXT of a recorded stack frame,
+	which may come from another machine, so it can only match the path shape. They stay separate on
+	purpose: neither input fits the other rule. Change one, check the other."""
 	if not isinstance(filename, str) or not filename or filename.startswith("<"):
 		return False
 	try:

@@ -371,3 +371,73 @@ class TestRedundantCallsUsesTheSameRule:
 
 		assert _is_optimus_own(own_then_boom())
 		assert not _is_optimus_own(user_then_boom())
+
+
+MALFORMED_FRAMES = [
+	None,
+	"optimus/optimus/managed.py",
+	42,
+	{},
+	{"filename": 7, "lineno": 1, "function": "f"},
+	{"filename": ["optimus/optimus/managed.py"], "function": "f"},
+	{"filename": None, "function": "f"},
+	{"lineno": 3},
+]
+
+
+class TestMalformedFramesAreSkipped:
+	@pytest.mark.parametrize("bad", MALFORMED_FRAMES, ids=repr)
+	def test_one_bad_frame_does_not_change_the_answer(self, bad):
+		assert not _own([USER, bad, RUN_METHOD, SQL])
+		assert _own([USER, F("optimus/optimus/managed.py", "protect_file"), bad, SQL])
+		assert _own([bad, F("optimus/optimus/managed.py", "protect_file"), SQL, bad])
+
+	@pytest.mark.parametrize("bad", MALFORMED_FRAMES, ids=repr)
+	def test_walk_callsite_and_the_hook_query_check_skip_it_too(self, bad):
+		from optimus.analyzers.base import is_error_log_hook_query
+
+		assert walk_callsite([USER, bad, SQL]) == USER
+		assert walk_callsite([bad, SQL]) == SQL
+		assert not is_error_log_hook_query([USER, bad, SQL])
+
+	@pytest.mark.parametrize("stack", [7, "optimus/optimus/managed.py", {"filename": "x"}, object(), None, []])
+	def test_a_stack_that_is_not_a_list_is_not_own(self, stack):
+		assert not is_profiler_own_query(stack)
+		assert walk_callsite(stack) is None
+
+	def test_a_tuple_stack_is_read_like_a_list(self):
+		assert is_profiler_own_query((USER, F("optimus/optimus/managed.py", "protect_file"), SQL))
+
+	@pytest.mark.parametrize("bad", MALFORMED_FRAMES, ids=repr)
+	def test_a_bad_frame_in_one_call_never_fails_the_strip(self, bad):
+		own = {"query": "select own", "stack": [USER, F("optimus/optimus/managed.py", "protect_file"), SQL]}
+		mine = {"query": "select user", "stack": [USER, bad, SQL]}
+		rec = {"calls": [own, mine, {"query": "no stack"}, {"stack": 5}, "junk", None, {"stack": bad}]}
+		assert strip_profiler_own_calls(rec) == 1
+		assert own not in rec["calls"] and mine in rec["calls"] and len(rec["calls"]) == 6
+
+	def test_a_bad_last_frame_is_not_returned_as_the_framework_fallback(self):
+		assert walk_callsite([RUN_METHOD, {"filename": 7, "lineno": 1}]) is None
+
+
+class TestDecidingFrame:
+	def test_the_deciding_frame_is_returned_not_a_pass_through_wrapper_inside_it(self):
+		from optimus.analyzers.base import own_query_frame
+
+		protect = F("optimus/optimus/managed.py", "protect_file", 234)
+		stack = [USER, protect, WRAPPED, GET_DOC, SQL]
+		assert own_query_frame(stack) is protect
+
+	def test_a_pass_through_frame_not_over_its_frappe_target_is_the_deciding_frame(self):
+		from optimus.analyzers.base import own_query_frame
+
+		stack = [USER, WRAPPED, F("frappe/frappe/model/document.py", "save", 1), SQL]
+		enqueue_over_get_doc = [USER, ENQUEUE_WRAP, GET_DOC, SQL]
+		assert own_query_frame(stack) is None
+		assert own_query_frame(enqueue_over_get_doc) is ENQUEUE_WRAP
+
+	def test_a_stack_that_is_not_own_has_no_deciding_frame(self):
+		from optimus.analyzers.base import own_query_frame
+
+		assert own_query_frame([USER, SQL]) is None
+		assert own_query_frame(None) is None

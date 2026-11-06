@@ -395,16 +395,24 @@ def test_analysis_strips_own_queries_and_logs_the_count_and_source_at_debug(monk
 	assert "optimus/optimus/managed.py:protect_file x2" in lines[0][1]
 
 
-def test_a_session_that_lost_most_of_its_calls_is_logged_as_a_warning(monkeypatch):
+def test_a_session_that_lost_most_of_its_calls_is_logged_at_error(monkeypatch):
+	"""Frappe's logger keeps ERROR and above by default, so only this level reaches a production log."""
 	lines = _strip(monkeypatch, [_recording("rec-1", 60, 20)])
-	assert [level for level, _text in lines] == ["warning"]
+	assert [level for level, _text in lines] == ["error"]
 	assert "dropped 60 of 80" in lines[0][1]
+	assert "optimus: dropped 60 of 80 queries as Optimus's own from session sess-9" in lines[0][1]
 
 
 @pytest.mark.parametrize("own,user", [(49, 1), (50, 50), (60, 61)])
 def test_a_small_or_minority_drop_stays_at_debug(monkeypatch, own, user):
 	lines = _strip(monkeypatch, [_recording("rec-1", own, user)])
 	assert [level for level, _text in lines] == ["debug"]
+
+
+def test_a_majority_drop_across_recordings_is_judged_on_the_whole_session(monkeypatch):
+	lines = _strip(monkeypatch, [_recording("rec-1", 30, 5), _recording("rec-2", 30, 5)])
+	assert [level for level, _text in lines] == ["error"]
+	assert "dropped 60 of 70" in lines[0][1]
 
 
 def test_nothing_dropped_logs_nothing(monkeypatch):
@@ -421,3 +429,45 @@ def test_a_failing_logger_never_fails_the_analysis(monkeypatch):
 	recordings = [_recording("rec-1", 60, 20)]
 	analyze._strip_own_calls(recordings, "sess-9")
 	assert len(recordings[0]["calls"]) == 20
+
+
+WRAPPED_FRAME = {"filename": "optimus/optimus/capture.py", "lineno": 216, "function": "wrapped"}
+GET_DOC_FRAME = {"filename": "frappe/frappe/__init__.py", "lineno": 90, "function": "get_doc"}
+SQL_FRAME = OWN_STACK[2]
+
+
+def test_own_source_names_the_deciding_frame_not_a_pass_through_wrapper_inside_it():
+	stack = [OWN_STACK[0], OWN_STACK[1], WRAPPED_FRAME, GET_DOC_FRAME, SQL_FRAME]
+	assert analyze._own_source(stack) == "optimus/optimus/managed.py:protect_file"
+
+
+def test_own_source_is_unknown_without_a_deciding_frame_or_a_stack():
+	assert analyze._own_source([OWN_STACK[0], WRAPPED_FRAME, GET_DOC_FRAME, SQL_FRAME]) == "unknown"
+	assert analyze._own_source(None) == "unknown"
+	assert analyze._own_source("not a stack") == "unknown"
+
+
+def test_own_source_skips_malformed_frames_and_a_non_string_function():
+	stack = [None, 7, {"filename": 5}, {"filename": "optimus/optimus/managed.py", "function": 9}, OWN_STACK[2]]
+	assert analyze._own_source(stack) == "optimus/optimus/managed.py:?"
+
+
+def test_a_log_names_the_deciding_frame_of_each_dropped_call(monkeypatch):
+	through_wrapper = [OWN_STACK[0], OWN_STACK[1], WRAPPED_FRAME, GET_DOC_FRAME, SQL_FRAME]
+	recording = {"uuid": "rec-1", "calls": [{"query": "q", "stack": through_wrapper} for _ in range(3)]}
+	lines = _strip(monkeypatch, [recording])
+	assert "optimus/optimus/managed.py:protect_file x3" in lines[0][1]
+	assert "capture.py:wrapped" not in lines[0][1]
+
+
+@pytest.mark.parametrize("bad", [None, "text", 7, {}, {"filename": 3}, {"filename": ["x"], "function": "f"}])
+def test_one_malformed_frame_or_call_never_fails_the_own_call_strip(monkeypatch, bad):
+	recording = {"uuid": "rec-1", "calls": [
+		{"query": "own", "stack": [OWN_STACK[0], bad, OWN_STACK[1], SQL_FRAME]},
+		{"query": "user", "stack": [OWN_STACK[0], bad, SQL_FRAME]},
+		{"query": "bare"}, {"stack": bad}, bad,
+	]}
+	lines = _strip(monkeypatch, [recording, bad, {"calls": bad}, {"uuid": "rec-3"}])
+	assert [c["query"] for c in recording["calls"] if isinstance(c, dict) and "query" in c] == ["user", "bare"]
+	assert len(lines) == 1 and "dropped 1 of 5" in lines[0][1]
+	assert "optimus/optimus/managed.py:protect_file x1" in lines[0][1]
