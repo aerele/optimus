@@ -17,12 +17,14 @@ under standalone pytest even when neither is installed; calling an impure
 function without its dependency raises ``RuntimeError``.
 """
 
+import ast
 import importlib
 import inspect
 import json
 import pickle
 import sys
 import threading
+import tokenize
 from dataclasses import dataclass
 from functools import wraps
 
@@ -167,9 +169,56 @@ def _resolve_attr(dotted_path: str):
 	return obj
 
 
+def _function_block(lines: list[str], code) -> list[dict]:
+	"""The function's own source rows, cut where ``inspect.getsourcelines`` would cut.
+
+	``lines`` carry no line ends, and tokenize reads an empty string as end of
+	file, so each line gets its newline back before ``getblock`` sees it.
+	"""
+	first = code.co_firstlineno
+	tail = [line + "\n" for line in lines[first - 1:]]
+	if first == 1 and tail:
+		tail[0] = tail[0].removeprefix("\ufeff")
+	try:
+		block = inspect.getblock(tail)
+	except (tokenize.TokenError, SyntaxError):
+		raise SourceUnavailable(_("its source could not be parsed")) from None
+	reason = _mismatch_reason(block, code)
+	if reason:
+		raise SourceUnavailable(reason)
+	return [{"lineno": first + i, "content": line[:-1]} for i, line in enumerate(block)]
+
+
+def _mismatch_reason(block: list[str], code) -> str | None:
+	"""Why the block is not this code object's own complete source, or None when it is."""
+	text = "".join(block)
+	short = code.co_firstlineno + len(block) - 1 < max(lineno for _start, _end, lineno in code.co_lines() if lineno)
+	if code.co_name == "<lambda>":
+		if short:
+			return _("its source spans several lines")
+		return None if "lambda" in text else _("its source no longer matches the code the server loaded")
+	if short:
+		return _("its source no longer matches the code the server loaded")
+	indented = text[:1].isspace()
+	try:
+		tree = ast.parse("if 1:\n" + text if indented else text)
+	except (SyntaxError, ValueError, RecursionError):
+		return _("its source could not be parsed")
+	head = (tree.body[0].body[0] if indented else tree.body[0]) if tree.body else None
+	if not isinstance(head, (ast.FunctionDef, ast.AsyncFunctionDef)):
+		return _("it is not a def statement")
+	if head.name != code.co_name:
+		return _("its source no longer matches the code the server loaded")
+	return None
+
+
 @_interrupt_boundary
 def _capture_source_lines(fn) -> list[dict]:
-	"""Snapshot only bounded, permitted on-disk source for the selected callable."""
+	"""Snapshot only bounded, permitted on-disk source for the selected callable.
+
+	An empty list means the source is outside the permitted boundary or unreadable;
+	``SourceUnavailable`` means it was read but is not this function's complete source.
+	"""
 	from optimus.renderer import source
 
 	try:
@@ -179,11 +228,9 @@ def _capture_source_lines(fn) -> list[dict]:
 		lines = source._source_lines(code.co_filename)
 		if not lines:
 			return []
-		first_lineno = code.co_firstlineno
-		source_lines = inspect.getblock(lines[first_lineno - 1:])
+		return _function_block(lines, code)
 	except (OSError, TypeError, ValueError):
 		return []
-	return [{"lineno": first_lineno + i, "content": line.rstrip("\n")} for i, line in enumerate(source_lines)]
 
 
 class CaptureInputError(ValueError):
@@ -198,6 +245,7 @@ MAX_CAPTURE_BYTES = 16 * 1024 * 1024
 MAX_SAMPLE_BATCHES = 10_000
 MAX_SAMPLE_RECORDS = 250_000
 MAX_SOURCE_LINES = 100_000
+MAX_SOURCE_LINE_CHARS = 20_000
 
 
 def _bounded_text(value, limit):
@@ -254,7 +302,7 @@ def _validate_captured_picks(picks):
 		for line in lines:
 			if (not isinstance(line, dict) or not _uint(line.get("lineno"), positive=True)
 				or line["lineno"] <= previous or not isinstance(line.get("content"), str)
-				or len(line["content"]) > 20_000):
+				or len(line["content"]) > MAX_SOURCE_LINE_CHARS):
 				raise CaptureInputError("Line profiling source snapshot is malformed")
 			previous = line["lineno"]
 
@@ -346,6 +394,14 @@ class CaptureError(Exception):
 	should communicate to the customer (e.g. all picks ineligible)."""
 
 
+class SourceUnavailable(CaptureError):
+	"""A selected function's source cannot be captured whole; ``reason`` says why."""
+
+	def __init__(self, reason):
+		super().__init__(reason)
+		self.reason = reason
+
+
 MAX_PICKS = 100
 
 
@@ -367,6 +423,37 @@ def validate_picks(picks):
 		source = entry.get("source", "freeform")
 		if not isinstance(source, str) or source not in {"freeform", "curated", "auto_expand"}:
 			raise CaptureError(_("Each selected function needs a known source label."))
+
+
+def _pick_source(fn) -> tuple[list[dict], str | None]:
+	"""The callable's whole source rows, or no rows and the reason they are unavailable."""
+	try:
+		lines = _capture_source_lines(fn) if fn else []
+	except SourceUnavailable as exc:
+		return [], exc.reason
+	if not lines:
+		return [], _("it could not be read")
+	if any(len(line["content"]) > MAX_SOURCE_LINE_CHARS for line in lines):
+		return [], _("it has a line longer than {0} characters").format(MAX_SOURCE_LINE_CHARS)
+	return lines, None
+
+
+def _pick_snapshot(pick: dict) -> list[dict] | None:
+	"""The pick's whole source rows, or None when a server-chosen pick is skipped.
+
+	A function the user chose that cannot be captured whole refuses the run, naming it.
+	"""
+	lines, reason = _pick_source(_resolve_attr(pick["dotted_path"]))
+	if reason is None:
+		return lines
+	if pick["source"] == "auto_expand":
+		pick["eligible"] = False
+		pick["ineligible_reason"] = _("Its source is unavailable: {0}.").format(reason)
+		return None
+	raise CaptureError(
+		_("Source for {0} is unavailable because {1}. Restart the workers if its file changed, "
+			"or choose another function.").format(pick["dotted_path"], reason)
+	)
 
 
 @_interrupt_boundary
@@ -417,10 +504,9 @@ def prepare_line_profile_picks(picks: list[dict], *, server_expanded=frozenset()
 	picks_meta: list[dict] = []
 	snapshot_bytes = 0
 	for r in eligible:
-		fn = _resolve_attr(r["dotted_path"])
-		lines = _capture_source_lines(fn) if fn else []
-		if not lines:
-			raise CaptureError(_("A selected function has no readable source. Choose another function."))
+		lines = _pick_snapshot(r)
+		if lines is None:
+			continue
 		snapshot_bytes += len(json.dumps(lines).encode()) + len(r["dotted_path"].encode()) + 8
 		if snapshot_bytes > MAX_CAPTURE_BYTES:
 			raise CaptureError(_("Selected source exceeds the capture size limit. Select fewer functions."))
@@ -432,8 +518,13 @@ def prepare_line_profile_picks(picks: list[dict], *, server_expanded=frozenset()
 			"first_lineno": r["lineno"],
 			"source": r["source"],
 		})
+	if not picks_meta:
+		raise CaptureError(_("No selected function has eligible source. Check the selected paths."))
 
-	_validate_captured_picks([{**pick, "source_lines": source_snapshot[pick["dotted_path"]]} for pick in picks_meta])
+	try:
+		_validate_captured_picks([{**pick, "source_lines": source_snapshot[pick["dotted_path"]]} for pick in picks_meta])
+	except CaptureInputError as exc:
+		raise CaptureError(_("The selected source cannot be captured: {0}. Select fewer functions.").format(str(exc))) from None
 	picks_json, source_json = json.dumps(picks_meta), json.dumps(source_snapshot)
 	if len(picks_json.encode()) + len(source_json.encode()) > MAX_CAPTURE_BYTES:
 		raise CaptureError(_("Selected source exceeds the capture size limit. Select fewer functions."))
