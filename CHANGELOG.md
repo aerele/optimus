@@ -8,11 +8,29 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.146] - 2026-11-06
+## [0.12.149] - 2026-11-06
 
 ### Fixed
 
 - Line profiling now captures the whole function. Before, the function's source was cut at its first blank line, so any timed line after it was missing from the drill-down, a function whose timed lines were all below the cut was shown as "not invoked", and the function's total time was understated, which inflated the severity of Hot Line findings. Some functions also failed to start with a server error. A function you chose whose source cannot be read in full now refuses the run with a message naming the function and the reason; a function added automatically is skipped instead. A source line longer than 20,000 characters, or too many source lines in one run, now shows a clear message instead of a server error. Runs recorded on 0.12.72 to 0.12.141 may be incomplete, so re-record them.
+
+---
+
+## [0.12.147] - 2026-11-06
+
+### Internal
+
+- The inline-stop "empty session" test now replaces `frappe.db` wholesale with a fake instead of patching an attribute on it, so it passes on a real bench as well as in CI. On a bench `frappe.db` is an unbound LocalProxy, so patching an attribute resolved the unbound `frappe.local` and raised during test setup. No product code changed.
+
+---
+
+## [0.12.143] - 2026-11-06
+
+### Changed
+
+- The popup that appears when a profiling session finishes now shows the session's title, underlined, as a normal Frappe link to the session, on the same line as the message. If a session has no title, the link shows its name (ID). The "Open Session" and "Review and Retry" button is gone, and so is the "Session ID" line. The popup for a failed analysis and for an empty session use the same layout.
+- The session events now carry the session title so the popup can show it. The title goes only to the people who already receive these events.
+- A long title with no spaces now wraps inside the popup instead of overflowing it sideways.
 
 ---
 
