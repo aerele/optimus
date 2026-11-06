@@ -122,6 +122,16 @@ class TestBuilder:
 		out = renderer.build_hot_frames_table([GEN_B, NEW, GEN_A, NEW_ZERO_SELF], is_hot=True)
 		assert [r["total_ms"] for r in out] == [700, 600, 500, 300]
 
+	def test_user_rows_sort_by_self_when_every_row_has_it(self):
+		low_self_high_total = {**NEW, "function": "a/b.py::low_self", "total_ms": 50, "total_cumulative_ms": 900}
+		out = renderer.build_hot_frames_table([low_self_high_total, NEW, NEW_ZERO_SELF], is_hot=True)
+		assert [r["self_ms"] for r in out] == [120, 50, 0]
+
+	def test_user_rows_sort_by_total_when_any_row_lacks_self(self):
+		low_self_high_total = {**NEW, "function": "a/b.py::low_self", "total_ms": 50, "total_cumulative_ms": 900}
+		out = renderer.build_hot_frames_table([NEW, low_self_high_total, GEN_A], is_hot=True)
+		assert [r["total_ms"] for r in out] == [900, 700, 600]
+
 	def test_framework_rows_unchanged(self):
 		out = renderer.build_hot_frames_table(
 			[FRAMEWORK, {**FRAMEWORK, "function": "c/d.py::small", "total_cumulative_ms": 100}], is_hot=False
@@ -172,6 +182,21 @@ class TestRendered:
 		assert LEGACY_NOTE not in _html([NEW, NEW_ZERO_SELF])
 		assert LEGACY_NOTE not in _html([FRAMEWORK])
 
+	def test_legacy_note_says_the_list_is_ordered_by_total(self):
+		html = _html([GEN_A, GEN_B])
+		assert "ordered by Total time, so it may not be the true top 20" in html
+
+	def test_recursion_tooltip_only_when_self_time_was_measured(self):
+		new = _table(_html([NEW]), "hot-frames-app")
+		assert "recursion counted once" in new
+		for rows in ([GEN_A], [GEN_B], [GEN_A, NEW]):
+			assert "recursion counted once" not in _table(_html(rows), "hot-frames-app")
+
+	def test_user_rows_render_in_self_order_when_measured(self):
+		low = {**NEW, "function": "a/b.py::low_self", "total_ms": 20, "total_cumulative_ms": 900}
+		user = _table(_html([low, NEW]), "hot-frames-app")
+		assert user.index("new_fn") < user.index("low_self")
+
 	def test_legacy_note_shown_once(self):
 		assert _html([GEN_A, GEN_B]).count(LEGACY_NOTE) == 1
 
@@ -184,6 +209,20 @@ class TestRendered:
 	def test_user_rows_render_in_total_order(self):
 		user = _table(_html([GEN_B, NEW, GEN_A]), "hot-frames-app")
 		assert user.index("new_fn") < user.index("gen_a") < user.index("gen_b")
+
+
+class TestMobileScroll:
+	def test_each_hot_frames_table_sits_in_a_scroll_box(self):
+		html = _html([NEW, FRAMEWORK])
+		for heading_id in ("hot-frames-app", "hot-frames-framework"):
+			before = html[: html.index("<table", html.index(f'id="{heading_id}"'))]
+			assert before.rstrip().endswith('<div class="hot-frames-scroll">')
+		assert html.count('class="hot-frames-scroll"') == 2
+
+	def test_scroll_box_css_scrolls_on_screen_and_not_in_print(self):
+		html = _html([NEW])
+		assert re.search(r"\.hot-frames-scroll\s*\{[^}]*overflow-x:\s*auto", html)
+		assert re.search(r"@media print\s*\{\s*\.hot-frames-scroll\s*\{\s*overflow-x:\s*visible", html)
 
 
 class TestSelfNodesAreGone:

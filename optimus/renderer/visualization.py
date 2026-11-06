@@ -96,7 +96,8 @@ def build_hot_frames_table(rows: list, is_hot: bool = False) -> list:
 	``is_hot`` marks user-code rows (True) for the tinted CSS variant. Both variants
 	show Total as ``total_ms``: the stored ``total_cumulative_ms``, or ``total_ms`` for
 	reports from before it existed. User rows also get ``self_ms``, the stored self-sum
-	``total_ms``, only when the row says it was measured (else None), and sort by Total.
+	``total_ms``, only when the row says it was measured (else None). Rows sort by Self
+	when every row has it (same key as the analyzer's cap), else by Total.
 	"""
 	out = []
 	for row in rows or []:
@@ -113,5 +114,6 @@ def build_hot_frames_table(rows: list, is_hot: bool = False) -> list:
 			"action_refs": row.get("action_refs", []),
 			"is_hot": is_hot,
 		})
-	out.sort(key=lambda r: r.get("total_ms", 0), reverse=True)
+	by_self = bool(out) and all(r["self_ms"] is not None for r in out)
+	out.sort(key=lambda r: r["self_ms"] if by_self else r.get("total_ms", 0), reverse=True)
 	return out

@@ -217,6 +217,29 @@ class TestAnalyzeEndToEnd:
 		result, _ = _run([self._heavy_action(own_ms=10)], calls={0: [_sql(500)]})
 		assert result.aggregate["total_python_ms"] == 0
 
+	def test_sql_is_removed_per_action_not_once_for_the_session(self):
+		light = _Session(_fn("<module>", 0, [_fn("light", 20, path="my_app/light.py")]))
+		result, _ = _run(
+			[self._heavy_action(), light], calls={0: [_sql(100)], 1: [_sql(500)]}
+		)
+		agg = result.aggregate
+		assert agg["total_sql_ms"] == 600
+		# 350 own - 100 sql = 250; the SQL-heavy action clamps at 0 (20 - 500), it does not go negative.
+		assert agg["total_python_ms"] == pytest.approx(250, abs=0.01)
+		assert agg["session_time_breakdown"]["python_ms"] == agg["total_python_ms"]
+
+	def test_sql_heavy_action_does_not_zero_the_other_actions(self):
+		light = _Session(_fn("<module>", 0, [_fn("light", 20, path="my_app/light.py")]))
+		result, _ = _run([self._heavy_action(), light], calls={1: [_sql(5000)]})
+		assert result.aggregate["total_python_ms"] == pytest.approx(350, abs=0.01)
+
+	def test_sql_heavy_session_is_not_reported_as_missing_self_time(self):
+		light = _Session(_fn("<module>", 0, [_fn("light", 20, path="my_app/light.py")]))
+		result, ctx = _run([light], calls={0: [_sql(500)]})
+		assert result.aggregate["total_python_ms"] == 0
+		assert all(r["self_time_measured"] for r in result.aggregate["hot_frames"])
+		assert not any("self time" in w.lower() for w in ctx.warnings)
+
 	def test_sql_of_an_action_without_a_tree_does_not_reduce_python_ms(self):
 		sessions = [self._heavy_action(), None]
 		result, _ = _run(sessions, wall_ms={0: 350, 1: 200}, calls={1: [_sql(200)]})
@@ -304,10 +327,14 @@ class TestAnalyzeEndToEnd:
 		assert "[self]" not in list(_names(tree))
 
 
-class TestRankingByTotal:
+class TestRankingByTotalWhenSelfIsNotMeasured:
 	@staticmethod
 	def _tree():
-		"""25 user functions whose Self order is the reverse of their Total order."""
+		"""25 user functions whose Self order is the reverse of their Total order.
+
+		The root's time (5000) is far above the self times (550), so self time is not
+		consistent with the sampled time and the ranking stays on Total.
+		"""
 		kids = []
 		for i in range(25):
 			kids.append(
@@ -332,6 +359,7 @@ class TestRankingByTotal:
 		}
 
 	def test_cap_and_stored_order_follow_total(self):
+		assert not call_tree._self_time_measured([self._tree()])
 		_, board = call_tree._aggregate_hot_frames([self._tree()], None, frozenset({"my_app"}))
 		names = [r["function"].split("::")[1] for r in board if not r["is_framework"]]
 		assert names == [f"fn{i:02d}" for i in range(20)]
@@ -365,3 +393,167 @@ class TestRankingByTotal:
 		_, board = call_tree._aggregate_hot_frames(trees, None, frozenset({"my_app"}))
 		kept = {r["function"].split("::")[1] for r in board}
 		assert "f0" in kept and "f1" in kept
+
+
+def _kid(function, path, own_ms, children=()):
+	return {
+		"function": function,
+		"filename": path,
+		"lineno": 1,
+		"kind": "python",
+		"self_ms": own_ms,
+		"cumulative_ms": own_ms + sum(c["cumulative_ms"] for c in children),
+		"children": list(children),
+	}
+
+
+def _root(kids, cumulative_ms=None):
+	return {
+		"function": "<root>",
+		"filename": "",
+		"lineno": 0,
+		"kind": "python",
+		"self_ms": 0,
+		"cumulative_ms": (
+			sum(k["cumulative_ms"] for k in kids) if cumulative_ms is None else cumulative_ms
+		),
+		"children": list(kids),
+	}
+
+
+INSTALLED = frozenset({"my_app", "frappe"})
+
+
+def _app_names(board):
+	return [r["function"].split("::")[1] for r in board if not r["is_framework"]]
+
+
+def _fw_names(board):
+	return [r["function"].split("::")[1] for r in board if r["is_framework"]]
+
+
+class TestSelfTimeReliability:
+	def test_no_self_time_is_not_measured(self):
+		tree = _root([_kid("f", APP, 0)], cumulative_ms=500)
+		assert call_tree._self_time_measured([tree]) is False
+
+	def test_consistent_self_time_is_measured(self):
+		tree = _root([_kid("f", APP, 300, [_kid("g", "my_app/g.py", 200)])])
+		assert tree["cumulative_ms"] == 500
+		assert call_tree._self_time_measured([tree]) is True
+
+	def test_sql_is_not_subtracted_from_the_target(self):
+		# The SQL wait sits inside python self time, so self still adds up to the root's time.
+		tree = _root([_kid("f", APP, 500)])
+		tree["children"].append(call_tree._make_sql_leaf(_sql(400), partial_match=False))
+		assert call_tree._self_time_measured([tree]) is True
+
+	def test_self_far_below_the_sampled_time_is_not_measured(self):
+		tree = _root([_kid("f", APP, 10)], cumulative_ms=5000)
+		assert call_tree._self_time_measured([tree]) is False
+
+	def test_self_above_the_sampled_time_is_not_measured(self):
+		tree = _root([_kid("f", APP, 3000)], cumulative_ms=1000)
+		assert call_tree._self_time_measured([tree]) is False
+
+	def test_rounding_and_clamping_noise_is_tolerated(self):
+		assert call_tree._self_time_measured([_root([_kid("f", APP, 1020)], cumulative_ms=1000)])
+		assert call_tree._self_time_measured([_root([_kid("f", APP, 700)], cumulative_ms=1000)])
+
+	def test_trees_without_samples_do_not_make_it_unreliable(self):
+		real = _root([_kid("f", APP, 500)])
+		empty = _root([], cumulative_ms=0)
+		assert call_tree._self_time_measured([real, empty]) is True
+
+	def test_flag_on_the_rows_follows_the_check(self):
+		bad = _root([_kid("f", APP, 10)], cumulative_ms=5000)
+		_, board = call_tree._aggregate_hot_frames([bad], None, INSTALLED)
+		assert board and not any(r["self_time_measured"] for r in board)
+		good = _root([_kid("f", APP, 500)])
+		_, board = call_tree._aggregate_hot_frames([good], None, INSTALLED)
+		assert board and all(r["self_time_measured"] for r in board)
+
+	def test_inconsistent_self_time_warns_and_degrades(self):
+		fixture = {"root": _root([_kid("f", APP, 10)], cumulative_ms=5000)}
+		result, ctx = _run([fixture], wall_ms={0: 5000})
+		assert not any(r["self_time_measured"] for r in result.aggregate["hot_frames"])
+		assert any("self time" in w.lower() for w in ctx.warnings)
+
+
+class TestRankingBySelfWhenMeasured:
+	@staticmethod
+	def _tree(root_cumulative_ms=None):
+		"""25 app functions: Self rises with i, Total falls with i (callee time in frappe code)."""
+		kids = [
+			_kid(
+				f"fn{i:02d}", f"my_app/m{i:02d}.py", 10 + i,
+				[_kid(f"callee{i:02d}", f"frappe/c{i:02d}.py", 1000 - 20 * i)],
+			)
+			for i in range(25)
+		]
+		return _root(kids, cumulative_ms=root_cumulative_ms)
+
+	def test_measured_ranks_the_app_group_by_self(self):
+		tree = self._tree()
+		assert call_tree._self_time_measured([tree])
+		_, board = call_tree._aggregate_hot_frames([tree], None, INSTALLED)
+		assert _app_names(board) == [f"fn{i:02d}" for i in range(24, 4, -1)]
+
+	def test_not_measured_ranks_the_same_tree_by_total(self):
+		tree = self._tree(root_cumulative_ms=10 * 30000)
+		assert not call_tree._self_time_measured([tree])
+		_, board = call_tree._aggregate_hot_frames([tree], None, INSTALLED)
+		assert _app_names(board) == [f"fn{i:02d}" for i in range(20)]
+
+	def test_final_merge_orders_each_row_by_its_group_key(self):
+		_, board = call_tree._aggregate_hot_frames([self._tree()], None, INSTALLED)
+		app = [r["total_ms"] for r in board if not r["is_framework"]]
+		fw = [r["total_cumulative_ms"] for r in board if r["is_framework"]]
+		assert app == sorted(app, reverse=True)
+		assert fw == sorted(fw, reverse=True)
+
+	def test_framework_group_still_ranks_by_total(self):
+		# Wrappers: Self rises with i, Total falls with i. Their callee time is in app code.
+		kids = [
+			_kid(
+				f"w{i:02d}", f"frappe/w{i:02d}.py", 1 + i,
+				[_kid(f"leaf{i:02d}", f"my_app/l{i:02d}.py", 1000 - 40 * i)],
+			)
+			for i in range(25)
+		]
+		tree = _root(kids)
+		assert call_tree._self_time_measured([tree])
+		_, board = call_tree._aggregate_hot_frames([tree], None, INSTALLED)
+		assert _fw_names(board) == [f"w{i:02d}" for i in range(20)]
+
+	def test_intermediate_trim_keeps_the_top_self_rows_when_measured(self):
+		cap = call_tree.HOT_FRAMES_INTERMEDIATE_CAP
+		trees = []
+		for i in range(cap * 2 + 5):
+			# Self falls with i, Total rises with i (callee time in frappe code).
+			trees.append(
+				_root([
+					_kid(
+						f"f{i}", f"my_app/m{i}.py", 1000 - i % 900,
+						[_kid(f"c{i}", f"frappe/c{i}.py", i * 10)],
+					)
+				])
+			)
+		assert call_tree._self_time_measured(trees)
+		_, board = call_tree._aggregate_hot_frames(trees, None, INSTALLED)
+		kept = set(_app_names(board))
+		assert "f0" in kept
+
+
+class TestStoredMeaningOfTotalMs:
+	def test_row_total_ms_is_the_self_sum_and_the_finding_agrees(self):
+		trees = [
+			_root([_kid("heavy", APP, 400, [_kid("inner", "my_app/i.py", 100)])]) for _ in range(3)
+		]
+		findings, board = call_tree._aggregate_hot_frames(trees, None, INSTALLED)
+		row = next(r for r in board if r["function"].endswith("::heavy"))
+		assert row["total_ms"] == 1200
+		assert row["total_cumulative_ms"] == 1500
+		finding = next(f for f in findings if f["title"].startswith(row["function"]))
+		assert json.loads(finding["technical_detail_json"])["total_ms"] == 1200
+		assert finding["estimated_impact_ms"] == 1200

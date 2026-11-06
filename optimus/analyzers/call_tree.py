@@ -161,9 +161,11 @@ def _is_synthetic_frame(frame) -> bool:
 def _walk_pyi_frame(frame) -> dict:
 	"""Convert one pyinstrument frame (and its descendants) into our dict shape.
 
-	A frame has no self time attribute; its own time is ``time`` minus its real
-	children's time. The synthetic ``[self]`` children pyinstrument adds per sample
-	are dropped. ``time`` is read without a default so an API change fails loudly.
+	pyinstrument exposes self time only on some versions (``total_self_time``, and
+	as per-sample ``[self]`` children), so it is derived the same way everywhere: a
+	frame's own time (``self_ms``) is ``time`` minus its real children's time. The
+	synthetic ``[self]`` children are dropped, their time stays in the parent's
+	``self_ms``. ``time`` is read without a default so an API change fails loudly.
 	"""
 	children = [c for c in getattr(frame, "children", ()) if not _is_synthetic_frame(c)]
 	cumulative_s = frame.time
@@ -1375,13 +1377,18 @@ def _row_labels(identities) -> dict:
 	return labels
 
 
-def _trim_occurrences(occurrences: dict, frame_class: dict) -> dict:
-	"""Keep the top rows per group by Total (outermost cumulative) and prune frame_class."""
+def _trim_occurrences(occurrences: dict, frame_class: dict, app_by_self: bool = False) -> dict:
+	"""Keep the top rows per group and prune frame_class.
+
+	Rows rank by Total (outermost cumulative); the app group ranks by Self instead when
+	``app_by_self``, matching the leaderboard cap in ``_aggregate_hot_frames``.
+	"""
 	keep = HOT_FRAMES_INTERMEDIATE_CAP // 2
 	kept: dict = defaultdict(list)
 	for is_framework in (False, True):
 		group = [kv for kv in occurrences.items() if frame_class.get(kv[0], False) is is_framework]
-		group.sort(key=lambda kv: sum(o[2] for o in kv[1]), reverse=True)
+		slot = 1 if (app_by_self and not is_framework) else 2
+		group.sort(key=lambda kv: sum(o[slot] for o in kv[1]), reverse=True)
 		kept.update(group[:keep])
 	for k in [k for k in frame_class if k not in kept]:
 		del frame_class[k]
@@ -1405,7 +1412,7 @@ def _aggregate_hot_frames(
 	occurrences: dict = defaultdict(list)
 	# {(full_path, function): is_framework}
 	frame_class: dict = {}
-	self_time_measured = _total_python_self_ms(per_action_trees) > 0
+	self_time_measured = _self_time_measured(per_action_trees)
 
 	for action_idx, tree in enumerate(per_action_trees):
 		_walk_for_aggregation(
@@ -1413,7 +1420,7 @@ def _aggregate_hot_frames(
 		)
 		# Cap intermediate map size to bound memory.
 		if len(occurrences) > HOT_FRAMES_INTERMEDIATE_CAP * 2:
-			occurrences = _trim_occurrences(occurrences, frame_class)
+			occurrences = _trim_occurrences(occurrences, frame_class, app_by_self=self_time_measured)
 
 	findings = []
 	leaderboard_rows = []
@@ -1422,13 +1429,14 @@ def _aggregate_hot_frames(
 	for ident, occs in occurrences.items():
 		key = labels[ident]
 		distinct_actions = {idx for idx, _, _ in occs}
-		total_self_ms = sum(self_ms for _, self_ms, _ in occs)
+		self_sum_ms = sum(self_ms for _, self_ms, _ in occs)
 		total_outermost_ms = sum(total for _, _, total in occs)
 		row = {
 			"function": key,
-			# Stored meaning: ``total_ms`` is the self-sum, ``total_cumulative_ms`` is the Total
+			# Stored meaning (kept for stored reports and the renderer): ``total_ms`` is the
+			# SELF-sum, not the user-facing Total. ``total_cumulative_ms`` is the Total
 			# (outermost occurrences only, so recursion counts once).
-			"total_ms": round(total_self_ms, 2),
+			"total_ms": round(self_sum_ms, 2),
 			"total_cumulative_ms": round(total_outermost_ms, 2),
 			"self_time_measured": self_time_measured,
 			"occurrences": len(occs),
@@ -1437,47 +1445,65 @@ def _aggregate_hot_frames(
 			"is_framework": frame_class.get(ident, False),
 		}
 		leaderboard_rows.append(row)
-		total_ms = total_self_ms  # alias for downstream Repeated Hot Frame logic
 
+		# Repeated Hot Frame is judged on the self-sum, which is wall-clock. A query's wait lands
+		# in the deepest frame sampled while it ran (usually the driver or db layer, not the app
+		# frame that issued it), so an app frame is inflated only when those frames were pruned
+		# or stripped. Telling that apart needs per-node SQL attribution that is not recorded,
+		# so the SQL wait is NOT discounted here (deferred); the finding text states the limit.
 		if (
 			len(distinct_actions) >= DEFAULT_REPEATED_FRAME_MIN_ACTIONS
-			and total_ms >= DEFAULT_REPEATED_FRAME_MIN_TOTAL_MS
+			and self_sum_ms >= DEFAULT_REPEATED_FRAME_MIN_TOTAL_MS
 		):
-			severity = "High" if total_ms >= 2000 else "Medium"
+			severity = "High" if self_sum_ms >= 2000 else "Medium"
 			findings.append({
 				"finding_type": "Repeated Hot Frame",
 				"severity": severity,
 				"title": (
 					f"{key} appeared in {len(distinct_actions)} actions "
-					f"and consumed {dur(total_ms)} total"
+					f"and consumed {dur(self_sum_ms)} total"
 				),
 				"customer_description": (
 					f"The function **{key}** ran across {len(distinct_actions)} "
-					f"different actions in this session, consuming {dur(total_ms)} "
-					"in total. Optimizing it would help every flow that touches it."
+					f"different actions in this session, consuming {dur(self_sum_ms)} "
+					"in its own lines. Optimizing it would help every flow that touches it."
+					"\n\nNote: this is wall-clock time in the function's own lines, so a wait "
+					"on I/O or on the database that is not shown as a separate call counts "
+					"too. Check the call tree before optimising its code."
 				),
 				"technical_detail_json": json.dumps({
 					"function": key,
-					"total_ms": round(total_ms, 2),
+					# Same self-sum as the leaderboard row's stored ``total_ms``.
+					"total_ms": round(self_sum_ms, 2),
 					"distinct_actions": len(distinct_actions),
 					"action_refs": sorted(distinct_actions),
 				}, default=str),
-				"estimated_impact_ms": round(total_ms, 2),
+				"estimated_impact_ms": round(self_sum_ms, 2),
 				"affected_count": len(occs),
 				"action_ref": None,
 			})
 
-	# Cap each group separately so app frames cannot crowd out the framework group.
-	# Both groups rank by Total, the same key the report sorts by.
+	# Cap each group separately so app frames cannot crowd out the framework group. The app
+	# group ranks by Self when self time was measured (the column the report orders it by),
+	# else by Total. The framework group always ranks by Total: its table shows Total only,
+	# and a wrapper's own time is usually a small part of it.
+	def app_rank(row):
+		return row["total_ms"] if self_time_measured else row["total_cumulative_ms"]
+
+	def framework_rank(row):
+		return row["total_cumulative_ms"]
+
 	custom_rows = sorted(
-		(r for r in leaderboard_rows if not r["is_framework"]),
-		key=lambda r: r["total_cumulative_ms"], reverse=True,
+		(r for r in leaderboard_rows if not r["is_framework"]), key=app_rank, reverse=True,
 	)[:HOT_FRAMES_LEADERBOARD_SIZE]
 	framework_rows = sorted(
-		(r for r in leaderboard_rows if r["is_framework"]),
-		key=lambda r: r["total_cumulative_ms"], reverse=True,
+		(r for r in leaderboard_rows if r["is_framework"]), key=framework_rank, reverse=True,
 	)[:HOT_FRAMES_LEADERBOARD_SIZE]
-	leaderboard = sorted(custom_rows + framework_rows, key=lambda r: r["total_cumulative_ms"], reverse=True)
+	leaderboard = sorted(
+		custom_rows + framework_rows,
+		key=lambda r: framework_rank(r) if r["is_framework"] else app_rank(r),
+		reverse=True,
+	)
 
 	return findings, leaderboard
 
@@ -1659,13 +1685,26 @@ def _top_level_app(function: str, filename: str) -> str:
 	return first
 
 
-def _build_session_breakdown(per_action_trees: list, sql_total_ms: float) -> dict:
-	"""Compute the donut data: sql ms + python ms + per-app self ms."""
+def _build_session_breakdown(
+	per_action_trees: list, sql_total_ms: float, per_action_sql_ms: list | None = None
+) -> dict:
+	"""Compute the donut data: sql ms + python ms + per-app self ms.
+
+	``python_ms`` is the python self time without the SQL wait, which is already in ``sql_ms``
+	and sits inside python self times. The wait is removed per action, clamped at zero, so one
+	SQL-heavy action cannot erase the python time of the others. ``per_action_sql_ms`` aligns
+	with ``per_action_trees``; absent entries count as no SQL.
+
+	``by_app`` is raw self time and still includes the SQL wait. It must not be rendered
+	against ``sql_ms`` without the same per-action exclusion.
+	"""
 	by_app: dict = defaultdict(float)
 	python_total = 0.0
-	for tree in per_action_trees:
+	sql_per_action = per_action_sql_ms or []
+	for idx, tree in enumerate(per_action_trees):
 		_walk_for_breakdown(tree, by_app)
-		python_total += _sum_self_python(tree)
+		action_sql_ms = sql_per_action[idx] if idx < len(sql_per_action) else 0.0
+		python_total += max(0.0, _sum_self_python(tree) - action_sql_ms)
 	return {
 		"sql_ms": round(sql_total_ms, 2),
 		"python_ms": round(python_total, 2),
@@ -1692,6 +1731,29 @@ def _sum_self_python(node: dict) -> float:
 
 def _total_python_self_ms(trees: list) -> float:
 	return sum(_sum_self_python(t) for t in trees)
+
+
+# Self time is trusted only when the python self times add up to the sampled time. Verified
+# against ``_walk_pyi_frame`` and ``reconcile``: a python frame's ``self_ms`` is its ``time``
+# minus its real children's time, and SQL leaves are separate ``kind == "sql"`` nodes grafted
+# on top without being subtracted, so the SQL wait stays INSIDE the python self times. Prune
+# and soft-cap placeholders carry the time of the frames they drop. Hence, per tree, the sum
+# of python self times is the root ``cumulative_ms`` (SQL is NOT subtracted from the target).
+# The tolerance absorbs what legitimately breaks the identity: self clamped to 0 when children
+# overshoot their parent (sum slightly above), 3-decimal rounding, and profiler frames stripped
+# after reconcile (sum below). Outside it the self times are missing or implausible and the
+# report falls back to Total only.
+SELF_TIME_MIN_COVERAGE = 0.5   # sum(self) / sum(root cumulative) at or above this
+SELF_TIME_MAX_COVERAGE = 1.05  # ... and at or below this
+
+
+def _self_time_measured(trees: list) -> bool:
+	"""True when python self time is present and consistent with the sampled wall time."""
+	self_ms = _total_python_self_ms(trees)
+	sampled_ms = sum(t.get("cumulative_ms", 0) for t in trees)
+	if self_ms <= 0 or sampled_ms <= 0:
+		return False
+	return SELF_TIME_MIN_COVERAGE <= self_ms / sampled_ms <= SELF_TIME_MAX_COVERAGE
 
 
 def _conf_float(key: str, default: float) -> float:
@@ -1730,8 +1792,8 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 	aggregate: dict = {}
 	per_action_trees: list = []
 	sql_total_ms = 0.0
-	# SQL time of actions that have a tree; only that wait sits inside the python self time.
-	tree_sql_ms = 0.0
+	# SQL ms per action, aligned with per_action_trees (the wait sits inside python self time).
+	per_action_sql_ms: list = []
 
 	# Threshold config (read once)
 	prune_pct = _conf_float("optimus_tree_prune_threshold_pct", DEFAULT_PRUNE_THRESHOLD_PCT)
@@ -1775,6 +1837,7 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 			action_wall_time = a.get("duration_ms") or 0
 
 		if pyi is None:
+			per_action_sql_ms.append(action_sql_ms)
 			per_action_trees.append({
 				"function": "<root>", "children": [],
 				"cumulative_ms": 0, "self_ms": 0, "kind": "python",
@@ -1800,7 +1863,6 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 			# stored tree here ensures they never appear in the
 			# report regardless of sampling luck.
 			tree = _strip_profiler_frames(tree)
-			tree_sql_ms += action_sql_ms
 		except Exception:
 			context.warnings.append(
 				f"Reconciliation failed for action {action_idx} (see error log)"
@@ -1811,6 +1873,7 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 			}
 
 		per_action_trees.append(tree)
+		per_action_sql_ms.append(action_sql_ms)
 
 		# Per-action findings
 		findings.extend(_emit_per_action_findings(
@@ -1836,20 +1899,22 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 	findings.extend(repeated_findings)
 
 	# Donut breakdown
-	breakdown = _build_session_breakdown(per_action_trees, sql_total_ms=sql_total_ms)
+	breakdown = _build_session_breakdown(
+		per_action_trees, sql_total_ms=sql_total_ms, per_action_sql_ms=per_action_sql_ms
+	)
 
-	# Time was sampled but no frame has own time: hot frames can show Total only.
+	# Time was sampled but self time is missing or does not add up: hot frames show Total only.
 	sampled = any(t.get("cumulative_ms", 0) > 0 for t in per_action_trees)
-	if sampled and breakdown["python_ms"] <= 0:
+	if sampled and not _self_time_measured(per_action_trees):
 		context.warnings.append(
 			"Self time could not be measured: the call trees carry no own time per function, "
-			"so hot frames show Total time only."
+			"or it does not add up to the sampled time, so hot frames show Total time only."
 		)
 
 	aggregate["hot_frames"] = leaderboard
 	aggregate["session_time_breakdown"] = breakdown
-	# Python self time includes the wait on SQL, which total_sql_ms already counts.
-	aggregate["total_python_ms"] = round(max(0.0, breakdown["python_ms"] - tree_sql_ms), 2)
+	# python_ms already excludes each action's SQL wait (see _build_session_breakdown).
+	aggregate["total_python_ms"] = breakdown["python_ms"]
 	aggregate["total_sql_ms"] = breakdown["sql_ms"]
 
 	return AnalyzerResult(findings=findings, aggregate=aggregate)
