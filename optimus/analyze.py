@@ -1438,7 +1438,7 @@ def _own_source(stack) -> str:
 
 
 def _top_sources(frames: list, limit: int = 2) -> str:
-	return ", ".join(f"{source} x{n}" for source, n in Counter(map(_frame_source, frames)).most_common(limit))
+	return ", ".join(f"{source} x{n}" for source, n in Counter(_frame_source(f) for f in frames).most_common(limit))
 
 
 def _strip_own_calls(recordings: list, session_uuid: str) -> None:
