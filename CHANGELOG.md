@@ -17,7 +17,7 @@ versions may contain breaking changes see migration notes below).
 - The pill is now a real button: you can reach it with Tab, open and stop with Enter or Space, it shows a focus ring, and its tooltip says what a click does ("Start a profiling session", "Stop recording and analyze") instead of a build number. The running timer is no longer read out every second by screen readers.
 - A failed start keeps the dialog open with your label, so you can fix the problem and press Start again. Pressing Enter or Ctrl+S twice no longer starts two sessions. Closing the dialog with Escape keeps what you typed for the next time you open it on the same page (kept in this tab only, gone on reload).
 - Clicking Stop after another tab has already stopped that session now says what happened, instead of leaving the pill stuck on "Stopping".
-- The pill, the start dialog note, the first-visit notice and the line profiling picker now follow the Desk dark theme, Windows high-contrast mode and the reduced-motion setting, and their text meets the contrast minimums. The pill now stays above Desk's pop-up notices and below an open dialog's backdrop.
+- The pill, the start dialog note, the first-visit notice and the line profiling picker now follow the Desk dark theme, Windows high-contrast mode and the reduced-motion setting, and their text meets the contrast minimums. The pill now stays below Desk's pop-up notices, so they are never covered, and below an open dialog's backdrop.
 
 ### Not covered
 

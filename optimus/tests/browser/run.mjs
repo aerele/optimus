@@ -166,11 +166,16 @@ for (const theme of ["light", "dark"]) {
 			const dot = getComputedStyle(w.querySelector(".fp-dot"));
 			const toast = document.querySelector(".es-toast");
 			const r = w.getBoundingClientRect();
-			const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
-			return { color: cs.color, bg: cs.backgroundColor, dot: dot.backgroundColor, toast: !!toast, pillOnTop: w.contains(top) };
+			const t = toast && toast.getBoundingClientRect();
+			const x1 = t ? Math.max(r.left, t.left) : 0, x2 = t ? Math.min(r.right, t.right) : 0;
+			const y1 = t ? Math.max(r.top, t.top) : 0, y2 = t ? Math.min(r.bottom, t.bottom) : 0;
+			const overlap = x2 > x1 && y2 > y1;
+			const top = overlap ? document.elementFromPoint((x1 + x2) / 2, (y1 + y2) / 2) : null;
+			const pillOnTop = !overlap || toast.contains(top);
+			return { color: cs.color, bg: cs.backgroundColor, dot: dot.backgroundColor, toast: !!toast, overlap, pillOnTop };
 		});
 		check(`${tag} recording label contrast >= 4.5 and dot follows the text colour`, contrast(parseRgb(rec.color), parseRgb(rec.bg)) >= 4.5 && rec.dot === rec.color, rec);
-		check(`${tag} with a toast showing the pill is still on top at its centre`, rec.toast && rec.pillOnTop, rec);
+		check(`${tag} a toast showing over the pill is on top of it (fully readable)`, rec.toast && rec.pillOnTop, rec);
 		await ctx.close();
 	}
 }
@@ -253,6 +258,8 @@ for (const cap of [false, true]) {
 	await startRecording(page);
 	server.pointer = null;
 	delete server.rows.s1;
+	// Toasts cover the pill for their 7 s lifetime; wait it out as a mouse user would.
+	await page.evaluate(() => document.querySelectorAll(".es-toast").forEach((t) => t.remove()));
 	await page.click(PILL);
 	await settle(page, 300);
 	const toasts = await alerts(page);

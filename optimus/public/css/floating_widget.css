@@ -8,8 +8,8 @@
 	position: fixed;
 	right: 20px;
 	bottom: 20px;
-	/* Above Desk toasts (2000); body.modal-open drops it below an open modal's backdrop (1040). */
-	z-index: 2001;
+	/* Below Desk toasts (2000), so a notice is never covered; body.modal-open drops it below a modal backdrop (1040). */
+	z-index: 1999;
 	display: none; /* hidden until JS confirms the user has permission */
 	min-width: 96px;
 	margin: 0;

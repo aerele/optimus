@@ -315,9 +315,9 @@ def test_the_pill_is_a_real_button_with_a_state_title_and_no_build_id_tooltip():
 	assert 'class="fp-elapsed" aria-hidden="true"' in src
 
 
-def test_the_pill_stacks_above_toasts_and_below_an_open_modal_backdrop():
+def test_the_pill_stacks_below_toasts_and_below_an_open_modal_backdrop():
 	css = _read(WIDGET_CSS)
-	assert re.search(r"#frappe-profiler-widget \{[^}]*z-index: 2001;", css)
+	assert re.search(r"#frappe-profiler-widget \{[^}]*z-index: 1999;", css)
 	assert re.search(r"body\.modal-open #frappe-profiler-widget \{\s*z-index: 1039;", css)
 	assert "z-index" not in re.search(r'widget\.style\.cssText = \[(.*?)\]', _read(WIDGET_JS), re.S).group(1)
 
