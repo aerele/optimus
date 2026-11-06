@@ -3,6 +3,7 @@
 
 """The Redis lifetimes and stale-session limits only work together: pin how they relate."""
 
+import os
 import re
 
 import pytest
@@ -71,3 +72,14 @@ def test_line_profiling_shares_the_session_ttl():
 	from optimus.line_profile import capture
 
 	assert capture.SESSION_TTL_SECONDS == timing.SESSION_TTL_SECONDS
+
+
+def test_the_pill_checks_for_an_ended_recording_more_often_than_the_pointer_lives():
+	assert timing.PILL_RECORDING_CHECK_SECONDS < timing.SESSION_TTL_SECONDS
+
+
+def test_the_pill_script_uses_the_same_recording_check_interval():
+	path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "public", "js", "optimus_pill_state.js")
+	with open(path) as f:
+		match = re.search(r"RECORDING_CHECK_MS = (\d+)", f.read())
+	assert int(match.group(1)) == timing.PILL_RECORDING_CHECK_SECONDS * 1000

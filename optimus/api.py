@@ -14,11 +14,11 @@ from dataclasses import dataclass
 
 import frappe
 from frappe import _
-from frappe.utils import add_to_date, now_datetime
+from frappe.utils import add_to_date, get_datetime, now_datetime
 
 from optimus import ratelimit, safe_call, safe_commit, session
 from optimus.permissions import may_act_on_session
-from optimus.timing import RECORDING_DATA_TTL_SECONDS
+from optimus.timing import RECORDING_DATA_TTL_SECONDS, SESSION_TTL_SECONDS
 
 # Roles allowed to call the profiler API. System Manager is always allowed
 # (Frappe's superuser role); Optimus User is our dedicated role created
@@ -821,8 +821,8 @@ def pill_state(session_uuid: str | None = None, run_uuid: str | None = None) -> 
 			"started_at": meta.get("started_at"),
 		}
 	if session_uuid:
-		return _pill_state_for(user, session_uuid, run_uuid)
-	return _pill_state_lp_recording(user) or _pill_state_in_flight(user)
+		return _pill_state_for(user, session_uuid, run_uuid, active)
+	return _pill_state_lp_recording(user) or _pill_state_in_flight(user, active)
 
 
 def _pill_state_lp_recording(user: str) -> dict | None:
@@ -845,18 +845,18 @@ def _pill_state_lp_recording(user: str) -> dict | None:
 	return _pill_payload("phase2", session_uuid, docname, "Recording", run_uuid)
 
 
-def _pill_state_for(user: str, session_uuid: str, run_uuid: str | None) -> dict:
+def _pill_state_for(user: str, session_uuid: str, run_uuid: str | None, active: str | None) -> dict:
 	row = frappe.get_all(
 		"Optimus Session",
 		filters={"session_uuid": session_uuid, "user": user},
-		fields=["name", "status"],
+		fields=["name", "status", "started_at"],
 		limit=1,
 	)
 	if not row:
 		return {"phase": "idle"}
 	docname, status = row[0]["name"], row[0]["status"]
 	if not run_uuid:
-		return _pill_payload("session", session_uuid, docname, status)
+		return _pill_payload("session", session_uuid, docname, status, ended=_row_ended(user, row[0], active))
 	run = frappe.get_all(
 		"Optimus Phase Two Run",
 		filters={"parent": docname, "parenttype": "Optimus Session", "run_uuid": run_uuid},
@@ -868,21 +868,22 @@ def _pill_state_for(user: str, session_uuid: str, run_uuid: str | None) -> dict:
 	return _pill_payload("phase2", session_uuid, docname, run[0]["status"], run_uuid)
 
 
-def _pill_state_in_flight(user: str) -> dict:
+def _pill_state_in_flight(user: str, active: str | None) -> dict:
 	"""Latest own session still analyzing, else an own phase-2 run still analyzing."""
 	cutoff = add_to_date(now_datetime(), minutes=-_PILL_RESYNC_WINDOW_MINUTES)
 	rows = frappe.get_all(
 		"Optimus Session",
 		filters={"user": user, "modified": [">", cutoff]},
-		fields=["name", "session_uuid", "status"],
+		fields=["name", "session_uuid", "status", "started_at"],
 		order_by="modified desc",
 		limit=20,
 	)
 	if not rows:
 		return {"phase": "idle"}
 	for row in rows:
-		if row["status"] in _PILL_TRANSIENT_STATUSES:
-			return _pill_payload("session", row["session_uuid"], row["name"], row["status"])
+		ended = _row_ended(user, row, active)
+		if row["status"] in _PILL_TRANSIENT_STATUSES or ended:
+			return _pill_payload("session", row["session_uuid"], row["name"], row["status"], ended=ended)
 	runs = frappe.get_all(
 		"Optimus Phase Two Run",
 		filters={
@@ -901,19 +902,34 @@ def _pill_state_in_flight(user: str) -> dict:
 	)
 
 
-def _pill_payload(scope: str, session_uuid, docname, status, run_uuid=None) -> dict:
+def _row_ended(user: str, row: dict, active: str | None) -> bool:
+	"""A Recording row whose pointer has expired: older than the pointer's lifetime and confirmed gone.
+
+	The pointer read that backs ``active`` swallows Redis errors, so a missing pointer alone
+	never proves the session ended; an unreadable Redis answers "not ended".
+	"""
+	if row["status"] != "Recording" or not row.get("started_at"):
+		return False
+	if get_datetime(row["started_at"]) > add_to_date(now_datetime(), seconds=-SESSION_TTL_SECONDS):
+		return False
+	return bool(active) or session.active_pointer_gone(user)
+
+
+def _pill_payload(scope: str, session_uuid, docname, status, run_uuid=None, ended=False) -> dict:
 	if status == "Ready":
 		phase = "ready"
 	elif status == "Failed":
 		phase = "failed"
 	elif status == "Recording":
 		# A line profiling run records; a session row alone is not proof of a live recording.
-		phase = "recording" if run_uuid else "idle"
+		phase = "recording" if run_uuid else ("ended" if ended else "idle")
 	else:
 		phase = "analyzing"
 	out = {"phase": phase, "scope": scope, "session_uuid": session_uuid, "docname": docname}
 	if run_uuid:
 		out["run_uuid"] = run_uuid
+	if phase == "ended":
+		out["cap_hit"] = bool((session.get_session_meta(session_uuid) or {}).get("cap_warning"))
 	return out
 
 

@@ -1,5 +1,5 @@
 // Pure floating-pill state logic (no DOM, no frappe); tested in node.
-// Reducers return {state, ui, alert}, or null to ignore the input.
+// Reducers return {state, ui, alert, effect?}, or null to ignore the input.
 
 (function (root, factory) {
 	"use strict";
@@ -18,6 +18,9 @@
 	// An "analyzing" event right after a terminal one is a reordered delivery.
 	const STALE_EVENT_WINDOW_MS = 5000;
 	const TRANSIENT = ["stopping", "analyzing"];
+	// A visible recording tab asks the server this often whether the session ended by itself.
+	// Must equal timing.PILL_RECORDING_CHECK_SECONDS (pinned by test_timing_relations.py).
+	const RECORDING_CHECK_MS = 60000;
 
 	const EVENTS = {
 		optimus_session_analyzing: { kind: "analyzing", phase2: false },
@@ -51,6 +54,14 @@
 			return "wait";
 		}
 		return pollExpired(elapsedMs) ? "expire" : "fetch";
+	}
+
+	// What a recording check tick should do: stop (not a phase-1 recording), wait (tab hidden) or fetch.
+	function recordingCheckAction(display, phase2, hidden) {
+		if (display !== "recording" || phase2) {
+			return "stop";
+		}
+		return hidden ? "wait" : "fetch";
 	}
 
 	function terminalKey(data, state) {
@@ -152,6 +163,8 @@
 		return { state: next, ui: { display: "analyzing", label: label, elapsed: spec.phase2 ? "" : "0%" }, alert: null };
 	}
 
+	const INACTIVE_UI = { display: "inactive", label: "Profiler", elapsed: "" };
+
 	// Server wins for terminal states; a stale recording snapshot is ignored.
 	function reduceServer(state, srv, now) {
 		if (!srv || !srv.phase) {
@@ -184,7 +197,37 @@
 			const data = { session_uuid: srv.session_uuid, docname: srv.docname, run_uuid: srv.run_uuid };
 			return finish(state, srv.phase, srv.scope === "phase2", data, now);
 		}
+		if (srv.phase === "ended") {
+			return serverEnded(state, srv);
+		}
 		return serverIdle(state);
+	}
+
+	// The tracked session ended by itself: analyze what was captured, once per session.
+	// No alert here: the stop reply says whether this tab won the claim, and only the winner tells the user.
+	function serverEnded(state, srv) {
+		const display = state.display;
+		if (state.phase2 || display === "stopping" || display === "analyzing" || display === "ready") {
+			return null;
+		}
+		if (state.session_uuid && state.session_uuid !== srv.session_uuid) {
+			return null;
+		}
+		if (state.autoStopped && state.autoStopped[srv.session_uuid]) {
+			// The automatic stop already failed: stop claiming a recording.
+			return display === "recording" ? { state: resetState(state), ui: INACTIVE_UI, alert: null } : null;
+		}
+		const autoStopped = Object.assign({}, state.autoStopped);
+		autoStopped[srv.session_uuid] = true;
+		return {
+			state: withState(state, {
+				active: false, display: "stopping", session_uuid: srv.session_uuid,
+				docname: srv.docname, autoStopped: autoStopped,
+			}),
+			ui: { display: "stopping", label: "Stopping…", elapsed: "" },
+			alert: null,
+			effect: { stop: srv.session_uuid, capHit: !!srv.cap_hit },
+		};
 	}
 
 	function serverAnalyzing(state, srv) {
@@ -243,13 +286,14 @@
 	function initialState() {
 		return {
 			active: false, session_uuid: null, docname: null, label: null, started_at: null,
-			display: "inactive", phase2: false, run_uuid: null, terminal: {},
+			display: "inactive", phase2: false, run_uuid: null, terminal: {}, autoStopped: {},
 		};
 	}
 
 	return {
 		POLL: POLL, STALE_EVENT_WINDOW_MS: STALE_EVENT_WINDOW_MS, EVENT_NAMES: Object.keys(EVENTS),
 		initialState: initialState, nextDelay: nextDelay, pollExpired: pollExpired, pollAction: pollAction,
+		RECORDING_CHECK_MS: RECORDING_CHECK_MS, recordingCheckAction: recordingCheckAction,
 		isTransient: isTransient, reduceEvent: reduceEvent, reduceServer: reduceServer,
 		reduceHardStop: reduceHardStop, resetState: resetState,
 	};

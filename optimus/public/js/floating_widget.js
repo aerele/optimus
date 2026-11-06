@@ -64,6 +64,11 @@
 
 	let widget = null;
 	let elapsedHandle = null;
+	// Asks the server every RECORDING_CHECK_MS whether the recording ended by itself.
+	let recordingTimer = null;
+	// The start dialog's label, kept in this tab's memory so a failed start or Escape does not lose it.
+	let rememberedLabel = null;
+	let startInFlight = false;
 	// State logic is in optimus_pill_state.js.
 	const Pill = window.OptimusPillState;
 	if (!Pill) {
@@ -136,32 +141,16 @@
 		if (document.getElementById("frappe-profiler-onboarding-toast")) return;
 		var toast = document.createElement("div");
 		toast.id = "frappe-profiler-onboarding-toast";
-		toast.style.cssText = [
-			"position: fixed",
-			"top: 20px",
-			"right: 20px",
-			"z-index: 2147483647",
-			"max-width: 360px",
-			"padding: 14px 18px",
-			"border-radius: 10px",
-			"border: 1px solid #16a34a",
-			"background: #f0fdf4",
-			"color: #166534",
-			"font-family: -apple-system, BlinkMacSystemFont, sans-serif",
-			"font-size: 0.9rem",
-			"line-height: 1.4",
-			"box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18)",
-			"cursor: default",
-		].join("; ");
+		toast.className = "optimus-onboarding-toast";
+		toast.setAttribute("role", "status");
 		toast.innerHTML = [
-			'<div style="margin-bottom: 8px; font-weight: 700;">Optimus is installed</div>',
-			'<div style="margin-bottom: 12px;">',
+			'<div class="optimus-onboarding-title">Optimus is installed</div>',
+			'<div class="optimus-onboarding-body">',
 			"Click the <strong>Profiler</strong> pill in the bottom-right corner ",
 			"to record your first slow flow.",
 			"</div>",
-			'<button id="frappe-profiler-onboarding-dismiss" ',
-			'style="background: #16a34a; color: #fff; border: none; padding: 6px 14px; ',
-			'border-radius: 6px; cursor: pointer; font-weight: 600;">Got it</button>',
+			'<button type="button" id="frappe-profiler-onboarding-dismiss" ',
+			'class="optimus-onboarding-dismiss">Got it</button>',
 		].join("");
 		document.body.appendChild(toast);
 
@@ -169,6 +158,7 @@
 		function dismiss() {
 			if (dismissed) return;
 			dismissed = true;
+			document.removeEventListener("keydown", onEscape);
 			try {
 				toast.remove();
 			} catch (e) { /* noop */ }
@@ -176,6 +166,10 @@
 				frappe.call({ method: "optimus.api.mark_onboarding_seen" });
 			} catch (e) { /* noop */ }
 		}
+		function onEscape(e) {
+			if (e.key === "Escape") dismiss();
+		}
+		document.addEventListener("keydown", onEscape);
 		var btn = document.getElementById("frappe-profiler-onboarding-dismiss");
 		if (btn) btn.addEventListener("click", dismiss);
 		// Auto-dismiss after 15 seconds
@@ -206,18 +200,18 @@
 			widget = existing;
 			return;
 		}
-		widget = document.createElement("div");
+		widget = document.createElement("button");
+		widget.type = "button";
 		widget.id = "frappe-profiler-widget";
 		widget.className = "fp-state-inactive";
-		// Expose the build ID so a hovering user / dev-tools inspector
-		// can confirm which JS is actually running without opening
-		// the console.
-		widget.title = "Optimus build " + WIDGET_BUILD_ID;
+		widget.title = pillTitle("inactive", false);
+		// Lets a dev-tools inspector confirm which JS is running; not shown to users.
 		widget.setAttribute("data-build-id", WIDGET_BUILD_ID);
+		// The per-second elapsed timer stays out of the accessible name.
 		widget.innerHTML = `
-			<span class="fp-dot"></span>
+			<span class="fp-dot" aria-hidden="true"></span>
 			<span class="fp-label">Profiler</span>
-			<span class="fp-elapsed"></span>
+			<span class="fp-elapsed" aria-hidden="true"></span>
 		`;
 		widget.addEventListener("click", onClick);
 		// Inline-style only the layout primitives that need to override
@@ -228,7 +222,6 @@
 			"position: fixed",
 			"right: 20px",
 			"bottom: 20px",
-			"z-index: 2147483647",  /* max int32 above everything */
 			"display: block !important",
 			"visibility: visible !important",
 			"opacity: 1 !important",
@@ -238,6 +231,15 @@
 		_diag("[optimus] widget appended to body, id=#frappe-profiler-widget");
 		_diag("[optimus] widget element:", widget);
 		_diag("[optimus] body has child count:", document.body.children.length);
+	}
+
+	function pillTitle(display, phase2) {
+		if (display === "recording") {
+			return phase2 ? __("Stop line profiling") : __("Stop recording and analyze");
+		}
+		if (display === "stopping" || display === "analyzing") return __("Analysis in progress");
+		if (display === "ready") return __("Open the session");
+		return __("Start a profiling session");
 	}
 
 	function setDisplay(display, label, elapsed, tone) {
@@ -255,7 +257,14 @@
 		if (tone) widget.classList.add(`fp-tone-${tone}`);
 		widget.querySelector(".fp-label").textContent = label;
 		widget.querySelector(".fp-elapsed").textContent = elapsed || "";
+		widget.title = pillTitle(display, currentState.phase2);
+		if (Pill.isTransient(display)) {
+			widget.setAttribute("aria-disabled", "true");
+		} else {
+			widget.removeAttribute("aria-disabled");
+		}
 		if (display !== "recording") stopElapsedTimer();
+		syncRecordingCheck(display);
 		syncPoll(display);
 	}
 
@@ -270,6 +279,39 @@
 		if (widget && !currentState.session_uuid) {
 			widget.removeAttribute("data-session-uuid");
 		}
+		if (res.effect && res.effect.stop) {
+			confirmAndStop({ sessionUuid: res.effect.stop, auto: true, capHit: res.effect.capHit });
+		}
+	}
+
+	// While recording, ask the server once a minute whether the session ended by itself.
+	function syncRecordingCheck(display) {
+		if (display !== "recording") {
+			stopRecordingCheck();
+		} else if (!recordingTimer) {
+			recordingTimer = setTimeout(recordingTick, Pill.RECORDING_CHECK_MS);
+		}
+	}
+
+	function stopRecordingCheck() {
+		if (recordingTimer) clearTimeout(recordingTimer);
+		recordingTimer = null;
+	}
+
+	function recordingTick() {
+		recordingTimer = null;
+		const action = Pill.recordingCheckAction(currentState.display, currentState.phase2, document.hidden);
+		if (action === "stop") return;
+		if (action === "wait") {
+			// No request while hidden; the visibility handler resyncs.
+			recordingTimer = setTimeout(recordingTick, Pill.RECORDING_CHECK_MS);
+			return;
+		}
+		refreshStatus(() => {
+			if (currentState.display === "recording" && !recordingTimer) {
+				recordingTimer = setTimeout(recordingTick, Pill.RECORDING_CHECK_MS);
+			}
+		});
 	}
 
 	// Fallback poll for missed realtime events, with backoff and a hard stop.
@@ -332,7 +374,7 @@
 			callback: (r) => {
 				// A click since the request was sent makes the reply obsolete.
 				if (epoch !== resyncEpoch) {
-					if (done) done();
+					if (done) done(false);
 					return;
 				}
 				const prev = currentState.display;
@@ -346,11 +388,11 @@
 					}
 					if (widget) widget.setAttribute("data-session-uuid", currentState.session_uuid || "");
 				}
-				if (done) done();
+				if (done) done(true);
 			},
 			error: (xhr) => {
 				_diag("[optimus] pill_state poll failed:", xhr && xhr.status);
-				if (done) done();
+				if (done) done(false);
 			},
 		});
 	}
@@ -498,7 +540,95 @@
 		return t ? `${route} · ${t}` : route;
 	}
 
+	function routeKey() {
+		try {
+			return JSON.stringify(frappe.get_route ? frappe.get_route() : []);
+		} catch (e) {
+			return "";
+		}
+	}
+
+	function remember(label) {
+		rememberedLabel = label ? { text: label, route: routeKey() } : null;
+	}
+
+	// A typed label survives a failed start or an Escape, but only on the page it was typed on.
+	function labelForNewDialog() {
+		if (rememberedLabel && rememberedLabel.route === routeKey()) return rememberedLabel.text;
+		return getDefaultSessionLabel();
+	}
+
+	function startSession(d, values, onStarted) {
+		if (startInFlight) return;
+		startInFlight = true;
+		d.disable_primary_action();
+		return frappe.call({
+			method: "optimus.api.start",
+			args: {
+				label: values.label || "",
+				// v0.7 GA: tree capture is always on - users
+				// who turn it off then file "no candidates"
+				// bugs. The api.start kwarg still defaults
+				// True so CLI / external callers can opt
+				// out if they really need SQL-only capture.
+				capture_python_tree: 1,
+			},
+			callback: (r) => {
+				startInFlight = false;
+				rememberedLabel = null;
+				onStarted();
+				d.hide();
+				showStarted((r && r.message) || {});
+			},
+			error: (r) => {
+				// frappe.call's success callback is NOT invoked on server errors
+				// (4xx/5xx). The dialog stays open with the label so the user can retry.
+				// A server message already opens its own dialog, so add a toast only without one.
+				startInFlight = false;
+				d.enable_primary_action();
+				if (r && r._server_messages) return;
+				frappe.show_alert({
+					message: __("Profiler start failed. Check your role and try again."),
+					indicator: "red",
+				});
+			},
+		});
+	}
+
+	function showStarted(data) {
+		if (!data.session_uuid) {
+			// Server returned 200 but no session_uuid in the
+			// response unexpected. Surface something so
+			// the user knows the click didn't land.
+			frappe.show_alert({
+				message: __("Profiler start returned no session check Error Log"),
+				indicator: "orange",
+			});
+			return;
+		}
+		resyncEpoch += 1;
+		currentState.active = true;
+		currentState.session_uuid = data.session_uuid;
+		currentState.docname = data.docname;
+		currentState.label = data.title;
+		currentState.started_at = data.started_at;
+		currentState.display = "recording";
+		startElapsedTimer();
+		setDisplay("recording", "Recording", "0:00");
+		// v0.5.0: expose session UUID for optimus_frontend.js.
+		if (widget) {
+			widget.setAttribute("data-session-uuid", data.session_uuid || "");
+		}
+		frappe.show_alert({
+			message: __("Profiler started: {0}", [data.title]),
+			indicator: "green",
+		});
+	}
+
 	function openStartDialog() {
+		const hadFocus = !!widget && document.activeElement === widget;
+		let started = false;
+		const initialLabel = labelForNewDialog();
 		const d = new frappe.ui.Dialog({
 			title: "Start profiling session",
 			fields: [
@@ -508,7 +638,7 @@
 					label: "Session label",
 					reqd: 1,
 					length: 140,
-					default: getDefaultSessionLabel(),
+					default: initialLabel,
 					description:
 						"Give this session a name you'll recognize later e.g. 'Sales Invoice flow with 50 items'. (up to 140 characters)",
 				},
@@ -516,7 +646,7 @@
 					fieldname: "warning_html",
 					fieldtype: "HTML",
 					options: `
-						<div style="background: #fffbeb; border: 1px solid #fbbf24; border-radius: 4px; padding: 10px 12px; margin-top: 10px; font-size: 0.85rem; color: #92400e;">
+						<div class="optimus-start-note">
 							<strong>Note:</strong> Recording adds ~1.5–2× wall-clock overhead per request while it's running.
 							Only your traffic will be captured other users on this site are not affected.
 							The session auto-stops after 10 minutes without activity, and stops recording once it reaches the per-session request limit. Captured data stays in Redis for up to 6 hours, until analysis completes.
@@ -525,81 +655,20 @@
 				},
 			],
 			primary_action_label: "Start",
-			primary_action: (values) => {
-				d.hide();
-				frappe.call({
-					method: "optimus.api.start",
-					args: {
-						label: values.label || "",
-						// v0.7 GA: tree capture is always on - users
-						// who turn it off then file "no candidates"
-						// bugs. The api.start kwarg still defaults
-						// True so CLI / external callers can opt
-						// out if they really need SQL-only capture.
-						capture_python_tree: 1,
-					},
-					callback: (r) => {
-						const data = (r && r.message) || {};
-						if (data.session_uuid) {
-							resyncEpoch += 1;
-							currentState.active = true;
-							currentState.session_uuid = data.session_uuid;
-							currentState.docname = data.docname;
-							currentState.label = data.title;
-							currentState.started_at = data.started_at;
-							currentState.display = "recording";
-							startElapsedTimer();
-							setDisplay("recording", "Recording", "0:00");
-							// v0.5.0: expose session UUID for optimus_frontend.js.
-							if (widget) {
-								widget.setAttribute("data-session-uuid", data.session_uuid || "");
-							}
-							frappe.show_alert({
-								message: __("Profiler started: {0}", [data.title]),
-								indicator: "green",
-							});
-						} else {
-							// Server returned 200 but no session_uuid in the
-							// response unexpected. Surface something so
-							// the user knows the click didn't land.
-							frappe.show_alert({
-								message: __("Profiler start returned no session check Error Log"),
-								indicator: "orange",
-							});
-						}
-					},
-					error: (r) => {
-						// v0.5.1: frappe.call's success callback is NOT
-						// invoked on server errors (4xx/5xx). Without
-						// this error branch, a failed start (permission
-						// denied, server exception, concurrent session,
-						// etc.) would leave the user staring at a
-						// silent inactive pill after the dialog closes
-						// the exact 'widget not working as expected'
-						// failure mode they'd see if their account
-						// lacked the Optimus User role.
-						//
-						// Frappe already surfaces server errors as its
-						// own alert via _server_messages, so we just
-						// need an additional best-effort toast so the
-						// user sees SOMETHING happened. The dialog has
-						// already been hidden at this point so we can't
-						// keep the user on it for another try.
-						const msg = (r && r._server_messages)
-							? "Profiler start failed see the Frappe error alert above"
-							: "Profiler start failed check your role and try again";
-						frappe.show_alert({
-							message: __(msg),
-							indicator: "red",
-						});
-					},
-				});
-			},
+			primary_action: (values) => startSession(d, values, () => { started = true; }),
 		});
+		d.onhide = () => {
+			const typed = d.get_value("label");
+			if (!started && typed !== initialLabel) remember(typed);
+			const active = document.activeElement;
+			if (hadFocus && widget && (!active || active === document.body)) widget.focus();
+		};
 		d.show();
 	}
 
-	function confirmAndStop() {
+	// opts.sessionUuid: stop that session (an automatic stop of an ended one); default is the session this tab shows.
+	// opts.auto: no click behind it, so only an expired-session notice is shown.
+	function confirmAndStop(opts) {
 		// No confirmation modal keep it one-click. Just fire stop().
 		// Update currentState.display BEFORE the API call so refreshStatus()'s
 		// transient-state guard in the reducers kicks in; otherwise a resync
@@ -608,6 +677,8 @@
 		// v0.5.0: also flush any buffered frontend metrics before the stop
 		// API fires, so analyze can join them to recordings. Best-effort
 		// a failed flush never blocks stop.
+		const options = opts || {};
+		const sessionUuid = options.sessionUuid || currentState.session_uuid || undefined;
 		_diag("[optimus] confirmAndStop: click received");
 		resyncEpoch += 1;
 		setDisplay("stopping", "Stopping…", "");
@@ -624,32 +695,15 @@
 			method: "optimus.api.stop",
 			// The session this tab shows, so an old tab never stops the one active in
 			// another tab. Omitted only when the tab knows none.
-			args: { session_uuid: currentState.session_uuid || undefined },
+			args: { session_uuid: sessionUuid },
 			callback: (r) => {
 				const data = (r && r.message) || {};
 				_diag("[optimus] stop callback:", data);
 
-				// v0.5.1: handle the "no active session" case explicitly.
-				// Stop API returns {stopped: false, reason: "no active session"}
-				// when the session has already been cleared (auto-stop,
-				// janitor sweep, or a retried click after a network blip
-				// on the first stop). Previously we fell into the else
-				// branch and transitioned to "Analyzing…" wrong, because
-				// there's nothing analyzing. The widget would hang on
-				// Analyzing… forever because no realtime event would ever
-				// fire for a session that no longer exists server-side.
+				// The stop did not claim the session: it is already stopping or analyzing
+				// (another tab won), or it is gone. Ask the server which.
 				if (data.stopped === false) {
-					currentState.display = "inactive";
-					currentState.active = false;
-					currentState.session_uuid = null;
-					if (widget) {
-						widget.removeAttribute("data-session-uuid");
-					}
-					setDisplay("inactive", "Profiler", "");
-					frappe.show_alert({
-						message: __("No active session widget reset"),
-						indicator: "gray",
-					});
+					resolveUnclaimedStop();
 					return;
 				}
 
@@ -687,69 +741,57 @@
 					setDisplay("analyzing", "Analyzing…", "");
 					currentState.display = "analyzing";
 					currentState.docname = data.docname || currentState.docname;
-					frappe.show_alert({
-						message: __("Profiler stopped analyzing session…"),
-						indicator: "orange",
-					});
+					announceStopped(data.expired, options);
 				}
 			},
-			error: (r) => {
-				// Stop failed at the network or server level. Don't
-				// unconditionally revert to Recording we don't actually
-				// know whether the stop succeeded on the server. It's
-				// possible the session was already cleared (auto-stop,
-				// janitor sweep) and the 'error' is a 400 / 500 we
-				// can't easily distinguish from a real network blip.
-				//
-				// Safer: call status() to ask the server what it thinks.
-				// If active → really revert to Recording. If inactive →
-				// the session is gone; reset the widget to inactive.
-				_diag("[optimus] stop error:", r);
-				frappe.call({
-					method: "optimus.api.status",
-					callback: (sr) => {
-						const sdata = (sr && sr.message) || {};
-						if (sdata.active) {
-							// Session is still live server-side retry is
-							// meaningful.
-							currentState.display = "recording";
-							setDisplay("recording", "Recording", computeElapsed());
-							startElapsedTimer();
-							frappe.show_alert({
-								message: __("Failed to stop profiler try again"),
-								indicator: "red",
-							});
-						} else {
-							// Server says the session is gone. Something
-							// stopped it (the stop we just sent, an
-							// auto-stop, or the janitor). Reset widget.
-							currentState.display = "inactive";
-							currentState.active = false;
-							currentState.session_uuid = null;
-							if (widget) {
-								widget.removeAttribute("data-session-uuid");
-							}
-							setDisplay("inactive", "Profiler", "");
-							frappe.show_alert({
-								message: __("Session already stopped"),
-								indicator: "gray",
-							});
-						}
-					},
-					error: () => {
-						// Both stop AND status failed. Network is probably
-						// down. Reset to recording so the user can retry
-						// when the network comes back.
-						currentState.display = "recording";
-						setDisplay("recording", "Recording", computeElapsed());
-						startElapsedTimer();
-						frappe.show_alert({
-							message: __("Network error please retry"),
-							indicator: "red",
-						});
-					},
-				});
-			},
+			error: () => recoverFromFailedStop(sessionUuid),
+		});
+	}
+
+	// Only the stop that claimed an expired session tells the user why it ended.
+	function announceStopped(expired, options) {
+		if (expired) {
+			const message = options.capHit
+				? "Recording reached its request limit, so later requests were not captured. Analyzing what was captured."
+				: "Recording stopped after 10 minutes without activity. Analyzing what was captured.";
+			frappe.show_alert({ message: __(message), indicator: "orange" });
+		} else if (!options.auto) {
+			frappe.show_alert({
+				message: __("Profiler stopped analyzing session…"),
+				indicator: "orange",
+			});
+		}
+	}
+
+	// stopped:false is ambiguous, so resync from the server; only a confirmed "nothing there" resets the pill.
+	function resolveUnclaimedStop() {
+		refreshStatus((ok) => {
+			if (!ok || currentState.display !== "stopping") return;
+			currentState = Pill.resetState(currentState);
+			if (widget) widget.removeAttribute("data-session-uuid");
+			setDisplay("inactive", "Profiler", "");
+			frappe.show_alert({
+				message: __("Nothing to stop: this session had already ended."),
+				indicator: "gray",
+			});
+		});
+	}
+
+	// The stop request failed, so the server may or may not have stopped the session: show Recording again
+	// and let pill_state for that session say what is true.
+	function recoverFromFailedStop(sessionUuid) {
+		_diag("[optimus] stop failed for", sessionUuid);
+		currentState.display = "recording";
+		setDisplay("recording", "Recording", computeElapsed());
+		startElapsedTimer();
+		refreshStatus((ok) => {
+			if (!ok) {
+				frappe.show_alert({ message: __("Network error please retry"), indicator: "red" });
+			} else if (currentState.display === "recording") {
+				frappe.show_alert({ message: __("Failed to stop profiler try again"), indicator: "red" });
+			} else if (currentState.display === "inactive") {
+				frappe.show_alert({ message: __("Session already stopped"), indicator: "gray" });
+			}
 		});
 	}
 
@@ -1028,7 +1070,7 @@
 	}
 
 	function startElapsedTimer() {
-		stopElapsedTimer();
+		if (elapsedHandle) return;
 		elapsedHandle = setInterval(() => {
 			if (currentState.display === "recording") {
 				const el = widget && widget.querySelector(".fp-elapsed");

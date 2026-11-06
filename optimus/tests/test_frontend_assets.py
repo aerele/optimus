@@ -9,6 +9,7 @@ a broken syntax or a deleted critical hook.
 """
 
 import os
+import re
 import shutil
 import subprocess
 
@@ -279,10 +280,73 @@ def test_widget_logs_when_the_realtime_socket_wait_gives_up():
 
 def test_the_stop_request_names_the_session_the_pill_shows():
 	"""A tab showing an old session must stop that one, never the one active in another tab."""
-	import re
-
 	with open(WIDGET_JS, encoding="utf-8") as f:
 		src = f.read()
 	call = re.search(r'frappe\.call\(\{\s*method: "optimus\.api\.stop",(.*?)callback:', src, re.S)
 	assert call, "the stop call was not found"
-	assert re.search(r"session_uuid:\s*currentState\.session_uuid\s*\|\|\s*undefined", call.group(1))
+	assert re.search(r"session_uuid:\s*sessionUuid\b", call.group(1))
+	assert re.search(
+		r"const sessionUuid = options\.sessionUuid\s*\|\|\s*currentState\.session_uuid\s*\|\|\s*undefined", src
+	)
+
+
+PICKER_JS = FORM_JS
+
+
+def _css_rules(css):
+	return re.findall(r"([^{}]+)\{([^{}]*)\}", re.sub(r"/\*.*?\*/", "", css, flags=re.S))
+
+
+def _read(path):
+	with open(path, encoding="utf-8") as f:
+		return f.read()
+
+
+def test_the_pill_is_a_real_button_with_a_state_title_and_no_build_id_tooltip():
+	src = _read(WIDGET_JS)
+	assert 'document.createElement("button")' in src
+	assert 'widget.type = "button"' in src
+	assert "Optimus build" not in src
+	for text in (
+		"Start a profiling session", "Stop recording and analyze", "Stop line profiling",
+		"Analysis in progress", "Open the session",
+	):
+		assert f'__("{text}")' in src, text
+	assert 'class="fp-elapsed" aria-hidden="true"' in src
+
+
+def test_the_pill_stacks_above_toasts_and_below_an_open_modal_backdrop():
+	css = _read(WIDGET_CSS)
+	assert re.search(r"#frappe-profiler-widget \{[^}]*z-index: 2001;", css)
+	assert re.search(r"body\.modal-open #frappe-profiler-widget \{\s*z-index: 1039;", css)
+	assert "z-index" not in re.search(r'widget\.style\.cssText = \[(.*?)\]', _read(WIDGET_JS), re.S).group(1)
+
+
+def test_the_pill_has_focus_forced_colors_and_reduced_motion_rules():
+	css = _read(WIDGET_CSS)
+	assert "#frappe-profiler-widget:focus-visible" in css
+	assert re.search(r"@media \(forced-colors: active\)[^@]*ButtonText", css, re.S)
+	reduced = css[css.index("@media (prefers-reduced-motion: reduce)"):css.index("@media (forced-colors")]
+	assert "animation: none" in reduced and "transform: none" in reduced
+
+
+def test_the_pill_text_is_never_dimmed_with_opacity():
+	rules = dict((sel.strip(), body) for sel, body in _css_rules(_read(WIDGET_CSS)))
+	assert "opacity" not in rules["#frappe-profiler-widget .fp-elapsed"]
+
+
+def test_pill_and_picker_colours_come_from_desk_tokens_with_fallbacks():
+	css = _read(WIDGET_CSS)
+	bare = re.sub(r"var\([^()]*\)", "", css)
+	bare = re.sub(r"/\*.*?\*/", "", bare, flags=re.S)
+	assert not re.findall(r"#[0-9a-fA-F]{3,6}\b", bare)
+
+
+def test_the_picker_and_start_dialog_carry_no_hard_coded_colours():
+	picker = _read(PICKER_JS)
+	body = picker[picker.index("function show_phase2_dialog"):]
+	assert "<style>" not in body
+	assert not re.findall(r"#[0-9a-fA-F]{3,6}\b", re.sub(r"var\([^()]*\)", "", body))
+	widget = _read(WIDGET_JS)
+	assert not re.findall(r"#[0-9a-fA-F]{6}\b", widget)
+	assert "optimus-start-note" in widget

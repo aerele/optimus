@@ -8,26 +8,43 @@
 	position: fixed;
 	right: 20px;
 	bottom: 20px;
-	z-index: 1040;
+	/* Above Desk toasts (2000); body.modal-open drops it below an open modal's backdrop (1040). */
+	z-index: 2001;
 	display: none; /* hidden until JS confirms the user has permission */
 	min-width: 96px;
+	margin: 0;
 	padding: 6px 12px;
+	appearance: none;
 	border-radius: 999px;
-	border: 1px solid rgba(0, 0, 0, 0.1);
-	background: #ffffff;
-	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
-	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+	border: 1px solid var(--text-light, #7c7c7c);
+	background: var(--card-bg, #ffffff);
+	box-shadow: var(--shadow-sm, 0 2px 8px rgba(0, 0, 0, 0.12));
+	font: inherit;
+	font-family: var(--font-stack, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif);
 	font-size: 0.78rem;
 	font-weight: 500;
-	color: #1f2937;
+	line-height: normal;
+	color: var(--text-color, #1f2937);
 	cursor: pointer;
 	user-select: none;
-	transition: transform 0.15s ease, box-shadow 0.15s ease;
+	transition: transform 0.15s ease;
+}
+
+body.modal-open #frappe-profiler-widget {
+	z-index: 1039;
 }
 
 #frappe-profiler-widget:hover {
 	transform: translateY(-2px);
-	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.16);
+}
+
+#frappe-profiler-widget:focus-visible {
+	outline: 2px solid currentColor;
+	outline-offset: 2px;
+}
+
+#frappe-profiler-widget[aria-disabled="true"] {
+	cursor: progress;
 }
 
 #frappe-profiler-widget .fp-dot {
@@ -37,59 +54,71 @@
 	border-radius: 50%;
 	margin-right: 6px;
 	vertical-align: middle;
-	background: #d1d5db;
+	background: currentColor;
 }
 
-#frappe-profiler-widget.fp-state-inactive .fp-dot {
-	background: #9ca3af;
+#frappe-profiler-widget.fp-state-inactive {
+	border-color: var(--text-light, #7c7c7c);
+	color: var(--text-color, #1f2937);
 }
 
 #frappe-profiler-widget.fp-state-recording {
-	border-color: #16a34a;
-	color: #15803d;
+	border-color: var(--text-on-green, #15803d);
+	color: var(--text-on-green, #15803d);
 }
 #frappe-profiler-widget.fp-state-recording .fp-dot {
-	background: #16a34a;
 	animation: fp-pulse 1.6s ease-in-out infinite;
 }
 
 #frappe-profiler-widget.fp-state-stopping,
 #frappe-profiler-widget.fp-state-analyzing {
-	border-color: #d97706;
-	color: #b45309;
-}
-#frappe-profiler-widget.fp-state-stopping .fp-dot,
-#frappe-profiler-widget.fp-state-analyzing .fp-dot {
-	background: #d97706;
+	border-color: var(--text-on-orange, #b45309);
+	color: var(--text-on-orange, #b45309);
 }
 
 #frappe-profiler-widget.fp-state-ready {
-	border-color: #2563eb;
-	color: #1d4ed8;
-}
-#frappe-profiler-widget.fp-state-ready .fp-dot {
-	background: #2563eb;
-}
-
-#frappe-profiler-widget.fp-tone-failed {
-	border-color: #dc2626;
-	color: #b91c1c;
-}
-#frappe-profiler-widget.fp-tone-failed .fp-dot {
-	background: #dc2626;
+	border-color: var(--text-on-blue, #1d4ed8);
+	color: var(--text-on-blue, #1d4ed8);
 }
 
 #frappe-profiler-widget.fp-tone-stale {
-	border-color: #d97706;
-	color: #b45309;
+	border-color: var(--text-on-orange, #b45309);
+	color: var(--text-on-orange, #b45309);
 }
-#frappe-profiler-widget.fp-tone-stale .fp-dot {
-	background: #d97706;
+
+#frappe-profiler-widget.fp-tone-failed {
+	border-color: var(--text-on-red, #b91c1c);
+	color: var(--text-on-red, #b91c1c);
 }
 
 @keyframes fp-pulse {
 	0%, 100% { opacity: 1; transform: scale(1); }
 	50% { opacity: 0.6; transform: scale(0.85); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+	#frappe-profiler-widget {
+		transition: none;
+	}
+
+	#frappe-profiler-widget:hover {
+		transform: none;
+	}
+
+	#frappe-profiler-widget.fp-state-recording .fp-dot {
+		animation: none;
+	}
+}
+
+@media (forced-colors: active) {
+	#frappe-profiler-widget .fp-dot {
+		forced-color-adjust: none;
+		background: ButtonText;
+	}
+
+	#frappe-profiler-widget:focus-visible {
+		outline-color: Highlight;
+	}
 }
 
 #frappe-profiler-widget .fp-label {
@@ -100,7 +129,6 @@
 	margin-left: 6px;
 	font-variant-numeric: tabular-nums;
 	color: inherit;
-	opacity: 0.8;
 }
 
 @media (max-width: 600px) {
@@ -177,4 +205,125 @@
 	text-decoration: underline;
 	/* A long title with no spaces must wrap inside the modal, never overflow it sideways. */
 	overflow-wrap: anywhere;
+}
+
+/* Start dialog note. */
+.optimus-start-note {
+	margin-top: 10px;
+	padding: 10px 12px;
+	border: 1px solid var(--border-color, #fbbf24);
+	border-radius: 4px;
+	background: var(--bg-yellow, #fffbeb);
+	color: var(--text-on-yellow, #92400e);
+	font-size: 0.85rem;
+}
+
+/* First-visit onboarding notice. */
+.optimus-onboarding-toast {
+	position: fixed;
+	top: 20px;
+	right: 20px;
+	z-index: 2001;
+	max-width: 360px;
+	padding: 14px 18px;
+	border: 1px solid var(--text-on-green, #166534);
+	border-radius: 10px;
+	background: var(--card-bg, #f0fdf4);
+	color: var(--text-color, #166534);
+	font-size: 0.9rem;
+	line-height: 1.4;
+	box-shadow: var(--shadow-lg, 0 6px 20px rgba(0, 0, 0, 0.18));
+}
+
+.optimus-onboarding-title {
+	margin-bottom: 8px;
+	font-weight: 700;
+}
+
+.optimus-onboarding-body {
+	margin-bottom: 12px;
+}
+
+.optimus-onboarding-dismiss {
+	padding: 6px 14px;
+	border: 1px solid var(--text-on-green, #166534);
+	border-radius: 6px;
+	background: var(--card-bg, #ffffff);
+	color: var(--text-on-green, #166534);
+	font-weight: 600;
+	cursor: pointer;
+}
+
+/* Line profiling picker (optimus_session.js): a custom chevron per row, aligned at every depth. */
+.fp-tree summary {
+	list-style: none;
+}
+.fp-tree summary::-webkit-details-marker {
+	display: none;
+}
+.fp-tree summary::marker {
+	content: "";
+}
+.fp-tree .fp-row {
+	margin: 0;
+}
+.fp-tree .fp-summary {
+	display: flex;
+	align-items: center;
+	padding: 2px 0;
+	cursor: pointer;
+}
+.fp-tree .fp-leaf {
+	padding: 2px 0;
+}
+.fp-tree .fp-rowline {
+	display: flex;
+	align-items: center;
+	flex: 1;
+	margin: 0;
+	cursor: pointer;
+}
+.fp-tree .fp-toggle {
+	display: inline-block;
+	width: 16px;
+	min-width: 16px;
+	text-align: center;
+	color: var(--text-muted, #6b7280);
+	font-size: 0.8em;
+	user-select: none;
+}
+.fp-tree details > summary > .fp-toggle::before {
+	content: "\25B8";
+}
+.fp-tree details[open] > summary > .fp-toggle::before {
+	content: "\25BE";
+}
+.fp-tree .fp-spacer {
+	visibility: hidden;
+}
+.fp-tree .fp-children {
+	margin-left: 7px;
+	padding-left: 16px;
+	border-left: 1px dashed var(--dark-border-color, #d1d5db);
+}
+
+.optimus-picker-meta {
+	color: var(--text-muted, #6b7280);
+	font-size: 0.85em;
+}
+
+.optimus-picker-empty {
+	margin-bottom: 12px;
+	padding: 10px 14px;
+	border: 1px solid var(--border-color, #fbbf24);
+	border-radius: 6px;
+	background: var(--bg-yellow, #fef3c7);
+	color: var(--text-on-yellow, #92400e);
+}
+.optimus-picker-empty-hint {
+	font-size: 0.85em;
+}
+.optimus-picker-empty-diag {
+	color: var(--text-muted, #6b7280);
+	font-size: 0.78em;
 }
