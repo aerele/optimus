@@ -8,7 +8,7 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.142] - 2026-11-06
+## [0.12.144] - 2026-11-06
 
 ### Fixed
 
