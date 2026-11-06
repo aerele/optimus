@@ -422,8 +422,9 @@ def prepare_line_profile_picks(picks: list[dict], *, server_expanded=frozenset()
 		fn = _resolve_attr(r["dotted_path"])
 		lines = _capture_source_lines(fn) if fn else []
 		if not lines:
-			frappe.logger("optimus").warning(f"line profiling dropped {r['dotted_path']}: no readable source")
-			resolved.remove(r)
+			frappe.logger("optimus").warning(f"line profiling skipped {r['dotted_path']}: no readable source")
+			r["eligible"] = False
+			r["ineligible_reason"] = _("Its source could not be read.")
 			continue
 		snapshot_bytes += len(json.dumps(lines).encode()) + len(r["dotted_path"].encode()) + 8
 		if snapshot_bytes > MAX_CAPTURE_BYTES:
@@ -438,7 +439,7 @@ def prepare_line_profile_picks(picks: list[dict], *, server_expanded=frozenset()
 		})
 
 	if not picks_meta:
-		raise CaptureError(_("No selected function has eligible source. Check the selected paths."))
+		raise CaptureError(_("The selected functions have no readable source. Choose other functions."))
 
 	_validate_captured_picks([{**pick, "source_lines": source_snapshot[pick["dotted_path"]]} for pick in picks_meta])
 	picks_json, source_json = json.dumps(picks_meta), json.dumps(source_snapshot)

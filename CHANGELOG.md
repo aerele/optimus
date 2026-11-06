@@ -13,7 +13,7 @@ versions may contain breaking changes see migration notes below).
 ### Fixed
 
 - Line profiling no longer cuts a selected function's source at its first blank line, and no longer fails on a function whose docstring contains a blank line. The saved source now holds the whole function.
-- A selected function whose source cannot be read is now dropped from the run, and the reason is written to the log. Before, it cancelled the whole run. The run is refused only when none of the selected functions has readable source.
+- A selected function whose source cannot be read is now shown as ineligible with the reason, is left out of the run, and the reason is also written to the log. Before, it cancelled the whole run. The run is refused only when none of the selected functions has readable source.
 
 ---
 

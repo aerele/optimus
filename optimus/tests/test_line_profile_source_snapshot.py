@@ -144,14 +144,19 @@ def test_prepare_keeps_the_full_source_for_functions_with_blank_lines(capture_en
 	assert snapshot[f"{MODULE}.blank_in_docstring"][-1]["content"] == "\treturn a"
 
 
-def test_mixed_selection_drops_only_the_unreadable_pick(capture_env, monkeypatch):
+def test_mixed_selection_marks_the_unreadable_pick_ineligible(capture_env, monkeypatch):
 	real = capture._capture_source_lines
 	bad = f"{MODULE}.one_liner"
 	monkeypatch.setattr(
 		capture, "_capture_source_lines", lambda fn: [] if fn.__name__ == "one_liner" else real(fn)
 	)
 	prepared = REAL_PREPARE([make_pick("blank_in_body"), make_pick("one_liner")])
-	assert [r["dotted_path"] for r in prepared.resolved] == [f"{MODULE}.blank_in_body"]
+	by_path = {r["dotted_path"]: r for r in prepared.resolved}
+	assert list(by_path) == [f"{MODULE}.blank_in_body", bad]
+	assert by_path[f"{MODULE}.blank_in_body"]["eligible"] is True
+	assert by_path[bad]["eligible"] is False
+	assert by_path[bad]["ineligible_reason"]
+	assert sum(1 for r in prepared.resolved if r["eligible"]) == 1
 	assert [p["dotted_path"] for p in capture.json.loads(prepared.picks_json)] == [f"{MODULE}.blank_in_body"]
 	assert list(capture.json.loads(prepared.source_json)) == [f"{MODULE}.blank_in_body"]
 	assert len(capture_env) == 1 and bad in capture_env[0]
@@ -159,9 +164,12 @@ def test_mixed_selection_drops_only_the_unreadable_pick(capture_env, monkeypatch
 
 def test_selection_without_any_readable_source_is_refused(capture_env, monkeypatch):
 	monkeypatch.setattr(capture, "_capture_source_lines", lambda fn: [])
-	with pytest.raises(capture.CaptureError, match="No selected function has eligible source"):
+	with pytest.raises(capture.CaptureError, match="have no readable source") as raised:
 		REAL_PREPARE([make_pick("blank_in_body"), make_pick("one_liner")])
 	assert len(capture_env) == 2
+	with pytest.raises(capture.CaptureError, match="No selected function has eligible source") as no_eligible:
+		REAL_PREPARE([{"dotted_path": f"{MODULE}.missing_fn", "source": "freeform"}])
+	assert str(raised.value) != str(no_eligible.value)
 
 
 def test_auto_arm_arms_a_function_with_blank_lines(arm_env, capture_env, monkeypatch):  # noqa: F811
