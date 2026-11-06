@@ -8,7 +8,7 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.145] - 2026-11-06
+## [0.12.150] - 2026-11-06
 
 ### Fixed
 
@@ -24,6 +24,24 @@ versions may contain breaking changes see migration notes below).
 - Restart the web server and the workers after updating: the wrappers are installed when the app loads.
 - To refresh a report made by an older version, use Regenerate Reports: it re-renders the stored recordings with the new rule. Recording the flow again is only certain to be needed for the repeated-call findings (stored sidecar data) and for stored line-profiling runs. Reports from sessions whose recordings were stored as reduced (degraded) snapshots are not corrected.
 - An editable install that is not under the bench's `apps/optimus/` folder or a `site-packages/` or `dist-packages/` folder is not recognised by the path rule.
+
+---
+
+## [0.12.147] - 2026-11-06
+
+### Internal
+
+- The inline-stop "empty session" test now replaces `frappe.db` wholesale with a fake instead of patching an attribute on it, so it passes on a real bench as well as in CI. On a bench `frappe.db` is an unbound LocalProxy, so patching an attribute resolved the unbound `frappe.local` and raised during test setup. No product code changed.
+
+---
+
+## [0.12.143] - 2026-11-06
+
+### Changed
+
+- The popup that appears when a profiling session finishes now shows the session's title, underlined, as a normal Frappe link to the session, on the same line as the message. If a session has no title, the link shows its name (ID). The "Open Session" and "Review and Retry" button is gone, and so is the "Session ID" line. The popup for a failed analysis and for an empty session use the same layout.
+- The session events now carry the session title so the popup can show it. The title goes only to the people who already receive these events.
+- A long title with no spaces now wraps inside the popup instead of overflowing it sideways.
 
 ---
 
