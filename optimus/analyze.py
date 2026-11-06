@@ -56,6 +56,7 @@ from optimus.analyzers.base import (
 	is_error_log_hook_query,
 	own_query_frame,
 	row_get,
+	strip_own_calls,
 	strip_profiler_own_calls,
 )
 from optimus.dbdialect import get_dialect
@@ -777,7 +778,15 @@ def _arm_phase2(docname: str, context) -> None:
 	try:
 		prepared = _lp_capture.prepare_line_profile_picks(picks)
 	except _lp_capture.NoEligiblePickError:
-		return  # every recommended function is ineligible (for example Optimus's own code): nothing to arm
+		# Every recommended function is ineligible (for example Optimus's own code): nothing to arm.
+		try:
+			frappe.logger("optimus").debug(
+				f"optimus: auto-arm skipped for session {context.session_uuid}: every recommended function"
+				" was ineligible for line profiling (for example Optimus's own code)"
+			)
+		except Exception:
+			pass  # a log line never fails the analysis
+		return
 	run_uuid = _uuid.uuid4().hex
 	from optimus.api import _lock_phase2_for_write, _persist_phase2_capture
 	from optimus.line_profile.jobs import _authorized
@@ -1415,47 +1424,55 @@ def _fetch_recordings(recording_uuids: list[str]):
 		yield rec
 
 
-# The own-query drop is logged at ERROR from this many dropped calls, when they are over half the
-# session's. That is far more than Optimus's own work: a wrapper missing from the pass-through table
-# is hiding the user's queries. Frappe's logger keeps ERROR and above by default, so production sees it.
-OWN_DROP_ALERT_MIN = 50
-
-
-def _own_source(stack) -> str:
-	"""``file:function`` of the Optimus frame that made a dropped call's stack Optimus's own."""
-	frame = own_query_frame(stack)
-	if frame is None:
+def _frame_source(frame) -> str:
+	"""``file:function`` of an Optimus frame, or "unknown" without one."""
+	if not isinstance(frame, dict):
 		return "unknown"
 	function = frame.get("function")
 	return f"{frame.get('filename')}:{function if isinstance(function, str) else '?'}"
 
 
+def _own_source(stack) -> str:
+	"""``file:function`` of the Optimus frame that made a dropped call's stack Optimus's own."""
+	return _frame_source(own_query_frame(stack))
+
+
+def _top_sources(frames: list, limit: int = 2) -> str:
+	return ", ".join(f"{source} x{n}" for source, n in Counter(map(_frame_source, frames)).most_common(limit))
+
+
 def _strip_own_calls(recordings: list, session_uuid: str) -> None:
-	"""Drop Optimus's own SQL calls from every recording; log dropped/total and the top sources,
-	at ERROR when they are over half the session's calls (and at least OWN_DROP_ALERT_MIN)."""
-	total = dropped = 0
-	sources = Counter()
+	"""Drop Optimus's own SQL calls from every recording and log the count at debug. A call that looks
+	like a user's query forwarded by an Optimus frame that is not registered (``own_query_verdict``) is
+	kept, and logged at ERROR (Frappe's logger keeps ERROR and above by default, so production sees it)
+	with its count and source, so the wrapper gets registered. This is the one analysis-time log: renders
+	repeat the rule on every refresh and stay silent."""
+	from optimus.settings import own_query_app_lists
+
+	tracked_apps, installed_apps = own_query_app_lists()
+	total = 0
+	dropped, suspicious = [], []  # the deciding frame of each
 	for rec in recordings:
 		if not isinstance(rec, dict):
 			continue
-		before = rec.get("calls") if isinstance(rec.get("calls"), list) else []
-		total += len(before)
-		count = strip_profiler_own_calls(rec)
-		if count:
-			dropped += count
-			kept = {id(call) for call in rec["calls"]}
-			sources.update(
-				_own_source(call.get("stack")) for call in before if isinstance(call, dict) and id(call) not in kept
-			)
-	if not dropped:
-		return
+		total += len(rec.get("calls") if isinstance(rec.get("calls"), list) else [])
+		result = strip_own_calls(rec, tracked_apps, installed_apps)
+		dropped += result.dropped_frames
+		suspicious += result.suspicious_frames
 	try:
-		top = ", ".join(f"{source} x{n}" for source, n in sources.most_common(2))
-		level = "error" if dropped >= OWN_DROP_ALERT_MIN and dropped * 2 > total else "debug"
-		getattr(frappe.logger("optimus"), level)(
-			f"optimus: dropped {dropped} of {total} queries as Optimus's own from session {session_uuid}"
-			f" (top sources: {top})"
-		)
+		logger = frappe.logger("optimus")
+		if suspicious:
+			logger.error(
+				f"optimus: kept {len(suspicious)} suspicious queries in session {session_uuid}: an Optimus frame"
+				f" with a developer's code outside it ran them (top sources: {_top_sources(suspicious)})."
+				" Register the wrapper in _OPTIMUS_PASS_THROUGH or the hook in _OPTIMUS_HOOK_ENTRY_POINTS"
+				" (optimus/analyzers/base.py) if it only forwards the user's call."
+			)
+		if dropped:
+			logger.debug(
+				f"optimus: dropped {len(dropped)} of {total} queries as Optimus's own from session {session_uuid}"
+				f" (top sources: {_top_sources(dropped)})"
+			)
 	except Exception:
 		pass  # a log line never fails the analysis
 
@@ -3050,6 +3067,9 @@ def load_recordings_light(doc, uuids=None, *, memo=None) -> list[dict]:
 	result = []
 	redis_failed = False
 	session_uuid = row_get(doc, "session_uuid")
+	from optimus.settings import own_query_app_lists
+
+	tracked_apps, installed_apps = own_query_app_lists()
 	for uuid in uuids:
 		rec = None
 		if not redis_failed:
@@ -3064,7 +3084,7 @@ def load_recordings_light(doc, uuids=None, *, memo=None) -> list[dict]:
 			rec = memo[memo_key].get(uuid)
 		if isinstance(rec, dict) and rec:
 			light = {key: value for key, value in rec.items() if key not in {"pyi_session", "sidecar", "tree_b64"}}
-			strip_profiler_own_calls(light)
+			strip_profiler_own_calls(light, tracked_apps, installed_apps)
 			result.append(light)
 	return result
 

@@ -767,6 +767,42 @@ def _pass_through_targets(filename: str, function) -> frozenset[str] | None:
 	return None
 
 
+# Optimus handlers that Frappe or the recorder calls from inside a user's own code (a save, a read,
+# a permission check) and that issue SQL: the queries below them are Optimus's own although a developer's
+# frame sits outside. Keyed like the pass-through table. Register a new such hook in hooks.py here, or
+# in tests/test_hook_entry_registry.py EXCLUDED with a reason.
+_OPTIMUS_HOOK_ENTRY_POINTS: frozenset[tuple[str, str]] = frozenset({
+	("optimus/managed.py", "protect_file"),
+	("optimus/managed.py", "protect_child"),
+	("optimus/permissions.py", "file_has_permission"),
+	(HOOK_FRAME_SUFFIX, "mask_error_log"),  # from the module itself, so a rename cannot leave it behind
+	("optimus/install.py", "on_user_role_change"),
+	("optimus/__init__.py", "_profiler_register"),
+})
+
+
+def _is_site_frame(filename: str, suffix: str) -> bool:
+	return filename == suffix or filename.endswith("/" + suffix)
+
+
+def _is_hook_entry_point(filename: str, function) -> bool:
+	"""True for a frame of a registered hook entry point (``_OPTIMUS_HOOK_ENTRY_POINTS``)."""
+	if not isinstance(function, str):
+		return False
+	return any(function == name and _is_site_frame(filename, suffix) for suffix, name in _OPTIMUS_HOOK_ENTRY_POINTS)
+
+
+def _is_known_own_entry(frame: dict, filename: str) -> bool:
+	"""True when an Optimus frame is a known place where Optimus code runs inside a user's flow: the
+	Error Log hook, a registered hook entry point, or a registered pass-through wrapper."""
+	function = frame.get("function")
+	return (
+		_is_error_log_hook_frame(filename)
+		or _is_hook_entry_point(filename, function)
+		or _pass_through_targets(filename, function) is not None
+	)
+
+
 def own_query_deciding_frame(frames) -> dict | None:
 	"""The Optimus frame that makes a call Optimus's own, or None when the call is not its own.
 	``frames`` runs innermost first and is read lazily so the walk ends at the deciding frame.
@@ -796,6 +832,13 @@ def own_query_innermost_first(frames) -> bool:
 	return own_query_deciding_frame(frames) is not None
 
 
+class KeptStack(list):
+	"""A SQL call's stack that ``strip_own_calls`` judged suspicious and kept as the user's. Every later
+	reader of the call (the analyzers, the per-action table, ``walk_callsite``) sees it as not Optimus's
+	own, so the rule is not run again without the app lists. The mark lives in memory only: a recording
+	loaded again is judged again."""
+
+
 def is_profiler_own_query(stack: list | None) -> bool:
 	"""True if a SQL call is Optimus's own work. ``stack`` is outermost-first; walk it
 	innermost to outermost:
@@ -805,32 +848,149 @@ def is_profiler_own_query(stack: list | None) -> bool:
 	- any other ``optimus/`` frame, the Error Log hook included: own.
 	- any other frame: the user's.
 	A stack with no deciding frame (only Frappe and pass-through frames) is not own.
-	A stack that cannot be walked innermost first, and any malformed frame in it, is not own.
+	A stack that cannot be walked innermost first, any malformed frame in it, and a ``KeptStack``
+	are not own. ``strip_own_calls`` adds the fail-safe check for a developer's code outside.
 	"""
 	return own_query_frame(stack) is not None
 
 
-def own_query_frame(stack: list | None) -> dict | None:
-	"""The Optimus frame that makes ``stack`` (outermost first) Optimus's own, else None."""
-	if not stack or isinstance(stack, (str, bytes, dict)):
+def _innermost_first(stack) -> list | None:
+	"""``stack`` (outermost first) as a list read innermost first, or None when it cannot be walked."""
+	if not stack or isinstance(stack, (str, bytes, dict, KeptStack)):
 		return None
 	try:
-		frames = reversed(stack)
+		return list(reversed(stack))
 	except TypeError:
 		return None
-	return own_query_deciding_frame(frames)
 
 
-def strip_profiler_own_calls(recording: dict) -> int:
-	"""Drop Optimus's own SQL calls from ``recording["calls"]``; return how many."""
+def own_query_frame(stack: list | None) -> dict | None:
+	"""The Optimus frame that makes ``stack`` (outermost first) Optimus's own, else None."""
+	frames = _innermost_first(stack)
+	return None if frames is None else own_query_deciding_frame(frames)
+
+
+def _developer_code_outside(frames: list, deciding, tracked_apps, installed_apps) -> bool:
+	"""True when, walking outward from ``deciding`` (innermost-first ``frames``), a developer-app frame
+	comes before any known place Optimus runs inside a user's flow (``_is_known_own_entry``). Optimus
+	and Frappe frames are skipped, and so is any other framework or library frame."""
+	started = False
+	for frame in frames:
+		if not started:
+			started = frame is deciding
+			if not started:
+				continue
+		filename = _frame_filename(frame)
+		if not filename:
+			continue
+		if is_optimus_path(filename):
+			if _is_known_own_entry(frame, filename):
+				return False
+			continue
+		if is_frappe_path(filename):
+			continue
+		if not is_framework_callsite(filename, tracked_apps, installed_apps):
+			return True
+	return False
+
+
+def own_query_verdict_innermost_first(
+	frames: list,
+	tracked_apps: tuple[str, ...] | None = None,
+	installed_apps: frozenset[str] | None = None,
+) -> tuple[dict | None, bool]:
+	"""``(deciding Optimus frame or None, suspicious)`` for ``frames`` read innermost first.
+
+	A call is suspicious when the rule marks it Optimus's own but the deciding frame is not a known
+	place Optimus runs inside a user's flow and a developer's code is outside it: a genuine own issuer
+	(a job, the capture and analyze code) has only framework frames outside, so this is more likely a
+	wrapper forwarding the user's query that is missing from ``_OPTIMUS_PASS_THROUGH``. Callers keep a
+	suspicious call. Without app lists no developer frame can be told apart, so nothing is suspicious."""
+	deciding = own_query_deciding_frame(frames)
+	if deciding is None:
+		return None, False
+	if not (tracked_apps or installed_apps):
+		return deciding, False
+	return deciding, _developer_code_outside(frames, deciding, tracked_apps, installed_apps)
+
+
+def own_query_verdict(
+	stack: list | None,
+	tracked_apps: tuple[str, ...] | None = None,
+	installed_apps: frozenset[str] | None = None,
+) -> tuple[dict | None, bool]:
+	"""``own_query_verdict_innermost_first`` for ``stack`` (outermost first); a stack that cannot be
+	walked, and a ``KeptStack``, have no verdict."""
+	frames = _innermost_first(stack)
+	if frames is None:
+		return None, False
+	return own_query_verdict_innermost_first(frames, tracked_apps, installed_apps)
+
+
+# Set on a recording by ``strip_own_calls``: how many of its calls were dropped as Optimus's own. The
+# strip can run before the renderer (the analysis, the light loader), so the count rides on the recording.
+OWN_EXCLUDED_KEY = "_optimus_own_excluded"
+
+
+@dataclass
+class OwnStripResult:
+	"""What ``strip_own_calls`` did: the calls it dropped and the suspicious ones it kept, each with the
+	Optimus frame that decided it (``dropped_frames`` and ``suspicious_frames`` line up with the calls)."""
+
+	dropped_calls: list = field(default_factory=list)
+	dropped_frames: list = field(default_factory=list)
+	suspicious_calls: list = field(default_factory=list)
+	suspicious_frames: list = field(default_factory=list)
+
+	@property
+	def dropped(self) -> int:
+		return len(self.dropped_calls)
+
+	@property
+	def suspicious(self) -> int:
+		return len(self.suspicious_calls)
+
+
+def strip_own_calls(
+	recording: dict,
+	tracked_apps: tuple[str, ...] | None = None,
+	installed_apps: frozenset[str] | None = None,
+) -> OwnStripResult:
+	"""Drop Optimus's own SQL calls from ``recording["calls"]`` and add their number to
+	``recording[OWN_EXCLUDED_KEY]``. A suspicious call (see ``own_query_verdict``) is kept, its stack
+	marked a ``KeptStack`` so no later reader hides it, and reported in the result."""
+	result = OwnStripResult()
 	calls = recording.get("calls")
 	if not isinstance(calls, list) or not calls:
-		return 0
-	kept = [c for c in calls if not (isinstance(c, dict) and is_profiler_own_query(c.get("stack")))]
-	dropped = len(calls) - len(kept)
-	if dropped:
+		return result
+	kept = []
+	for call in calls:
+		frame, suspicious = own_query_verdict(
+			call.get("stack") if isinstance(call, dict) else None, tracked_apps, installed_apps
+		)
+		if frame is None:
+			kept.append(call)
+		elif suspicious:
+			call["stack"] = KeptStack(call["stack"])
+			kept.append(call)
+			result.suspicious_calls.append(call)
+			result.suspicious_frames.append(frame)
+		else:
+			result.dropped_calls.append(call)
+			result.dropped_frames.append(frame)
+	if result.dropped_calls:
 		recording["calls"] = kept
-	return dropped
+		recording[OWN_EXCLUDED_KEY] = recording.get(OWN_EXCLUDED_KEY, 0) + result.dropped
+	return result
+
+
+def strip_profiler_own_calls(
+	recording: dict,
+	tracked_apps: tuple[str, ...] | None = None,
+	installed_apps: frozenset[str] | None = None,
+) -> int:
+	"""``strip_own_calls`` returning only how many calls it dropped."""
+	return strip_own_calls(recording, tracked_apps, installed_apps).dropped
 
 
 def walk_callsite(stack: list | None) -> dict | None:

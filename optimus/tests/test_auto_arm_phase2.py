@@ -183,6 +183,41 @@ class TestAutoArmPhase2:
 		assert arm_env.start_calls == [] and arm_env.published == [] and arm_env.lock_calls == []
 		assert arm_env.doc.get("phase_2_runs") in (None, []) and arm_env.doc.saved is not True
 
+	def test_the_skip_is_logged_at_debug_with_the_session_and_the_reason(self, arm_env, monkeypatch):
+		import optimus.line_profile.capture as cap_real
+
+		lines = []
+		log = types.SimpleNamespace(**{
+			level: (lambda text, _level=level: lines.append((_level, text)))
+			for level in ("debug", "info", "warning", "error")
+		})
+		monkeypatch.setattr(frappe, "logger", lambda *a, **k: log, raising=False)
+
+		def none_eligible(picks):
+			raise cap_real.NoEligiblePickError("No selected function can be line-profiled: x")
+
+		monkeypatch.setattr(cap_real, "prepare_line_profile_picks", none_eligible)
+		analyze._auto_arm_phase2("PS-1", _ctx())
+		assert [level for level, _text in lines] == ["debug"]
+		assert "sess-1" in lines[0][1]
+		assert "every recommended function was ineligible" in lines[0][1]
+		assert "Optimus's own code" in lines[0][1]
+
+	def test_a_failing_logger_does_not_break_the_skip(self, arm_env, monkeypatch):
+		import optimus.line_profile.capture as cap_real
+
+		def broken(*a, **k):
+			raise RuntimeError("no logger")
+
+		monkeypatch.setattr(frappe, "logger", broken, raising=False)
+
+		def none_eligible(picks):
+			raise cap_real.NoEligiblePickError("x")
+
+		monkeypatch.setattr(cap_real, "prepare_line_profile_picks", none_eligible)
+		analyze._auto_arm_phase2("PS-1", _ctx())
+		assert arm_env.start_calls == []
+
 	def test_another_capture_error_is_still_logged_as_a_failure(self, arm_env, monkeypatch):
 		import optimus.ai_fix as ai_fix
 		import optimus.line_profile.capture as cap_real
