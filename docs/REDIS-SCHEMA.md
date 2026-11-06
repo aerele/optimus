@@ -68,7 +68,7 @@ when you add a new key; the audit test asserts this table matches
 
 | Pattern | Value | Encoding | TTL | Notes |
 |---|---|---|---|---|
-| `profiler:tree:<recording_uuid>` | bytes | **HMAC-signed pickle** | `RECORDING_DATA_TTL_SECONDS` (6 h, until cleanup) | 32-byte HMAC-SHA256 prefix + pickled pyinstrument `Profiler.last_session`. See § 6 "HMAC envelope". |
+| `profiler:tree:<recording_uuid>` | bytes | **HMAC-signed pickle** | `RECORDING_DATA_TTL_SECONDS` (6 h, until cleanup) | 32-byte HMAC-SHA256 prefix + pickled pyinstrument `Profiler.last_session`, compacted (equal frame strings and stacks shared) and at most 1 MiB (`capture.TREE_MAX_BYTES`); a longer tree is thinned by time and carries `optimus_thinned`, and one that cannot fit is not stored. See § 6 "HMAC envelope". |
 | `profiler:sidecar:<recording_uuid>` | list[dict] | Frappe pickle | `RECORDING_DATA_TTL_SECONDS` (6 h, until cleanup) | Argument-log entries; optional `{"_truncated": True}` tail marker. |
 | `profiler:infra:<recording_uuid>` | dict | Frappe pickle | `RECORDING_DATA_TTL_SECONDS` (6 h, until cleanup) | CPU / RAM / DB / RQ delta. |
 | `profiler:resolved_doc:<recording_uuid>` | dict | Frappe pickle | `RECORDING_DATA_TTL_SECONDS` (6 h, until cleanup) | A created doc's save-assigned `{doctype, name}`, written by `after_request` and merged onto the recording as `resolved_target_doc` at analyze time. |

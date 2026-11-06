@@ -8,6 +8,14 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.157] - 2026-11-07
+
+### Fixed
+
+- Long requests no longer flood Redis with their Python call tree. A 3-second request used to store about 20 MB; the same tree is now about 50 KB with nothing lost. A tree still larger than 1 MB is thinned to fit (a long wait, such as a slow query, keeps its own place in it), and the report says which requests were thinned. SQL findings are never affected, though SQL can appear under a parent function in a thinned tree. A tree that cannot fit even thinned is not stored and the report lists it as not captured. Trees stored before this version are read as before.
+
+---
+
 ## [0.12.153] - 2026-11-06
 
 ### Fixed

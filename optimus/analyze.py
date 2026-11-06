@@ -1382,10 +1382,29 @@ def _report_missing_trees(context, recordings: list[dict], meta: dict, now: date
 	if never_captured:
 		context.warnings.append(
 			f"Python call trees were not captured for {never_captured} of {total} requests "
-			"(pyinstrument was unavailable or failed, Frappe's Recorder was already running, Redis "
-			"evicted them when it ran short of memory, or they could not be read after an encryption "
-			"key change). SQL findings are complete."
+			"(pyinstrument was unavailable or failed, Frappe's Recorder was already running, the tree "
+			"was too large to keep, Redis evicted it when it ran short of memory, or it could not be "
+			"read after an encryption key change). SQL findings are complete."
 		)
+
+
+def _report_thinned_trees(context, recordings: list[dict]) -> None:
+	"""Warn when call trees were thinned to fit the stored size cap (see capture.TREE_MAX_BYTES)."""
+	steps = []
+	for rec in recordings:
+		if not isinstance(rec, dict):
+			continue
+		thinned = getattr(rec.get("pyi_session"), "optimus_thinned", None)
+		if isinstance(thinned, dict) and isinstance(thinned.get("every"), int):
+			steps.append(thinned["every"])
+	if not steps:
+		return
+	context.warnings.append(
+		f"Python call trees for {len(steps)} of {len(recordings)} requests were too long to keep in "
+		f"full, so Optimus kept about 1 in every {max(steps)} samples of them. The slowest paths are "
+		"kept; shares can be off by a few points and paths under 1% of a request may be missing. "
+		"SQL findings are complete, but SQL may appear under a parent function in those call trees."
+	)
 
 
 def _note_missing_trees(context, recordings: list[dict], meta: dict) -> None:
@@ -1396,6 +1415,11 @@ def _note_missing_trees(context, recordings: list[dict], meta: dict) -> None:
 		lambda: _report_missing_trees(context, recordings, meta, now_datetime()),
 		None,
 		on_error=lambda kind: safe_call.log_error_line(f"optimus: missing-tree check failed ({kind})"),
+	)
+	safe_call.best_effort(
+		lambda: _report_thinned_trees(context, recordings),
+		None,
+		on_error=lambda kind: safe_call.log_error_line(f"optimus: thinned-tree check failed ({kind})"),
 	)
 
 

@@ -162,6 +162,148 @@ def _identify_args(fn_name: str, args: tuple, kwargs: dict):
 # clear hint to refactor the loop.
 SIDECAR_CAP_PER_RECORDING = 10_000
 
+# The stored pyinstrument tree is at most TREE_MAX_BYTES per recording. pyinstrument
+# builds a fresh string per frame per sample, so the raw pickle is ~7 KB per sample.
+# Interning the strings and stacks shrinks it without loss; only a tree still over
+# the cap is thinned. TREE_MAX_SAMPLES bounds the interning work and analyze cost.
+TREE_MAX_BYTES = 1 << 20
+TREE_MAX_SAMPLES = 60_000
+_THIN_ROUNDS = 6
+_STRING_OVERHEAD = 6
+_STACK_OVERHEAD = 4
+_RECORD_OVERHEAD = 24
+_ENVELOPE_OVERHEAD = 1024
+
+
+def _frame_records(session):
+	"""The session's ``[(stack, seconds)]`` list, or None for a shape we do not know."""
+	records = getattr(session, "frame_records", None)
+	if not isinstance(records, list):
+		return None
+	for record in records:
+		if not isinstance(record, tuple | list) or len(record) != 2:
+			return None
+		stack, seconds = record
+		if not isinstance(stack, list) or not isinstance(seconds, int | float):
+			return None
+	return records
+
+
+def _thin_by_time(records, target):
+	"""Keep about ``target`` samples by time, so a long blocking sample keeps its stack.
+
+	Skipped time accumulates until it reaches the step; the sample that reaches it
+	is kept with that time, and any leftover goes to the last kept sample, so total
+	time is exact.
+	"""
+	total = sum(seconds for _, seconds in records)
+	step = total / max(target, 1)
+	if step <= 0:
+		return list(records)
+	kept = []
+	pending = 0.0
+	for stack, seconds in records:
+		pending += seconds
+		if pending >= step:
+			kept.append((stack, pending))
+			pending = 0.0
+	if pending and kept:
+		stack, seconds = kept[-1]
+		kept[-1] = (stack, seconds + pending)
+	elif pending:
+		kept.append((records[-1][0], pending))
+	return kept
+
+
+def _estimate_bytes(string_bytes, stacks, depth_total, samples):
+	return _ENVELOPE_OVERHEAD + string_bytes + stacks * _STACK_OVERHEAD + depth_total * 3 + samples * _RECORD_OVERHEAD
+
+
+def _intern_records(records):
+	"""Share equal strings and equal stacks, so pickle writes repeats as back-references.
+
+	Returns ``(records, estimated_pickle_bytes)``; the estimate counts UTF-8 bytes.
+	"""
+	strings, stacks = {}, {}
+	string_bytes = depth_total = 0
+	interned = []
+	for stack, seconds in records:
+		key = tuple(stack)
+		shared = stacks.get(key)
+		if shared is None:
+			shared = []
+			for text in stack:
+				known = strings.get(text)
+				if known is None:
+					strings[text] = known = text
+					string_bytes += len(text.encode("utf-8", "surrogatepass")) + _STRING_OVERHEAD
+				shared.append(known)
+			stacks[key] = shared
+			depth_total += len(shared)
+		interned.append((shared, seconds))
+	return interned, _estimate_bytes(string_bytes, len(stacks), depth_total, len(interned))
+
+
+def _original_samples(session, records):
+	thinned = getattr(session, "optimus_thinned", None)
+	return thinned["samples"] if isinstance(thinned, dict) else len(records)
+
+
+def compact_pyi_session(session, budget=None):
+	"""Intern a pyinstrument session's stacks in place and thin it to the byte budget.
+
+	Lossless unless the estimate is over ``budget`` (default TREE_MAX_BYTES) or the
+	session has more than TREE_MAX_SAMPLES samples; then samples are thinned by time
+	and ``session.optimus_thinned = {"every", "samples"}`` says so. Returns
+	``{"estimate", "samples", "every"}``, or None (session untouched) for a shape this
+	does not know. The new records are built first and assigned in one step.
+	"""
+	records = _frame_records(session)
+	if records is None:
+		return None
+	budget = TREE_MAX_BYTES if budget is None else budget
+	original = _original_samples(session, records)
+	if len(records) > TREE_MAX_SAMPLES:
+		records = _thin_by_time(records, TREE_MAX_SAMPLES)
+	interned, estimate = _intern_records(records)
+	for _ in range(_THIN_ROUNDS):
+		target = int(len(records) * budget / estimate) if estimate else 0
+		if estimate <= budget or len(records) < 2:
+			break
+		records = _thin_by_time(records, min(target, len(records) - 1))
+		interned, estimate = _intern_records(records)
+	every = max(1, round(original / max(len(interned), 1)))
+	session.frame_records = interned
+	session.sample_count = len(interned)
+	if every > 1:
+		session.optimus_thinned = {"every": every, "samples": original}
+	return {"estimate": estimate, "samples": len(interned), "every": every}
+
+
+def pickle_pyi_session(session):
+	"""``(blob, info)``: the compacted session pickled within TREE_MAX_BYTES.
+
+	Thins further when the real pickle is over the cap (the estimate is only close).
+	``blob`` is None when it cannot fit or ``info`` is None for an unknown shape that
+	is pickled as is.
+	"""
+	import pickle
+
+	budget = TREE_MAX_BYTES
+	info = None
+	for _ in range(_THIN_ROUNDS):
+		try:
+			info = compact_pyi_session(session, budget)
+		except Exception:
+			info = None
+		blob = pickle.dumps(session)
+		if len(blob) <= TREE_MAX_BYTES:
+			return blob, info
+		if info is None or info["samples"] < 2:
+			break
+		budget = int(budget * TREE_MAX_BYTES / len(blob) * 0.9)
+	return None, info
+
 
 def _make_wrap(orig, fn_name: str, local_proxy=None):
 	"""Build a sidecar-recording wrapper around ``orig``.

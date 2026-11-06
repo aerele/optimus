@@ -674,6 +674,36 @@ def after_job(method=None, kwargs=None, result=None, **rest):
 				pass
 
 
+def _signed_tree_blob(last_session, recording_uuid: str):
+	"""The signed, size-capped pickle of the pyinstrument session, or None to store nothing.
+
+	Sessions of an unknown shape are pickled as they are and stored only if they fit.
+	A tree that cannot fit even thinned is dropped with a warning; analyze reports
+	it as not captured.
+	"""
+	from optimus.session import _has_stable_hmac_secret, sign_blob
+
+	if last_session is None:
+		return None
+	blob, info = _capture.pickle_pyi_session(last_session)
+	if blob is None:
+		frappe.logger("optimus").warning(
+			f"optimus pyi dump: {recording_uuid} did not fit {_capture.TREE_MAX_BYTES} bytes "
+			f"({len(getattr(last_session, 'frame_records', None) or ())} samples); tree not stored"
+		)
+		return None
+	signed = sign_blob(blob)
+	try:
+		frappe.logger().debug(
+			f"optimus pyi dump: {recording_uuid} "
+			f"({'signed' if _has_stable_hmac_secret() else 'unsigned'}, {len(signed)} bytes, "
+			f"{(info or {}).get('samples')} samples, 1 in {(info or {}).get('every', 1)})"
+		)
+	except Exception:
+		pass
+	return signed
+
+
 def _dump_capture_state_to_redis(recording_uuid: str | None) -> None:
 	"""Serialize the in-flight pyinstrument session and sidecar list to Redis.
 
@@ -686,10 +716,6 @@ def _dump_capture_state_to_redis(recording_uuid: str | None) -> None:
 	so analyze refuses to unpickle a poisoned blob (Redis-poisoning RCE guard).
 	Best-effort: failures log but never break the request.
 	"""
-	import pickle
-
-	from optimus.session import sign_blob
-
 	if not recording_uuid:
 		# No recorder ran on this request nothing to dump.
 		_clear_capture_locals()
@@ -706,28 +732,14 @@ def _dump_capture_state_to_redis(recording_uuid: str | None) -> None:
 	if prof is not None:
 		try:
 			prof.stop()
-			tree_blob = sign_blob(pickle.dumps(prof.last_session))
-			# Visibility for the picker-diagnostic path: log whether
-			# this write was signed or unsigned, plus byte size.
-			# Helps operators correlate a "with_tree=0" picker
-			# diagnostic with the actual write mode (signed blobs
-			# need a stable encryption_key; unsigned blobs round-
-			# trip via the fallback).
-			try:
-				from optimus.session import _has_stable_hmac_secret
-				frappe.logger().debug(
-					f"optimus pyi dump: {recording_uuid} "
-					f"({'signed' if _has_stable_hmac_secret() else 'unsigned'}, "
-					f"{len(tree_blob)} bytes)"
+			tree_blob = _signed_tree_blob(prof.last_session, recording_uuid)
+			if tree_blob is not None:
+				from optimus import redis_keys
+				frappe.cache.set_value(
+					redis_keys.tree(recording_uuid),
+					tree_blob,
+					expires_in_sec=RECORDING_DATA_TTL_SECONDS,
 				)
-			except Exception:
-				pass
-			from optimus import redis_keys
-			frappe.cache.set_value(
-				redis_keys.tree(recording_uuid),
-				tree_blob,
-				expires_in_sec=RECORDING_DATA_TTL_SECONDS,
-			)
 		except Exception:
 			frappe.log_error(title="optimus pyi dump")
 
