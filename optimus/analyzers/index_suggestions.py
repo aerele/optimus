@@ -15,7 +15,8 @@ the read gain (``index_harm``).
 import json
 import logging
 import re
-from collections import Counter, defaultdict
+import time
+from collections import Counter, defaultdict, namedtuple
 
 from optimus.analyzers.base import (
 	FRAPPE_METADATA_COLUMNS,
@@ -34,8 +35,9 @@ from optimus.analyzers.index_where import (
 	parse_where,
 	strip_leading_comments,
 )
+from optimus.analyzers.optimizer_db_cache import cached_db, failed_statement
 from optimus.dbdialect import get_dialect
-from optimus.safe_call import job_timeout_types
+from optimus.safe_call import job_timeout_types, log_error_line
 
 
 def _scrub_literals(text: str) -> str:
@@ -356,6 +358,154 @@ def _classify_column(
 	return "actionable", dialect.index_ddl(table, column, is_text_col=False)
 
 
+INDEX_SUGGESTIONS_BUDGET_SECONDS = 120
+
+# Seam for tests: the clock the optimizer loop checks its deadline against.
+_monotonic = time.monotonic
+
+_Outcome = namedtuple("_Outcome", "kind value message", defaults=("",))
+
+
+def _loop_deadline(context) -> float:
+	"""Monotonic time by which the optimizer loop must stop: its own budget, or the
+	analysis' deadline when that comes sooner."""
+	own = _monotonic() + INDEX_SUGGESTIONS_BUDGET_SECONDS
+	overall = getattr(context, "deadline", None)
+	return own if overall is None else min(own, overall)
+
+
+def _check_shapes(unique_queries, optimize_query, dialect, deadline) -> tuple[dict, int]:
+	"""Run ``optimize_query`` over the shapes, slowest first, until ``deadline``.
+
+	Returns ``({normalized: _Outcome}, number of shapes not checked)``. Table stats are
+	read once through ``cached_db`` and every statement runs under one time cap."""
+	if not unique_queries or _monotonic() >= deadline:
+		return {}, len(unique_queries)
+	import frappe
+
+	outcomes: dict[str, _Outcome] = {}
+	ordered = sorted(unique_queries.items(), key=lambda item: -item[1]["duration"])
+	with cached_db(frappe, job_timeout_types()) as cached:
+		if not cached:
+			log_error_line(
+				"optimus index_suggestions: frappe.local.db is not available to cache the optimizer's "
+				"table reads; reading them again for every query shape"
+			)
+		with dialect.statement_time_limit(OPTIMIZER_STATEMENT_TIMEOUT_SECONDS):
+			for normalized, info in ordered:
+				if _monotonic() >= deadline:
+					break
+				outcomes[normalized] = _check_shape(info, optimize_query, dialect)
+	return outcomes, len(unique_queries) - len(outcomes)
+
+
+def _check_shape(info: dict, optimize_query, dialect) -> _Outcome:
+	from optimus.sql_budget import within_budget
+
+	if not within_budget(info["raw"]):
+		return _Outcome("parser", "ParseBudgetExceeded")
+	try:
+		# DBOptimizer parses with sql_metadata which doesn't care about literal values.
+		return _Outcome("index", optimize_query(info["raw"]))
+	except job_timeout_types():
+		raise
+	except _PARSER_LIMITATION_EXCEPTIONS as e:
+		# Expected for complex queries sql_metadata can't parse; the user can't act on these.
+		return _Outcome("parser", type(e).__name__)
+	except Exception as e:
+		if dialect.is_statement_timeout(e):
+			return _Outcome("timeout", None)
+		if _is_reserved_column_error(e):
+			return _Outcome("reserved", None)
+		return _Outcome("real", type(e).__name__, str(e))
+
+
+def _is_reserved_column_error(error: Exception) -> bool:
+	"""True for a syntax error (MariaDB/MySQL 1064) from the optimizer's COUNT(DISTINCT col)
+	statement. Frappe sends the column unquoted, so a reserved word such as `read` is
+	rejected. A 1064 from any other statement is not expected and stays a real failure."""
+	args = getattr(error, "args", None)
+	return bool(args) and args[0] == 1064 and failed_statement(error) == "cardinality"
+
+
+def _aggregate_outcomes(unique_queries, outcomes) -> tuple:
+	"""Fold the outcomes, in the order the shapes were first seen, into suggestion buckets and
+	failure counts, so the result does not depend on the order they were checked in."""
+	suggestion_buckets: dict[tuple, dict] = defaultdict(
+		lambda: {"duration": 0.0, "count": 0, "entries": [], "cardinality": None}
+	)
+	parser_limit_failures: Counter = Counter()
+	real_failures: Counter = Counter()
+	dropped_meta_table_tables: set[str] = set()
+	failures_to_log: list[tuple[str, str, str]] = []
+	timed_out = 0
+	reserved_columns = 0
+	for normalized, info in unique_queries.items():
+		outcome = outcomes.get(normalized)
+		if outcome is None:
+			continue
+		if outcome.kind == "parser":
+			parser_limit_failures[outcome.value] += 1
+		elif outcome.kind == "timeout":
+			timed_out += 1
+		elif outcome.kind == "reserved":
+			reserved_columns += 1
+		elif outcome.kind == "real":
+			real_failures[outcome.value] += 1
+			if len(failures_to_log) < MAX_LOGGED_FAILURES:
+				failures_to_log.append((outcome.value, outcome.message, normalized))
+		else:
+			_bucket_suggestion(outcome.value, info, suggestion_buckets, dropped_meta_table_tables)
+	return (
+		suggestion_buckets,
+		parser_limit_failures,
+		real_failures,
+		dropped_meta_table_tables,
+		timed_out,
+		reserved_columns,
+		failures_to_log,
+	)
+
+
+def _bucket_suggestion(index, info, suggestion_buckets, dropped_meta_table_tables) -> None:
+	if not index or not index.table or not index.column:
+		return
+	if is_frappe_meta_table(index.table):
+		dropped_meta_table_tables.add(str(index.table).strip().strip("`"))
+		return
+	bucket = suggestion_buckets[(index.table, index.column)]
+	bucket["duration"] += info["duration"]
+	bucket["count"] += info["count"]
+	bucket["entries"].append(info)
+	if bucket["cardinality"] is None:
+		bucket["cardinality"] = getattr(index, "cardinality", None)
+
+
+def _log_optimizer_failures(failures: list[tuple[str, str, str]]) -> None:
+	"""Write the first few unexpected optimizer failures to the Error Log (best effort)."""
+	for name, message, normalized in failures:
+		try:
+			import frappe
+
+			# Scrub literals defensively: the query should already be normalized, but if it
+			# isn't we don't want literal customer data landing in the Error Log.
+			frappe.log_error(
+				title="optimus optimizer failure",
+				message=f"{name}: {message}\n\nQuery: {_scrub_literals(normalized[:1000])}",
+			)
+		except Exception:
+			pass
+
+
+def _unchecked_warning(unchecked: int, total: int) -> str:
+	return (
+		"Index suggestions stopped early to keep the analysis within its time limit: "
+		f"{total - unchecked} of {total} SELECT query shapes were checked, slowest first. "
+		f"The other {unchecked} were not checked, so some missing indexes may not be listed. "
+		"Profile a shorter flow to cover them."
+	)
+
+
 def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	# Frappe's query optimizer fetches table stats with MariaDB-only
 	# introspection (DESCRIBE / SHOW INDEX FROM). On Postgres those statements
@@ -429,71 +579,23 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	# the optimizer couldn't analyze a lot of queries otherwise the
 	# customer reads "no index suggestions" as "no missing indexes"
 	# when the real answer might be "we couldn't analyze your queries".
-	suggestion_buckets: dict[tuple, dict] = defaultdict(
-		lambda: {"duration": 0.0, "count": 0, "entries": [], "cardinality": None}
-	)
-	parser_limit_failures: Counter = Counter()
-	real_failures: Counter = Counter()
 	# Frappe framework "meta" tables (tabDocType, tabCustom Field, tabSingles,
 	# tab__global_search, …) `bench migrate` owns their schema (indexes
 	# included) and they're tiny / write-on-every-customization, so we never
-	# suggest an index on them. Skip before we even bucket the suggestion.
-	dropped_meta_table_tables: set[str] = set()
-	logged_real = 0
-	timed_out = 0
-	dialect = get_dialect()
-	for normalized, info in unique_queries.items():
-		from optimus.sql_budget import within_budget
-		if not within_budget(info["raw"]):
-			parser_limit_failures["ParseBudgetExceeded"] += 1
-			continue
-		try:
-			# DBOptimizer parses with sql_metadata which doesn't care about
-			# literal values, so passing the normalized query is fine.
-			# Its COUNT(DISTINCT) cardinality check scans the whole table, so cap it.
-			with dialect.statement_time_limit(OPTIMIZER_STATEMENT_TIMEOUT_SECONDS):
-				index = _optimize_query(info["raw"])
-		except _PARSER_LIMITATION_EXCEPTIONS as e:
-			# Expected path for complex queries sql_metadata can't parse.
-			# Count but don't log the user can't act on these.
-			parser_limit_failures[type(e).__name__] += 1
-			continue
-		except Exception as e:
-			if dialect.is_statement_timeout(e):
-				timed_out += 1
-				continue
-			# Unexpected path this might indicate a real profiler bug.
-			# Count, log the first few to Error Log (so they're discoverable
-			# for investigation) and continue.
-			real_failures[type(e).__name__] += 1
-			if logged_real < MAX_LOGGED_FAILURES:
-				try:
-					import frappe
-
-					# Scrub literals defensively the query should already
-					# be normalized, but if it isn't (edge case), we don't
-					# want literal customer data landing in the Error Log.
-					scrubbed = _scrub_literals(normalized[:1000])
-					frappe.log_error(
-						title="optimus optimizer failure",
-						message=f"{type(e).__name__}: {e}\n\nQuery: {scrubbed}",
-					)
-				except Exception:
-					pass
-				logged_real += 1
-			continue
-		if not index or not index.table or not index.column:
-			continue
-		if is_frappe_meta_table(index.table):
-			dropped_meta_table_tables.add(str(index.table).strip().strip("`"))
-			continue
-		key = (index.table, index.column)
-		bucket = suggestion_buckets[key]
-		bucket["duration"] += info["duration"]
-		bucket["count"] += info["count"]
-		bucket["entries"].append(info)
-		if bucket["cardinality"] is None:
-			bucket["cardinality"] = getattr(index, "cardinality", None)
+	# suggest an index on them. They are dropped before the suggestion is bucketed.
+	outcomes, unchecked = _check_shapes(
+		unique_queries, _optimize_query, get_dialect(), _loop_deadline(context)
+	)
+	(
+		suggestion_buckets,
+		parser_limit_failures,
+		real_failures,
+		dropped_meta_table_tables,
+		timed_out,
+		reserved_columns,
+		failures_to_log,
+	) = _aggregate_outcomes(unique_queries, outcomes)
+	_log_optimizer_failures(failures_to_log)
 
 	# v0.5.1: verify each suggested (table, column) against
 	# information_schema before emitting a finding. Pre-v0.5.1 the
@@ -652,6 +754,8 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 
 	# v0.5.1: Real errors (unexpected exception types from DBOptimizer) get
 	# the loud "you should investigate" warning + Error Log entries.
+	if unchecked:
+		warnings.append(_unchecked_warning(unchecked, len(unique_queries)))
 	total_real = sum(real_failures.values())
 	if total_real:
 		failure_summary = ", ".join(
@@ -668,6 +772,12 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 			f"Skipped index suggestions for {timed_out} SELECT statement(s) because the "
 			f"optimizer's table scan ran past {OPTIMIZER_STATEMENT_TIMEOUT_SECONDS}s. "
 			"Their tables are likely large; check them with EXPLAIN by hand."
+		)
+
+	if reserved_columns:
+		warnings.append(
+			f"{reserved_columns} query shape(s) use a column name MariaDB rejects unquoted, such as "
+			"`read`; their cardinality was not checked, so no index suggestion was made for them."
 		)
 
 	# v0.5.1: Parser limitations (sql_metadata can't parse this shape) get
