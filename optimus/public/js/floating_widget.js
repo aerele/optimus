@@ -799,28 +799,35 @@
 		const messages = {
 			ready: __("Profiling is complete. Your Optimus Session is ready."),
 			empty: __("Profiling finished, but no requests were recorded in this session."),
-			failed: __("Analysis failed for this session. Open it to review the error and retry."),
+			failed: __("Analysis failed for this session. Open the session to review the error and retry."),
 		};
 		const titles = {
 			ready: __("Optimus Session ready"),
 			empty: __("Optimus Session has no data"),
 			failed: __("Optimus analysis failed"),
 		};
+		const url = frappe.utils.get_form_link("Optimus Session", item.docname);
+		const link = '<a class="optimus-session-link" href="' + frappe.utils.escape_html(url) + '">'
+			+ frappe.utils.escape_html(item.title || item.docname) + "</a>";
 		const d = new frappe.ui.Dialog({
 			title: titles[item.kind],
 			fields: [{
 				fieldtype: "HTML",
 				fieldname: "body",
-				options: "<p>" + frappe.utils.escape_html(messages[item.kind]) + "</p>"
-					+ "<p><b>" + frappe.utils.escape_html(__("Session ID: {0}", [item.docname])) + "</b></p>",
+				options: "<p>" + frappe.utils.escape_html(messages[item.kind]) + " " + link + "</p>",
 			}],
-			primary_action_label: item.kind === "failed" ? __("Review and Retry") : __("Open Session"),
-			primary_action: () => {
-				d.hide();
-				frappe.set_route("Form", "Optimus Session", item.docname);
-			},
 		});
 		if (d.$wrapper && d.$wrapper.addClass) d.$wrapper.addClass("optimus-session-popup");
+		// A plain primary click navigates this tab to the session, so close the dialog behind it.
+		// For a modified or non-primary click (ctrl / meta / shift / alt / middle) the browser may
+		// open a new tab or window, so keep the popup. If Desk's router instead navigates this tab,
+		// it closes the dialog itself (hide_open_dialog), so nothing is left dangling either way.
+		if (d.$wrapper && d.$wrapper.on) {
+			d.$wrapper.on("click", "a.optimus-session-link", (e) => {
+				if (e && (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey || e.button)) return;
+				d.hide();
+			});
+		}
 		d.onhide = () => {
 			popupBusy = false;
 			flushPopups();
@@ -842,6 +849,12 @@
 		}
 		popupDeferrals = 0;
 		const item = popupQueue.shift();
+		// The user may have opened this session's own form while the popup waited; drop it, as
+		// showSessionPopup does at enqueue time.
+		if (isOnSessionForm(item.docname)) {
+			flushPopups();
+			return;
+		}
 		if (!claimPopup(item.key, item.token)) {
 			flushPopups();
 			return;
@@ -875,7 +888,7 @@
 			if (isOnSessionForm(docname)) return;
 			const key = "optimus_popup_shown:" + docname + ":" + kind;
 			const token = String(data.event_id || data.session_uuid || "");
-			popupQueue.push({ docname, kind, key, token });
+			popupQueue.push({ docname, kind, key, token, title: data.title || "" });
 			flushPopups();
 		} catch (e) {
 			console.warn("[optimus] session popup failed", e);
