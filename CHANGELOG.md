@@ -18,7 +18,7 @@ versions may contain breaking changes see migration notes below).
 - A report that has no Self time recorded shows Total and a "-" for Self, with a note to record the flow again. This applies to every report analyzed before 0.12.146, because their self time was never recorded and cannot be recovered. Their list is ordered by Total, so it may not be the true top 20, and their Total may count a recursive function more than once.
 - Total Python Time on the session is now filled in: it is the Python time without the SQL time, taken off action by action and never below zero for an action, so one SQL-heavy action cannot erase the Python time of the others.
 - The call tree no longer shows "[self]" rows, and a function that spends time in its own lines shows "self ..." beside its time.
-- Repeated Hot Frame findings and the self-time hot path findings can appear again. Some Slow Hot Path findings are now titled as a self-time hot path. Self time is wall-clock, so a function that waits on I/O inside its own lines can still be flagged; the finding says so.
+- Repeated Hot Frame findings and the self-time hot path findings can appear again. They are raised only when Self time is recorded and adds up to the sampled time. Some Slow Hot Path findings are now titled as a self-time hot path. Self time is wall-clock, so a function that waits on I/O inside its own lines can still be flagged; the finding says so.
 
 ---
 

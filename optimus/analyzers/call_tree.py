@@ -949,6 +949,7 @@ def _emit_per_action_findings(
 	action_wall_time_ms: float,
 	tracked_apps: tuple[str, ...] | None = None,
 	installed_apps: frozenset[str] | None = None,
+	self_time_trusted: bool = True,
 ) -> list:
 	"""Walk the tree and emit Slow Hot Path / Hook Bottleneck findings.
 
@@ -960,6 +961,10 @@ def _emit_per_action_findings(
 	any per-frame finding but ARE slow, emit a Slow Background Job
 	finding rooted at the deepest user-code frame so the reader has an
 	actionable callsite instead of an unexplained 12s job entry.
+
+	``self_time_trusted`` False (self time missing or inconsistent, see
+	``_self_time_measured``) stops a node's own ``self_ms`` from raising a self-time hot
+	path; the subtree findings that run on cumulative time are unaffected.
 	"""
 	if action_wall_time_ms <= 0:
 		return []
@@ -974,6 +979,7 @@ def _emit_per_action_findings(
 		findings=findings,
 		tracked_apps=tracked_apps,
 		installed_apps=installed_apps,
+		self_time_trusted=self_time_trusted,
 	)
 
 	# v0.7.x: BG-job fallback. When the walker emits nothing for a slow
@@ -1036,6 +1042,7 @@ def _walk_for_findings(
 	findings: list,
 	tracked_apps: tuple[str, ...] | None = None,
 	installed_apps: frozenset[str] | None = None,
+	self_time_trusted: bool = True,
 ) -> None:
 	cumulative = node.get("cumulative_ms", 0)
 	# v0.7.x A.CR1: clamp pct at the gating + severity site too. The
@@ -1186,9 +1193,11 @@ def _walk_for_findings(
 					before = len(findings)
 					_walk_children(
 						node, parent_chain, action_idx, action_label, action_wall_time_ms,
-						findings, tracked_apps, installed_apps,
+						findings, tracked_apps, installed_apps, self_time_trusted,
 					)
-					own_ms = node.get("self_ms") or 0
+					# Untrusted self time must not raise a self-time hot path: the time then
+					# reads as callees (the "and its callees" finding), as before self time existed.
+					own_ms = (node.get("self_ms") or 0) if self_time_trusted else 0
 					own_pct = min(1.0, own_ms / action_wall_time_ms) if action_wall_time_ms else 0
 					if own_pct >= med_pct and own_ms >= med_ms:
 						impact_ms = own_ms
@@ -1273,7 +1282,7 @@ def _walk_for_findings(
 
 	_walk_children(
 		node, parent_chain, action_idx, action_label, action_wall_time_ms, findings,
-		tracked_apps, installed_apps,
+		tracked_apps, installed_apps, self_time_trusted,
 	)
 
 
@@ -1286,6 +1295,7 @@ def _walk_children(
 	findings: list,
 	tracked_apps: tuple[str, ...] | None = None,
 	installed_apps: frozenset[str] | None = None,
+	self_time_trusted: bool = True,
 ) -> None:
 	"""Run ``_walk_for_findings`` over the node's python children."""
 	new_chain = parent_chain + [node]
@@ -1294,7 +1304,7 @@ def _walk_children(
 			continue
 		_walk_for_findings(
 			child, new_chain, action_idx, action_label, action_wall_time_ms, findings,
-			tracked_apps, installed_apps,
+			tracked_apps, installed_apps, self_time_trusted,
 		)
 
 
@@ -1451,8 +1461,11 @@ def _aggregate_hot_frames(
 		# frame that issued it), so an app frame is inflated only when those frames were pruned
 		# or stripped. Telling that apart needs per-node SQL attribution that is not recorded,
 		# so the SQL wait is NOT discounted here (deferred); the finding text states the limit.
+		# Gated on self_time_measured: it is a self-based finding, so untrusted self time must not
+		# raise it. Before self time was recorded this finding never fired in practice.
 		if (
-			len(distinct_actions) >= DEFAULT_REPEATED_FRAME_MIN_ACTIONS
+			self_time_measured
+			and len(distinct_actions) >= DEFAULT_REPEATED_FRAME_MIN_ACTIONS
 			and self_sum_ms >= DEFAULT_REPEATED_FRAME_MIN_TOTAL_MS
 		):
 			severity = "High" if self_sum_ms >= 2000 else "Medium"
@@ -1693,7 +1706,9 @@ def _build_session_breakdown(
 	``python_ms`` is the python self time without the SQL wait, which is already in ``sql_ms``
 	and sits inside python self times. The wait is removed per action, clamped at zero, so one
 	SQL-heavy action cannot erase the python time of the others. ``per_action_sql_ms`` aligns
-	with ``per_action_trees``; absent entries count as no SQL.
+	with ``per_action_trees``; absent entries count as no SQL. When pyinstrument misses a SQL
+	wait (the wait is then not in the python self time), ``python_ms`` is under-reported,
+	bounded at 0 per action.
 
 	``by_app`` is raw self time and still includes the SQL wait. It must not be rendered
 	against ``sql_ms`` without the same per-action exclusion.
@@ -1794,6 +1809,7 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 	sql_total_ms = 0.0
 	# SQL ms per action, aligned with per_action_trees (the wait sits inside python self time).
 	per_action_sql_ms: list = []
+	pending_action_findings: list = []
 
 	# Threshold config (read once)
 	prune_pct = _conf_float("optimus_tree_prune_threshold_pct", DEFAULT_PRUNE_THRESHOLD_PCT)
@@ -1875,9 +1891,9 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 		per_action_trees.append(tree)
 		per_action_sql_ms.append(action_sql_ms)
 
-		# Per-action findings
-		findings.extend(_emit_per_action_findings(
-			tree,
+		# Per-action findings wait for the session-wide self time check below.
+		pending_action_findings.append(dict(
+			tree=tree,
 			action_idx=action_idx,
 			action_label=action_label,
 			action_wall_time_ms=action_wall_time or tree.get("cumulative_ms", 0),
@@ -1891,6 +1907,11 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 		if action_idx < len(context.actions):
 			context.actions[action_idx]["call_tree_json"] = tree_json
 			context.actions[action_idx]["call_tree_size_bytes"] = len(tree_json)
+
+	# Per-action findings: self time is trusted only when it is consistent across the session.
+	self_time_trusted = _self_time_measured(per_action_trees)
+	for pending in pending_action_findings:
+		findings.extend(_emit_per_action_findings(**pending, self_time_trusted=self_time_trusted))
 
 	# Cross-action aggregation
 	repeated_findings, leaderboard = _aggregate_hot_frames(

@@ -557,3 +557,70 @@ class TestStoredMeaningOfTotalMs:
 		finding = next(f for f in findings if f["title"].startswith(row["function"]))
 		assert json.loads(finding["technical_detail_json"])["total_ms"] == 1200
 		assert finding["estimated_impact_ms"] == 1200
+
+
+class TestSelfBasedFindingsFollowTheReliabilityFlag:
+	"""Repeated Hot Frame and the own-time hot path run on self time, so they need it trusted.
+
+	Before self time was recorded both read ``self_ms`` too (always 0 in practice), so
+	suppressing them while it is untrusted restores that behaviour and drops nothing new.
+	"""
+
+	@staticmethod
+	def _repeated(root_cumulative_ms):
+		trees = [
+			_root([_kid("calc", "my_app/d.py", 200)], cumulative_ms=root_cumulative_ms)
+			for _ in range(4)
+		]
+		findings, board = call_tree._aggregate_hot_frames(trees, None, INSTALLED)
+		return [f for f in findings if f["finding_type"] == "Repeated Hot Frame"], board
+
+	def test_repeated_hot_frame_fires_when_self_time_is_consistent(self):
+		repeated, board = self._repeated(root_cumulative_ms=200)
+		assert len(repeated) == 1 and repeated[0]["estimated_impact_ms"] == 800
+		assert all(r["self_time_measured"] for r in board)
+
+	def test_repeated_hot_frame_is_skipped_when_self_time_is_implausible(self):
+		repeated, board = self._repeated(root_cumulative_ms=5000)
+		assert repeated == []
+		# The table still lists the frame, on Total only.
+		assert board and not any(r["self_time_measured"] for r in board)
+
+	@staticmethod
+	def _endpoint():
+		return _root([
+			_kid("get_report", "my_app/api.py", 500, [_kid("slow_child", "my_app/calc.py", 500)])
+		])
+
+	def _titles(self, trusted):
+		findings = call_tree._emit_per_action_findings(
+			self._endpoint(), action_idx=0, action_label="my_app.api.get_report",
+			action_wall_time_ms=1000, self_time_trusted=trusted,
+		)
+		return [f["title"] for f in findings if f["finding_type"] == "Slow Hot Path"]
+
+	def test_own_time_hot_path_fires_when_trusted(self):
+		titles = self._titles(True)
+		assert any("self-time hot path" in t for t in titles)
+		assert any("slow_child" in t for t in titles)
+
+	def test_own_time_hot_path_is_skipped_when_untrusted_and_the_callee_finding_stays(self):
+		titles = self._titles(False)
+		assert not any("self-time hot path" in t for t in titles)
+		assert any("slow_child" in t for t in titles)
+
+	def test_analyze_gates_the_own_time_hot_path_on_the_session_check(self):
+		def run(root_cumulative_ms):
+			tree = _root(
+				[_kid("get_report", "my_app/api.py", 500, [_kid("slow_child", "my_app/calc.py", 500)])],
+				cumulative_ms=root_cumulative_ms,
+			)
+			recs = [{"pyi_session": {"root": tree}, "calls": []}]
+			ctx = AnalyzeContext(
+				session_uuid="u", docname="d",
+				actions=[{"action_label": "my_app.api.get_report", "duration_ms": 1000}],
+			)
+			return [f["title"] for f in call_tree.analyze(recs, ctx).findings]
+
+		assert any("self-time hot path" in t for t in run(1000))
+		assert not any("self-time hot path" in t for t in run(5000))
