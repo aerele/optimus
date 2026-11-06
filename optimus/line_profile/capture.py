@@ -26,6 +26,7 @@ import threading
 import tokenize
 from dataclasses import dataclass
 from functools import wraps
+from itertools import islice
 
 from optimus import redis_keys as _redis_keys
 from optimus.line_profile import diff
@@ -182,7 +183,7 @@ def _capture_source_lines(fn) -> list[dict]:
 			return []
 		first_lineno = code.co_firstlineno
 		# getblock reads "" as end of input; re-add the newline the reader strips.
-		source_lines = inspect.getblock([line + "\n" for line in lines[first_lineno - 1:]])
+		source_lines = inspect.getblock([line + "\n" for line in islice(lines, first_lineno - 1, None)])
 	except (OSError, TypeError, ValueError, SyntaxError, tokenize.TokenError):
 		return []
 	return [{"lineno": first_lineno + i, "content": line.rstrip("\n")} for i, line in enumerate(source_lines)]
@@ -200,6 +201,7 @@ MAX_CAPTURE_BYTES = 16 * 1024 * 1024
 MAX_SAMPLE_BATCHES = 10_000
 MAX_SAMPLE_RECORDS = 250_000
 MAX_SOURCE_LINES = 100_000
+MAX_SOURCE_LINE_CHARS = 20_000
 
 
 def _bounded_text(value, limit):
@@ -256,7 +258,7 @@ def _validate_captured_picks(picks):
 		for line in lines:
 			if (not isinstance(line, dict) or not _uint(line.get("lineno"), positive=True)
 				or line["lineno"] <= previous or not isinstance(line.get("content"), str)
-				or len(line["content"]) > 20_000):
+				or len(line["content"]) > MAX_SOURCE_LINE_CHARS):
 				raise CaptureInputError("Line profiling source snapshot is malformed")
 			previous = line["lineno"]
 
@@ -418,14 +420,22 @@ def prepare_line_profile_picks(picks: list[dict], *, server_expanded=frozenset()
 	source_snapshot: dict[str, list[dict]] = {}
 	picks_meta: list[dict] = []
 	snapshot_bytes = 0
+	snapshot_lines = 0
 	for r in eligible:
 		fn = _resolve_attr(r["dotted_path"])
 		lines = _capture_source_lines(fn) if fn else []
 		if not lines:
-			frappe.logger("optimus").warning(f"line profiling skipped {r['dotted_path']}: no readable source")
+			frappe.logger("optimus").warning("line profiling skipped %s: no readable source", r["dotted_path"])
 			r["eligible"] = False
-			r["ineligible_reason"] = _("Its source could not be read.")
+			r["ineligible_reason"] = _("Its source could not be found or read.")
 			continue
+		if (snapshot_lines + len(lines) > MAX_SOURCE_LINES
+			or any(len(line["content"]) > MAX_SOURCE_LINE_CHARS for line in lines)):
+			frappe.logger("optimus").warning("line profiling skipped %s: source too large", r["dotted_path"])
+			r["eligible"] = False
+			r["ineligible_reason"] = _("Its source is too large to profile.")
+			continue
+		snapshot_lines += len(lines)
 		snapshot_bytes += len(json.dumps(lines).encode()) + len(r["dotted_path"].encode()) + 8
 		if snapshot_bytes > MAX_CAPTURE_BYTES:
 			raise CaptureError(_("Selected source exceeds the capture size limit. Select fewer functions."))
@@ -439,7 +449,7 @@ def prepare_line_profile_picks(picks: list[dict], *, server_expanded=frozenset()
 		})
 
 	if not picks_meta:
-		raise CaptureError(_("The selected functions have no readable source. Choose other functions."))
+		raise CaptureError(_("The selected functions have no readable source that can be profiled. Choose other functions."))
 
 	_validate_captured_picks([{**pick, "source_lines": source_snapshot[pick["dotted_path"]]} for pick in picks_meta])
 	picks_json, source_json = json.dumps(picks_meta), json.dumps(source_snapshot)
