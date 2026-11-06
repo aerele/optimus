@@ -799,7 +799,7 @@
 		const messages = {
 			ready: __("Profiling is complete. Your Optimus Session is ready."),
 			empty: __("Profiling finished, but no requests were recorded in this session."),
-			failed: __("Analysis failed for this session. Open it to review the error and retry."),
+			failed: __("Analysis failed for this session. Open the session to review the error and retry."),
 		};
 		const titles = {
 			ready: __("Optimus Session ready"),
@@ -818,8 +818,14 @@
 			}],
 		});
 		if (d.$wrapper && d.$wrapper.addClass) d.$wrapper.addClass("optimus-session-popup");
-		// Following the link opens the session, so close the dialog behind it.
-		if (d.$wrapper && d.$wrapper.on) d.$wrapper.on("click", "a.optimus-session-link", () => d.hide());
+		// A plain click navigates this tab to the session, so close the dialog behind it. A modified
+		// or non-primary click opens a new tab or window and leaves this page, so keep the popup.
+		if (d.$wrapper && d.$wrapper.on) {
+			d.$wrapper.on("click", "a.optimus-session-link", (e) => {
+				if (e && (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey || e.button)) return;
+				d.hide();
+			});
+		}
 		d.onhide = () => {
 			popupBusy = false;
 			flushPopups();
@@ -841,6 +847,12 @@
 		}
 		popupDeferrals = 0;
 		const item = popupQueue.shift();
+		// The user may have opened this session's own form while the popup waited; drop it, as
+		// showSessionPopup does at enqueue time.
+		if (isOnSessionForm(item.docname)) {
+			flushPopups();
+			return;
+		}
 		if (!claimPopup(item.key, item.token)) {
 			flushPopups();
 			return;

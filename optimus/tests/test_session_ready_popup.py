@@ -39,7 +39,7 @@ function desk(opts = {}) {
   localStorage:storage,Math,__:(t,a)=>a?t.replace('{0}',a[0]):t,
   __sd:(display,label)=>pills.push({display,label}),
   frappe:{session:{user:'owner'},set_route:()=>{},get_route:()=>opts.route||[],
-   ui:{Dialog,open_dialogs:opts.openDialogs||[]},utils:{escape_html:s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'),get_form_link:(dt,n)=>'/desk/optimus/optimus-session/'+n},
+   ui:{Dialog,open_dialogs:opts.openDialogs||[]},utils:{escape_html:s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'),get_form_link:(dt,n)=>opts.formLink||'/desk/optimus/optimus-session/'+n},
    realtime:{socket:opts.noSocket?undefined:{},on:(n,fn)=>{handlers[n]=fn;(opts.onCalls||[]).push(n);}},show_alert:a=>alerts.push(a)}};
  vm.createContext(ctx);
  vm.runInContext(fs.readFileSync(process.argv[2],'utf8'),ctx);
@@ -324,7 +324,7 @@ def test_failed_popup_has_its_own_copy():
 	_run(r"""
 const d = desk();
 d.handlers.optimus_session_failed(ev());
-assert.ok(d.dialogs[0].cfg.fields[0].options.includes('review the error and retry'));
+assert.ok(d.dialogs[0].cfg.fields[0].options.includes('Open the session to review the error and retry.'));
 const r = desk();
 r.handlers.optimus_session_ready(ev());
 assert.ok(r.dialogs[0].cfg.fields[0].options.includes('Your Optimus Session is ready'));
@@ -369,17 +369,51 @@ assert.ok(e.dialogs[0].cfg.fields[0].options.includes('>OS-1</a>'));
 """)
 
 
-def test_popup_link_text_is_escaped_and_closes_the_dialog():
+def test_popup_link_text_and_address_are_escaped():
 	_run(r"""
-const d = desk();
+const d = desk({formLink:'/desk/optimus-session/OS-1?a=1&b="x"\'y'});
 d.handlers.optimus_session_ready(ev({title:'<img src=x onerror=1>'}));
 const html = d.dialogs[0].cfg.fields[0].options;
 assert.ok(!html.includes('<img'));
 assert.ok(html.includes('&lt;img src=x onerror=1&gt;'));
+assert.ok(html.includes('href="/desk/optimus-session/OS-1?a=1&amp;b=&quot;x&quot;&#39;y"'), html);
+assert.ok(!html.includes('a=1&b='), 'raw address must not appear');
+assert.equal((html.match(/href="/g) || []).length, 1);
+""")
+
+
+def test_plain_link_click_closes_the_dialog_but_a_modified_click_keeps_it():
+	_run(r"""
+const sel = 'a.optimus-session-link';
+const d = desk();
+d.handlers.optimus_session_ready(ev());
 const dlg = d.dialogs[0];
-assert.ok(dlg.clicks['a.optimus-session-link']);
-dlg.clicks['a.optimus-session-link']();
-assert.equal(dlg.shown, false);
+assert.ok(dlg.clicks[sel], 'click is delegated to the session link');
+for (const mod of [{ctrlKey:true}, {metaKey:true}, {shiftKey:true}, {altKey:true}, {button:1}]) {
+ dlg.clicks[sel]({button:0, ...mod});
+ assert.equal(dlg.shown, true, JSON.stringify(mod) + ' keeps the popup open');
+}
+dlg.clicks[sel]({button:0, ctrlKey:false, metaKey:false, shiftKey:false, altKey:false});
+assert.equal(dlg.shown, false, 'a plain click closes it');
+""")
+
+
+def test_queued_popup_is_dropped_when_the_user_is_on_its_session_form_at_flush_time():
+	_run(r"""
+const opts = {route:['List','Optimus Session']};
+const d = desk(opts);
+d.doc.activeElement = {tagName:'INPUT', type:'text'};
+d.handlers.optimus_session_ready(ev());
+assert.equal(d.dialogs.length, 0, 'deferred while typing');
+opts.route = ['Form','Optimus Session','OS-1'];
+d.doc.activeElement = null;
+d.tick();
+assert.equal(d.dialogs.length, 0, 'dropped on the own form');
+assert.deepEqual(Object.keys(d.store), [], 'no claim taken for a dropped popup');
+// The rest of the queue still flows.
+opts.route = ['List','Optimus Session'];
+d.handlers.optimus_session_ready(ev({event_id:'e2', docname:'OS-2'}));
+assert.equal(d.dialogs.length, 1);
 """)
 
 
