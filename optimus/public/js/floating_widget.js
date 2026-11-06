@@ -622,6 +622,9 @@
 
 		frappe.call({
 			method: "optimus.api.stop",
+			// The session this tab shows, so an old tab never stops the one active in
+			// another tab. Omitted only when the tab knows none.
+			args: { session_uuid: currentState.session_uuid || undefined },
 			callback: (r) => {
 				const data = (r && r.message) || {};
 				_diag("[optimus] stop callback:", data);
