@@ -10,6 +10,7 @@ when the setting is unset or the DocType row doesn't exist yet (fresh install,
 pre-migration).
 """
 
+import time
 from dataclasses import dataclass, field
 
 from optimus.ai_privacy import opted_in
@@ -796,13 +797,59 @@ def _resolve(*, row=_UNREAD_ROW) -> OptimusConfig:
 	)
 
 
+_MEMO_ATTR = "optimus_config"
+
+
+def _memoized_config(frappe):
+	"""The config resolved earlier in this request or job, or None once it is a minute old."""
+	try:
+		stamp, cfg = getattr(frappe.local, _MEMO_ATTR)
+		if time.monotonic() - stamp < CONFIG_CACHE_SECONDS:
+			return cfg
+	except Exception:
+		pass
+	return None
+
+
+def _memoize_config(frappe, cfg) -> None:
+	try:
+		setattr(frappe.local, _MEMO_ATTR, (time.monotonic(), cfg))
+	except Exception:
+		pass
+
+
+def _forget_config(frappe) -> None:
+	try:
+		delattr(frappe.local, _MEMO_ATTR)
+	except Exception:
+		pass
+
+
+def invalidate_config() -> None:
+	"""Drop the shared Redis copy and this request's memo; the next read resolves afresh."""
+	import frappe
+
+	_forget_config(frappe)
+	frappe.cache.delete_value(_CACHE_KEY)
+
+
 def get_config() -> OptimusConfig:
-	"""Return cached configuration, falling back on ordinary errors, never RQ timeouts."""
+	"""Return cached configuration, falling back on ordinary errors, never RQ timeouts.
+
+	The result is also kept on ``frappe.local`` (at most CONFIG_CACHE_SECONDS), so a
+	request or job reads Redis once, not once per recorded query. Only a Redis hit or
+	a config written to Redis is kept: never a failure default, and never settings
+	that a pending write could still roll back.
+	"""
 	try:
 		import frappe
 	except ImportError:
 		return OptimusConfig()
 	from optimus import redis_schema
+
+	memoized = _memoized_config(frappe)
+	if memoized is not None:
+		return memoized
 
 	def cached_config():
 		payload, _version = redis_schema.unwrap_value(frappe.cache.get_value(_CACHE_KEY, expires=True))
@@ -812,6 +859,7 @@ def get_config() -> OptimusConfig:
 
 	cached = _best_effort(cached_config)
 	if cached is not None:
+		_memoize_config(frappe, cached)
 		return cached
 	row = _best_effort(_read_doctype_row)
 	cfg = _best_effort(lambda: _resolve(row=row))
@@ -819,8 +867,15 @@ def get_config() -> OptimusConfig:
 		return OptimusConfig()
 	# A transient read failure must not turn defaults into durable site settings.
 	if row is not None and _best_effort(lambda: not getattr(frappe.db, "transaction_writes", 0), False):
-		_best_effort(lambda: frappe.cache.set_value(_CACHE_KEY, redis_schema.wrap_value(cfg.__dict__), expires_in_sec=CONFIG_CACHE_SECONDS))
+		stored = _best_effort(lambda: _store_config(frappe, redis_schema, cfg), False)
+		if stored:
+			_memoize_config(frappe, cfg)
 	return cfg
+
+
+def _store_config(frappe, redis_schema, cfg) -> bool:
+	frappe.cache.set_value(_CACHE_KEY, redis_schema.wrap_value(cfg.__dict__), expires_in_sec=CONFIG_CACHE_SECONDS)
+	return True
 
 
 def is_enabled() -> bool:

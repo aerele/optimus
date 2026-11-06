@@ -178,7 +178,8 @@ def before_request(*args, **kwargs):
 	"""Activate the recorder if the current user has an active profiler session.
 
 	Runs on every HTTP request; the hot path (no active session) is a single
-	Redis GET plus an early return.
+	Redis GET (the active-session pointer) plus an early return, with no settings
+	read. Other hooks may still read their own keys.
 	"""
 	try:
 		# v0.5.3: deferred sidecar-wrap install. The module-level
@@ -190,16 +191,6 @@ def before_request(*args, **kwargs):
 		# wrap's own `_profiler_original` marker.
 		import optimus
 		optimus._try_install_capture_wraps()
-
-		# v0.5.2: master kill-switch. When an admin turns off
-		# Optimus Settings ▸ Enabled, we short-circuit before even
-		# the active-session lookup. `is_enabled()` is a cached
-		# read (same Redis value reused across all requests until a
-		# setting change invalidates it), so the hot-path cost is a
-		# single Redis GET regardless of state.
-		from optimus.settings import is_enabled
-		if not is_enabled():
-			return
 
 		# Round 2 fix #6: if the analyze pipeline itself is running (it
 		# does DB writes to the Optimus Session doctype, which may
@@ -213,15 +204,24 @@ def before_request(*args, **kwargs):
 		if not user or user == "Guest":
 			return
 
-		# v0.6.0 Round 6: admin-configured user skip list. Checked early
-		# so a system bot user with an active session (rare but possible
-		# via API token) doesn't get profiled.
-		if _should_skip_user(user):
-			return
-
+		# The active-session pointer is the one Redis GET every request needs,
+		# so it gates the settings reads below: a request without a session
+		# reads no settings at all.
 		session_uuid = session.get_active_session_for(user)
 		if not session_uuid:
 			return  # 99.9% of requests exit here
+
+		# v0.5.2: master kill-switch. When an admin turns off Optimus Settings
+		# Enabled nothing is recorded, even for a user whose pointer is still set.
+		from optimus.settings import is_enabled
+		if not is_enabled():
+			return
+
+		# v0.6.0 Round 6: admin-configured user skip list. A system bot user
+		# with an active session (rare but possible via API token) doesn't get
+		# profiled.
+		if _should_skip_user(user):
+			return
 
 		# v0.5.1: Skip profiler / Frappe-recorder instrumentation noise.
 		# Checked AFTER the active-session lookup (two Redis GETs gating a
@@ -448,22 +448,6 @@ def before_job(method=None, kwargs=None, **rest):
 		import optimus
 		optimus._try_install_capture_wraps()
 
-		# v0.5.2: honor the master kill-switch here too. If the admin
-		# turned the profiler off, we still need to pop our marker
-		# from kwargs so the user's method doesn't see an unexpected
-		# keyword argument that happens below after the kill-switch
-		# check short-circuits the recorder activation path.
-		from optimus.settings import is_enabled
-		if not is_enabled():
-			# Still pop the marker so the downstream method signature
-			# stays clean (see the pop comment below for why).
-			if isinstance(kwargs, dict):
-				kwargs.pop("_profiler_session_id", None)
-			return
-
-		if getattr(frappe.local, "optimus_analyzing", False):
-			return
-
 		if kwargs is None:
 			return
 		if optimus.is_internal_job(method):
@@ -484,14 +468,22 @@ def before_job(method=None, kwargs=None, **rest):
 
 		# Pop our marker so the user's method doesn't see it. This MUST
 		# happen regardless of whether we proceed to activate recording
-		# if we leave the marker in kwargs, the user's method will be
-		# called with an unexpected keyword argument and crash.
+		# (kill-switch included): if we leave the marker in kwargs, the user's
+		# method will be called with an unexpected keyword argument and crash.
 		session_uuid = kwargs.pop("_profiler_session_id", None)
 		retry_state = _capture.job_retry_state(create=bool(session_uuid))
 		if not session_uuid and retry_state:
 			# Frappe re-runs a deadlocked job with the marker already popped.
 			session_uuid = retry_state.get("session_uuid")
 		if not session_uuid:
+			return  # an untagged job reads no settings
+
+		# v0.5.2: honor the master kill-switch (after the pop above).
+		from optimus.settings import is_enabled
+		if not is_enabled():
+			return
+
+		if getattr(frappe.local, "optimus_analyzing", False):
 			return
 		if retry_state is not None:
 			retry_state["session_uuid"] = session_uuid

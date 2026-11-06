@@ -13,6 +13,7 @@ versions may contain breaking changes see migration notes below).
 ### Fixed
 
 - Long requests no longer flood Redis with their Python call tree. A 3-second request used to store about 20 MB; the same tree is now about 50 KB with nothing lost. A tree still larger than 1 MB is thinned to fit (a long wait, such as a slow query, keeps its own place in it), and the report says which requests were thinned. SQL findings are never affected, though SQL can appear under a parent function in a thinned tree. A tree that cannot fit even thinned is not stored and the report lists it as not captured. Trees stored before this version are read as before.
+- Optimus reads its settings once per request or job instead of once per recorded database query, and no longer reads them for requests that have no recording session or for background jobs that are not part of one. Recorded timings are no longer inflated by Optimus's own settings reads. The hook's own Redis reads for a request without a session drop from three to one; other Optimus hooks (for example line profiling) still make their own. A settings change still takes effect on the next request; a console or migrate process picks it up within a minute. Nothing changes for users.
 
 ---
 
