@@ -171,3 +171,10 @@
 		animation: none;
 	}
 }
+
+/* The session link in the session-complete popup reads as a link without hovering. */
+.optimus-session-popup a.optimus-session-link {
+	text-decoration: underline;
+	/* A long title with no spaces must wrap inside the modal, never overflow it sideways. */
+	overflow-wrap: anywhere;
+}
