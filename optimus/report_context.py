@@ -23,6 +23,7 @@ from optimus.analyzers.base import (
 	humanize_duration_ms,
 	phase2_run_display_status,
 )
+from optimus.analyzers.per_action import is_background_job
 
 # A whole captured flow slower than this reads as "danger" on the Total-time
 # KPI. Deliberately separate from large_duration_threshold_ms (which is only a
@@ -483,29 +484,22 @@ def _build_waterfall(waterfall_rows, fmt_ms=None) -> list[dict]:
 	return result
 
 
-def _build_actions(actions, findings, fmt_ms=None) -> list[dict]:
+def _build_actions(actions, fmt_ms=None) -> list[dict]:
 	"""Contract ``actions`` = {number, name, meta, kind, duration_display,
-	duration_pct, duration_is_hot, bar_kind, queries, db_time_display,
-	finding_inline_html}.
+	duration_pct, duration_is_hot, bar_kind, queries, db_time_display}.
 
 	The original action dict is spread through (so the ``action_row`` macro
 	still reads ``action_label``, ``http_method``, ``path`` etc.); contract
 	fields are added on top and never collide with the legacy keys.
 	"""
 	fmt = fmt_ms or _ms_display
-	findings_by_ref: dict[str, list] = {}
-	for f in findings or []:
-		ref = str(f.get("action_ref") or "")
-		if ref:
-			findings_by_ref.setdefault(ref, []).append(f)
-
 	max_ms = max((a.get("duration_ms", 0) for a in (actions or [])), default=1) or 1
 
 	result = []
 	for idx, action in enumerate(actions or []):
 		duration_ms = action.get("duration_ms", 0) or 0
 		event_type = action.get("event_type", "")
-		kind = "bg" if event_type == "RQ Job" else "http"
+		kind = "bg" if is_background_job(event_type) else "http"
 
 		meta_parts = []
 		if action.get("http_method"):
@@ -513,15 +507,6 @@ def _build_actions(actions, findings, fmt_ms=None) -> list[dict]:
 		if action.get("path"):
 			meta_parts.append(action["path"])
 		meta = " · ".join(meta_parts)
-
-		ref_findings = findings_by_ref.get(str(idx + 1)) or findings_by_ref.get(str(idx), [])
-		finding_inline_html = None
-		if ref_findings:
-			f0 = ref_findings[0]
-			finding_inline_html = (
-				f"⚠ <strong>{len(ref_findings)} finding linked:</strong> "
-				f"{_html.escape(f0.get('title', '') or '')}"
-			)
 
 		entry = dict(action)  # preserve original keys
 		entry.update({
@@ -535,7 +520,6 @@ def _build_actions(actions, findings, fmt_ms=None) -> list[dict]:
 			"bar_kind": _bar_kind_for(duration_ms),
 			"queries": action.get("queries_count", 0) or 0,
 			"db_time_display": fmt(action.get("query_time_ms", 0) or 0),
-			"finding_inline_html": finding_inline_html,
 		})
 		result.append(entry)
 	return result
@@ -1043,15 +1027,11 @@ def build_report_context(session_doc: Any, ctx: dict) -> dict:
 		"line_drilldown_html": ctx.get("line_drilldown_html") or "",
 		"action_plan": _build_action_plan(ctx.get("action_plan", []), _fmt_ms),
 		"waterfall": _build_waterfall(ctx.get("waterfall_rows", []), _fmt_ms),
-		"actions": _build_actions(
-			ctx.get("actions", []), ctx.get("findings", []), _fmt_ms
-		),
+		"actions": _build_actions(ctx.get("actions", []), _fmt_ms),
 		# J.2.3 non-contract addition pragmatic extension so the framework
 		# sub-block keeps rendering. May be folded into ``actions`` with an
 		# ``is_framework`` flag in J.3.
-		"actions_framework": _build_actions(
-			ctx.get("actions_framework", []), ctx.get("findings", []), _fmt_ms
-		),
+		"actions_framework": _build_actions(ctx.get("actions_framework", []), _fmt_ms),
 		"background_jobs": _build_background_jobs(
 			(ctx.get("background_jobs") or {}).get("jobs", []) or [], _fmt_ms
 		),

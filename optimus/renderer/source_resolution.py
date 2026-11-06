@@ -30,6 +30,7 @@ import os
 import re
 import sys
 
+from optimus.analyzers.per_action import is_background_job
 from optimus.renderer.source import (
 	_installed_apps,
 	_read_source_snippet,
@@ -52,12 +53,12 @@ def _action_dotted_entry(action) -> str | None:
 	"""
 	if not isinstance(action, dict):
 		return None
-	event_type = (action.get("event_type") or "").strip()
+	event_type = action.get("event_type")
 	path = (action.get("path") or "").strip()
 	if not path:
 		return None
-	if event_type == "RQ Job":
-		return path.split("?", 1)[0].strip() or None
+	if is_background_job(event_type):
+		return path
 	if event_type == "HTTP Request" and path.startswith("/api/method/"):
 		rest = path[len("/api/method/"):]
 		rest = rest.split("?", 1)[0].split("/", 1)[0].strip().strip(".")

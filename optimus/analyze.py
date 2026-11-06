@@ -3190,6 +3190,7 @@ def actions_for_humanizer(recordings: list[dict], *, send_raw: bool | None = Non
 		doctype = doctype or fd.get("dt") or fd.get("doc_type") or ""
 		out.append({
 			"label": per_action.humanized_label(rec) or "",
+			"event_type": rec.get("event_type", ""),
 			"cmd": (rec.get("cmd") or "").strip(),
 			"path": (rec.get("path") or "").strip(),
 			"method": (rec.get("method") or "").strip(),
@@ -3291,6 +3292,11 @@ def _build_summary_html(
 			for a in context.actions if a.get("action_label")
 		}
 
+		# A job finding reads "In job <method>, ..." where the label reads "RQ Job: <method>".
+		slowest_title_prefixes = [f"In {slowest_label}, "]
+		if slowest_label.startswith("RQ Job: "):
+			slowest_title_prefixes.append(f"In job {slowest_label[len('RQ Job: '):]}, ")
+
 		def _finding_phrase(f: dict) -> str:
 			"""Finding title with raw action references swapped for plain labels (a
 			leading "In <slowest>, " trimmed since the sentence already names it),
@@ -3299,9 +3305,9 @@ def _build_summary_html(
 			for raw, human in label_map.items():
 				if raw and human and raw != human:
 					title = title.replace(raw, human)
-			prefix = f"In {slowest_label}, "
-			if title.startswith(prefix):
-				title = title[len(prefix):]
+			for prefix in slowest_title_prefixes:
+				if title.startswith(prefix):
+					title = title[len(prefix):]
 			pri = _PRIORITY_WORD.get(f.get("severity") or "", "")
 			impact = f.get("estimated_impact_ms") or 0
 			# No "~0ms" for a finding with no measured impact (Lock Contention).

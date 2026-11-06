@@ -340,7 +340,7 @@ def path_without_names(path) -> str:
 
 def private_action(action: dict) -> dict:
 	"""Rebuild labels from operation and DocType, never a captured free-text label."""
-	from optimus.analyzers.per_action import humanized_label
+	from optimus.analyzers.per_action import humanized_label, is_background_job
 
 	cmd = action.get("cmd")
 	cmd = cmd if isinstance(cmd, str) and (_DOTTED.fullmatch(cmd) or cmd == "run_doc_method") else ""
@@ -352,7 +352,9 @@ def private_action(action: dict) -> dict:
 	operation = action.get("operation")
 	operation = operation if isinstance(operation, str) and operation in {"Save", "Submit", "Cancel", "Update"} else ""
 	is_new = opted_in(action.get("is_new"))
+	event_type = action.get("event_type")
+	event_type = event_type if event_type == "HTTP Request" or is_background_job(event_type) else ""
 	return {"cmd": cmd, "path": path, "method": method, "doctype": doctype, "duration_ms": action.get("duration_ms"),
-		"operation": operation, "is_new": is_new,
-		"label": humanized_label({"cmd": cmd, "path": path, "method": method,
+		"operation": operation, "is_new": is_new, "event_type": event_type,
+		"label": humanized_label({"event_type": event_type, "cmd": cmd, "path": path, "method": method,
 			"form_dict": {"doctype": doctype, "action": operation, "doc": {"doctype": doctype, "__islocal": is_new}}})}
