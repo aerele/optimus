@@ -5,7 +5,9 @@
 //
 // Wraps window.fetch + XMLHttpRequest.prototype to capture XHR timings,
 // and uses PerformanceObserver to capture Web Vitals (FCP, LCP, CLS,
-// navigation timing). Fires only when the server returns an
+// navigation timing) of the page load, all under the load's own URL. A
+// page loaded before Record was pressed is not reported (beginSession).
+// Fires only when the server returns an
 // X-Optimus-Recording-Id response header (i.e. there's an active
 // profiler session). Buffers in memory and flushes to
 // optimus.api.submit_frontend_metrics at stop time (via
@@ -47,7 +49,7 @@
 			ttfb_ms: data.ttfb_ms,
 			dom_content_loaded_ms: data.dom_content_loaded_ms,
 			load_ms: data.load_ms,
-			page_url: window.location.pathname + window.location.search,
+			page_url: data.page_url || (window.location.pathname + window.location.search),
 			timestamp: Date.now(),
 			recording_id_hint: currentRecordingId,
 		});
@@ -180,36 +182,53 @@
 	// -----------------------------------------------------------------
 	// 3. Web Vitals via PerformanceObserver
 	// -----------------------------------------------------------------
-	try {
-		if (typeof PerformanceObserver !== "undefined") {
-			new PerformanceObserver(function (list) {
-				var entries = list.getEntries();
-				for (var i = 0; i < entries.length; i++) {
-					var entry = entries[i];
-					if (entry.entryType === "paint" && entry.name === "first-contentful-paint") {
-						recordVital({ name: "fcp", value_ms: entry.startTime });
-					} else if (entry.entryType === "largest-contentful-paint") {
-						recordVital({ name: "lcp", value_ms: entry.startTime });
-					} else if (entry.entryType === "layout-shift" && !entry.hadRecentInput) {
-						recordVital({ name: "cls", value: entry.value });
-					} else if (entry.entryType === "navigation") {
-						recordVital({
-							name: "navigation",
-							dns_ms: entry.domainLookupEnd - entry.domainLookupStart,
-							tcp_ms: entry.connectEnd - entry.connectStart,
-							ttfb_ms: entry.responseStart - entry.requestStart,
-							dom_content_loaded_ms: entry.domContentLoadedEventEnd - entry.startTime,
-							load_ms: entry.loadEventEnd - entry.startTime,
-						});
-					}
-				}
-			}).observe({
-				entryTypes: ["paint", "largest-contentful-paint", "layout-shift", "navigation"],
-				buffered: true,
-			});
+	var VITAL_TYPES = ["paint", "largest-contentful-paint", "layout-shift", "navigation"];
+	var loadPageUrl = window.location.pathname + window.location.search;
+	var seenFcp = false;
+	var seenNavigation = false;
+	var preSessionLoad = false;
+
+	function onVitalEntries(list) {
+		if (preSessionLoad) return;
+		var entries = list.getEntries();
+		for (var i = 0; i < entries.length; i++) {
+			var entry = entries[i];
+			if (entry.entryType === "paint" && entry.name === "first-contentful-paint") {
+				if (seenFcp) continue;
+				seenFcp = true;
+				recordVital({ name: "fcp", value_ms: entry.startTime, page_url: loadPageUrl });
+			} else if (entry.entryType === "largest-contentful-paint") {
+				recordVital({ name: "lcp", value_ms: entry.startTime, page_url: loadPageUrl });
+			} else if (entry.entryType === "layout-shift" && !entry.hadRecentInput) {
+				recordVital({ name: "cls", value: entry.value, page_url: loadPageUrl });
+			} else if (entry.entryType === "navigation") {
+				// Chrome delivers the entry once before load (loadEventEnd 0) and again complete.
+				if (seenNavigation || !(entry.loadEventEnd > 0)) continue;
+				seenNavigation = true;
+				recordVital({
+					name: "navigation",
+					page_url: loadPageUrl,
+					dns_ms: entry.domainLookupEnd - entry.domainLookupStart,
+					tcp_ms: entry.connectEnd - entry.connectStart,
+					ttfb_ms: entry.responseStart - entry.requestStart,
+					dom_content_loaded_ms: entry.domContentLoadedEventEnd - entry.startTime,
+					load_ms: entry.loadEventEnd - entry.startTime,
+				});
+			}
 		}
-	} catch (e) {
-		// Older browsers without PerformanceObserver degrade silently.
+	}
+
+	// One observe() per type: the browser ignores `buffered` together with `entryTypes`.
+	if (typeof PerformanceObserver !== "undefined") {
+		var supported = PerformanceObserver.supportedEntryTypes || VITAL_TYPES;
+		var vitalsObserver = null;
+		try { vitalsObserver = new PerformanceObserver(onVitalEntries); } catch (e) { /* degrade */ }
+		for (var t = 0; vitalsObserver && t < VITAL_TYPES.length; t++) {
+			if (supported.indexOf(VITAL_TYPES[t]) === -1) continue;
+			try {
+				vitalsObserver.observe({ type: VITAL_TYPES[t], buffered: true });
+			} catch (e) { /* one unsupported type must not drop the others */ }
+		}
 	}
 
 	// -----------------------------------------------------------------
@@ -311,6 +330,12 @@
 	// -----------------------------------------------------------------
 	window.optimus_frontend = {
 		flush: flush,
+		// Record was pressed: earlier buffered timings and the load still in progress are not part of the session.
+		beginSession: function () {
+			xhrBuffer.length = 0;
+			vitalsBuffer.length = 0;
+			preSessionLoad = true;
+		},
 		getState: function () {
 			return {
 				xhr_buffered: xhrBuffer.length,

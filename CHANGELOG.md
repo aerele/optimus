@@ -8,6 +8,21 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.155] - 2026-11-07
+
+### Fixed
+
+- Page-load timings are no longer lost. First Contentful Paint, the early Largest Contentful Paint and navigation timing were dropped because the browser ignored our request for timings recorded before the script loaded. Each page load now reports once, under the page's own address, instead of being split across two rows when Desk changes the URL during load.
+- A malformed frontend timing (text or an oversized number where a number belongs) is now ignored. Before, it could hide the whole Frontend section or make the report fail to render.
+- Timings from a page that was loaded before you pressed Record are no longer added to the session, and neither are request timings left over from earlier. The Frontend section now says so: to include a page's load, reload it while recording.
+
+### Not covered
+
+- Page-load timings are only captured for the load of the page itself; moving between Desk pages afterwards adds none. Largest Contentful Paint needs Firefox 122 or Safari 26.2 and newer, and Cumulative Layout Shift is Chromium-only; those cells stay empty elsewhere.
+- Timings are still sent when you press Stop or the page closes. A session that ends by itself does not send them.
+
+---
+
 ## [0.12.154] - 2026-11-07
 
 ### Fixed

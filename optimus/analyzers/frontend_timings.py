@@ -13,6 +13,7 @@ recording_id and dedupes multi-fire LCP per page. Emits three finding types:
 """
 
 import json
+import math
 
 from optimus.analyzers.base import SEVERITY_ORDER, AnalyzerResult, dur
 
@@ -26,8 +27,8 @@ HEAVY_RESPONSE_BYTES = 500_000
 
 def analyze(recordings: list[dict], context) -> AnalyzerResult:
     frontend_data = getattr(context, "frontend_data", None) or {"xhr": [], "vitals": []}
-    xhr_entries = frontend_data.get("xhr") or []
-    vitals_entries = frontend_data.get("vitals") or []
+    xhr_entries = _dict_rows(frontend_data.get("xhr"))
+    vitals_entries = _dict_rows(frontend_data.get("vitals"))
 
     # Build a recording_id → action_idx map.
     rec_index = {}
@@ -80,12 +81,12 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 
     for x in xhr_entries:
         rid = x.get("recording_id")
-        if rid is None or rid not in rec_index:
+        if not isinstance(rid, str) or rid not in rec_index:
             orphans.append({
-                "recording_id": rid,
-                "url": x.get("url"),
-                "duration_ms": x.get("duration_ms"),
-                "timestamp": x.get("timestamp"),
+                "recording_id": rid if isinstance(rid, str) else None,
+                "url": _text(x.get("url")),
+                "duration_ms": _num(x.get("duration_ms")),
+                "timestamp": _num(x.get("timestamp")),
                 "reason": "no_matching_recording",
             })
             continue
@@ -121,10 +122,10 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
             "backend_ms": backend_ms,
             "xhr_ms": xhr_ms,
             "network_delta_ms": delta,
-            "response_size_bytes": x.get("response_size_bytes", 0),
-            "status": x.get("status"),
-            "url": x.get("url"),
-            "transport": x.get("transport"),
+            "response_size_bytes": _int(x.get("response_size_bytes")) or 0,
+            "status": _int(x.get("status")),
+            "url": _text(x.get("url")),
+            "transport": _text(x.get("transport")),
         }
         matched.append(entry)
 
@@ -133,7 +134,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
         network_overhead_ms += delta
         if slowest_xhr is None or xhr_ms > slowest_xhr["duration_ms"]:
             slowest_xhr = {
-                "url": x.get("url"),
+                "url": entry["url"],
                 "duration_ms": xhr_ms,
                 "action_idx": action_idx,
             }
@@ -144,29 +145,32 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
     lcp_last_ts: dict[str, int] = {}
 
     for v in vitals_entries:
-        page = v.get("page_url") or "/"
+        page = v.get("page_url")
+        if not isinstance(page, str) or not page:
+            page = "/"
         bucket = vitals_by_page.setdefault(page, {})
         name = v.get("name")
-        ts = v.get("timestamp") or 0
+        ts = _num(v.get("timestamp")) or 0
 
         if name == "lcp":
-            if ts >= lcp_last_ts.get(page, -1):
-                bucket["lcp_ms"] = v.get("value_ms")
+            value = _num(v.get("value_ms"))
+            if value is not None and ts >= lcp_last_ts.get(page, -1):
+                bucket["lcp_ms"] = value
                 lcp_last_ts[page] = ts
         elif name == "fcp":
-            bucket["fcp_ms"] = v.get("value_ms")
+            bucket["fcp_ms"] = _num(v.get("value_ms"))
         elif name == "cls":
             # CLS accumulates across entries keep the max seen per page.
             current = bucket.get("cls", 0) or 0
-            val = v.get("value") or 0
+            val = _num(v.get("value")) or 0
             if val > current:
                 bucket["cls"] = val
         elif name == "navigation":
-            bucket["ttfb_ms"] = v.get("ttfb_ms")
-            bucket["dom_content_loaded_ms"] = v.get("dom_content_loaded_ms")
-            bucket["load_ms"] = v.get("load_ms")
-            bucket["dns_ms"] = v.get("dns_ms")
-            bucket["tcp_ms"] = v.get("tcp_ms")
+            bucket["ttfb_ms"] = _num(v.get("ttfb_ms"))
+            bucket["dom_content_loaded_ms"] = _num(v.get("dom_content_loaded_ms"))
+            bucket["load_ms"] = _num(v.get("load_ms"))
+            bucket["dns_ms"] = _num(v.get("dns_ms"))
+            bucket["tcp_ms"] = _num(v.get("tcp_ms"))
 
     findings = []
 
@@ -290,9 +294,26 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 
 
 def _num(val):
-    if val is None:
+    """A finite float, or None for anything the browser payload should not have sent."""
+    if val is None or isinstance(val, bool):
         return None
     try:
-        return float(val)
-    except (TypeError, ValueError):
+        number = float(val)
+    except (TypeError, ValueError, OverflowError):
         return None
+    return number if math.isfinite(number) else None
+
+
+def _text(val):
+    return val if isinstance(val, str) else None
+
+
+def _int(val):
+    number = _num(val)
+    return None if number is None else int(number)
+
+
+def _dict_rows(rows):
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict)]

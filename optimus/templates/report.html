@@ -3349,6 +3349,8 @@
       Per-XHR timings from the browser joined to the matching server recording,
       plus Web Vitals (FCP, LCP, CLS) per page. Shows what the user actually
       felt - network overhead and page paint time that the server alone can't see.
+      Page-load timings (FCP, LCP, CLS, TTFB, DCL) are captured only for pages loaded after you press Record.
+      To include a page's load, reload it while recording.
     </p>
     {% set _fs = report_data.frontend.summary %}
     <div class="resource-grid">
