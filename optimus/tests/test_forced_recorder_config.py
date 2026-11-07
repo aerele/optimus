@@ -355,7 +355,9 @@ class TestSqlOffNote:
 		)
 
 	def test_analyze_warns_in_the_singular(self, monkeypatch):
-		monkeypatch.setattr(frappe, "cache", FakeCache({redis_keys.sql_off("a"): ["record_sql"]}), raising=False)
+		monkeypatch.setattr(
+			frappe, "cache", FakeCache({redis_keys.sql_off("a"): ["record_sql"]}), raising=False
+		)
 		assert analyze._sql_off_warning([{"uuid": "a"}]).startswith("1 action was recorded while")
 
 	def test_analyze_still_understands_the_old_true_marker(self, monkeypatch):
