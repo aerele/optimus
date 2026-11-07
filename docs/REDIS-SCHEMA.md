@@ -58,7 +58,7 @@ when you add a new key; the audit test asserts this table matches
 
 | Pattern | Value | Encoding | TTL | Notes |
 |---|---|---|---|---|
-| `profiler:active:<user>` | string (session UUID) | raw | 10 min (`SESSION_TTL_SECONDS`) | Refreshed on every `register_recording`. Cleared by `api.stop`. |
+| `profiler:active:<user>` | string (session UUID) | raw | 10 min (`SESSION_TTL_SECONDS`) | Refreshed on every `register_recording`. Cleared by `api.stop` or by the janitor. When it expires the row stays `Recording` and `api.stop(session_uuid)` (or a bare Stop) stops it with `pointer=False`, returning `expired: true`. |
 | `profiler:session:<session_uuid>:meta` | **enveloped** dict (v0.12.21+) | Frappe pickle around `{"_v": 1, "data": {session_uuid, docname, user, label, started_at, capture_python_tree, optional cap_warning, optional draining_until}}` | none (explicit delete) | Migrated to the v0.12.0 envelope in v0.12.21. `get_session_meta` unwraps; pre-v0.12.21 bare-dict writes still resolve via legacy-detection branch. A defensive `isinstance(dict)` check on the unwrapped payload normalises corrupt non-dict values to `None`. |
 | `profiler:session:<session_uuid>:recordings` | set | raw UUIDs | none (explicit delete) | SADD per recording. |
 | `profiler:session:<session_uuid>:pending_jobs` | set | raw RQ job IDs | none (explicit delete) | SADD on enqueue, SREM on completion. |

@@ -53,7 +53,8 @@ the highest-value security considerations:
    (signature derived from `frappe.conf.encryption_key`). A
    Redis-poisoning attacker without the encryption_key cannot
    inject a malicious pickle - signature verification fires on
-   read.
+   read. Per-request trees and sidecars expire 6 hours after capture
+   (`RECORDING_DATA_TTL_SECONDS`) or when analysis cleans them up.
 4. **Session actions share a permission gate and mutating endpoints require POST.**
    Refresh AI suggestions, Regenerate Reports, Retry Analyze and line profiling
    actions use `api._session_action_gate`: the caller needs the profiler
