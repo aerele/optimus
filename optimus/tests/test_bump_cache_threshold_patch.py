@@ -35,8 +35,9 @@ def _install_frappe_stub(monkeypatch):
 			pass
 
 	stub.db = _DB()
+	stub._deleted = []
 	stub.cache = types.SimpleNamespace(
-		delete_value=lambda k: None,
+		delete_value=stub._deleted.append,
 		get_value=lambda k: None,
 		set_value=lambda k, v: None,
 	)
@@ -60,6 +61,16 @@ class TestBumpCacheThreshold:
 		patch = _import_patch()
 		patch.execute()
 		assert stub._single_values["redundant_cache_threshold"] == 50
+
+	def test_bump_drops_the_shared_copy_and_this_requests_memo(self, monkeypatch):
+		from optimus import settings
+
+		stub = _install_frappe_stub(monkeypatch)
+		stub.local = types.SimpleNamespace(request_cache={settings._MEMO_KEY: {"config": object()}})
+		stub._single_values["redundant_cache_threshold"] = 10
+		_import_patch().execute()
+		assert stub._deleted == [settings._CACHE_KEY]
+		assert settings._MEMO_KEY not in stub.local.request_cache
 
 	def test_does_not_overwrite_deliberate_custom_value(self, monkeypatch):
 		"""User set a custom threshold like 20 or 100 don't touch it."""

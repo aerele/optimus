@@ -178,7 +178,8 @@ def before_request(*args, **kwargs):
 	"""Activate the recorder if the current user has an active profiler session.
 
 	Runs on every HTTP request; the hot path (no active session) is a single
-	Redis GET plus an early return.
+	Redis GET (the active-session pointer) plus an early return, with no settings
+	read. Other hooks may still read their own keys.
 	"""
 	try:
 		# v0.5.3: deferred sidecar-wrap install. The module-level
@@ -190,16 +191,6 @@ def before_request(*args, **kwargs):
 		# wrap's own `_profiler_original` marker.
 		import optimus
 		optimus._try_install_capture_wraps()
-
-		# v0.5.2: master kill-switch. When an admin turns off
-		# Optimus Settings ▸ Enabled, we short-circuit before even
-		# the active-session lookup. `is_enabled()` is a cached
-		# read (same Redis value reused across all requests until a
-		# setting change invalidates it), so the hot-path cost is a
-		# single Redis GET regardless of state.
-		from optimus.settings import is_enabled
-		if not is_enabled():
-			return
 
 		# Round 2 fix #6: if the analyze pipeline itself is running (it
 		# does DB writes to the Optimus Session doctype, which may
@@ -213,15 +204,24 @@ def before_request(*args, **kwargs):
 		if not user or user == "Guest":
 			return
 
-		# v0.6.0 Round 6: admin-configured user skip list. Checked early
-		# so a system bot user with an active session (rare but possible
-		# via API token) doesn't get profiled.
-		if _should_skip_user(user):
-			return
-
+		# The active-session pointer is the one Redis GET every request needs,
+		# so it gates the settings reads below: a request without a session
+		# reads no settings at all.
 		session_uuid = session.get_active_session_for(user)
 		if not session_uuid:
 			return  # 99.9% of requests exit here
+
+		# v0.5.2: master kill-switch. When an admin turns off Optimus Settings
+		# Enabled nothing is recorded, even for a user whose pointer is still set.
+		from optimus.settings import is_enabled
+		if not is_enabled():
+			return
+
+		# v0.6.0 Round 6: admin-configured user skip list. A system bot user
+		# with an active session (rare but possible via API token) doesn't get
+		# profiled.
+		if _should_skip_user(user):
+			return
 
 		# v0.5.1: Skip profiler / Frappe-recorder instrumentation noise.
 		# Checked AFTER the active-session lookup (two Redis GETs gating a
@@ -448,22 +448,6 @@ def before_job(method=None, kwargs=None, **rest):
 		import optimus
 		optimus._try_install_capture_wraps()
 
-		# v0.5.2: honor the master kill-switch here too. If the admin
-		# turned the profiler off, we still need to pop our marker
-		# from kwargs so the user's method doesn't see an unexpected
-		# keyword argument that happens below after the kill-switch
-		# check short-circuits the recorder activation path.
-		from optimus.settings import is_enabled
-		if not is_enabled():
-			# Still pop the marker so the downstream method signature
-			# stays clean (see the pop comment below for why).
-			if isinstance(kwargs, dict):
-				kwargs.pop("_profiler_session_id", None)
-			return
-
-		if getattr(frappe.local, "optimus_analyzing", False):
-			return
-
 		if kwargs is None:
 			return
 		if optimus.is_internal_job(method):
@@ -484,15 +468,26 @@ def before_job(method=None, kwargs=None, **rest):
 
 		# Pop our marker so the user's method doesn't see it. This MUST
 		# happen regardless of whether we proceed to activate recording
-		# if we leave the marker in kwargs, the user's method will be
-		# called with an unexpected keyword argument and crash.
+		# (kill-switch included): if we leave the marker in kwargs, the user's
+		# method will be called with an unexpected keyword argument and crash.
 		session_uuid = kwargs.pop("_profiler_session_id", None)
-		retry_state = _capture.job_retry_state(create=bool(session_uuid))
+		retry_state = _capture.job_retry_state(create=False)
 		if not session_uuid and retry_state:
 			# Frappe re-runs a deadlocked job with the marker already popped.
 			session_uuid = retry_state.get("session_uuid")
 		if not session_uuid:
+			return  # an untagged job reads no settings
+
+		# v0.5.2: honor the master kill-switch (after the pop above).
+		from optimus.settings import is_enabled
+		if not is_enabled():
 			return
+
+		if getattr(frappe.local, "optimus_analyzing", False):
+			return
+		# Created only now: a job that records nothing leaves no state behind.
+		if retry_state is None:
+			retry_state = _capture.job_retry_state(create=True)
 		if retry_state is not None:
 			retry_state["session_uuid"] = session_uuid
 
@@ -674,6 +669,38 @@ def after_job(method=None, kwargs=None, result=None, **rest):
 				pass
 
 
+def _signed_tree_blob(last_session, recording_uuid: str):
+	"""The signed, size-capped pickle of the pyinstrument session, or None to store nothing.
+
+	Sessions of an unknown shape are pickled as they are and stored only if they fit.
+	A tree that cannot fit even thinned is replaced by a small marker, so analyze can
+	report it as too large to keep, and logs one line per hour.
+	"""
+	from optimus import safe_call
+	from optimus.session import _has_stable_hmac_secret, sign_blob
+
+	if last_session is None:
+		return None
+	blob, info = _capture.pickle_pyi_session(last_session)
+	if blob is None:
+		# No uuid in the text: the line is the same for every request, so it logs once per hour.
+		safe_call.log_error_line(
+			f"optimus: a Python call tree did not fit {_capture.TREE_MAX_BYTES} bytes even thinned; not stored",
+			dedupe_seconds=3600,
+		)
+		return sign_blob(_capture.dropped_tree_blob())
+	signed = sign_blob(blob)
+	try:
+		frappe.logger().debug(
+			f"optimus pyi dump: {recording_uuid} "
+			f"({'signed' if _has_stable_hmac_secret() else 'unsigned'}, {len(signed)} bytes, "
+			f"{(info or {}).get('samples')} samples, 1 in {(info or {}).get('every', 1)})"
+		)
+	except Exception:
+		pass
+	return signed
+
+
 def _dump_capture_state_to_redis(recording_uuid: str | None) -> None:
 	"""Serialize the in-flight pyinstrument session and sidecar list to Redis.
 
@@ -686,10 +713,6 @@ def _dump_capture_state_to_redis(recording_uuid: str | None) -> None:
 	so analyze refuses to unpickle a poisoned blob (Redis-poisoning RCE guard).
 	Best-effort: failures log but never break the request.
 	"""
-	import pickle
-
-	from optimus.session import sign_blob
-
 	if not recording_uuid:
 		# No recorder ran on this request nothing to dump.
 		_clear_capture_locals()
@@ -706,28 +729,14 @@ def _dump_capture_state_to_redis(recording_uuid: str | None) -> None:
 	if prof is not None:
 		try:
 			prof.stop()
-			tree_blob = sign_blob(pickle.dumps(prof.last_session))
-			# Visibility for the picker-diagnostic path: log whether
-			# this write was signed or unsigned, plus byte size.
-			# Helps operators correlate a "with_tree=0" picker
-			# diagnostic with the actual write mode (signed blobs
-			# need a stable encryption_key; unsigned blobs round-
-			# trip via the fallback).
-			try:
-				from optimus.session import _has_stable_hmac_secret
-				frappe.logger().debug(
-					f"optimus pyi dump: {recording_uuid} "
-					f"({'signed' if _has_stable_hmac_secret() else 'unsigned'}, "
-					f"{len(tree_blob)} bytes)"
+			tree_blob = _signed_tree_blob(prof.last_session, recording_uuid)
+			if tree_blob is not None:
+				from optimus import redis_keys
+				frappe.cache.set_value(
+					redis_keys.tree(recording_uuid),
+					tree_blob,
+					expires_in_sec=RECORDING_DATA_TTL_SECONDS,
 				)
-			except Exception:
-				pass
-			from optimus import redis_keys
-			frappe.cache.set_value(
-				redis_keys.tree(recording_uuid),
-				tree_blob,
-				expires_in_sec=RECORDING_DATA_TTL_SECONDS,
-			)
 		except Exception:
 			frappe.log_error(title="optimus pyi dump")
 
