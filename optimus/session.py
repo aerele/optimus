@@ -165,6 +165,14 @@ def get_active_session_for(user: str) -> str | None:
 	return value
 
 
+def active_pointer_gone(user: str) -> bool:
+	"""True only when Redis answers and holds no pointer; an unreachable Redis is not "gone"."""
+	try:
+		return frappe.cache.get(frappe.cache.make_key(_active_key(user))) is None  # nosemgrep: frappe-cache-breaks-multitenancy -- the key is built with make_key
+	except Exception:
+		return False
+
+
 def set_active_session(user: str, session_uuid: str) -> None:
 	"""Mark the user as currently recording into the given session.
 

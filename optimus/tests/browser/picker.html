@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Optimus picker harness</title>
+<link rel="stylesheet" href="/frappe/colors.css">
+<link rel="stylesheet" href="/frappe/legacy.css">
+<link rel="stylesheet" href="/frappe/effects.css">
+<link rel="stylesheet" href="/optimus/floating_widget.css">
+<style>
+	body { margin: 0; background: var(--bg-color); color: var(--text-color); font: 14px system-ui, sans-serif; }
+	main { padding: 16px; display: grid; gap: 16px; }
+	.modal-backdrop { display: none; }
+	.modal { position: static; transform: none; background: var(--modal-bg); color: var(--text-color); border: 1px solid var(--border-color); border-radius: 8px; padding: 16px; }
+	.modal .modal-footer { display: none; }
+</style>
+</head>
+<body>
+<main id="picker-host"></main>
+<script src="/stub/frappe_stub.js"></script>
+<script>
+	window.optimus_fmt_ms = (ms) => ms + " ms";
+</script>
+<script src="/optimus/optimus_session.js"></script>
+<script>
+	// The picker's own dialogs, rendered inline: one with a nested tree, one with the empty-state callout.
+	const candidates = [
+		{ dotted_path: "myapp.api.submit_invoice", cumulative_ms: 820, hit_count: 3, app: "myapp", depth: 0, recommended: true },
+		{ dotted_path: "myapp.utils.calc_taxes", cumulative_ms: 410, hit_count: 12, app: "myapp", depth: 1 },
+		{ dotted_path: "myapp.utils.round_all", cumulative_ms: 90, hit_count: 40, app: "myapp", depth: 2 },
+		{ dotted_path: "myapp.hooks.validate", cumulative_ms: 55, hit_count: 1, app: "myapp", depth: 0 },
+	];
+	const host = document.getElementById("picker-host");
+	[{ candidates, observations: [] }, { candidates: [], observations: [], diagnostic: { hint: "No call trees were captured for this session.", action_count: 4, actions_with_call_tree_json: 0, trees_parsed_ok: 0, raw_candidates_before_filter: 0 } }].forEach((data) => {
+		show_phase2_dialog({ doc: {}, page: {} }, data);
+		const modal = document.querySelector(".modal:last-of-type");
+		host.appendChild(modal);
+	});
+	document.querySelectorAll(".fp-tree details").forEach((d) => { d.open = true; });
+</script>
+</body>
+</html>
