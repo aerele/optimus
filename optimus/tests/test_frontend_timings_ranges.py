@@ -16,7 +16,6 @@ from optimus.tests.test_frontend_timings_hardening import (
 	_xhr,
 )
 
-
 ALL_BAD_NAV = dict.fromkeys(("ttfb_ms", "dom_content_loaded_ms", "load_ms", "dns_ms", "tcp_ms"), "x")
 
 
@@ -46,7 +45,9 @@ def test_a_malformed_lcp_on_a_page_with_a_good_lcp_keeps_the_good_one():
 
 @pytest.mark.parametrize("bad", [1e300, -5, 1e13, 700_000])
 def test_out_of_range_timings_never_become_findings_or_cells(bad):
-	result = _analyze(vitals=[_lcp(bad), _nav(**{key: bad for key in ALL_BAD_NAV})], xhr=[_xhr(duration_ms=bad)])
+	result = _analyze(
+		vitals=[_lcp(bad), _nav(**{key: bad for key in ALL_BAD_NAV})], xhr=[_xhr(duration_ms=bad)]
+	)
 	assert result.findings == []
 	assert _vitals(result) == {}
 	assert result.aggregate["frontend_xhr_matched"] == []
@@ -79,7 +80,9 @@ def test_a_malformed_duration_is_dropped_not_counted_as_zero():
 
 
 def test_a_non_string_page_url_is_dropped_not_shown_as_a_root_page():
-	result = _analyze(vitals=[{"name": "fcp", "page_url": 888.89, "value_ms": 10}, {"name": "fcp", "value_ms": 10}])
+	result = _analyze(
+		vitals=[{"name": "fcp", "page_url": 888.89, "value_ms": 10}, {"name": "fcp", "value_ms": 10}]
+	)
 	assert _vitals(result) == {}
 
 
