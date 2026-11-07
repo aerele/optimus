@@ -524,11 +524,22 @@ class _RecordingQuery:
 		return self
 
 	def where(self, condition):
-		self.wheres.append(condition.terms)
+		if self.wheres:
+			self.wheres[-1] = self.wheres[-1] + condition.terms
+		else:
+			self.wheres.append(condition.terms)
 		return self
 
 	def run(self, **kwargs):
 		return []
+
+
+def test_the_recording_query_treats_chained_wheres_like_one_anded_where():
+	chained, combined = [], []
+	a, b = _Column("status") == "Ready", _Column("stopped_at") > "x"
+	_RecordingQuery(chained).where(a).where(b)
+	_RecordingQuery(combined).where(a & b)
+	assert chained == combined == [(("status", "==", "Ready"), ("stopped_at", ">", "x"))]
 
 
 def test_health_window_uses_stopped_at_not_ai_modified_without_the_real_query_builder(monkeypatch):

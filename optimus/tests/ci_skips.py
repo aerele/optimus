@@ -7,9 +7,10 @@
 silently stop running. A row matches on the test file of the skipped TEST (the basename of
 its node id, never the line that called ``skip``) and a regex over the skip reason.
 
-``max_count`` is ``None`` for an environment gate (the test runs in another job or on a
-machine that has the tool), an int, or ``{"default": n, "3.10": m}`` keyed by
-``major.minor`` Python. Counts are the ``-rs`` totals of ci.yml's exact install (no rq, no
+``max_count`` is ``None`` only for a skip that depends on the machine (a CLI, a database
+service, a platform); a gate on a tool that ci.yml installs or lacks has the measured count
+(``0`` when CI skips none), so a new skip with that reason fails CI. The count is an int, or
+``{"default": n, "3.10": m}`` keyed by ``major.minor`` Python. Counts are the ``-rs`` totals of ci.yml's exact install (no rq, no
 codex, no Frappe), measured on Python 3.10 and 3.14; a lower count is fine, a higher one
 fails.
 """
@@ -29,7 +30,10 @@ _BELOW_312 = {"default": 0, "3.10": 15, "3.11": 15}
 ALLOWED = (
 	# Environment gates: the tool is absent here, the test runs in the job or on the machine that has it.
 	Row(
-		None, r"could not import 'rq(\.timeouts)?'", None, "rq tests run in ai-quality.yml, which installs rq"
+		None,
+		r"^could not import 'rq(\.timeouts)?': No module named 'rq'",
+		113,
+		"rq tests run in ai-quality.yml, which installs rq; ci.yml has no rq (113 on 3.10 and 3.14)",
 	),
 	Row(
 		None,
@@ -44,7 +48,7 @@ ALLOWED = (
 		"needs the operator's codex CLI",
 	),
 	Row("test_ai_subscription_cli.py", r"set OPTIMUS_LIVE_CODEX=1", None, "live Codex is opt-in"),
-	Row(None, r"^node not installed", None, "UI tests need node (CI runners have it)"),
+	Row(None, r"^node not installed", 0, "UI tests need node (CI runners have it, so none skip there)"),
 	Row(
 		None,
 		r"disposable SQL validation service",
@@ -57,9 +61,19 @@ ALLOWED = (
 		None,
 		"the Lua merge needs a Lua engine; it runs in integration.yml",
 	),
-	Row(None, r"line_profiler not installed", None, "line profiling tests need the C extension"),
-	Row(None, r"frappe\.recorder unavailable", None, "needs Frappe's recorder module"),
-	Row(None, r"pyinstrument not available|pyinstrument not installed", None, "optional profiler"),
+	Row(
+		None,
+		r"^line_profiler not installed",
+		0,
+		"ci.yml installs line_profiler through the project deps, so none skip there",
+	),
+	Row(None, r"^frappe\.recorder unavailable", 0, "bench-only: no Frappe-free test is expected to skip"),
+	Row(
+		None,
+		r"^pyinstrument (not available|not installed)",
+		0,
+		"ci.yml's install skips none; a machine without pyinstrument must install it or list the skip",
+	),
 	Row("test_ai_subscription_cli.py", r"PR_SET_PDEATHSIG is Linux only", None, "Linux-only behaviour"),
 	Row("test_index_catalog_sql.py", r"MariaDB prefix key parts", None, "PostgreSQL has no prefix key parts"),
 	Row(

@@ -4,7 +4,8 @@
 """Frappe v16's ``RedisWrapper`` value API, transcribed so Frappe-free CI runs the same
 behaviour the bench tests check against the real class.
 
-Transcribed from frappe/utils/redis_wrapper.py (frappe 2fcb9397a1, v16.54.0): make_key,
+Transcribed from frappe/utils/redis_wrapper.py as of frappe commit 2fcb9397a1 (its
+__version__ is 16.54.0; compared line by line with that checkout, not a release tag): make_key,
 set_value, get_value, _get_value_with_size, delete_value. Unlike v15, v16 swallows
 redis ConnectionError on get, set and unlink, ``get_value`` takes ``use_local_cache`` and
 ``set_value`` always fills ``frappe.local.cache``. The real class stays exercised by the

@@ -83,6 +83,31 @@ def test_every_allowlist_row_has_a_reason_a_valid_pattern_and_a_sane_count():
 		assert limit is None or isinstance(limit, int) or "default" in limit, row
 
 
+@pytest.mark.parametrize(
+	"reason",
+	[
+		"could not import 'rq': No module named 'rq'",
+		"node not installed",
+		"line_profiler not installed",
+		"frappe.recorder unavailable",
+		"pyinstrument not installed",
+	],
+)
+def test_a_tool_gate_has_a_count_so_new_skips_for_it_fail_ci(reason):
+	rows = [r for r in ci_skips.ALLOWED if r.file is None and re.search(r.reason, reason)]
+	assert len(rows) == 1, reason
+	assert isinstance(rows[0].max_count, int), rows[0]
+
+
+def test_a_tool_gate_pattern_is_anchored_to_the_start_of_the_reason():
+	for reason in (
+		"flaky: node not installed",
+		"xx line_profiler not installed",
+		"see rq: could not import 'rq'",
+	):
+		assert not any(re.search(r.reason, reason) for r in ci_skips.ALLOWED), reason
+
+
 def test_the_guard_is_off_on_xdist_workers_and_when_real_frappe_is_installed(monkeypatch):
 	monkeypatch.delenv(ci_skip_guard.FORCE_ENV, raising=False)
 	monkeypatch.setattr(ci_skip_guard, "frappe_is_real", lambda: False)
@@ -113,7 +138,8 @@ def _run(tmp_path, files, *args, force=True, extra_path=()):
 	for name, body in files.items():
 		(tmp_path / name).write_text(textwrap.dedent(body), encoding="utf-8")
 	env = {key: value for key, value in os.environ.items() if key != ci_skip_guard.FORCE_ENV}
-	env["PYTHONPATH"] = os.pathsep.join([REPO_ROOT, *[str(p) for p in extra_path]])
+	inherited = [env["PYTHONPATH"]] if env.get("PYTHONPATH") else []
+	env["PYTHONPATH"] = os.pathsep.join([REPO_ROOT, *[str(p) for p in extra_path], *inherited])
 	if force:
 		env[ci_skip_guard.FORCE_ENV] = "1"
 	return subprocess.run(
@@ -158,8 +184,19 @@ def test_an_unlisted_skip_fails_a_passing_run_with_its_own_section(tmp_path):
 	assert "unlisted skip: test_new.py::test_skips: zz not in the allowlist" in result.stdout
 
 
+def test_a_subprocess_keeps_the_callers_pythonpath(tmp_path, monkeypatch):
+	extra = tmp_path / "extra_path_dir"
+	extra.mkdir()
+	monkeypatch.setenv("PYTHONPATH", str(extra))
+	body = f"import sys\n\ndef test_path():\n\tassert {str(extra)!r} in sys.path\n"
+	result = _run(tmp_path, {"test_path.py": body})
+	assert result.returncode == 0, result.stdout
+
+
 def test_a_listed_skip_leaves_the_run_green(tmp_path):
-	result = _run(tmp_path, {"test_ok.py": _PASS_AND_SKIP.format(reason="node not installed")})
+	result = _run(
+		tmp_path, {"test_ok.py": _PASS_AND_SKIP.format(reason="no disposable SQL validation service")}
+	)
 	assert result.returncode == 0, result.stdout
 	assert "Unlisted CI skips" not in result.stdout
 
