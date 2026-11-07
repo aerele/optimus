@@ -365,6 +365,39 @@ def test_user_visible_strings_in_the_pill_dialog_and_notice_are_translatable():
 		assert f'__("{text}")' in state, text
 
 
+def test_the_expiry_and_hard_stop_notices_are_extractable_translatable_literals():
+	widget = _read(WIDGET_JS)
+	state = _read(os.path.join(os.path.dirname(WIDGET_JS), "optimus_pill_state.js"))
+	for src, texts in (
+		(widget, (
+			"Recording reached its request limit, so later requests were not captured. Analyzing what was captured.",
+			"Recording stopped after 10 minutes without activity. Analyzing what was captured.",
+			"Recording ended but could not be stopped automatically. Open the session to stop it.",
+		)),
+		(state, (
+			"Profiler is taking unusually long open the session to check its status",
+			"Profiler status could not be confirmed check the Optimus Session list",
+		)),
+	):
+		for text in texts:
+			assert f'__("{text}")' in src, text
+	# A message held in a variable and passed to __() is invisible to Frappe's string extractor.
+	assert not re.search(r"__\(\s*message\s*\)", widget)
+	assert not re.search(r"__\(\s*res\.alert\.message", widget)
+	assert not re.search(r"\bmessage: \"", state)
+
+
+def test_the_pill_offsets_are_in_the_stylesheet_so_the_narrow_screen_rule_applies():
+	widget = _read(WIDGET_JS)
+	start = widget.index("widget.style.cssText")
+	inline = widget[start:widget.index(".join(", start)]
+	assert "right:" not in inline and "bottom:" not in inline
+	css = _read(WIDGET_CSS)
+	assert re.search(r"#frappe-profiler-widget \{[^}]*right: 20px;[^}]*bottom: 20px;", css)
+	narrow = css[css.index("@media (max-width: 600px)"):]
+	assert "right: 12px" in narrow and "bottom: 12px" in narrow
+
+
 def test_pill_label_and_timer_truncate_instead_of_growing_with_a_long_translation():
 	css = _read(WIDGET_CSS)
 	rule = re.search(r"#frappe-profiler-widget \.fp-label,\s*#frappe-profiler-widget \.fp-elapsed \{([^}]*)\}", css)

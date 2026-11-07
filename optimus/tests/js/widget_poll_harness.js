@@ -37,7 +37,25 @@ class FakeDialog {
 
 function load() {
 	const env = { now: 1_000_000, hidden: false, timers: [], calls: [], intervals: 0, cleared: 0, reply: null, alerts: [], active: null };
-	const doc = { readyState: "loading", addEventListener: () => {}, body: {} };
+	const listeners = {};
+	const byId = {};
+	const makeEl = (tag) => {
+		const el = { tag, attrs: {}, children: [], textContent: "", innerHTML: "", className: "", style: {} };
+		el.setAttribute = (k, v) => { el.attrs[k] = v; if (k === "id") byId[v] = el; };
+		el.appendChild = (c) => { el.children.push(c); if (c.id) byId[c.id] = c; if (c.attrs && c.attrs.id) byId[c.attrs.id] = c; };
+		el.remove = () => { el.removed = true; delete byId[el.id]; };
+		el.addEventListener = () => {};
+		return el;
+	};
+	const doc = {
+		readyState: "loading", body: makeEl("body"),
+		addEventListener: (type, fn) => { (listeners[type] = listeners[type] || []).push(fn); },
+		removeEventListener: (type, fn) => { listeners[type] = (listeners[type] || []).filter((f) => f !== fn); },
+		createElement: (tag) => { const el = makeEl(tag); Object.defineProperty(el, "id", { get: () => el.attrs.id, set: (v) => { el.attrs.id = v; byId[v] = el; } }); return el; },
+		getElementById: (id) => byId[id] || null,
+	};
+	env.listeners = listeners;
+	env.press = (key, extra) => (listeners.keydown || []).slice().forEach((fn) => fn(Object.assign({ key, defaultPrevented: false }, extra)));
 	Object.defineProperty(doc, "hidden", { get: () => env.hidden });
 	Object.defineProperty(doc, "activeElement", { get: () => env.active });
 	const ctx = {
@@ -60,7 +78,7 @@ function load() {
 	vm.runInContext(fs.readFileSync(path.join(JS, "optimus_pill_state.js"), "utf8"), ctx);
 	const code = fs.readFileSync(path.join(JS, "floating_widget.js"), "utf8").replace(
 		/\}\)\(\);\s*$/,
-		"widget = makeWidget();\nglobalThis.t = { applyResult, openStartDialog, setDisplay, refreshStatus, onClick, confirmAndStop, stopPhase2, get widget() { return widget; }, startElapsedTimer, computeElapsed," +
+		"widget = makeWidget();\nglobalThis.t = { renderOnboardingToast, applyResult, openStartDialog, setDisplay, refreshStatus, onClick, confirmAndStop, stopPhase2, get widget() { return widget; }, startElapsedTimer, computeElapsed," +
 		" get state() { return currentState; }, set state(v) { currentState = v; }, Pill };})();"
 	);
 	ctx.makeWidget = makeWidget;
@@ -347,14 +365,16 @@ test("a stop that finds nothing resets the pill with one gray notice, never stuc
 	assert.ok(/had already ended/.test(env.alerts[0].message));
 });
 
-test("a failed resync after stopped:false leaves the pill stopping and says nothing", () => {
+test("a failed resync after stopped:false does not leave the pill stopping", () => {
 	const env = load();
 	enterRecording(env);
 	env.t.confirmAndStop();
 	callsTo(env, "optimus.api.stop")[0].callback({ message: { stopped: false } });
 	env.calls[env.calls.length - 1].error({});
-	assert.strictEqual(env.t.state.display, "stopping");
-	assert.strictEqual(env.alerts.length, 0);
+	assert.notStrictEqual(env.t.state.display, "stopping");
+	assert.strictEqual(env.t.widget.attrs["aria-disabled"], undefined, "the pill is clickable again");
+	assert.strictEqual(env.alerts.length, 1);
+	assert.strictEqual(env.alerts[0].indicator, "orange");
 });
 
 test("a manual stop of an expired session tells the user once why it had ended", () => {
@@ -397,6 +417,69 @@ test("an ended session whose automatic stop failed is auto-stopped once, not eve
 	for (let i = 0; i < 3; i++) env.fire();
 	assert.strictEqual(callsTo(env, "optimus.api.stop").length, 1);
 	assert.ok(env.alerts.every((a) => a.indicator !== "orange"));
+});
+
+test("a failed automatic stop never says the session already stopped while its row is still recording", () => {
+	const env = load();
+	enterRecording(env);
+	env.reply = (opts) => (opts.method === "optimus.api.pill_state" ? endedReply : undefined);
+	env.fire();
+	callsTo(env, "optimus.api.stop")[0].error({});
+	assert.strictEqual(env.alerts.length, 1);
+	assert.ok(!/already stopped/i.test(env.alerts[0].message), env.alerts[0].message);
+	assert.ok(/could not be stopped automatically/.test(env.alerts[0].message), env.alerts[0].message);
+	assert.strictEqual(env.alerts[0].indicator, "red");
+});
+
+test("a failed manual stop that finds the session gone still says it already stopped", () => {
+	const env = load();
+	enterRecording(env);
+	env.t.confirmAndStop();
+	env.reply = () => ({ phase: "idle" });
+	callsTo(env, "optimus.api.stop")[0].error({});
+	assert.strictEqual(env.alerts.length, 1);
+	assert.ok(/already stopped/.test(env.alerts[0].message));
+});
+
+function showToast(env) {
+	env.t.renderOnboardingToast();
+	return env.ctx.document.getElementById("frappe-profiler-onboarding-toast");
+}
+
+test("Escape in a Desk dialog does not dismiss the onboarding notice", () => {
+	const env = load();
+	const toast = showToast(env);
+	assert.ok(toast);
+	env.ctx.frappe.ui.open_dialogs = [{}];
+	env.press("Escape");
+	assert.ok(!toast.removed, "a dialog owns Escape");
+	env.ctx.frappe.ui.open_dialogs = [];
+	env.press("Escape", { defaultPrevented: true });
+	assert.ok(!toast.removed, "an Escape another handler used is not ours");
+	env.active = { tagName: "INPUT", type: "text" };
+	env.press("Escape");
+	assert.ok(!toast.removed, "Escape while typing is not ours");
+	env.active = null;
+	env.press("Escape");
+	assert.ok(toast.removed, "a plain Escape still dismisses it");
+});
+
+test("a status change is announced once in a polite live region, and the timer is not", () => {
+	const env = load();
+	enterRecording(env);
+	const region = env.ctx.document.getElementById("frappe-profiler-live");
+	assert.ok(region, "the live region exists");
+	assert.strictEqual(region.attrs["aria-live"], "polite");
+	assert.strictEqual(region.attrs.role, "status");
+	assert.strictEqual(region.textContent, "Recording");
+	region.textContent = "sentinel";
+	for (const t of ["0:01", "0:02", "0:03"]) env.t.setDisplay("recording", "Recording", t);
+	assert.strictEqual(region.textContent, "sentinel", "ticking the timer does not announce");
+	env.t.setDisplay("stopping", "Stopping…", "");
+	assert.strictEqual(region.textContent, "Stopping…");
+	env.t.setDisplay("analyzing", "Analyzing 40%", "");
+	env.t.setDisplay("analyzing", "Analyzing 41%", "");
+	assert.strictEqual(region.textContent, "Analyzing 40%", "percent updates inside one state are not announced");
 });
 
 test("a failed stop on a live session says so and keeps recording", () => {

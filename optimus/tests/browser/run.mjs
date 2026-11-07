@@ -17,8 +17,13 @@ const { chromium } = require(process.env.PLAYWRIGHT_CORE || "playwright-core");
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const APP = path.resolve(HERE, "..", "..");
 const PUB = path.join(APP, "public");
-const FRAPPE = process.env.FRAPPE_APP || "/home/sowmya/frappe-16/frappe-16/apps/frappe";
+// FRAPPE_APP, else the frappe app next to optimus in a bench (apps/optimus/optimus -> apps/frappe).
+const FRAPPE = process.env.FRAPPE_APP || path.resolve(APP, "..", "..", "frappe");
 const ESPRESSO = path.join(FRAPPE, "frappe", "public", "css", "espresso");
+if (!fs.existsSync(ESPRESSO)) {
+	console.error(`Frappe's Espresso stylesheets were not found at ${ESPRESSO}; set FRAPPE_APP to the frappe app directory.`);
+	process.exit(2);
+}
 const SHOTS = process.argv[2] || path.join(process.env.TMPDIR || "/tmp", "optimus-pill-shots");
 const ORIGIN = "http://harness.test";
 fs.mkdirSync(SHOTS, { recursive: true });
@@ -31,13 +36,13 @@ function check(name, ok, detail) {
 
 // Fake server: one user, a Redis pointer, Optimus Session rows, #137 stop semantics and pill_state "ended".
 function makeServer() {
-	const s = { pointer: null, rows: {}, n: 0, log: [] };
+	const s = { pointer: null, rows: {}, n: 0, log: [], seen: true };
 	const calls = (m) => s.log.filter((l) => l[0] === m).map((l) => l[1]);
 	s.calls = calls;
 	s.handle = (method, args) => {
 		s.log.push([method.replace("optimus.api.", ""), args]);
 		const m = method.replace("optimus.api.", "");
-		if (m === "check_onboarding_seen") return { seen: true };
+		if (m === "check_onboarding_seen") return { seen: s.seen };
 		if (m === "start") {
 			if (args.label === "FAIL") return { __status: 417, _server_messages: "[\"boom\"]" };
 			if (s.pointer) return { __status: 417, _server_messages: "[\"already active\"]" };
@@ -176,6 +181,51 @@ for (const theme of ["light", "dark"]) {
 		});
 		check(`${tag} recording label contrast >= 4.5 and dot follows the text colour`, contrast(parseRgb(rec.color), parseRgb(rec.bg)) >= 4.5 && rec.dot === rec.color, rec);
 		check(`${tag} a toast showing over the pill is on top of it (fully readable)`, rec.toast && rec.pillOnTop, rec);
+		await ctx.close();
+	}
+}
+
+// ---------- 1b. Narrow screens: a long timer beside the label, with a toast up ----------
+for (const theme of ["light", "dark"]) {
+	for (const width of [375, 320]) {
+		const tag = `${theme}@${width}`;
+		const server = makeServer();
+		const { ctx, page } = await open(server, { width, theme });
+		await startRecording(page);
+		await runClock(page, 7 * 60 * 1000 + 12 * 1000);
+		await page.evaluate(() => frappe.show_alert({ message: "Recording stopped after 10 minutes without activity. Analyzing what was captured.", indicator: "orange" }));
+		await settle(page, 1200);
+		await page.screenshot({ path: path.join(SHOTS, `${tag}-long-timer-toast.png`) });
+		const g = await page.evaluate(() => {
+			const w = document.querySelector("#frappe-profiler-widget");
+			const box = (el) => { const r = el.getBoundingClientRect(); return { l: r.left, r: r.right, t: r.top, b: r.bottom, w: r.width }; };
+			const lab = w.querySelector(".fp-label"), el = w.querySelector(".fp-elapsed"), toast = document.querySelector(".es-toast");
+			const cs = getComputedStyle(w);
+			return { pill: box(w), label: box(lab), elapsed: box(el), toast: toast && box(toast), vw: innerWidth, text: el.textContent, labelText: lab.textContent,
+				labelClipped: lab.scrollWidth > lab.clientWidth, right: cs.right, inlineRight: w.style.right, inlineBottom: w.style.bottom };
+		});
+		check(`${tag} the timer sits after the label and never covers it`, g.label.r <= g.elapsed.l + 0.5 && g.text.length >= 4, g);
+		check(`${tag} the label is not truncated`, !g.labelClipped && g.labelText === "Recording", g);
+		check(`${tag} the pill and the toast stay inside the viewport`, g.pill.l >= 0 && g.pill.r <= g.vw && g.toast && g.toast.l >= 0 && g.toast.r <= g.vw, g);
+		check(`${tag} the offsets come from the stylesheet, so the narrow-screen rule applies`, g.inlineRight === "" && g.inlineBottom === "" && g.right === "12px", g);
+		await ctx.close();
+	}
+}
+
+// ---------- 1c. The first-visit onboarding notice on narrow screens ----------
+for (const theme of ["light", "dark"]) {
+	for (const width of [1440, 375, 320]) {
+		const tag = `${theme}@${width}`;
+		const server = makeServer();
+		server.seen = false;
+		const { ctx, page } = await open(server, { width, theme });
+		await page.waitForSelector(".optimus-onboarding-toast");
+		await page.screenshot({ path: path.join(SHOTS, `${tag}-onboarding.png`) });
+		const g = await page.evaluate(() => {
+			const r = document.querySelector(".optimus-onboarding-toast").getBoundingClientRect();
+			return { l: r.left, r: r.right, vw: innerWidth, hscroll: document.documentElement.scrollWidth > innerWidth };
+		});
+		check(`${tag} the onboarding notice keeps a gutter of at least 8px on both sides`, g.l >= 8 && g.vw - g.r >= 8 && !g.hscroll, g);
 		await ctx.close();
 	}
 }
