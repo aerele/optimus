@@ -463,7 +463,8 @@ def stop(session_uuid: str | None = None) -> dict:
 	row; the active session and its pointer are never touched on that path.
 
 	Returns a dict with ``stopped``, ``session_uuid``, ``docname``,
-	``ran_inline`` and, only when ran_inline is True, the final ``status``
+	``ran_inline``, ``expired`` (True only when a session whose pointer had
+	expired was stopped), and, only when ran_inline is True, the final ``status``
 	(``Ready`` or ``Failed``) and ``empty`` (a Ready session with no recorded
 	requests). The widget uses ran_inline + status + empty to pick its
 	terminal state (Analyzing / Report ready / No data / Analyze failed).
@@ -471,6 +472,7 @@ def stop(session_uuid: str | None = None) -> dict:
 	user = _require_profiler_user()
 	if not (isinstance(session_uuid, str) or session_uuid is None):
 		frappe.throw(_("Invalid session reference"), frappe.ValidationError)
+	session_uuid = session_uuid or None
 	active = session.get_active_session_for(user)
 	if active and session_uuid in (None, active):
 		return _stop_active(user, active)

@@ -343,6 +343,16 @@ class TestStopAfterTheIdleExpiry:
 
 		assert limits == [(("stop",), {"limit": 20, "seconds": 60})] * 2
 
+	def test_an_empty_session_uuid_stops_the_active_session_and_clears_its_pointer(self, env, monkeypatch):
+		_scheduler(monkeypatch, disabled=False)
+		env.store.active["alice@example.com"] = "u1"
+		_row(env)
+
+		out = api.stop(session_uuid="")
+
+		assert out["session_uuid"] == "u1" and "expired" not in out
+		assert "alice@example.com" not in env.store.active
+
 	def test_stop_with_the_session_uuid_stops_that_session(self, env, monkeypatch):
 		_scheduler(monkeypatch, disabled=False)
 		_row(env, "a", "OPT-A", started_at=1)
