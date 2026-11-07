@@ -8,6 +8,19 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.158] - 2026-11-07
+
+### Fixed
+
+- Missing-index suggestions now read each table's structure and row count once per analysis instead of once per query. A session with 200 query shapes on one table used to send about 1,800 statements to the database for this; it now sends about 10 (rough figures; they depend on the queries).
+- A column whose distinct-value count times out is no longer tried again for every query on that table, which could add minutes to an analysis. Only errors that would repeat are remembered; a lost connection or lock wait is tried again.
+- Index suggestions no longer write an "optimizer failure" Error Log entry for a column named after an SQL reserved word (such as `read`). The report now says "N query shape(s) use a column name MariaDB rejects unquoted, such as `read`; their cardinality was not checked", instead of blaming the SQL parser.
+- Index suggestions now stop after 2 minutes (or sooner if the whole analysis is near its 20-minute limit), check the slowest queries first, and say in the report how many queries were not checked. The Error Log also gets a line when this limit stops the check.
+- A one-off statement timeout while reading a table's structure is no longer remembered for the rest of the analysis; only the distinct-value count remembers a timeout.
+- A syntax error from the distinct-value count that does not look like a reserved word is now written to the log once, so a parser bug does not go unseen.
+
+---
+
 ## [0.12.147] - 2026-11-06
 
 ### Internal

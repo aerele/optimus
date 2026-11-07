@@ -1011,6 +1011,8 @@ class AnalyzeContext:
 	findings: list[dict] = field(default_factory=list)
 	aggregate: dict[str, Any] = field(default_factory=dict)
 	warnings: list[str] = field(default_factory=list)
+	# time.monotonic() value by which the whole analysis must finish; None means no limit.
+	deadline: float | None = None
 
 	def merge(self, result: AnalyzerResult) -> None:
 		"""Fold an analyzer's output into the context."""

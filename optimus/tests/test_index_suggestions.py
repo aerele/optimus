@@ -109,7 +109,11 @@ def test_optimizer_runs_under_a_statement_time_limit(monkeypatch, empty_context)
 	class _StatementTimeout(Exception):
 		pass
 
+	capped = {"active": False}
+	seen_active = []
+
 	def fake_optimize(query: str):
+		seen_active.append(capped["active"])
 		if "tabBig" in query:
 			raise _StatementTimeout(1969, "max_statement_time exceeded")
 		return _FakeDBIndex("tabLead", "status")
@@ -117,9 +121,14 @@ def test_optimizer_runs_under_a_statement_time_limit(monkeypatch, empty_context)
 	limits = []
 
 	class _CappedDialect(MariaDBDialect):
+		@contextlib.contextmanager
 		def statement_time_limit(self, seconds):
 			limits.append(seconds)
-			return contextlib.nullcontext()
+			capped["active"] = True
+			try:
+				yield
+			finally:
+				capped["active"] = False
 
 		def is_statement_timeout(self, error):
 			return isinstance(error, _StatementTimeout)
@@ -138,7 +147,9 @@ def test_optimizer_runs_under_a_statement_time_limit(monkeypatch, empty_context)
 	}
 	result = index_suggestions.analyze([recording], empty_context)
 
-	assert limits == [index_suggestions.OPTIMIZER_STATEMENT_TIMEOUT_SECONDS] * 2
+	# one cap covers the whole loop, and it is active during every optimizer call
+	assert limits == [index_suggestions.OPTIMIZER_STATEMENT_TIMEOUT_SECONDS]
+	assert seen_active == [True, True]
 	assert logged == []
 	assert any("Skipped index suggestions for 1 SELECT" in w for w in result.warnings)
 	assert not any("Could not analyze" in w for w in result.warnings)
