@@ -40,7 +40,17 @@ versions may contain breaking changes see migration notes below).
 - A statement longer than 256 KB, with more than 120,000 tokens, or with a long run of unclosed `$tag$` quotes is omitted without being read, so a huge bulk insert cannot slow a request. Identifiers and JSON keys are matched in camelCase too (`accessToken`, `clientSecret`, `secretKey`). Also masked now: `IDENTIFIED BY '...'`, `PASSWORD()` and `AES_*()` arguments, `ARRAY[...]`, `REPLACE(...)`, `CONCAT(...)`, `&&`, `@@`, `MEMBER OF`, `data->>'password'`, and `field IN (...)` settings rows.
 - On a statement that goes through the slower path, comments are replaced by one space. The `-- [Optimus: query truncated ...]` note at the end of a cut query is kept. A statement that was cut inside a quote is now omitted instead of shown cut. One existing test (`test_slow_query_full_sql_render`) now ends its long query with a value instead of a comment.
 - The default names are exact words and underscore compounds. Spellings such as `secrets`, `mypassword`, `accesstoken`, `pin` and `pan` are not default names: add them under Sensitive SQL Columns in Optimus Settings.
-- Sessions recorded before this version keep their old SQL. Regenerate Reports rewrites only the HTML and PDF report. The Desk form and the exported session JSON keep the values stored when the session was recorded, so delete any session that profiled a login, password change or API key flow.
+- Text inside a string literal is masked again: `password=...&client_secret=...` form bodies, `?api_key=` and `token=` in a callback URL or an Email Queue message, in any letter case (`PassWord=`) and with hyphens (`Api-Key=`). Only the value after the `=` is replaced, so the rest of the text stays readable.
+- Hyphenated and spaced names are matched like underscore names: `X-API-Key`, `X-Auth-Token`, `X-Secret` and `api-key` as a JSON key, a settings key or a quoted column, and `PassWord` written with a capital inside the word. A name you add in Optimus Settings matches in both spellings.
+- A PostgreSQL `$$...$$` or `$tag$...$tag$` quote that a long statement cut short is omitted instead of shown as typed. A value that follows `LEFT`, `RIGHT`, `INNER`, `CROSS`, `NATURAL` or `FULL` `JOIN` no longer swallows that word, so the shown SQL and its EXPLAIN keep the join type.
+- A last pass masks a stored-hash or encrypted-secret shape (`gAAAAA...`, `$argon2...`, `$2b$...`, `$pbkdf2-...`, `pbkdf2:sha256:...`) wherever it sits in the statement, also inside a longer literal.
+- A Settings list that cannot be read now logs one warning (the error class only) and masks the default names; before, the names you added were dropped without a trace. When a report omitted or masked whole at least half of 10 or more statements, one warning with the counts is logged, so a drift to hiding most SQL is visible.
+- The stored-key check no longer stalls on a statement of many long keys: it looks at the last word run of a key and remembers each answer.
+
+### Action needed
+
+- Sessions recorded before this version keep their old SQL. Regenerate Reports rewrites only the HTML and PDF report. The Desk form and the exported session JSON keep the values stored when the session was recorded, so delete any session that profiled a login, password change or API key flow. Optimus has no purge command for them.
+- The plain words `credit`, `card` and `bank` no longer mask a value. If your sites filter on a column that holds such data, add it under Sensitive SQL Columns in Optimus Settings (for example `credit_card` or `bank_account`, which were never default names either).
 
 ---
 

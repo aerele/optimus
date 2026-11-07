@@ -42,7 +42,7 @@ from optimus.dbdialect import redaction_dialect
 from optimus.redaction import redact_call_queries as _redact_call_queries_base
 from optimus.redaction import redact_sensitive as _redact_sensitive_base
 from optimus.redaction import redact_sql_literals as _redact_sql_literals_base
-from optimus.redaction_log import log_redaction_failure
+from optimus.redaction_log import log_redaction_drift, log_redaction_failure
 
 # v0.10.0+: Pygments syntax highlighting + the diff-block helpers moved to
 # ``optimus/renderer/syntax.py``. They're imported here under the same
@@ -94,9 +94,10 @@ def _redact_call_queries(calls) -> None:
 	"""Mutate ``calls`` in place, redacting each query's SQL literals via
 	``optimus.redaction.redact_call_queries`` with the live extra columns."""
 	_, extra_cols = _settings_extras()
-	_redact_call_queries_base(
+	counts = _redact_call_queries_base(
 		calls, extra_columns=extra_cols, dialect=redaction_dialect(), on_error=log_redaction_failure
 	)
+	log_redaction_drift(counts)
 
 
 # Slow Query SQL longer than this many characters renders in a collapsed <details>.
