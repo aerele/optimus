@@ -336,13 +336,19 @@ def test_an_import_that_fails_badly_skips_only_that_server_chosen_pick(tmp_path,
 def test_a_timeout_during_import_is_not_swallowed_when_server_chosen(tmp_path, monkeypatch):
 	_, good = load(tmp_path, monkeypatch, BLANKS)
 	wire(monkeypatch, {"optimus.mod.good": good})
-	from optimus.ai_fix import _job_timeout_types
+	from optimus import ai_fix
+
+	class JobTimeout(Exception):
+		pass
+
+	# A stand-in type, so the test does not depend on rq being installed (the CI tests job has no rq).
+	monkeypatch.setattr(ai_fix, "_job_timeout_types", lambda: (JobTimeout,))
 
 	def resolve(dotted):
-		raise _job_timeout_types()[0]()
+		raise JobTimeout()
 
 	monkeypatch.setattr(picker, "resolve_freeform", resolve)
-	with pytest.raises(_job_timeout_types()):
+	with pytest.raises(JobTimeout):
 		capture.prepare_line_profile_picks(curated("good"), server_chosen=True)
 
 
