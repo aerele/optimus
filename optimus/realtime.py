@@ -26,11 +26,13 @@ def publish_session_event(event: str, payload: dict) -> None:
 	if session_uuid:
 		filters["session_uuid"] = session_uuid
 	row = safe_call.best_effort(
-		lambda: frappe.db.get_value("Optimus Session", filters, ["name", "user"], as_dict=True), None
+		lambda: frappe.db.get_value("Optimus Session", filters, ["name", "user", "title"], as_dict=True), None
 	)
 	if not row or not row.get("name") or not row.get("user") or row["user"] == "Guest":
 		return
 	message = {**payload, "recording_user": row["user"], "event_id": uuid4().hex}
+	if row.get("title"):
+		message["title"] = row["title"]
 	rooms = [f"user:{row['user']}", f"doc:Optimus Session/{row['name']}"]
 	actor = payload.get("user")
 	if event.startswith("phase_2_") and actor and actor not in {row["user"], "Guest"}:
