@@ -8,6 +8,20 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.151] - 2026-11-06
+
+### Fixed
+
+- Hot frames under "Your app's code" no longer show 0ms. The table now has a Total time column (the function and the functions it calls, with a recursive function counted once) and a Self time column (the function's own lines), and it is ordered by Self time. Since May 2026 the row time was the self time, which was never recorded, so every row read 0ms.
+- Self time is shown only when it adds up to the sampled time of the session. If it is missing or does not add up, the table shows Total only and is ordered by Total.
+- The hot-frames tables scroll inside their own box on a phone instead of widening the page. The box keeps a visible scrollbar and shows a "Swipe the table sideways" hint on phones.
+- A report that has no Self time recorded shows Total and a "-" for Self, with a note to record the flow again. This applies to every report analyzed before 0.12.151, because their self time was never recorded and cannot be recovered. Their list is ordered by Total, so it may not be the true top 20, and their Total may count a recursive function more than once.
+- Total Python Time on the session is now filled in: it is the Python time without the SQL time, taken off action by action and never below zero for an action, so one SQL-heavy action cannot erase the Python time of the others.
+- The call tree no longer shows "[self]" rows, and a function that spends time in its own lines shows "self ..." beside its time.
+- Repeated Hot Frame findings and the self-time hot path findings can appear again. They are raised only when Self time is recorded and adds up to the sampled time. Some Slow Hot Path findings are now titled as a self-time hot path. Self time is wall-clock, so a function that waits on I/O inside its own lines can still be flagged; the finding says so.
+
+---
+
 ## [0.12.147] - 2026-11-06
 
 ### Internal
