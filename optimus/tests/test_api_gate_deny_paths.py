@@ -8,6 +8,8 @@ PermissionError and leave no trace: no LLM, analyze, PDF or line profiling modul
 no enqueue, no set_value or sql, no get_doc, no commit and no rate-limit count.
 """
 
+import types
+
 import pytest
 
 from optimus import api
@@ -15,8 +17,10 @@ from optimus.tests.gate_fakes import (
 	DOCNAME,
 	GATED_ENDPOINTS,
 	OWNER,
+	OWNER_SCOPED_ENDPOINTS,
 	SESSION_UUID,
 	FakePermissionError,
+	FakeValidationError,
 	Tripwire,
 	install,
 	install_tripwires,
@@ -85,3 +89,46 @@ def test_denied_caller_leaves_no_trace(monkeypatch, endpoint, caller):
 	assert fake.spies.get_doc == [] and fake.spies.publish_realtime == []
 	assert commits == []
 	assert fake.cache.calls == []  # the rate limit is counted only after permission passes
+
+
+# Stop is owner-scoped, not gated: it must refuse these callers and leave no trace either.
+STOP_DENIED = {
+	"guest": {"user": "Guest", "roles": (), "error": FakeValidationError},
+	"no_profiler_role": {"user": "plain@example.com", "roles": ("Desk User",), "error": FakePermissionError},
+}
+
+
+def test_stop_is_the_only_owner_scoped_endpoint():
+	assert OWNER_SCOPED_ENDPOINTS == {"stop"}
+
+
+@pytest.mark.parametrize("caller", sorted(STOP_DENIED))
+@pytest.mark.parametrize("uuid", [None, SESSION_UUID])
+def test_stop_refuses_callers_without_the_profiler_role_and_leaves_no_trace(monkeypatch, caller, uuid):
+	caller_args = {k: v for k, v in STOP_DENIED[caller].items() if k != "error"}
+	fake = make_fake_frappe(sessions={SESSION_UUID: session_row(status="Recording")}, **caller_args)
+	install(monkeypatch, fake)
+	commits = []
+	monkeypatch.setattr(api, "safe_commit", lambda: commits.append(True))
+	wire = Tripwire("optimus.session")
+	monkeypatch.setattr(api, "session", wire)
+
+	with pytest.raises(STOP_DENIED[caller]["error"]):
+		api.stop(session_uuid=uuid)
+
+	assert wire.touched == [] and commits == []
+	assert fake.spies.set_value == [] and fake.spies.enqueue == [] and fake.cache.calls == []
+
+
+@pytest.mark.parametrize("uuid", [None, SESSION_UUID])
+def test_stop_never_touches_another_users_session(monkeypatch, uuid):
+	fake = make_fake_frappe(
+		user="intruder@example.com", sessions={SESSION_UUID: session_row(status="Recording")}
+	)
+	install(monkeypatch, fake)
+	monkeypatch.setattr(api, "safe_commit", lambda: None)
+	monkeypatch.setattr(api, "session", types.SimpleNamespace(get_active_session_for=lambda user: None))
+	monkeypatch.setattr(api.ratelimit, "enforce_user_rate_limit", lambda *a, **kw: None)
+
+	assert api.stop(session_uuid=uuid) == {"stopped": False, "reason": "no active session"}
+	assert fake.spies.set_value == [] and fake.spies.enqueue == []

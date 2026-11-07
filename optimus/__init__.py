@@ -1,4 +1,4 @@
-__version__ = "0.12.147"
+__version__ = "0.12.153"
 
 
 def safe_commit() -> None:
@@ -88,6 +88,18 @@ def _is_synchronous_enqueue(args, kwargs, positions=_ENQUEUE_POSITIONS) -> bool:
 		return False
 
 
+# Jobs Optimus queues for itself. Tagging one with the user's *next* session would
+# record the analysis into that session, so they never carry a session marker.
+_INTERNAL_JOB_METHODS = frozenset({"optimus.analyze.run"})
+
+
+def is_internal_job(method) -> bool:
+	"""True for a job Optimus queued for itself, given as a dotted path or a callable."""
+	if not isinstance(method, str):
+		method = f"{getattr(method, '__module__', '')}.{getattr(method, '__qualname__', '')}"
+	return method in _INTERNAL_JOB_METHODS
+
+
 def _live_bg_session(session_uuid, user, _profiler_session):
 	"""The job's own session if still active or draining, else None (never resurrect a finished one)."""
 	if not session_uuid or not _profiler_session.get_session_meta(session_uuid):
@@ -163,7 +175,7 @@ def _patch_enqueue():
 			from optimus import session as _profiler_session
 
 			user = getattr(frappe.session, "user", None) if hasattr(frappe, "session") else None
-			if user and user != "Guest":
+			if user and user != "Guest" and not is_internal_job(method):
 				active = _enqueue_session_for(user, _profiler_session)
 				# Inline calls would pass the marker to the method as a kwarg.
 				if active and not synchronous:
@@ -204,7 +216,7 @@ def _patch_enqueue():
 		# None for `now=True` inline jobs (nothing async to wait for). Never
 		# track our own analyze job (it would deadlock the wait on itself).
 		try:
-			if active and not synchronous and method != "optimus.analyze.run":
+			if active and not synchronous:
 				job_id = getattr(job, "id", None) or deferred_job_id
 				if job_id:
 					_track_enqueued_job(active, job_id, method)

@@ -58,12 +58,16 @@ from optimus.analyzers.base import (
 	strip_profiler_own_calls,
 )
 from optimus.dbdialect import get_dialect
+from optimus.timing import (
+	ANALYZE_TOTAL_BUDGET_SECONDS,
+	MAX_BG_JOB_WAIT_SECONDS,
+	RECORDING_DATA_TTL_SECONDS,
+	SINGLEFLIGHT_MAX_WAIT_SECONDS,
+)
 
-# v0.3.0: per-analyzer wall-clock budget. If the cumulative analyze
-# elapsed time crosses this threshold, remaining analyzers are skipped
-# and the session is finalized as Ready with a partial-completion
-# warning. 5 minutes of headroom under the RQ long-queue 25-min timeout.
-ANALYZE_TOTAL_BUDGET_SECONDS = 20 * 60
+# ANALYZE_TOTAL_BUDGET_SECONDS: once the cumulative analyze elapsed time crosses it,
+# remaining analyzers are skipped and the session is finalized as Ready with a
+# partial-completion warning.
 
 # Per-individual-analyzer soft cap: an analyzer that exceeds this is
 # logged as a warning but doesn't halt the pipeline.
@@ -185,7 +189,7 @@ def _publish_session_event(
 
 # v0.6.0: hard ceiling on how long analyze waits for the flow's background
 # jobs, regardless of the configured `background_job_wait_seconds`.
-_MAX_BG_JOB_WAIT_SECONDS = 300
+_MAX_BG_JOB_WAIT_SECONDS = MAX_BG_JOB_WAIT_SECONDS
 # Throttle between re-enqueue cycles while waiting keeps a wedged ("deferred"
 # forever) job from busy-looping our re-enqueues.
 _BG_WAIT_THROTTLE_SECONDS = 2.0
@@ -209,7 +213,7 @@ _SINGLEFLIGHT_TTL_SECONDS = 300
 _SINGLEFLIGHT_THROTTLE_SECONDS = 5.0
 # Hard ceiling on how long a session waits for the flag before degrading to the
 # pre-M2 behavior (proceed anyway) rather than waiting forever.
-_SINGLEFLIGHT_MAX_WAIT_SECONDS = 600
+_SINGLEFLIGHT_MAX_WAIT_SECONDS = SINGLEFLIGHT_MAX_WAIT_SECONDS
 # The flag is written with a raw SET NX EX, pickled the way RedisWrapper.get_value
 # reads it back. 5 is frappe v16's DEFAULT_PICKLE_PROTOCOL; v15's get_value loads any protocol.
 _SINGLEFLIGHT_PICKLE_PROTOCOL = 5
@@ -814,11 +818,8 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 
 	``_bg_wait_until`` / ``_singleflight_deadline`` are set only when ``run``
 	re-enqueues itself while waiting; external callers never pass them."""
-	# Round 2 fix #6: mark this request-context as "analyzing" so our
-	# before_request / before_job hooks don't recursively activate the
-	# recorder on the DocType writes we're about to do. Without this,
-	# if the recording user also has an active profiler session (e.g.
-	# multiple sessions started in sequence) we could recurse.
+	# Keeps before_request from recording the DocType writes below. before_job has
+	# already run by now, so analyze.run is kept out of recording by never being tagged.
 	frappe.local.optimus_analyzing = True
 
 	# v0.7.x (M5): de-prioritize this analyze on the async (worker) path so it
@@ -934,6 +935,7 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		meta = session.get_session_meta(session_uuid) or {}
 		if meta.get("cap_warning"):
 			context.warnings.append(meta["cap_warning"])
+		_note_missing_trees(context, recordings, meta)
 
 		# v0.5.0: load the frontend metrics posted by optimus_frontend.js
 		# for consumption by the frontend_timings analyzer. Reads from the
@@ -1337,6 +1339,64 @@ def _bundle_entries(bundle) -> dict:
 		return {}
 	entries = bundle.get("recordings")
 	return entries if isinstance(entries, dict) else bundle
+
+
+def _recorder_start(rec: dict) -> datetime | None:
+	"""When Frappe's Recorder started this recording, as a naive datetime (the recorder's
+	own, in the system time zone; an offset is dropped), or None when unknown."""
+	start = rec.get("time")
+	if isinstance(start, str):
+		try:
+			start = datetime.fromisoformat(start)
+		except ValueError:
+			return None
+	return start.replace(tzinfo=None) if isinstance(start, datetime) else None
+
+
+def _outlived_data_ttl(rec: dict, now: datetime) -> bool:
+	start = _recorder_start(rec)
+	return start is not None and (now - start).total_seconds() > RECORDING_DATA_TTL_SECONDS
+
+
+def _report_missing_trees(context, recordings: list[dict], meta: dict, now: datetime) -> None:
+	"""Warn when recordings lack their Python call tree. Trees older than
+	RECORDING_DATA_TTL_SECONDS expired from Redis before analysis (an error: a
+	session that long, or an Analyze delayed that long); the others were never
+	captured (pyinstrument unavailable or failed, or Frappe's Recorder was on)."""
+	if not meta.get("capture_python_tree", True):
+		return
+	missing = [rec for rec in recordings if rec.get("pyi_session") is None]
+	expired = [rec for rec in missing if _outlived_data_ttl(rec, now)]
+	total, hours = len(recordings), RECORDING_DATA_TTL_SECONDS // 3600
+	if expired:
+		context.warnings.append(
+			f"Python call trees were missing for {len(expired)} of {total} requests: Optimus keeps them "
+			f"for {hours} hours and these were recorded earlier, so they expired before analysis. "
+			"SQL findings are complete."
+		)
+		safe_call.log_error_line(
+			f"optimus: {len(expired)} of {total} Python call trees expired before analyze "
+			f"(session {context.session_uuid}, kept {hours} hours)"
+		)
+	never_captured = len(missing) - len(expired)
+	if never_captured:
+		context.warnings.append(
+			f"Python call trees were not captured for {never_captured} of {total} requests "
+			"(pyinstrument was unavailable or failed, Frappe's Recorder was already running, Redis "
+			"evicted them when it ran short of memory, or they could not be read after an encryption "
+			"key change). SQL findings are complete."
+		)
+
+
+def _note_missing_trees(context, recordings: list[dict], meta: dict) -> None:
+	"""``_report_missing_trees`` as a diagnostic: a failure in it must never fail analyze."""
+	from frappe.utils import now_datetime
+
+	safe_call.best_effort(
+		lambda: _report_missing_trees(context, recordings, meta, now_datetime()),
+		None,
+		on_error=lambda kind: safe_call.log_error_line(f"optimus: missing-tree check failed ({kind})"),
+	)
 
 
 def _fetch_recordings(recording_uuids: list[str]):
@@ -3588,35 +3648,47 @@ def _load_recordings_bundle(session_doc):
 
 def _cleanup_redis(session_uuid: str, recording_uuids: list[str]) -> None:
 	"""Delete Redis state for this finalized session (the Optimus Session row is
-	now the durable record). Best-effort: a failure does not abort analyze."""
+	now the durable record). Best-effort: a failure does not abort analyze.
+
+	Recordings are removed before the set that indexes them, and the set is read
+	again first: one registered after analyze took its snapshot (a late job, a
+	request crossing Stop) is still listed there. When a delete fails the set
+	stays, so the janitor's sweep can finish the job.
+	"""
+	try:
+		recording_uuids = sorted(set(recording_uuids) | set(session.get_recordings(session_uuid)))
+	except Exception:
+		pass
+
+	failed = False
+	for uuid in recording_uuids:
+		for name in (RECORDER_REQUEST_HASH, RECORDER_REQUEST_SPARSE_HASH):
+			failed |= not _attempt(lambda name=name: frappe.cache.hdel(name, uuid))
+		for key in (
+			_redis_keys.tree(uuid),
+			_redis_keys.sidecar(uuid),
+			_redis_keys.lock_events(uuid),
+			_redis_keys.resolved_doc(uuid),
+			_redis_keys.infra(uuid),
+		):
+			failed |= not _attempt(lambda key=key: frappe.cache.delete_value(key))
+	if failed:
+		safe_call.log_error_line(
+			f"optimus: a Redis delete failed cleaning session {session_uuid}; its recordings set was "
+			"kept for the janitor sweep",
+			dedupe_seconds=3600,
+		)
+		return
+
 	try:
 		session.delete_session_state(session_uuid)
 	except Exception:
 		frappe.log_error(title="optimus cleanup session_state")
 
-	for uuid in recording_uuids:
-		try:
-			frappe.cache.hdel(RECORDER_REQUEST_HASH, uuid)
-		except Exception:
-			pass
-		try:
-			frappe.cache.hdel(RECORDER_REQUEST_SPARSE_HASH, uuid)
-		except Exception:
-			pass
-		# v0.3.0: also delete the per-recording tree and sidecar keys.
-		try:
-			frappe.cache.delete_value(_redis_keys.tree(uuid))
-		except Exception:
-			pass
-		try:
-			frappe.cache.delete_value(_redis_keys.sidecar(uuid))
-		except Exception:
-			pass
-		try:
-			frappe.cache.delete_value(_redis_keys.lock_events(uuid))
-		except Exception:
-			pass  # best-effort cleanup
-		try:
-			frappe.cache.delete_value(_redis_keys.resolved_doc(uuid))
-		except Exception:
-			pass
+
+def _attempt(delete) -> bool:
+	try:
+		delete()
+	except Exception:
+		return False
+	return True
