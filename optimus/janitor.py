@@ -361,7 +361,13 @@ def _sweep_stale_recording():
 	for row in stale:
 		# Locked per-row transition: a Stop click may have taken this row since the
 		# query above, and it has queued analyze already. Analyze only what we changed.
-		if not claim_for_stop(row["name"]):
+		try:
+			claimed = claim_for_stop(row["name"])
+		except Exception:
+			# One lock wait must not abort the batch; the next sweep retries this row.
+			frappe.log_error(title=f"optimus janitor claim {row['session_uuid']}")
+			continue
+		if not claimed:
 			continue
 
 		# Clear the pointer only while it still names this session; the user may have started a new one.

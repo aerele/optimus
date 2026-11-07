@@ -777,11 +777,11 @@ def _discard_dropped_recording(recorder, purge_stored: bool) -> None:
 	recorder is cleaned up here (a leftover cProfile blocks every later Recorder); a
 	job was already dumped by then, so its entry is deleted (``purge_stored``).
 	"""
-	from frappe.recorder import RECORDER_REQUEST_HASH, RECORDER_REQUEST_SPARSE_HASH
-
 	frappe.local.optimus_capture_dropped = True
 	if not getattr(frappe.local, "optimus_owns_recorder", False):
 		return
+	from frappe.recorder import RECORDER_REQUEST_HASH, RECORDER_REQUEST_SPARSE_HASH
+
 	recorder._recording = False
 	recorder.cleanup()  # dump() now skips the cProfile disable and SQL unpatch it ends with
 	if purge_stored:

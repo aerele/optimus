@@ -247,3 +247,22 @@ def test_a_borrowed_recorder_is_not_cleaned_up(make_env):
 	hc.after_request()
 
 	assert env.recorder.cleaned == 0
+
+
+def test_the_drop_flag_is_set_even_when_the_recorder_import_fails(make_env, monkeypatch):
+	import builtins
+
+	env = make_env(cap_hit=True)
+	env.local.optimus_owns_recorder = True
+	real_import = builtins.__import__
+
+	def failing_import(name, *args, **kwargs):
+		if name == "frappe.recorder":
+			raise ImportError(name)
+		return real_import(name, *args, **kwargs)
+
+	monkeypatch.setattr(builtins, "__import__", failing_import)
+	with pytest.raises(ImportError):
+		hc._discard_dropped_recording(env.recorder, purge_stored=False)
+
+	assert env.local.optimus_capture_dropped is True
