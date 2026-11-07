@@ -1276,7 +1276,9 @@ def render_raw(session_doc: Any, recordings: list[dict]) -> str:
 def _action_to_dict(child: Any) -> dict:
 	"""Flatten an Optimus Action child row to a plain dict. Normalises legacy
 	``event_type = "Background Job"`` to ``"RQ Job"`` at read time so older
-	sessions still surface the RQ-Jobs section.
+	sessions still surface the RQ-Jobs section. Readers that compare
+	``event_type == "RQ Job"`` (RQ-Jobs section, waterfall, source resolution
+	inputs) rely on this mapping.
 	"""
 	_event_type = child.event_type or ""
 	if _event_type == "Background Job":

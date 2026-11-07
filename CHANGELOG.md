@@ -8,6 +8,22 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.149] - 2026-11-06
+
+### Fixed
+
+- A background job now shows as `RQ Job: <method>` in Steps to Reproduce, the AI-drafted steps, the summary and the Actions table in the Desk, instead of `GET <dotted.method.path>` as if it were a page request. The report's own Actions table already showed jobs correctly. A job is also labelled correctly in the text sent to the AI provider when private mode is on.
+- Job findings now read "In job <method>, ..." and no longer name the job's own method as the slow part. A job whose method is slow inside a callee now names that callee. A slow job that is mostly SQL or framework time gets a Slow Background Job finding; it can get an AI suggestion like other findings, and you can add it to Excluded finding types to keep it from the AI provider.
+- The summary no longer reads "went into In job <method>, ..." for a slow job.
+- On a narrow screen the report's per-action table now scrolls sideways inside its own box instead of making the whole page wider, and its column headers (such as Slowest query) are no longer cut off. The table was already too wide on develop.
+- Sessions analyzed before this version keep their old labels, steps and findings in the Desk. Their summary changes when the report is regenerated, and an AI Steps refresh uses the new job label. Record the flow again for fully new results.
+
+### Internal
+
+- Removed the unused `finding_inline_html` field from the report's action rows.
+
+---
+
 ## [0.12.147] - 2026-11-06
 
 ### Internal
