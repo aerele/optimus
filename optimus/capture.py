@@ -352,15 +352,12 @@ def _warn_lock_capture_once(what: str, exc: BaseException) -> None:
 	if _lock_capture_warned:
 		return
 	_lock_capture_warned = True
-	try:
-		import frappe
+	from optimus import safe_call
 
-		frappe.logger("optimus").warning(
-			f"optimus: lock capture {what} failed ({type(exc).__name__}); "
-			"Lock Contention findings may be missing"
-		)
-	except Exception:
-		pass
+	safe_call.log_error_line(
+		f"optimus: lock capture {what} failed ({type(exc).__name__}); "
+		"Lock Contention findings may be missing"
+	)
 
 
 def _log_lock_skipped(reason: str) -> None:

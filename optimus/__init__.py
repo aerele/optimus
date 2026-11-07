@@ -1,4 +1,4 @@
-__version__ = "0.12.153"
+__version__ = "0.12.164"
 
 
 def safe_commit() -> None:
@@ -215,20 +215,24 @@ def _patch_enqueue():
 		# picked up by a worker shortly after Stop aren't lost. `job` is
 		# None for `now=True` inline jobs (nothing async to wait for). Never
 		# track our own analyze job (it would deadlock the wait on itself).
+		track_failure = None
 		try:
 			if active and not synchronous:
 				job_id = getattr(job, "id", None) or deferred_job_id
 				if job_id:
 					_track_enqueued_job(active, job_id, method)
 		except Exception as exc:
+			track_failure = (
+				f"optimus: could not track job {getattr(job, 'id', None) or deferred_job_id} "
+				f"for session {active}: {type(exc).__name__}",
+				type(exc).__name__,
+			)
+		if track_failure is not None:
 			# Log instead of writing an Error Log row into the caller's transaction.
-			try:
-				frappe.logger("optimus").warning(
-					f"optimus: could not track job {getattr(job, 'id', None) or deferred_job_id} "
-					f"for session {active}: {exc!r}"
-				)
-			except Exception:
-				pass
+			from optimus.safe_call import log_error_line
+
+			message, error_type = track_failure
+			log_error_line(message, dedupe_key=f"could not track a job ({error_type})")
 
 		return job
 
@@ -412,7 +416,7 @@ def _startup_probe_tool2() -> None:
 		try:
 			import frappe
 
-			log = frappe.logger().warning
+			log = frappe.logger("optimus").error
 		except Exception:
 			log = print
 

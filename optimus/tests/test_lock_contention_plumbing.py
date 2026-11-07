@@ -66,7 +66,7 @@ def test_recording_failure_is_logged_once(lock_env, monkeypatch):
 
 	logged = []
 	monkeypatch.setattr(
-		frappe, "logger", lambda *a, **k: types.SimpleNamespace(warning=logged.append), raising=False
+		frappe, "logger", lambda *a, **k: types.SimpleNamespace(error=logged.append), raising=False
 	)
 	monkeypatch.setattr(capture, "_lock_capture_warned", False)
 	monkeypatch.setattr(capture, "_lock_caller_frames", lambda: 1 / 0)
