@@ -267,7 +267,8 @@ _patch_enqueue()
 def _omit_unredacted_request(recorder, failure):
 	"""Last resort when form_dict / headers could not be redacted: store a marker in their
 	place and log the exception class once (never the values). Never raises."""
-	marker = {"_optimus": "<REDACTED:redaction failed>"}
+	# the literal of redaction.OMITTED_COUNT_KEY: this path runs when that module is broken
+	marker = {"_optimus": "<REDACTED:redaction failed>", "_optimus_omitted": 1}
 	for name in ("form_dict", "headers"):
 		if getattr(recorder, name, None) is not None:
 			setattr(recorder, name, dict(marker))
@@ -277,6 +278,29 @@ def _omit_unredacted_request(recorder, failure):
 		safe_call.log_error_line(f"optimus: request redaction failed ({type(failure).__name__}); values omitted")
 	except Exception:
 		pass
+
+
+def _log_redaction_gap(message: str) -> None:
+	"""One deduplicated error line (never values). Never raises."""
+	try:
+		from optimus import safe_call
+
+		safe_call.log_error_line(message)
+	except Exception:
+		pass
+
+
+def _raise_if_job_timeout(failure) -> None:
+	"""An RQ job timeout caught by a capture hook's ``except Exception`` must still stop the
+	job: raise a fresh instance of it (no traceback, so no frames that hold values)."""
+	try:
+		from optimus.safe_call import job_timeout_types
+
+		timeout_types = job_timeout_types()
+	except Exception:
+		return
+	if timeout_types and isinstance(failure, timeout_types):
+		raise type(failure)(*failure.args) from None
 
 
 def _omit_unredacted_query(data):
@@ -322,8 +346,9 @@ def _patch_recorder():
 	_original_register = Recorder.register
 
 	def _read_extras():
-		"""Read the live sensitive-list settings. Falls back to empty extras
-		(defaults still apply) if settings can't be loaded."""
+		"""Read the live sensitive-list settings. Raises when they cannot be loaded: the
+		callers omit the value instead of redacting with the defaults alone, because the
+		customer's own extra names would be missing."""
 		import frappe
 
 		# A config cache miss reads settings from the DB, and those queries re-enter register.
@@ -338,8 +363,6 @@ def _patch_recorder():
 				tuple(cfg.sensitive_form_keys or ()),
 				tuple(cfg.sensitive_sql_columns or ()),
 			)
-		except Exception:
-			return ((), ())
 		finally:
 			frappe.local.optimus_reading_extras = False
 
@@ -349,19 +372,30 @@ def _patch_recorder():
 			self.cmd = ""
 		failure = None
 		try:
-			from optimus.redaction import redact_sensitive
+			from optimus.redaction import OMITTED_COUNT_KEY, redact_sensitive_walk
 
 			extra_keys, _ = _read_extras()
-			if isinstance(getattr(self, "form_dict", None), dict):
-				self.form_dict = redact_sensitive(self.form_dict, extra_keys=extra_keys)
-			if isinstance(getattr(self, "headers", None), dict):
-				self.headers = redact_sensitive(self.headers, extra_keys=extra_keys)
+			omitted = 0
+			stored = []
+			# Not only a dict: any other shape is walked too and fails closed to a marker.
+			for name in ("form_dict", "headers"):
+				value = getattr(self, name, None)
+				if value is not None:
+					value, walk = redact_sensitive_walk(value, extra_keys=extra_keys)
+					omitted += walk.omitted
+					stored.append((name, value))
+			for name, value in stored:
+				if omitted and isinstance(value, dict):
+					value[OMITTED_COUNT_KEY] = omitted
+					omitted = 0
+				setattr(self, name, value)
 		except Exception as exc:
 			# Never break the user's request because OUR scrubber failed, and never keep the
 			# raw values either: the recording stores a marker in their place.
 			failure = exc
 		if failure is not None:
 			_omit_unredacted_request(self, failure)
+			_raise_if_job_timeout(failure)
 
 	def _profiler_register(self, data):
 		try:
@@ -379,8 +413,10 @@ def _patch_recorder():
 					data[LITERALS_MASKED_KEY] = True
 			elif query is not None:
 				_omit_unredacted_query(data)
-		except Exception:
+		except Exception as exc:
 			_omit_unredacted_query(data)
+			_log_redaction_gap(f"optimus: SQL redaction could not run ({type(exc).__name__}); query omitted")
+			_raise_if_job_timeout(exc)
 		return _original_register(self, data)
 
 	_profiler_init._profiler_patched = True

@@ -12,13 +12,20 @@ versions may contain breaking changes see migration notes below).
 
 ### Fixed
 
-- A request whose form data is nested thousands of levels deep (or whose JSON text field is) is now redacted: the over-deep part is replaced by `<REDACTED:nested too deep>`, so the secret inside is never stored, and the report no longer fails to render. Before, the nesting crashed the redaction, the form data was kept as sent, and the report broke on it. Normal requests, nested up to 100 levels, are unchanged. Recordings stored before this version are cut the same way when the report is built.
+- A request whose form data is nested thousands of levels deep (or whose JSON text field is) is now redacted: the over-deep part is replaced by `<REDACTED:nested too deep>`, so the secret inside is never stored, and the report no longer fails to render. Before, the nesting crashed the redaction, the form data was kept as sent, and the report broke on it. Normal requests, nested up to 100 levels, are unchanged. The report shows how many values were omitted this way ("N request values were omitted at capture...").
 - If redaction of a request's form data or headers fails for any other reason, the recording now holds `<REDACTED:redaction failed>` in their place instead of the raw values, and one line naming only the error class is logged at error level, at most once a minute.
 - Request data that refers to itself, or shares the same sub-part so many times that walking it would take forever, no longer hangs the request: the repeated part is replaced by `<REDACTED:circular>` or, past 100,000 containers, `<REDACTED:too large>`. Sets, `dict.keys()` and `dict.items()` are redacted like lists and dicts; bytes, `dict.values()` and any other object are replaced by `<REDACTED:unsupported type>` instead of being kept as is.
+- A text field that looks like JSON but cannot be read (cut off or malformed) and names a sensitive key such as `password` is now replaced by `<REDACTED:unreadable json>` instead of being kept. A JSON text with a repeated key no longer comes back unchanged when the last copy was already masked. Each attempt to read a JSON text now counts against the same 100,000 budget, and text that cannot be JSON is not parsed, so a form full of tiny `{x` strings no longer holds the request.
+- If Optimus cannot read its own settings while a request is recorded, the request's form data and headers are replaced by `<REDACTED:redaction failed>` and an SQL statement by the omitted-SQL note, with one error line in the log, instead of being redacted with the default key list alone. An RQ job timeout hit while redacting now stops the job.
+- A request whose `action` or `method` is not text (for example `{"action": 5}`) no longer breaks the actions table or the step labels.
 - A request whose `cmd` is not text (for example `{"cmd": 5}` in a JSON body) no longer writes an Error Log entry for every request, is no longer skipped from profiling, and no longer breaks the actions table. Recordings already stored with such a value are read as having no `cmd`.
 - The "Generated" time of a report and the time on an AI fix now show in the site's time zone instead of UTC or the server's own zone. Times already stored are unchanged and are converted when shown.
 - A redundant-call check no longer fails on an argument nested past the recursion limit; that entry is skipped and counted.
 - Not covered: call-tree depth limits, and the SQL redaction paths, are unchanged.
+
+### Action needed
+
+- Recordings captured before this version are not cleaned. Their form data and headers were stored as sent, so a payload that was nested too deep is still in Redis and in any saved session until it expires or is deleted. The report cuts deep nesting when it is built, but the analysis step, the doc-event view and direct reads of a stored recording still see the stored data. To remove them, delete the old Optimus Sessions and let Redis recordings expire, or clear them from Redis.
 
 ---
 

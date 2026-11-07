@@ -921,6 +921,9 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 
 		context = AnalyzeContext(session_uuid=session_uuid, docname=docname)
 		context.warnings.extend(enrichment_warnings)
+		omitted_warning = _omitted_values_warning(recordings)
+		if omitted_warning:
+			context.warnings.append(omitted_warning)
 
 		# v0.6.0: if we hit the wait cap with jobs still running, say so.
 		if bg_jobs_unfinished:
@@ -1338,6 +1341,22 @@ def _bundle_entries(bundle) -> dict:
 		return {}
 	entries = bundle.get("recordings")
 	return entries if isinstance(entries, dict) else bundle
+
+
+def _omitted_values_warning(recordings) -> str | None:
+	"""The report line for request values capture could not redact and so omitted (too deep,
+	circular, too large, an unknown type, or a redaction failure), or None when there are none."""
+	from optimus.redaction import count_omitted
+
+	total = sum(count_omitted(rec) for rec in recordings or [])
+	if not total:
+		return None
+	noun = "value was" if total == 1 else "values were"
+	return (
+		f"{total} request {noun} omitted at capture because "
+		f"{'it' if total == 1 else 'they'} could not be redacted safely. "
+		"The recording shows a <REDACTED:...> marker in place."
+	)
 
 
 def _clean_cmd(recording: dict) -> None:
