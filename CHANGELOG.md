@@ -35,6 +35,11 @@ versions may contain breaking changes see migration notes below).
 - A failed start keeps the dialog open with your label, so you can fix the problem and press Start again. Pressing Enter or Ctrl+S twice no longer starts two sessions. Closing the dialog with Escape keeps what you typed for the next time you open it on the same page (kept in this tab only, gone on reload).
 - Clicking Stop after another tab has already stopped that session now says what happened, instead of leaving the pill stuck on "Stopping".
 - The pill, the start dialog note, the first-visit notice and the line profiling picker now follow the Desk dark theme, Windows high-contrast mode and the reduced-motion setting, and their text meets the contrast minimums. The pill now stays below Desk's pop-up notices, so they are never covered, and below an open dialog's backdrop.
+- The "recording stopped after 10 minutes" and "request limit" notices, and the pill's "taking unusually long" notices, can now be translated. Before, they always showed in English.
+- The pill now keeps its 12px corner offset on narrow screens, and the first-visit notice keeps a margin from both screen edges at 320px wide.
+- Screen readers now hear the pill's state changes (Recording, Stopping, Analyzing, Report ready) once each, without the running timer.
+- If the pill cannot stop a session that ended by itself, it now says so and points you to the session, instead of saying it already stopped. If a Stop is not confirmed and the status check fails, the pill no longer waits up to 15 minutes on "Stopping".
+- Pressing Escape in a dialog or input no longer dismisses the first-visit notice.
 
 ### Not covered
 
@@ -53,6 +58,10 @@ versions may contain breaking changes see migration notes below).
 - The janitor and a Stop click no longer both analyze the same timed-out session.
 - Requests and background jobs dropped at the per-session recording limit no longer leave their Frappe Recorder entry in Redis forever, and no longer leave a profiler running on the worker thread. A cleanup that failed part-way keeps its index so the daily sweep can finish it, and the sweep now also removes the entries of sessions without a row and of finished sessions that a late background job left data on.
 - The start dialog now says the session stops after 10 minutes without activity, and that recording ends at the per-session request limit.
+
+### Action needed
+
+- Check the Frappe Recorder for old entries. Before this update, requests and background jobs dropped at the per-session recording limit left their full Recorder entry (SQL, form data and headers) in Redis with no expiry, and nothing removes those old entries. Check the size of the `recorder-requests` and `recorder-requests-sparse` Redis hashes by counting the rows in the Recorder page or running `frappe.cache.hlen("recorder-requests")` in `bench console`. If nobody uses the Recorder, clear them from the Recorder page or with `frappe.recorder.delete()` in `bench console`. Entries dropped after this update are removed automatically.
 
 ### Upgrade note
 

@@ -883,7 +883,7 @@ bench --site <site> mariadb -e "SELECT method, error FROM \`tabError Log\` WHERE
 
 ### "No active session" after clicking Stop
 
-The session was already cleared server-side usually because the auto-stop TTL expired (10 minutes of inactivity) or the janitor swept it. v0.5.1 handles this cleanly: the widget resets to inactive with a gray toast *"Session already stopped."* If you see the widget stuck on "Analyzing…" after this, you're on pre-v0.5.1 JS (see cache troubleshooting above).
+Stop now also ends a session that timed out after 10 minutes of inactivity: it stops your latest timed-out recording and analyzes it. You only see this message when there is no recording to stop, usually because the janitor or another tab already stopped it. v0.5.1 handles this cleanly: the widget resets to inactive with a gray toast *"Session already stopped."* If you see the widget stuck on "Analyzing…" after this, you're on pre-v0.5.1 JS (see cache troubleshooting above).
 
 ### Missing Index finding suggests a column that's already indexed
 

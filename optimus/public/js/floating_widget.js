@@ -170,7 +170,9 @@
 			} catch (e) { /* noop */ }
 		}
 		function onEscape(e) {
-			if (e.key === "Escape") dismiss();
+			// A dialog, an input or another handler that used this Escape owns it.
+			if (e.key !== "Escape" || e.defaultPrevented || isOtherDialogOpen() || isTyping()) return;
+			dismiss();
 		}
 		document.addEventListener("keydown", onEscape);
 		var btn = document.getElementById("frappe-profiler-onboarding-dismiss");
@@ -219,12 +221,11 @@
 		widget.addEventListener("click", onClick);
 		// Inline-style only the layout primitives that need to override
 		// any Desk-side CSS regression (positioning + force-visible).
+		// The right/bottom offsets live in the stylesheet so its narrow-screen rule can change them.
 		// Visual styling (size, padding, border, colour, font) lives in
 		// floating_widget.css so the pill stays mobile-overlay-sized.
 		widget.style.cssText = [
 			"position: fixed",
-			"right: 20px",
-			"bottom: 20px",
 			"display: block !important",
 			"visibility: visible !important",
 			"opacity: 1 !important",
@@ -245,8 +246,28 @@
 		return __("Start a profiling session");
 	}
 
+	// A polite live region, written only when the state changes: the per-second timer and the percent never announce.
+	let announcedDisplay = null;
+	let liveRegion = null;
+	function announceStatus(display, label) {
+		if (display === announcedDisplay) return;
+		announcedDisplay = display;
+		try {
+			if (!liveRegion) {
+				liveRegion = document.createElement("div");
+				liveRegion.setAttribute("id", "frappe-profiler-live");
+				liveRegion.setAttribute("role", "status");
+				liveRegion.setAttribute("aria-live", "polite");
+				liveRegion.className = "fp-sr-only";
+				document.body.appendChild(liveRegion);
+			}
+			liveRegion.textContent = label;
+		} catch (e) { /* announcing is best effort */ }
+	}
+
 	function setDisplay(display, label, elapsed, tone) {
 		if (!widget) return;
+		announceStatus(display, label);
 		widget.classList.remove(
 			"fp-state-inactive",
 			"fp-state-recording",
@@ -278,7 +299,8 @@
 		currentState = res.state;
 		if (res.ui) setDisplay(res.ui.display, res.ui.label, res.ui.elapsed, res.ui.tone);
 		if (res.alert) {
-			frappe.show_alert({ message: __(res.alert.message, res.alert.args), indicator: res.alert.indicator });
+			// pill_state translated the message where it built it.
+			frappe.show_alert({ message: res.alert.message, indicator: res.alert.indicator });
 		}
 		if (widget && !currentState.session_uuid) {
 			widget.removeAttribute("data-session-uuid");
@@ -762,7 +784,7 @@
 					announceStopped(data.expired, options);
 				}
 			},
-			error: () => recoverFromFailedStop(sessionUuid),
+			error: () => recoverFromFailedStop(sessionUuid, options.auto),
 		});
 	}
 
@@ -770,9 +792,9 @@
 	function announceStopped(expired, options) {
 		if (expired) {
 			const message = options.capHit
-				? "Recording reached its request limit, so later requests were not captured. Analyzing what was captured."
-				: "Recording stopped after 10 minutes without activity. Analyzing what was captured.";
-			frappe.show_alert({ message: __(message), indicator: "orange" });
+				? __("Recording reached its request limit, so later requests were not captured. Analyzing what was captured.")
+				: __("Recording stopped after 10 minutes without activity. Analyzing what was captured.");
+			frappe.show_alert({ message: message, indicator: "orange" });
 		} else if (!options.auto) {
 			frappe.show_alert({
 				message: __("Profiler stopped analyzing session…"),
@@ -784,7 +806,12 @@
 	// stopped:false is ambiguous, so resync from the server; only a confirmed "nothing there" resets the pill.
 	function resolveUnclaimedStop() {
 		refreshStatus((ok) => {
-			if (!ok || currentState.display !== "stopping") return;
+			if (currentState.display !== "stopping") return;
+			if (!ok) {
+				// Not claimed and the resync failed: end "Stopping…" now instead of waiting for the poll's hard stop.
+				applyResult(Pill.reduceHardStop(currentState));
+				return;
+			}
 			currentState = Pill.resetState(currentState);
 			if (widget) widget.removeAttribute("data-session-uuid");
 			setDisplay("inactive", __("Profiler"), "");
@@ -797,7 +824,7 @@
 
 	// The stop request failed, so the server may or may not have stopped the session: show Recording again
 	// and let pill_state for that session say what is true.
-	function recoverFromFailedStop(sessionUuid) {
+	function recoverFromFailedStop(sessionUuid, auto) {
 		_diag("[optimus] stop failed for", sessionUuid);
 		currentState.display = "recording";
 		setDisplay("recording", __("Recording"), computeElapsed());
@@ -807,6 +834,12 @@
 				frappe.show_alert({ message: __("Network error please retry"), indicator: "red" });
 			} else if (currentState.display === "recording") {
 				frappe.show_alert({ message: __("Failed to stop profiler try again"), indicator: "red" });
+			} else if (currentState.display === "inactive" && auto) {
+				// The row may still read Recording on the server: never claim it stopped.
+				frappe.show_alert({
+					message: __("Recording ended but could not be stopped automatically. Open the session to stop it."),
+					indicator: "red",
+				});
 			} else if (currentState.display === "inactive") {
 				frappe.show_alert({ message: __("Session already stopped"), indicator: "gray" });
 			}

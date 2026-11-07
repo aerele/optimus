@@ -208,6 +208,13 @@ def test_a_recording_row_younger_than_the_pointer_lifetime_is_not_ended(env):
 	assert api.pill_state()["phase"] == "idle"
 
 
+def test_a_recording_row_just_under_the_pointer_lifetime_is_not_ended(env):
+	# Pins the age gate between 2 and 10 minutes: halving it to 5 would call this row ended.
+	for minutes in (5, 9):
+		env(sessions=[_s("OS-1", "u1", "Recording", age_minutes=minutes)])
+		assert api.pill_state(session_uuid="u1")["phase"] == "idle", minutes
+
+
 def test_a_recording_row_exactly_at_the_pointer_lifetime_is_ended(env):
 	env(sessions=[_s("OS-1", "u1", "Recording", age_minutes=10)])
 	assert api.pill_state(session_uuid="u1")["phase"] == "ended"

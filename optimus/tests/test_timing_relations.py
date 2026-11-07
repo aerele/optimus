@@ -83,3 +83,10 @@ def test_the_pill_script_uses_the_same_recording_check_interval():
 	with open(path) as f:
 		match = re.search(r"RECORDING_CHECK_MS = (\d+)", f.read())
 	assert int(match.group(1)) == timing.PILL_RECORDING_CHECK_SECONDS * 1000
+
+
+def test_the_expiry_notice_names_the_real_idle_limit():
+	path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "public", "js", "floating_widget.js")
+	with open(path) as f:
+		src = f.read()
+	assert f"after {timing.SESSION_TTL_SECONDS // 60} minutes without activity" in src
