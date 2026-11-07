@@ -113,9 +113,12 @@ def _install_frappe_stub(monkeypatch):
 	# another caller already took in stub._taken.
 	stub._taken = set()
 	stub._claimed = []
+	stub._claim_raises = set()
 	api_mod = types.ModuleType("optimus.api")
 	def claim_for_stop(name):
 		stub._claimed.append(name)
+		if name in stub._claim_raises:
+			raise RuntimeError("lock wait timeout")
 		return None if name in stub._taken else name
 	api_mod.claim_for_stop = claim_for_stop
 	monkeypatch.setitem(sys.modules, "optimus.api", api_mod)
@@ -163,6 +166,19 @@ class TestSweepStaleRecording:
 		janitor = _reload_janitor(monkeypatch)
 		janitor._sweep_stale_recording()
 
+		assert [c[1]["session_uuid"] for c in stub._enqueue_calls] == ["u-free"]
+
+	def test_a_claim_that_raises_skips_that_row_and_the_batch_goes_on(self, monkeypatch):
+		stub = _install_frappe_stub(monkeypatch)
+		stub._get_all_return["Optimus Session"] = [
+			{"name": "PS-LOCKED", "session_uuid": "u-locked", "user": "a@b.com"},
+			{"name": "PS-FREE", "session_uuid": "u-free", "user": "c@d.com"},
+		]
+		stub._claim_raises = {"PS-LOCKED"}
+		janitor = _reload_janitor(monkeypatch)
+		janitor._sweep_stale_recording()
+
+		assert stub._claimed == ["PS-LOCKED", "PS-FREE"]
 		assert [c[1]["session_uuid"] for c in stub._enqueue_calls] == ["u-free"]
 
 	def test_no_claim_when_no_stale_rows(self, monkeypatch):
