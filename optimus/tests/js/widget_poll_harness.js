@@ -542,10 +542,11 @@ test("an inline stop of a live session keeps the report-ready notice, and a fail
 
 // window.optimus_frontend.beginSession(): the shim drops timings from before Record.
 function spyShim(env) {
-	const log = { begins: 0, uuidAtBegin: [], throws: false };
+	const log = { begins: 0, uuidAtBegin: [], opts: [], throws: false };
 	env.ctx.window.optimus_frontend = {
-		beginSession: () => {
+		beginSession: (opts) => {
 			log.begins += 1;
+			log.opts.push(opts);
 			log.uuidAtBegin.push(env.t.widget.attrs["data-session-uuid"]);
 			if (log.throws) throw new Error("shim broke");
 		},
@@ -624,6 +625,7 @@ test("a later resync that finds a recording started elsewhere clears the shim on
 	env.calls[1].callback({ message: recordingReply });
 	assert.strictEqual(shim.begins, 1);
 	assert.deepStrictEqual(shim.uuidAtBegin, [undefined]);
+	assert.strictEqual(JSON.stringify(shim.opts), "[{\"keepXhr\":true}]", "a resync keeps the XHR buffer");
 	env.t.refreshStatus();
 	env.calls[2].callback({ message: recordingReply });
 	assert.strictEqual(shim.begins, 1, "already recording: nothing more to clear");

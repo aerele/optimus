@@ -14,6 +14,8 @@ versions may contain breaking changes see migration notes below).
 
 - Page-load timings are no longer lost. First Contentful Paint, the early Largest Contentful Paint and navigation timing were dropped because the browser ignored our request for timings recorded before the script loaded. Each page load now reports once, under the page's own address, instead of being split across two rows when Desk changes the URL during load.
 - A malformed frontend timing (text or an oversized number where a number belongs) is now ignored. Before, it could hide the whole Frontend section or make the report fail to render.
+- A timing that is negative or absurdly large (over ten minutes, or a size over 2 GB) is now ignored instead of becoming a false slow-page finding, and a bad row can no longer blank a good value from the same page. The report counts the ignored rows and says when no page-load timings were captured. One bad row in a batch no longer rejects the other rows, and a single oversized entry is dropped.
+- On a phone the Frontend tiles stack and its two tables scroll inside their own box instead of widening the page. A burst of layout shifts can no longer push out the page's first paint, and finding a recording already running no longer discards buffered request timings.
 - Timings from a page that was loaded before you pressed Record are no longer added to the session, and neither are request timings left over from earlier. The Frontend section now says so: to include a page's load, reload it while recording.
 
 ### Not covered

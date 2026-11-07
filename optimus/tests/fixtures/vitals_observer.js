@@ -114,6 +114,16 @@ const scenarios = {
 		env.emit([lcp(500), lcp(900)]);
 		assert.deepStrictEqual(names(env.flushed()), ["lcp", "lcp"]);
 	},
+	layout_shifts_never_push_out_the_paint_timings() {
+		const env = load();
+		env.emit([fcp, lcp(500), nav(600)]);
+		const shifts = [];
+		for (let i = 0; i < 500; i++) shifts.push(shift(0.001));
+		env.emit(shifts);
+		const p = env.flushed();
+		assert.ok(names(p).includes("fcp") && names(p).includes("lcp") && names(p).includes("navigation"), names(p).join());
+		assert.ok(p.vitals.length <= 200, "total " + p.vitals.length);
+	},
 	load_url_is_frozen_for_every_vital() {
 		const env = load();
 		env.emit([fcp, lcp(500)]);
@@ -146,6 +156,16 @@ const scenarios = {
 			assert.strictEqual(p.xhr.length, 1);
 			assert.strictEqual(p.xhr[0].url, "/y");
 			assert.strictEqual(p.vitals.length, 0);
+		});
+	},
+	begin_session_for_a_resync_keeps_the_xhr_buffer() {
+		const env = load({ fetch: true });
+		env.emit([fcp, lcp(500)]);
+		return env.win.fetch("/x").then(() => {
+			env.win.optimus_frontend.beginSession({ keepXhr: true });
+			const s = env.win.optimus_frontend.getState();
+			assert.strictEqual(s.xhr_buffered, 1);
+			assert.strictEqual(s.vitals_buffered, 0);
 		});
 	},
 	begin_session_drops_a_load_that_finishes_later() {

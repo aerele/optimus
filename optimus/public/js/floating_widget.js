@@ -365,10 +365,10 @@
 	}
 
 	// Timings buffered before Record belong to no session.
-	function beginFrontendSession() {
+	function beginFrontendSession(opts) {
 		try {
 			if (window.optimus_frontend && window.optimus_frontend.beginSession) {
-				window.optimus_frontend.beginSession();
+				window.optimus_frontend.beginSession(opts);
 			}
 		} catch (e) { /* the pill must still record */ }
 	}
@@ -401,8 +401,8 @@
 						startElapsedTimer();
 						setDisplay("recording", __("Recording"), computeElapsed());
 					}
-					// Also runs when a resync first finds a line-profiling or other-tab recording; that clears the XHR buffer too, on purpose.
-					if (!isInitialResync) beginFrontendSession();
+					// A resync that finds a line-profiling or other-tab recording drops the pre-session load's vitals but keeps buffered XHRs.
+					if (!isInitialResync) beginFrontendSession({ keepXhr: true });
 					if (widget) widget.setAttribute("data-session-uuid", currentState.session_uuid || "");
 				}
 				if (done) done(true);

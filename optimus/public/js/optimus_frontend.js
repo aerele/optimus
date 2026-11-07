@@ -24,7 +24,9 @@
 	if (frappe.session && frappe.session.user === "Guest") return;
 
 	var SOFT_CAP_XHR = 500;
-	var SOFT_CAP_VITALS = 200;
+	// Per type, so a burst of layout shifts cannot push the single FCP/LCP/navigation out of the buffer.
+	var SOFT_CAP_VITALS = { cls: 100, lcp: 20, fcp: 5, navigation: 5 };
+	var SOFT_CAP_VITALS_OTHER = 10;
 	var WATCHDOG_FLUSH_MS = 60000;
 	var WATCHDOG_XHR_THRESHOLD = 200;
 
@@ -53,7 +55,13 @@
 			timestamp: Date.now(),
 			recording_id_hint: currentRecordingId,
 		});
-		if (vitalsBuffer.length > SOFT_CAP_VITALS) vitalsBuffer.shift();
+		var cap = SOFT_CAP_VITALS[data.name] || SOFT_CAP_VITALS_OTHER;
+		var same = 0;
+		for (var i = 0; i < vitalsBuffer.length; i++) if (vitalsBuffer[i].name === data.name) same++;
+		if (same <= cap) return;
+		for (var j = 0; j < vitalsBuffer.length; j++) {
+			if (vitalsBuffer[j].name === data.name) { vitalsBuffer.splice(j, 1); break; }
+		}
 	}
 
 	// -----------------------------------------------------------------
@@ -331,8 +339,9 @@
 	window.optimus_frontend = {
 		flush: flush,
 		// Record was pressed: earlier buffered timings and the load still in progress are not part of the session.
-		beginSession: function () {
-			xhrBuffer.length = 0;
+		// A resync that only found a session already running (opts.keepXhr) leaves the XHR buffer alone.
+		beginSession: function (opts) {
+			if (!(opts && opts.keepXhr)) xhrBuffer.length = 0;
 			vitalsBuffer.length = 0;
 			preSessionLoad = true;
 		},

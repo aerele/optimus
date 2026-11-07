@@ -112,8 +112,8 @@ def _assert_numbers_only(value):
 	elif isinstance(value, list):
 		for v in value:
 			_assert_numbers_only(v)
-	if isinstance(value, float):
-		assert value == value and abs(value) != float("inf")
+	if isinstance(value, (int, float)) and not isinstance(value, bool):
+		assert value == value and abs(value) <= 10**12, value
 
 
 @pytest.mark.parametrize("case", BAD_VITALS)
@@ -150,7 +150,7 @@ def test_a_bad_row_does_not_hide_good_rows_in_the_same_payload():
 		xhr=[_xhr(duration_ms="slow"), _xhr(url="/good", duration_ms=40)],
 		vitals=[_lcp([1]), *GOOD, "junk"],
 	)
-	assert result.aggregate["frontend_summary"]["total_xhrs"] == 2
+	assert result.aggregate["frontend_summary"]["total_xhrs"] == 1
 	assert set(result.aggregate["frontend_vitals_by_page"]) >= {"/ok"}
 	assert result.aggregate["frontend_orphans"] == []
 

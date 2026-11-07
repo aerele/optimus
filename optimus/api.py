@@ -1005,7 +1005,21 @@ def _frontend_vitals_key(session_uuid: str) -> str:
 
 
 MAX_FRONTEND_PAYLOAD_BYTES = 512 * 1024
+MAX_FRONTEND_ENTRY_BYTES = 4 * 1024
 MAX_FRONTEND_PAYLOAD_NODES = 32_000
+
+
+def _encode_frontend_rows(rows, soft_cap):
+	"""JSON-encode the newest ``soft_cap`` dict rows that fit one Redis entry; count the rest as dropped."""
+	import json
+
+	rows = rows or []
+	encoded = []
+	for row in rows[-soft_cap:]:
+		text = json.dumps(row, default=str) if isinstance(row, dict) else None
+		if text is not None and len(text.encode("utf-8")) <= MAX_FRONTEND_ENTRY_BYTES:
+			encoded.append(text)
+	return encoded, min(len(rows), soft_cap) - len(encoded)
 
 
 def _frontend_payload_bounded(value):
@@ -1069,7 +1083,7 @@ def submit_frontend_metrics(payload: str) -> dict:
 
 	if not isinstance(data, dict) or not _frontend_payload_bounded(data):
 		return {"accepted": False, "reason": "invalid payload"}
-	if any(not isinstance(data.get(key) or [], list) or any(not isinstance(row, dict) for row in (data.get(key) or [])) for key in ("xhr", "vitals")):
+	if any(not isinstance(data.get(key) or [], list) for key in ("xhr", "vitals")):
 		return {"accepted": False, "reason": "invalid payload"}
 
 	session_uuid = data.get("session_uuid")
@@ -1088,8 +1102,9 @@ def submit_frontend_metrics(payload: str) -> dict:
 	# doesn't push MAX entries through Redis only to have them trimmed.
 	import json as _json
 
-	xhr = (data.get("xhr") or [])[-SOFT_CAP_FRONTEND_XHR:]
-	vitals = (data.get("vitals") or [])[-SOFT_CAP_FRONTEND_VITALS:]
+	# One bad row is dropped (and counted); it must not cost the rest of the batch.
+	xhr, xhr_dropped = _encode_frontend_rows(data.get("xhr"), SOFT_CAP_FRONTEND_XHR)
+	vitals, vitals_dropped = _encode_frontend_rows(data.get("vitals"), SOFT_CAP_FRONTEND_VITALS)
 
 	xhr_key = _frontend_xhr_key(session_uuid)
 	vitals_key = _frontend_vitals_key(session_uuid)
@@ -1101,7 +1116,7 @@ def submit_frontend_metrics(payload: str) -> dict:
 	if xhr:
 		for entry in xhr:
 			try:
-				frappe.cache.rpush(xhr_key, _json.dumps(entry, default=str))
+				frappe.cache.rpush(xhr_key, entry)
 			except Exception:
 				frappe.log_error(title="optimus frontend rpush (xhr)")
 		# Tail-preferring trim: keep the last N entries.
@@ -1114,7 +1129,7 @@ def submit_frontend_metrics(payload: str) -> dict:
 	if vitals:
 		for entry in vitals:
 			try:
-				frappe.cache.rpush(vitals_key, _json.dumps(entry, default=str))
+				frappe.cache.rpush(vitals_key, entry)
 			except Exception:
 				frappe.log_error(title="optimus frontend rpush (vitals)")
 		try:
@@ -1137,6 +1152,7 @@ def submit_frontend_metrics(payload: str) -> dict:
 		"accepted": True,
 		"xhr_count": xhr_count,
 		"vitals_count": vitals_count,
+		"dropped": xhr_dropped + vitals_dropped,
 	}
 
 
