@@ -63,16 +63,32 @@ def _has_live_recorder() -> bool:
 	return recorder is not None and _capture.is_recording(recorder)
 
 
-def _flag_sql_recording_off(recorder, recording_uuid) -> None:
-	"""Remember a recording whose shared Frappe Recorder had SQL recording off (its queries are missing)."""
-	config = getattr(recorder, "config", None)
-	if getattr(config, "record_sql", True):
-		return
-	from optimus import redis_keys
+# Settings of a shared Frappe Recorder that degrade an Optimus recording, with the value Optimus needs.
+_RECORDER_SETTINGS_WANTED = (("record_sql", 1), ("capture_stack", 1), ("profile", 0))
 
-	frappe.cache.set_value(
-		redis_keys.sql_off(recording_uuid), True, expires_in_sec=session.SESSION_TTL_SECONDS
-	)
+
+def _flag_sql_recording_off(recorder, recording_uuid) -> None:
+	"""Remember a recording whose shared Frappe Recorder had SQL recording or stack capture off, or its
+	profiler on (queries or call details are missing). Never raises: this is a footnote, so a Redis
+	error must not lose the recording."""
+	try:
+		config = getattr(recorder, "config", None)
+		if config is None:
+			return
+		degraded = [
+			name
+			for name, wanted in _RECORDER_SETTINGS_WANTED
+			if bool(getattr(config, name, wanted)) != bool(wanted)
+		]
+		if not degraded:
+			return
+		from optimus import redis_keys
+
+		frappe.cache.set_value(
+			redis_keys.sql_off(recording_uuid), degraded, expires_in_sec=session.SESSION_TTL_SECONDS
+		)
+	except Exception:
+		frappe.log_error(title="optimus recorder settings note")
 
 
 def _extract_cmd_from_request() -> str:
@@ -322,14 +338,13 @@ def after_request(*args, **kwargs):
 		if not recording_uuid:
 			return
 
-		_flag_sql_recording_off(recorder, recording_uuid)
-
 		# Pass the current user so register_recording can refresh the
 		# active-session TTL (Round 2 fix #2) without re-reading meta.
 		user = getattr(frappe.session, "user", None)
 		registered = session.register_recording(
 			session_uuid, recording_uuid, user=user
 		)
+		_flag_sql_recording_off(recorder, recording_uuid)
 		if not registered:
 			# Cap hit the recording is in RECORDER_REQUEST_HASH but not
 			# registered against our session. The cap_warning is already
@@ -600,12 +615,11 @@ def after_job(method=None, kwargs=None, result=None, **rest):
 		if not recording_uuid:
 			return
 
-		_flag_sql_recording_off(recorder, recording_uuid)
-
 		user = getattr(frappe.session, "user", None)
 		registered = session.register_recording(
 			session_uuid, recording_uuid, user=user
 		)
+		_flag_sql_recording_off(recorder, recording_uuid)
 		if not registered:
 			frappe.logger().warning(
 				f"optimus: recording cap hit for session "

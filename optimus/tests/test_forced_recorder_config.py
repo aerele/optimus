@@ -270,21 +270,31 @@ class TestStaleUiConfigDoesNotChangeTheForcedRecorder:
 
 
 class TestSqlOffNote:
-	def _recorded(self, env, record_sql, uuid="rec-1"):  # noqa: F811
+	def _recorded(self, env, record_sql=1, uuid="rec-1", **cfg):  # noqa: F811
 		env.local.optimus_session_id = "s1"
 		env.local._recorder = types.SimpleNamespace(
-			uuid=uuid, config=types.SimpleNamespace(record_sql=record_sql)
+			uuid=uuid, config=types.SimpleNamespace(record_sql=record_sql, **cfg)
 		)
 
 	def test_request_on_a_recorder_with_sql_off_is_flagged(self, env):  # noqa: F811
 		self._recorded(env, 0)
 		hc.after_request(response=object())
-		assert env.cache_writes[redis_keys.sql_off("rec-1")] is True
+		assert env.cache_writes[redis_keys.sql_off("rec-1")] == ["record_sql"]
 
 	def test_job_on_a_recorder_with_sql_off_is_flagged(self, env):  # noqa: F811
 		self._recorded(env, 0)
 		hc.after_job()
-		assert env.cache_writes[redis_keys.sql_off("rec-1")] is True
+		assert env.cache_writes[redis_keys.sql_off("rec-1")] == ["record_sql"]
+
+	def test_stack_off_and_profiler_on_are_flagged_too(self, env):  # noqa: F811
+		self._recorded(env, 1, capture_stack=0, profile=1)
+		hc.after_request(response=object())
+		assert env.cache_writes[redis_keys.sql_off("rec-1")] == ["capture_stack", "profile"]
+
+	def test_all_three_degraded_settings_are_listed(self, env):  # noqa: F811
+		self._recorded(env, 0, capture_stack=0, profile=1)
+		hc.after_job()
+		assert env.cache_writes[redis_keys.sql_off("rec-1")] == ["record_sql", "capture_stack", "profile"]
 
 	def test_sql_on_is_not_flagged(self, env):  # noqa: F811
 		self._recorded(env, 1)
@@ -303,8 +313,40 @@ class TestSqlOffNote:
 		hc.after_request(response=object())
 		assert env.cache_writes == {}
 
+	@pytest.mark.parametrize("hook", ["request", "job"])
+	def test_a_failing_flag_write_does_not_lose_the_recording(self, env, monkeypatch, hook):  # noqa: F811
+		self._recorded(env, 0)
+		registered = []
+		monkeypatch.setattr(
+			hc.session, "register_recording", lambda *a, **kw: registered.append(a) or True, raising=False
+		)
+
+		def boom(*a, **kw):
+			raise RuntimeError("redis down")
+
+		monkeypatch.setattr(hc, "_flag_sql_recording_off", boom)
+		if hook == "request":
+			hc.after_request(response=object())
+		else:
+			hc.after_job()
+		assert registered == [("s1", "rec-1")]
+
+	@pytest.mark.parametrize("hook", ["request", "job"])
+	def test_the_recording_is_registered_before_the_flag_is_written(self, env, monkeypatch, hook):  # noqa: F811
+		self._recorded(env, 0)
+		order = []
+		monkeypatch.setattr(
+			hc.session, "register_recording", lambda *a, **kw: order.append("register") or True, raising=False
+		)
+		monkeypatch.setattr(hc, "_flag_sql_recording_off", lambda *a: order.append("flag"))
+		if hook == "request":
+			hc.after_request(response=object())
+		else:
+			hc.after_job()
+		assert order == ["register", "flag"]
+
 	def test_analyze_warns_with_the_count_of_flagged_actions(self, monkeypatch):
-		store = {redis_keys.sql_off("a"): True, redis_keys.sql_off("c"): True}
+		store = {redis_keys.sql_off("a"): ["record_sql"], redis_keys.sql_off("c"): ["record_sql"]}
 		monkeypatch.setattr(frappe, "cache", FakeCache(store), raising=False)
 		warning = analyze._sql_off_warning([{"uuid": "a"}, {"uuid": "b"}, {"uuid": "c"}, {}])
 		assert warning == (
@@ -313,9 +355,68 @@ class TestSqlOffNote:
 		)
 
 	def test_analyze_warns_in_the_singular(self, monkeypatch):
-		monkeypatch.setattr(frappe, "cache", FakeCache({redis_keys.sql_off("a"): True}), raising=False)
+		monkeypatch.setattr(frappe, "cache", FakeCache({redis_keys.sql_off("a"): ["record_sql"]}), raising=False)
 		assert analyze._sql_off_warning([{"uuid": "a"}]).startswith("1 action was recorded while")
+
+	def test_analyze_still_understands_the_old_true_marker(self, monkeypatch):
+		monkeypatch.setattr(frappe, "cache", FakeCache({redis_keys.sql_off("a"): True}), raising=False)
+		assert "SQL recording turned off" in analyze._sql_off_warning([{"uuid": "a"}])
+
+	def test_analyze_names_every_degraded_setting_in_one_note(self, monkeypatch):
+		store = {
+			redis_keys.sql_off("a"): ["record_sql"],
+			redis_keys.sql_off("b"): ["capture_stack", "profile"],
+		}
+		monkeypatch.setattr(frappe, "cache", FakeCache(store), raising=False)
+		warning = analyze._sql_off_warning([{"uuid": "a"}, {"uuid": "b"}])
+		assert warning == (
+			"2 actions were recorded while Frappe's Recorder was running with SQL recording "
+			"turned off, call stacks turned off and its profiler turned on, so some queries or "
+			"call details are missing."
+		)
 
 	def test_analyze_adds_no_warning_when_nothing_is_flagged(self, monkeypatch):
 		monkeypatch.setattr(frappe, "cache", FakeCache({}), raising=False)
 		assert analyze._sql_off_warning([{"uuid": "a"}]) is None
+
+	def test_cleanup_deletes_the_flag(self, monkeypatch):
+		deleted = []
+		cache = FakeCache({})
+		cache.delete_value = lambda key, *a, **kw: deleted.append(key)
+		monkeypatch.setattr(frappe, "cache", cache, raising=False)
+		monkeypatch.setattr(analyze.session, "delete_session_state", lambda *a: None)
+		analyze._cleanup_redis("s1", ["rec-1"])
+		assert redis_keys.sql_off("rec-1") in deleted
+
+
+class TestRealFrappeRecorderContract:
+	"""The fakes above stand in for Frappe's Recorder; pin the shape the patch relies on."""
+
+	@pytest.fixture
+	def real_rec(self):
+		try:
+			import frappe.recorder as rec
+		except ImportError:
+			pytest.skip("real frappe is not installed (CI runs without a bench)")
+		if not hasattr(rec, "RecorderConfig"):
+			pytest.skip("real frappe is not installed (frappe is stubbed)")
+		return rec
+
+	def test_retrieve_is_a_classmethod_on_the_config_class(self, real_rec):
+		assert isinstance(real_rec.RecorderConfig.__dict__["retrieve"], classmethod)
+
+	def test_real_config_has_the_fields_the_note_reads(self, real_rec):
+		cfg = real_rec.RecorderConfig()
+		assert (cfg.record_sql, cfg.capture_stack, cfg.profile) == (1, 1, 0)
+
+	def test_patch_returns_defaults_only_while_forcing(self, real_rec, monkeypatch):
+		stored = real_rec.RecorderConfig()
+		stored.record_sql = 0
+		original = real_rec.RecorderConfig.__dict__["retrieve"]
+		monkeypatch.setattr(real_rec.RecorderConfig, "retrieve", classmethod(lambda cls: stored))
+		optimus._patch_recorder_config(real_rec)
+		monkeypatch.setattr(frappe, "local", types.SimpleNamespace(), raising=False)
+		assert real_rec.RecorderConfig.retrieve() is stored
+		frappe.local.optimus_forcing = True
+		assert real_rec.RecorderConfig.retrieve().record_sql == 1
+		assert original is not None

@@ -296,20 +296,36 @@ def _note_heartbeat_problem(session_uuid: str, problem: str) -> None:
 	safe_call.log_error_line(f"optimus: analyze {session_uuid}: {problem}")
 
 
+_RECORDER_SETTING_PHRASES = {
+	"record_sql": "SQL recording turned off",
+	"capture_stack": "call stacks turned off",
+	"profile": "its profiler turned on",
+}
+
+
 def _sql_off_warning(recordings: list[dict]) -> str | None:
-	"""One plain note when some actions shared a Frappe Recorder that had SQL recording off."""
+	"""One plain note when some actions shared a Frappe Recorder with SQL recording or stack capture
+	off, or its profiler on."""
 	count = 0
+	degraded: set[str] = set()
 	for rec in recordings:
 		rec_uuid = rec.get("uuid")
-		if rec_uuid and frappe.cache.get_value(_redis_keys.sql_off(rec_uuid)):
-			count += 1
+		flag = frappe.cache.get_value(_redis_keys.sql_off(rec_uuid)) if rec_uuid else None
+		if not flag:
+			continue
+		count += 1
+		# An older worker stored plain True for "SQL recording was off".
+		degraded.update(flag if isinstance(flag, (list, tuple)) else ["record_sql"])
 	if not count:
 		return None
 	subject = "1 action was" if count == 1 else f"{count} actions were"
-	return (
-		f"{subject} recorded while Frappe's Recorder was running with SQL recording "
-		"turned off, so their queries are missing."
-	)
+	phrases = [text for name, text in _RECORDER_SETTING_PHRASES.items() if name in degraded]
+	if not phrases:
+		phrases = [_RECORDER_SETTING_PHRASES["record_sql"]]
+	said = phrases[0] if len(phrases) == 1 else ", ".join(phrases[:-1]) + " and " + phrases[-1]
+	sql_only = phrases == [_RECORDER_SETTING_PHRASES["record_sql"]]
+	effect = "their queries are missing" if sql_only else "some queries or call details are missing"
+	return f"{subject} recorded while Frappe's Recorder was running with {said}, so {effect}."
 
 
 def _touch_singleflight(session_uuid: str) -> bool:
