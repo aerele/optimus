@@ -14,6 +14,8 @@ import importlib
 import sys
 import types
 
+import pytest
+
 
 def _install_frappe_stub(monkeypatch):
 	"""Build a minimal ``frappe`` stub the janitor module can import. All
@@ -391,6 +393,17 @@ class TestSweepStalePhase2Runs:
 			raise ConnectionError("redis down")
 		seen = self._expiry(monkeypatch, broken, lambda samples: "retry" if samples is None else True)
 		assert seen.expire == [None]
+		assert seen.analyzed == [] and seen.cleaned == []
+
+	@pytest.mark.parametrize("known", [True, None])
+	def test_run_failed_after_the_retry_bound_keeps_its_samples_for_retry(self, monkeypatch, known):
+		"""expire_legacy fails the run (True) but samples exist or are unknown: nothing is cleaned."""
+		def has_samples(run_uuid):
+			if known is None:
+				raise ConnectionError("redis down")
+			return known
+		seen = self._expiry(monkeypatch, has_samples, lambda samples: True)
+		assert seen.expire == [known]
 		assert seen.analyzed == [] and seen.cleaned == []
 
 	def test_no_set_value_when_no_phase2_rows(self, monkeypatch):
