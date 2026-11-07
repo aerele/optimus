@@ -211,6 +211,19 @@ Most keys carry an explicit TTL via `frappe.cache.set_value(..., expires_in_sec=
 * `profiler:explain:<cache_key>`: persistent read-through cache. Small per-entry; not worth a TTL.
 * `optimus_settings_cached`: invalidated by the Optimus Settings DocType's `on_update` (Frappe's standard cache invalidation pattern, not a TTL).
 
+`optimus:schema_version` has no TTL; it is rewritten at every app start (see section 4). `bench clear-cache` does not clear `optimus:*` keys.
+
+### Clearing a stuck analyze lock
+
+`optimus:analyze:inflight` expires 300 s after its holder's last heartbeat, so a dead worker frees it by itself. If it must be cleared sooner (and `bench clear-cache` no longer does it), delete the key from the site's cache Redis. The key carries the site prefix, so look it up first:
+
+```
+redis-cli -p <redis_cache port> --scan --pattern '*optimus:analyze:inflight'
+redis-cli -p <redis_cache port> DEL '<the key printed above>'
+```
+
+Do this only when no analysis is running: the next analyze then takes the lock again.
+
 The `profiler:onboarding_seen:<user>` 1-year TTL is the policy lever; bump or shorten via `ONBOARDING_CACHE_TTL_SECONDS` in `api.py` if the user-research story changes.
 
 ---

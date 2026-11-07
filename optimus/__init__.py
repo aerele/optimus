@@ -224,7 +224,7 @@ def _patch_enqueue():
 		except Exception as exc:
 			track_failure = (
 				f"optimus: could not track job {getattr(job, 'id', None) or deferred_job_id} "
-				f"for session {active}: {exc!r}",
+				f"for session {active}: {type(exc).__name__}",
 				type(exc).__name__,
 			)
 		if track_failure is not None:

@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Boundaries that mutation testing showed no test pinned: the retention sweep's batch
+"""Boundary values that no other test pinned: the retention sweep's batch
 size, the N+1 time floor, and the context-truncation ratio."""
 
 import types
@@ -21,7 +21,7 @@ class _Cache:
 		self.writes.append((key, value, kw))
 
 
-def _sweep(monkeypatch, row_count):
+def _sweep(monkeypatch, row_count, on_line=lambda *a, **k: None):
 	"""Run ``_sweep_old_sessions`` over ``row_count`` stale rows; return (get_all kwargs, cache)."""
 	import frappe
 
@@ -51,7 +51,7 @@ def _sweep(monkeypatch, row_count):
 	monkeypatch.setattr(
 		"optimus.settings.get_config", lambda: types.SimpleNamespace(session_retention_days=30)
 	)
-	monkeypatch.setattr(janitor.safe_call, "log_error_line", lambda *a, **k: None)
+	monkeypatch.setattr(janitor.safe_call, "log_error_line", on_line)
 	janitor._sweep_old_sessions()
 	assert frappe is not None
 	return seen, cache

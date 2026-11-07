@@ -143,3 +143,27 @@ def test_patch_idempotent(fake_frappe, monkeypatch):
 	assert original is not None
 	# If double-wrapped, original would itself be a patched function.
 	assert not getattr(original, "_profiler_patched", False)
+
+
+def test_a_tracking_failure_logs_the_class_not_the_connection_details(fake_frappe, monkeypatch):
+	"""The ERROR line must not carry the host of a failed Redis connection."""
+	fake, fake_bg, enqueue_calls = fake_frappe
+	fake.cache.set_value("profiler:active:alice@example.com", "sess-1")
+	fake_bg.enqueue = lambda method, **kw: types.SimpleNamespace(id="job-1")
+	_reset_profiler_modules()
+	import optimus  # noqa: F401
+	from optimus import safe_call, session
+
+	def down(*a, **k):
+		raise ConnectionError("Error 111 connecting to redis-prod.internal:6379")
+
+	lines = []
+	monkeypatch.setattr(session, "register_pending_job", down)
+	monkeypatch.setattr(
+		safe_call, "log_error_line", lambda message, **kw: lines.append((message, kw["dedupe_key"]))
+	)
+	fake_bg.enqueue("m.f")
+	assert len(lines) == 1
+	message, key = lines[0]
+	assert "ConnectionError" in message and "redis-prod" not in message and "6379" not in message
+	assert key == "could not track a job (ConnectionError)"

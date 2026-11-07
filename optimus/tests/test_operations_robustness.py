@@ -20,10 +20,14 @@ ROOT = Path(safe_call.__file__).resolve().parent
 
 
 class FakeRedis:
-	"""One Redis shared by every fake process; ``set`` honours NX."""
+	"""One Redis shared by every fake process; ``set`` honours NX and records the TTL."""
 
 	def __init__(self):
 		self.keys = {}
+		self.ttls = {}
+
+	def delete(self, name):
+		self.keys.pop(name, None)
 
 	def make_key(self, key):
 		return f"db|{key}".encode()
@@ -32,6 +36,7 @@ class FakeRedis:
 		if nx and name in self.keys:
 			return None
 		self.keys[name] = value
+		self.ttls[name] = ex
 		return True
 
 
@@ -95,6 +100,80 @@ def test_different_titles_are_not_merged(monkeypatch):
 	safe_call.log_hook_error("a")
 	safe_call.log_hook_error("b")
 	assert rows == ["a", "b"]
+
+
+def _log_failing_with(error, title="optimus before_job"):
+	try:
+		raise error
+	except Exception:
+		safe_call.log_hook_error(title)
+
+
+def test_a_different_exception_class_under_one_title_is_not_hidden(monkeypatch):
+	rows = []
+	_frappe(monkeypatch, FakeRedis(), rows)
+	_log_failing_with(ValueError("a"))
+	_log_failing_with(ValueError("b"))
+	_log_failing_with(KeyError("c"))
+	assert rows == ["optimus before_job", "optimus before_job"]
+
+
+def test_the_window_survives_the_redis_ttl_of_exactly_the_dedupe_seconds(monkeypatch):
+	cache = FakeRedis()
+	_frappe(monkeypatch, cache, [])
+	safe_call.log_hook_error("a")
+	safe_call.log_hook_error("b", dedupe_seconds=5)
+	safe_call.log_hook_error("c", dedupe_seconds=0.2)
+	assert sorted(cache.ttls.values()) == [1, 5, 60]
+
+
+def test_the_same_title_on_another_site_is_logged_again(monkeypatch):
+	import frappe
+
+	rows = []
+	_frappe(monkeypatch, BrokenRedis(), rows)
+	safe_call.log_hook_error("t")
+	monkeypatch.setattr(frappe, "local", types.SimpleNamespace(site="s2"), raising=False)
+	safe_call.log_hook_error("t")
+	assert rows == ["t", "t"]
+
+
+@pytest.mark.parametrize("cache_class", [FakeRedis, BrokenRedis])
+def test_a_title_and_a_log_line_of_one_text_do_not_share_a_slot(monkeypatch, cache_class):
+	import frappe
+
+	lines, rows = [], []
+	_frappe(monkeypatch, cache_class(), rows)
+	monkeypatch.setattr(
+		frappe, "logger", lambda name=None: types.SimpleNamespace(error=lines.append), raising=False
+	)
+	# outside an except the title's key text is "<title>|", so the line uses that text
+	safe_call.log_hook_error("same text")
+	if cache_class is FakeRedis:
+		_new_process()  # only the shared slot is left to tell them apart
+	safe_call.log_error_line("same text|")
+	assert rows == ["same text"] and lines == ["same text|"]
+
+
+def test_a_failed_insert_releases_the_shared_slot_for_the_other_processes(monkeypatch):
+	cache = FakeRedis()
+	rows, calls = [], []
+
+	def log_error(**kw):
+		calls.append(kw)
+		if len(calls) == 1:
+			raise RuntimeError("insert failed")
+		rows.append(kw["title"])
+
+	_frappe(monkeypatch, cache, rows, log_error=log_error)
+	safe_call.log_hook_error("t")
+	assert cache.keys == {}
+	safe_call.log_hook_error("t")  # same process: tried once a window, not on every request
+	assert rows == []
+	_new_process()
+	safe_call.log_hook_error("t")
+	safe_call.log_hook_error("t")
+	assert rows == ["t"]
 
 
 def test_a_log_error_that_raises_does_not_escape(monkeypatch):
@@ -168,18 +247,47 @@ def test_a_failing_hook_with_a_failing_logger_never_raises(monkeypatch, hook):
 # --- levels ---------------------------------------------------------------------------
 
 
-def test_the_sub_error_sites_use_the_error_level_line():
-	for name in (
-		"__init__.py",
-		"hooks_callbacks.py",
-		"capture.py",
-		"janitor.py",
-		"api.py",
-		"line_profile/hooks.py",
-		"line_profile/jobs.py",
-	):
-		text = (ROOT / name).read_text()
-		assert "logger().warning(" not in text and 'logger("optimus").warning(' not in text, name
+def _cap_hit_env(monkeypatch):
+	"""``after_job`` for a session at its recording limit, with a real error-line dedupe."""
+	import frappe
+
+	from optimus import hooks_callbacks as hc
+
+	levels = {"error": [], "warning": []}
+	logger = types.SimpleNamespace(
+		error=levels["error"].append, warning=levels["warning"].append, info=lambda m: None
+	)
+	_frappe(monkeypatch, FakeRedis(), [])
+	monkeypatch.setattr(frappe, "logger", lambda name=None: logger, raising=False)
+	monkeypatch.setattr(frappe, "session", types.SimpleNamespace(user="u"), raising=False)
+	monkeypatch.setattr(hc, "session", types.SimpleNamespace(register_recording=lambda *a, **k: False))
+	monkeypatch.setattr(hc, "_discard_dropped_recording", lambda *a, **k: None)
+	monkeypatch.setattr(hc, "_dump_capture_state_to_redis", lambda **k: None)
+
+	def run(recording_uuid):
+		frappe.local = types.SimpleNamespace(
+			site="s1", optimus_session_id="s-1", _recorder=types.SimpleNamespace(uuid=recording_uuid)
+		)
+		hc.after_job()
+
+	return run, levels
+
+
+def test_a_cap_hit_writes_one_error_level_line_for_many_recordings(monkeypatch):
+	run, levels = _cap_hit_env(monkeypatch)
+	for i in range(5):
+		run(f"rec-{i}")
+	assert len(levels["error"]) == 1 and "cap hit" in levels["error"][0]
+	assert levels["warning"] == []  # Frappe drops warnings on a production site
+
+
+def test_the_janitor_cap_line_is_keyed_without_the_backlog_count(monkeypatch):
+	from optimus import janitor
+	from optimus.tests.test_boundary_pins import _sweep
+
+	keys = []
+	_sweep(monkeypatch, 100, lambda message, **kw: keys.append(kw.get("dedupe_key")))
+	assert keys == ["janitor deletion cap hit"]
 
 
 def test_the_import_time_probe_keeps_its_print_fallback():
@@ -214,6 +322,8 @@ def test_every_optimus_key_pattern_is_persistent_but_the_settings_cache_is_not()
 class SeedDb:
 	"""Records the order of calls; a COMMIT inside the index step models PostgreSQL's
 	``add_index``, which destroys every savepoint."""
+
+	transaction_writes = 1
 
 	def __init__(self):
 		self.calls = []
@@ -279,17 +389,6 @@ def test_a_rollback_that_itself_fails_does_not_escape(seed_env):
 	assert logged == ["optimus ai refresh store seed"]
 
 
-# --- the Phase Two Run scan index --------------------------------------------------------
-
-
-def test_the_phase_two_status_index_goes_through_the_table_qualified_path():
-	store = import_module("optimus.patches.v0_12_0.initialize_ai_refresh_store")
-	assert store.SCAN_INDEXES == {"Optimus Phase Two Run": ("status",)}
-	path = ROOT / "optimus" / "doctype" / "optimus_phase_two_run" / "optimus_phase_two_run.json"
-	status = next(f for f in json.loads(path.read_text())["fields"] if f["fieldname"] == "status")
-	assert not status.get("search_index")
-
-
 # --- settings cache drift ----------------------------------------------------------------
 
 
@@ -341,6 +440,28 @@ def test_the_index_step_commits_before_it_runs_on_either_dialect(seed_env):
 	assert logged == []
 
 
+def test_a_migrate_with_nothing_written_commits_nothing(seed_env):
+	store, db, logged, mp = seed_env
+	order = []
+	mp.setattr(install, "safe_commit", lambda: order.append("commit"))
+	mp.setattr(store, "seed_control", lambda: None)
+	mp.setattr(store, "ensure_indexes", lambda: order.append("indexes"))
+	db.transaction_writes = 0
+	install._seed_ai_refresh_store()
+	assert order == ["indexes"]
+
+
+def test_the_patch_never_raises_into_the_migrate(seed_env):
+	store, db, logged, mp = seed_env
+	mp.setattr(store, "seed_control", _raise(RuntimeError("insert failed")))
+	mp.setattr(store, "ensure_indexes", lambda: None)
+	store.execute()
+	mp.setattr(store, "seed_control", lambda: None)
+	mp.setattr(store, "ensure_indexes", _raise(RuntimeError("CREATE INDEX failed")))
+	store.execute()
+	assert logged == ["optimus ai refresh store seed", "optimus ai refresh store indexes"]
+
+
 def test_a_failing_index_step_rolls_back_only_after_its_commit(seed_env):
 	store, db, logged, mp = seed_env
 	db.calls.clear()
@@ -383,34 +504,32 @@ def test_the_permission_line_is_keyed_without_the_document_name(monkeypatch):
 	assert len(lines) == 1 and "PS-a" in lines[0]
 
 
-def test_the_cap_hit_key_is_a_stable_title():
-	text = (ROOT / "hooks_callbacks.py").read_text()
-	assert text.count('dedupe_key="recording cap hit"') == 2
-
-
-def _scan_patch(monkeypatch, db_type, table_exists):
+def _status_patch(monkeypatch, table_exists):
 	patch = import_module("optimus.patches.v0_12_0.initialize_ai_refresh_store")
 	created = []
 	db = types.SimpleNamespace(
-		db_type=db_type,
+		db_type="postgres",
 		db_schema="public",
 		sql=lambda q, v: [],
 		table_exists=table_exists,
 		add_index=lambda doctype, columns, index_name: created.append(doctype),
 	)
+	status = types.SimpleNamespace(fieldname="status", search_index=1, unique=0)
 	monkeypatch.setattr(
 		patch,
 		"frappe",
-		types.SimpleNamespace(db=db, get_meta=lambda d: types.SimpleNamespace(fields=[])),
+		types.SimpleNamespace(
+			db=db,
+			get_meta=lambda d: types.SimpleNamespace(fields=[status] if "Phase Two" in d else []),
+		),
 	)
 	return patch, created
 
 
-@pytest.mark.parametrize("db_type", ["postgres", "mariadb"])
-def test_a_missing_phase_two_run_table_is_skipped(monkeypatch, db_type):
-	patch, created = _scan_patch(monkeypatch, db_type, lambda doctype: False)
+def test_a_missing_phase_two_run_table_is_skipped(monkeypatch):
+	patch, created = _status_patch(monkeypatch, lambda doctype: False)
 	patch.ensure_indexes()
 	assert created == []
-	patch, created = _scan_patch(monkeypatch, db_type, lambda doctype: True)
+	patch, created = _status_patch(monkeypatch, lambda doctype: True)
 	patch.ensure_indexes()
 	assert created == ["Optimus Phase Two Run"]

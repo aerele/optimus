@@ -132,8 +132,11 @@ def _seed_ai_refresh_store():
 def _commit_then(step):
 	"""Frappe runs every app's ``after_migrate`` hook in one transaction. Committing first
 	puts the earlier hooks' work out of reach of the rollback a failed index step needs
-	on PostgreSQL (``add_index`` commits first anyway)."""
-	safe_commit()
+	on PostgreSQL (``add_index`` commits first anyway). With nothing written in the
+	transaction there is nothing to protect, so a migrate that changes nothing commits
+	nothing."""
+	if getattr(frappe.db, "transaction_writes", 1):
+		safe_commit()
 	step()
 
 

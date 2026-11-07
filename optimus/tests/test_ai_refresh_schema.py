@@ -254,10 +254,18 @@ def test_on_frappe_v15_the_schema_comes_from_the_site_config(monkeypatch, conf, 
 	assert len(created) == 7 and all(c[2].startswith("tab") for c in created)
 
 
-def test_mariadb_only_gets_the_scan_index(monkeypatch):
+def test_mariadb_is_left_alone(monkeypatch):
 	patch, created = _index_patch(monkeypatch, db_type="mariadb", indexes={})
 	patch.ensure_indexes()
-	assert created == [("Optimus Phase Two Run", ["status"], "tabOptimus Phase Two Run_status_index")]
+	assert created == []
+
+
+def test_the_phase_two_status_index_is_declared_so_the_schema_sync_keeps_it():
+	"""Frappe drops an index its DocType does not declare (on PostgreSQL by the bare
+	column name, which can hit another table's index): ``status`` must be declared."""
+	path = ROOT / "optimus" / "doctype" / "optimus_phase_two_run" / "optimus_phase_two_run.json"
+	status = next(f for f in json.loads(path.read_text())["fields"] if f["fieldname"] == "status")
+	assert status.get("search_index") == 1
 
 
 def test_the_seed_runs_after_the_model_sync():

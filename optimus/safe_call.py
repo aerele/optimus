@@ -165,6 +165,15 @@ def _current_site() -> str | None:
 	return best_effort(_site, None)
 
 
+def _slot_name(kind: str, text: str) -> bytes:
+	import hashlib
+
+	import frappe
+
+	digest = hashlib.sha1(f"{kind}:{text}".encode()).hexdigest()[:16]
+	return frappe.cache.make_key(f"{_ERRLOG_KEY_PREFIX}{kind}:{digest}")
+
+
 def _claim_slot(kind: str, text: str, dedupe_seconds: float) -> bool:
 	"""True when this (site, kind, text) has not been logged in the last
 	``dedupe_seconds``. The process dict answers repeats inside one process; a Redis
@@ -183,21 +192,30 @@ def _claim_slot(kind: str, text: str, dedupe_seconds: float) -> bool:
 	_RECENT_LINES[key] = now
 
 	def _redis_claim() -> bool:
-		import hashlib
-
 		import frappe
 
-		digest = hashlib.sha1(f"{kind}:{text}".encode()).hexdigest()[:16]
-		name = frappe.cache.make_key(f"{_ERRLOG_KEY_PREFIX}{kind}:{digest}")
 		# A raw SET is the only way to get NX; the key comes from make_key, so it carries
 		# the site prefix that set_value would add.
 		return bool(
 			frappe.cache.set(  # nosemgrep: frappe-cache-breaks-multitenancy
-				name, 1, nx=True, ex=max(1, int(dedupe_seconds))
+				_slot_name(kind, text), 1, nx=True, ex=max(1, int(dedupe_seconds))
 			)
 		)
 
 	return best_effort(_redis_claim, True)
+
+
+def _release_shared_slot(kind: str, text: str) -> None:
+	"""Give the shared Redis slot back, so a write that failed does not hide the next
+	failure from the other processes. The process dict keeps its claim: a logger that
+	keeps failing is then tried once a window per process, not on every request."""
+
+	def _redis_release() -> None:
+		import frappe
+
+		frappe.cache.delete(_slot_name(kind, text))
+
+	best_effort(_redis_release, None)
 
 
 def log_error_line(message: str, *, dedupe_seconds: float = 60.0, dedupe_key: str | None = None) -> None:
@@ -221,19 +239,27 @@ def log_error_line(message: str, *, dedupe_seconds: float = 60.0, dedupe_key: st
 
 def log_hook_error(title: str, *, message: str | None = None, dedupe_seconds: float = 60.0) -> None:
 	"""``frappe.log_error(title=...)`` for a failing request or job hook, at most once
-	per ``dedupe_seconds`` per title (see ``_claim_slot``) and never raising, so a
-	failing logger, a lost connection or an aborted transaction cannot turn a customer
-	request into a 500. Call it inside the ``except``: Frappe reads the active
-	exception for the traceback. Keep ids out of ``title``; ``message`` may carry them."""
-	if not _claim_slot("title", title, dedupe_seconds):
+	per ``dedupe_seconds`` per title and exception class (see ``_claim_slot``) and never
+	raising, so a failing logger, a lost connection or an aborted transaction cannot turn
+	a customer request into a 500. A second, different failure under one title is
+	therefore still written. The shared slot is released when the insert fails. Call it inside
+	the ``except``: Frappe reads the active exception for the traceback. Keep ids out of
+	``title``; ``message`` may carry them."""
+	import sys
+
+	active = sys.exc_info()[1]
+	text = f"{title}|{type(active).__name__ if active is not None else ''}"
+	if not _claim_slot("title", text, dedupe_seconds):
 		return
 
-	def _write() -> None:
+	def _write() -> bool:
 		import frappe
 
 		if message:
 			frappe.log_error(title=title, message=message)
-			return
-		frappe.log_error(title=title)
+		else:
+			frappe.log_error(title=title)
+		return True
 
-	best_effort(_write, None)
+	if not best_effort(_write, False):
+		_release_shared_slot("title", text)
