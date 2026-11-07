@@ -49,6 +49,7 @@ def pytest_configure(config):
 	# without the tool they skip locally.
 	config.addinivalue_line("markers", "rq: needs the rq package (installed by the ai-quality workflow)")
 	config.addinivalue_line("markers", "semgrep: needs the semgrep CLI and OPTIMUS_SEMGREP_RULES_DIR")
+	config.pluginmanager.import_plugin("optimus.tests.ci_skip_guard")
 
 
 # --- CI-friendly baseline frappe stub ---------------------------------------
