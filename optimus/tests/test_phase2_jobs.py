@@ -1,5 +1,6 @@
 """Line profiling delivery uses SQL ownership, never an HTTP inline fallback."""
 
+import json
 from copy import deepcopy
 from importlib import import_module
 from types import SimpleNamespace
@@ -1043,3 +1044,44 @@ def test_expired_run_with_no_identity_fails_without_requesting(expired):
 	expired.mod.analyze_expired("fake-session-doc", "fake-phase2", cutoff=expired.cutoff)
 	assert expired.row()["status"] == "Failed"
 	assert expired.calls == []
+
+
+def test_retry_bound_is_pinned(phase2):
+	assert phase2.mod.EXPIRED_RETRY_MINUTES == 60
+
+
+@pytest.mark.parametrize(("samples", "specific"), [(True, True), (None, True), (False, False)])
+def test_failed_after_the_bound_says_what_actually_happened(phase2, samples, specific):
+	import datetime
+	_expired_recording(phase2)
+	late = datetime.datetime(2026, 1, 1) + datetime.timedelta(minutes=phase2.mod.EXPIRED_RETRY_MINUTES + 1)
+	with phase2.db.transaction():
+		phase2.mod.expire_legacy("fake-session-doc", "fake-phase2", status="Recording", cutoff=late, samples=samples)
+	warnings = json.loads(phase2.row()["warnings_json"])
+	expected = phase2.mod.EXPIRED_NOT_ANALYZED if specific else "Line profiling recording expired."
+	assert len(warnings) == 1 and warnings[0].startswith(expected[:30])
+	assert (warnings[0] == phase2.mod.EXPIRED_NOT_ANALYZED) is specific
+
+
+def test_the_retry_clock_runs_from_the_start_not_from_a_parent_save(phase2):
+	"""A parent save moves the child's modified; the give-up time must not follow it."""
+	import datetime
+	started = datetime.datetime(2026, 1, 1)
+	cutoff = started + datetime.timedelta(minutes=phase2.mod.EXPIRED_RETRY_MINUTES + 5)
+	phase2.row().update(status="Recording", started_at=started, modified=cutoff - datetime.timedelta(minutes=1))
+	with phase2.db.transaction():
+		got = phase2.mod.expire_legacy("fake-session-doc", "fake-phase2", status="Recording", cutoff=cutoff, samples=True)
+	assert got is True and phase2.row()["status"] == "Failed"
+
+
+def test_giving_up_is_logged_once(phase2, monkeypatch):
+	import datetime
+
+	from optimus import safe_call
+	lines = []
+	monkeypatch.setattr(safe_call, "log_error_line", lines.append)
+	_expired_recording(phase2)
+	late = datetime.datetime(2026, 1, 1) + datetime.timedelta(minutes=phase2.mod.EXPIRED_RETRY_MINUTES + 1)
+	with phase2.db.transaction():
+		phase2.mod.expire_legacy("fake-session-doc", "fake-phase2", status="Recording", cutoff=late, samples=True)
+	assert len(lines) == 1 and "fake-phase2" in lines[0] and "samples are kept" in lines[0]

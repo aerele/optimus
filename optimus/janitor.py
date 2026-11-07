@@ -487,12 +487,16 @@ def _expire_phase2_run(row, status, cutoff):
 	from optimus.line_profile import capture as _lp_capture
 	from optimus.line_profile import jobs as _lp_jobs
 
-	samples = False
+	samples, unavailable = False, None
 	if status == "Recording":
 		try:
 			samples = _lp_capture.has_samples(row["run_uuid"])
-		except Exception:
-			samples = None  # unknown is never treated as empty: nothing is cleaned up
+		except Exception as exc:
+			samples, unavailable = None, type(exc).__name__  # unknown is never empty: nothing is cleaned up
+	if unavailable:
+		from optimus.safe_call import log_error_line
+
+		log_error_line(f"optimus janitor: sample count of line profiling run {row['run_uuid']} unavailable ({unavailable}); retrying next sweep")
 	outcome = ai_jobs._retry_sql(lambda: _lp_jobs.expire_legacy(
 		row["parent"], row["run_uuid"], status=status, cutoff=cutoff, samples=samples,
 	))

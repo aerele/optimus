@@ -26,7 +26,8 @@ LEASE_SECONDS = JOB_SECONDS + 120
 RENDER_LEASE_SECONDS = 600
 MAX_ATTEMPTS = 4
 # An expired recording that has samples is retried on each janitor sweep while its sample count or
-# admission is unavailable for a passing reason; this long past expiry it is failed, samples kept.
+# admission is unavailable for a passing reason; this long past the run's start plus the recording
+# bound it is failed, samples kept (they then expire by themselves after capture.DATA_TTL_SECONDS).
 EXPIRED_RETRY_MINUTES = 60
 # Refusals that clear by themselves: the next sweep may admit the run.
 PASSING_REFUSALS = frozenset({"busy", "ai_refresh", "not_ready"})
@@ -624,6 +625,9 @@ def expire_legacy(docname, run_uuid, *, status, cutoff, samples=False):
 	the caller can stop capture and queue analysis, as the Stop button does. An
 	unknown sample count (samples=None) returns "retry" and leaves the run for the
 	next sweep. Both give way to Failed once the run is EXPIRED_RETRY_MINUTES past expiry.
+	That Failed run says its analysis could not start (EXPIRED_NOT_ANALYZED) and its Redis
+	samples are not deleted, so Retry Analyze works while they last (their own TTL); only a
+	run known to have no samples fails with the "record a new pass" text and is cleaned up.
 	"""
 	_parent, row = _locked(docname, run_uuid)
 	if (not row or row["status"] != status or row.get("analyze_generation")
@@ -634,9 +638,13 @@ def expire_legacy(docname, run_uuid, *, status, cutoff, samples=False):
 	if status == "Analyzing" and row.get("results_json"):
 		_write(row, status="Ready", ended_at=_stamp(), analyze_render_pending=1)
 		return True
-	if status == "Recording" and samples is not False and not _gave_up(row, cutoff):
+	has_input = status == "Recording" and samples is not False
+	if has_input and not _gave_up(row, cutoff):
 		return "analyze" if samples else "retry"
+	if has_input:
+		_log_gave_up(run_uuid)
 	message = (
+		EXPIRED_NOT_ANALYZED if has_input else
 		"Line profiling recording expired. Record a new line-profile pass and stop it after reproducing the flow."
 		if status == "Recording" else
 		"Line profiling analysis timed out or crashed. Retry analysis while its captured input is available."
@@ -646,7 +654,19 @@ def expire_legacy(docname, run_uuid, *, status, cutoff, samples=False):
 
 
 def _gave_up(row, cutoff):
-	return row["modified"] < cutoff - timedelta(minutes=EXPIRED_RETRY_MINUTES)
+	"""Whether the run began more than the recording bound plus EXPIRED_RETRY_MINUTES ago.
+
+	started_at is set once when the run starts; a row's modified moves whenever its parent
+	session is saved, so it would restart the clock. Legacy rows without it use modified.
+	"""
+	return (row.get("started_at") or row["modified"]) < cutoff - timedelta(minutes=EXPIRED_RETRY_MINUTES)
+
+
+def _log_gave_up(run_uuid):
+	"""One deduplicated ERROR line (Frappe drops lower levels in production); outside any except."""
+	from optimus.safe_call import log_error_line
+
+	log_error_line(f"optimus line profiling run {run_uuid} expired and was failed without analysis; its samples are kept for Retry Analyze")
 
 
 def _fail_expired(docname, run_uuid):
@@ -654,6 +674,7 @@ def _fail_expired(docname, run_uuid):
 	_parent, row = _locked(docname, run_uuid)
 	if not row or row["status"] != "Recording":
 		return False
+	_log_gave_up(run_uuid)
 	_write(row, status="Failed", analyze_dispatch_pending=0, warnings_json=json.dumps([EXPIRED_NOT_ANALYZED]))
 	return True
 
@@ -688,7 +709,7 @@ def analyze_expired(docname, run_uuid, *, cutoff):
 def _will_clear(docname, run_uuid, out, cutoff):
 	if out.get("reason") not in PASSING_REFUSALS:
 		return False
-	row = frappe.db.get_value(TABLE, {"parent": docname, "run_uuid": run_uuid}, ["modified"], as_dict=True)
+	row = frappe.db.get_value(TABLE, {"parent": docname, "run_uuid": run_uuid}, ["modified", "started_at"], as_dict=True)
 	return bool(row) and not _gave_up(row, cutoff)
 
 

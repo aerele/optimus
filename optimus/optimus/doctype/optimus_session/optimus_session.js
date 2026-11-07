@@ -1030,7 +1030,8 @@ function start_phase2(frm, picks, auto_expand) {
 				// Show the first expansion inline so the dev sees what was
 				// added; remaining expansions appear in the form's run row.
 				var first = expansions[0];
-				var expanded = [first.original.split(".").pop(), first.chain.length];
+				// show_alert renders HTML, and translation arguments are not escaped.
+				var expanded = [frappe.utils.escape_html(first.original.split(".").pop()), first.chain.length];
 				msg += " " + (expansions.length > 1
 					? __("Auto-expanded {0} → {1} functions (+ {2} more)", expanded.concat(expansions.length - 1))
 					: __("Auto-expanded {0} → {1} functions", expanded));
@@ -1198,14 +1199,43 @@ function render_phase2_progress(frm) {
 // Why a Failed session failed, as plain text. set_intro shows a string with no element
 // as text, so the reason is wrapped in one: the escaped entities then render as characters
 // and line breaks survive. A refresh clears the intro, so each refresh sets it once.
-const _ANALYZE_FAILED = /^Analysis failed \((\w{1,80})\)\. Details are in the Error Log under 'optimus ai analyze'\.$/;
+// The server stores English sentences; each fixed one is matched here and shown translated,
+// and the Retry hint goes only to users who can act. Letters, digits and "_" of any script
+// are allowed in the error type, as Python allows them in a class name.
+const _ANALYZE_FAILED = /^Analysis failed \(([\p{L}\p{N}_]{1,80})\)\. Details are in the Error Log under 'optimus ai analyze'\.$/u;
+const _ANALYZE_CAP = /^Scheduler is disabled and this session has (\d+) recordings, exceeding the inline analyze cap of (\d+)\. Re-enable the scheduler \(bench enable-scheduler\) and click Retry Analyze on this session's form view\.$/;
+const _JANITOR_TIMEOUT = "Analyze job timed out, crashed, or its analyze heartbeat lapsed (the optimus log names a failed or yielded heartbeat). The session owner, or anyone who can edit it, can use Retry Analyze; saved reports and retained input are kept.";
+const _SNAPSHOT_UNSAVED = "Recording snapshot could not be saved. Redis input was retained for Retry Analyze (up to 7 days); do not clear Recorder data.";
+
+function _retry_hint(can_act) {
+	return can_act
+		? __("Use Retry Analyze to run it again while its captured input is available.")
+		: __("Ask the session owner to run Retry Analyze.");
+}
 
 function _failure_reason_text(warnings, can_act) {
 	const failed = _ANALYZE_FAILED.exec(warnings);
-	if (!failed) return warnings;
-	let text = __("Analysis failed ({0}). Details are in the Error Log under 'optimus ai analyze'.", [failed[1]]);
-	if (can_act) text += " " + __("Use Retry Analyze to run it again while its captured input is available.");
-	return text;
+	if (failed) {
+		// The Error Log is readable by System Manager only.
+		const where = frappe.user && frappe.user.has_role && frappe.user.has_role("System Manager")
+			? __("Analysis failed ({0}). Details are in the Error Log under 'optimus ai analyze'.", [failed[1]])
+			: __("Analysis failed ({0}). Ask a system administrator to check the Error Log.", [failed[1]]);
+		return where + " " + _retry_hint(can_act);
+	}
+	const cap = _ANALYZE_CAP.exec(warnings);
+	if (cap) {
+		return __("Scheduler is disabled and this session has {0} recordings, exceeding the inline analyze cap of {1}. Re-enable the scheduler (bench enable-scheduler).", [cap[1], cap[2]]) +
+			" " + _retry_hint(can_act);
+	}
+	if (warnings === _JANITOR_TIMEOUT) {
+		return __("Analyze job timed out, crashed, or its analyze heartbeat lapsed (the optimus log names a failed or yielded heartbeat). Saved reports and retained input are kept.") +
+			" " + _retry_hint(can_act);
+	}
+	if (warnings === _SNAPSHOT_UNSAVED) {
+		return __("Recording snapshot could not be saved. Redis input was retained for up to 7 days; do not clear Recorder data.") +
+			" " + _retry_hint(can_act);
+	}
+	return warnings;
 }
 
 function _failure_intro_html(text) {

@@ -406,6 +406,23 @@ class TestSweepStalePhase2Runs:
 		assert seen.expire == [known]
 		assert seen.analyzed == [] and seen.cleaned == []
 
+	def test_unavailable_sample_count_is_logged_with_the_error_type_only(self, monkeypatch):
+		from optimus import safe_call
+		lines = []
+		monkeypatch.setattr(safe_call, "log_error_line", lines.append)
+		def broken(run_uuid):
+			raise ConnectionError("secret redis host")
+		self._expiry(monkeypatch, broken, lambda samples: "retry")
+		assert len(lines) == 1 and "run-1" in lines[0] and "ConnectionError" in lines[0]
+		assert "secret redis host" not in lines[0]
+
+	def test_known_sample_count_logs_nothing(self, monkeypatch):
+		from optimus import safe_call
+		lines = []
+		monkeypatch.setattr(safe_call, "log_error_line", lines.append)
+		self._expiry(monkeypatch, lambda run_uuid: True, lambda samples: "analyze")
+		assert lines == []
+
 	def test_no_set_value_when_no_phase2_rows(self, monkeypatch):
 		from optimus import ai_jobs
 		stub = _install_frappe_stub(monkeypatch)

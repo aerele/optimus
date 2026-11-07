@@ -339,3 +339,8 @@ body.modal-open #frappe-profiler-widget {
 	color: var(--text-muted, #6b7280);
 	font-size: 0.78em;
 }
+
+/* The Failed session reason carries an error type of up to 80 characters with no break point. */
+.optimus-failure-reason {
+	overflow-wrap: anywhere;
+}
