@@ -212,3 +212,22 @@ def test_persistence_conflict_is_not_replayed_with_mutated_trees(delivery, monke
 		analyze.run("s")
 	assert len(calls) == 1 and delivery.status == "Failed"
 	assert delivery.recordings and not [e for e in delivery.events if e[0] == "cleanup"]
+
+
+def test_the_analyzers_get_the_overall_deadline_in_their_context(delivery, monkeypatch):
+	import time
+
+	seen = []
+
+	def spy(recordings, context):
+		seen.append(context.deadline)
+		from optimus.analyzers.base import AnalyzerResult
+
+		return AnalyzerResult()
+
+	monkeypatch.setattr(analyze, "_get_analyzers", lambda: [spy])
+	before = time.monotonic()
+	analyze.run("s")
+
+	assert len(seen) == 1
+	assert seen[0] - before == pytest.approx(analyze.ANALYZE_TOTAL_BUDGET_SECONDS, abs=30)

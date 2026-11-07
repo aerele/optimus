@@ -35,15 +35,22 @@ _STATEMENTS = (
 	("cardinality", re.compile(r"select count\(distinct (.+?)\) from (`[^`]+`)", re.I)),
 )
 
-# Errors that repeat for the same statement: syntax error, statement timeout, no such
-# table, unknown column. Only these are remembered; anything else (connection lost,
-# lock wait, deadlock) is raised without caching so a later shape retries.
-_DETERMINISTIC_ERRORS = frozenset({1064, 1969, 1146, 1054})
+# Errors that repeat for the same statement: syntax error, no such table, unknown column.
+# Only these are remembered; anything else (connection lost, lock wait, deadlock) is raised
+# without caching so a later shape retries.
+_DETERMINISTIC_ERRORS = frozenset({1064, 1146, 1054})
 
-# Set on an error raised from the cache, naming the optimizer statement that failed.
+# 1969 (statement timeout) repeats only for the full-table COUNT(DISTINCT); on the cheap
+# metadata reads it is a one-off lock or load blip that must not poison the whole table.
+_TIMEOUT_ERROR = 1969
+_TIMEOUT_REPEATS_FOR = "cardinality"
+
+# Set on an error raised from the cache, naming the optimizer statement that failed (and,
+# for the cardinality statement, the column it counted).
 STATEMENT_ATTRIBUTE = "optimus_statement"
+COLUMN_ATTRIBUTE = "optimus_column"
 
-_OWN_ATTRIBUTES = ("_real", "_memo", "_passthrough", "_tables")
+_OWN_ATTRIBUTES = ("_real", "_memo", "_passthrough", "_tables", "_hits", "_misses")
 
 
 def _recognise(query) -> tuple | None:
@@ -66,6 +73,8 @@ class CachingDb:
 		object.__setattr__(self, "_memo", {})
 		object.__setattr__(self, "_passthrough", tuple(passthrough_errors))
 		object.__setattr__(self, "_tables", {})
+		object.__setattr__(self, "_hits", 0)
+		object.__setattr__(self, "_misses", 0)
 
 	def __getattr__(self, name):
 		return getattr(self._real, name)
@@ -87,13 +96,21 @@ class CachingDb:
 		key = _recognise(query)
 		if key is None or args or set(kwargs) - {"as_dict"}:
 			return self._real.sql(query, *args, **kwargs)
-		kind = key[0]
+		recognised = key
 		key = (*key, bool(kwargs.get("as_dict")))
-		if key not in self._memo:
-			self._memo[key] = self._run(query, kwargs)
-		return self._replay(self._memo[key], kind)
+		if key in self._memo:
+			self._hits += 1
+		else:
+			self._misses += 1
+			self._memo[key] = self._run(query, kwargs, recognised[0])
+		return self._replay(self._memo[key], recognised)
 
-	def _run(self, query, kwargs) -> tuple:
+	def optimus_cache_stats(self) -> tuple[int, int]:
+		"""``(statements served from the cache, statements sent to the database)``; both
+		count only the recognised optimizer statements."""
+		return self._hits, self._misses
+
+	def _run(self, query, kwargs, kind) -> tuple:
 		"""Run the statement; an error comes back as an outcome only when it is worth remembering,
 		otherwise it is raised and the next caller tries again."""
 		try:
@@ -101,19 +118,21 @@ class CachingDb:
 		except Exception as error:
 			if (
 				isinstance(error, self._passthrough)
-				or not _is_deterministic(error)
+				or not _is_deterministic(error, kind)
 				or not _can_rebuild(error)
 			):
 				raise
 			return ("error", type(error), error.args)
 
 	@staticmethod
-	def _replay(outcome: tuple, kind: str):
+	def _replay(outcome: tuple, recognised: tuple):
 		if outcome[0] == "ok":
 			return outcome[1]
 		_, error_type, args = outcome
 		error = error_type(*args)
-		setattr(error, STATEMENT_ATTRIBUTE, kind)
+		setattr(error, STATEMENT_ATTRIBUTE, recognised[0])
+		if recognised[0] == "cardinality":
+			setattr(error, COLUMN_ATTRIBUTE, recognised[1])
 		raise error
 
 
@@ -123,10 +142,20 @@ def failed_statement(error: BaseException) -> str | None:
 	return getattr(error, STATEMENT_ATTRIBUTE, None)
 
 
-def _is_deterministic(error: Exception) -> bool:
-	"""True when the same statement would fail the same way again (syntax, statement timeout,
-	no such table or column), as opposed to a lost connection, lock wait or deadlock."""
-	return bool(error.args) and isinstance(error.args[0], int) and error.args[0] in _DETERMINISTIC_ERRORS
+def failed_column(error: BaseException) -> str | None:
+	"""The column of the cardinality statement that raised ``error``, when it came out of the cache."""
+	return getattr(error, COLUMN_ATTRIBUTE, None)
+
+
+def _is_deterministic(error: Exception, kind: str) -> bool:
+	"""True when the same statement would fail the same way again (syntax, no such table or
+	column, and a statement timeout of the cardinality count), as opposed to a lost connection,
+	lock wait, deadlock or a timeout of a metadata read."""
+	if not error.args or not isinstance(error.args[0], int):
+		return False
+	if error.args[0] == _TIMEOUT_ERROR:
+		return kind == _TIMEOUT_REPEATS_FOR
+	return error.args[0] in _DETERMINISTIC_ERRORS
 
 
 def _can_rebuild(error: Exception) -> bool:

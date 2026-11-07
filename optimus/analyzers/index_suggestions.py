@@ -17,6 +17,7 @@ import logging
 import re
 import time
 from collections import Counter, defaultdict, namedtuple
+from typing import NamedTuple
 
 from optimus.analyzers.base import (
 	FRAPPE_METADATA_COLUMNS,
@@ -35,7 +36,7 @@ from optimus.analyzers.index_where import (
 	parse_where,
 	strip_leading_comments,
 )
-from optimus.analyzers.optimizer_db_cache import cached_db, failed_statement
+from optimus.analyzers.optimizer_db_cache import cached_db, failed_column, failed_statement
 from optimus.dbdialect import get_dialect
 from optimus.safe_call import job_timeout_types, log_error_line
 
@@ -380,11 +381,13 @@ def _check_shapes(unique_queries, optimize_query, dialect, deadline) -> tuple[di
 	Returns ``({normalized: _Outcome}, number of shapes not checked)``. Table stats are
 	read once through ``cached_db`` and every statement runs under one time cap."""
 	if not unique_queries or _monotonic() >= deadline:
+		_log_stopped_early(len(unique_queries), len(unique_queries), None)
 		return {}, len(unique_queries)
 	import frappe
 
 	outcomes: dict[str, _Outcome] = {}
 	ordered = sorted(unique_queries.items(), key=lambda item: -item[1]["duration"])
+	suspect_logged = False
 	with cached_db(frappe, job_timeout_types()) as cached:
 		if not cached:
 			log_error_line(
@@ -395,8 +398,32 @@ def _check_shapes(unique_queries, optimize_query, dialect, deadline) -> tuple[di
 			for normalized, info in ordered:
 				if _monotonic() >= deadline:
 					break
-				outcomes[normalized] = _check_shape(info, optimize_query, dialect)
+				outcome = outcomes[normalized] = _check_shape(info, optimize_query, dialect)
+				if outcome.kind == "reserved" and outcome.value and not suspect_logged:
+					suspect_logged = True
+					log_error_line(
+						"optimus index_suggestions: a syntax error (1064) from the cardinality count does not "
+						f"look like a reserved column name, this may be a bug: {outcome.message[:300]}"
+					)
+		stats = frappe.local.db.optimus_cache_stats() if cached else None
+	_log_stopped_early(len(unique_queries) - len(outcomes), len(unique_queries), stats)
 	return outcomes, len(unique_queries) - len(outcomes)
+
+
+def _log_stopped_early(unchecked: int, total: int, stats) -> None:
+	"""Tell the operator (the Error Log line is for them, the report warning is for the user)
+	that the budget stopped the loop, or that the cache never recognised a statement."""
+	if unchecked:
+		hits, misses = stats or (0, 0)
+		log_error_line(
+			f"optimus index_suggestions: budget reached, {total - unchecked} of {total} query shapes "
+			f"checked ({hits} optimizer reads served from cache, {misses} sent to the database)"
+		)
+	elif stats is not None and total and not any(stats):
+		log_error_line(
+			"optimus index_suggestions: the optimizer ran but none of its table reads were recognised "
+			"for caching; Frappe may have changed its SQL, so every shape re-reads the table"
+		)
 
 
 def _check_shape(info: dict, optimize_query, dialect) -> _Outcome:
@@ -416,7 +443,7 @@ def _check_shape(info: dict, optimize_query, dialect) -> _Outcome:
 		if dialect.is_statement_timeout(e):
 			return _Outcome("timeout", None)
 		if _is_reserved_column_error(e):
-			return _Outcome("reserved", None)
+			return _Outcome("reserved", not _looks_like_reserved_word(e), str(e))
 		return _Outcome("real", type(e).__name__, str(e))
 
 
@@ -428,7 +455,26 @@ def _is_reserved_column_error(error: Exception) -> bool:
 	return bool(args) and args[0] == 1064 and failed_statement(error) == "cardinality"
 
 
-def _aggregate_outcomes(unique_queries, outcomes) -> tuple:
+def _looks_like_reserved_word(error: Exception) -> bool:
+	"""True when the 1064 message points at the start of the counted column, as it does for a
+	bare reserved word (``near 'read) from ...'``). Anything else is classified the same way but
+	logged once, so a parser bug does not hide behind the reserved-word case."""
+	column = failed_column(error) or ""
+	message = str(error.args[1]) if len(error.args) > 1 else ""
+	return bool(re.fullmatch(r"\w+", column)) and f"near '{column}".lower() in message.lower()
+
+
+class _Folded(NamedTuple):
+	suggestion_buckets: dict
+	parser_limit_failures: Counter
+	real_failures: Counter
+	dropped_meta_table_tables: set
+	timed_out: int
+	reserved_columns: int
+	failures_to_log: list
+
+
+def _aggregate_outcomes(unique_queries, outcomes) -> _Folded:
 	"""Fold the outcomes, in the order the shapes were first seen, into suggestion buckets and
 	failure counts, so the result does not depend on the order they were checked in."""
 	suggestion_buckets: dict[tuple, dict] = defaultdict(
@@ -456,7 +502,7 @@ def _aggregate_outcomes(unique_queries, outcomes) -> tuple:
 				failures_to_log.append((outcome.value, outcome.message, normalized))
 		else:
 			_bucket_suggestion(outcome.value, info, suggestion_buckets, dropped_meta_table_tables)
-	return (
+	return _Folded(
 		suggestion_buckets,
 		parser_limit_failures,
 		real_failures,
@@ -586,16 +632,14 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	outcomes, unchecked = _check_shapes(
 		unique_queries, _optimize_query, get_dialect(), _loop_deadline(context)
 	)
-	(
-		suggestion_buckets,
-		parser_limit_failures,
-		real_failures,
-		dropped_meta_table_tables,
-		timed_out,
-		reserved_columns,
-		failures_to_log,
-	) = _aggregate_outcomes(unique_queries, outcomes)
-	_log_optimizer_failures(failures_to_log)
+	folded = _aggregate_outcomes(unique_queries, outcomes)
+	suggestion_buckets = folded.suggestion_buckets
+	parser_limit_failures = folded.parser_limit_failures
+	real_failures = folded.real_failures
+	dropped_meta_table_tables = folded.dropped_meta_table_tables
+	timed_out = folded.timed_out
+	reserved_columns = folded.reserved_columns
+	_log_optimizer_failures(folded.failures_to_log)
 
 	# v0.5.1: verify each suggested (table, column) against
 	# information_schema before emitting a finding. Pre-v0.5.1 the

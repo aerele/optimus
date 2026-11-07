@@ -10,7 +10,6 @@ found) against a fake database that counts every statement it receives.
 
 import contextlib
 import hashlib
-import inspect
 import json
 import os
 import re
@@ -581,7 +580,7 @@ def test_an_already_cached_db_is_not_wrapped_twice(env):
 	assert env.local.db is env.db
 
 
-@pytest.mark.parametrize("code", [2006, 2013, 1205, 1213, 9999])
+@pytest.mark.parametrize("code", [2006, 2013, 1205, 1213, 9999, 1969])
 def test_a_transient_error_is_not_remembered(code):
 	db = FakeDb()
 	db.failures["describe"] = Exception(code, "transient")
@@ -594,7 +593,7 @@ def test_a_transient_error_is_not_remembered(code):
 	assert db.log["describe"] == 2
 
 
-@pytest.mark.parametrize("code", [1064, 1969, 1146, 1054])
+@pytest.mark.parametrize("code", [1064, 1146, 1054])
 def test_a_repeating_error_is_remembered(code):
 	db = FakeDb()
 	db.failures["describe"] = Exception(code, "repeats")
@@ -661,16 +660,6 @@ def test_the_budget_is_two_minutes():
 	assert index_suggestions.INDEX_SUGGESTIONS_BUDGET_SECONDS == 120
 
 
-def test_analyze_run_gives_the_context_the_overall_deadline():
-	from optimus import analyze
-
-	source = inspect.getsource(analyze.run)
-
-	assert re.search(
-		r"AnalyzeContext\([^)]*deadline=analyze_start \+ ANALYZE_TOTAL_BUDGET_SECONDS", source, re.S
-	)
-
-
 def test_a_clock_exactly_at_the_deadline_does_no_work(env, empty_context, monkeypatch):
 	monkeypatch.setattr(index_suggestions, "_monotonic", lambda: 500.0)
 	empty_context.deadline = 500.0
@@ -692,3 +681,88 @@ def test_a_clock_exactly_at_the_deadline_stops_the_loop(env, empty_context, monk
 
 	assert env.db.log["describe"] == 1  # the first shape moved the clock onto the deadline
 	assert any("1 of 4 SELECT query shapes were checked" in w for w in result.warnings)
+
+
+def test_a_timeout_is_remembered_only_for_the_cardinality_count():
+	for kind, statement, remembered in (
+		("cardinality", "select count(distinct status) from `tabItem`", True),
+		("describe", "describe `tabItem`", False),
+		("show_index", "show index from `tabItem`", False),
+	):
+		db = FakeDb()
+		db.failures[kind] = Exception(*TIMEOUT)
+		cache = _cache(db)
+		for _ in range(2):
+			with pytest.raises(Exception):
+				cache.sql(statement)
+
+		assert db.log[kind] == (1 if remembered else 2), kind
+
+
+def test_a_statement_with_trailing_text_is_not_recognised():
+	db = FakeDb()
+	cache = _cache(db)
+	for statement in (
+		"describe `tabItem` extra",
+		"show index from `tabItem` where 1",
+		"select count(distinct a) from `tabItem` where 1",
+		"select table_rows from information_schema.tables where table_name = 'tabItem' limit 1",
+	):
+		cache.sql(statement)
+		cache.sql(statement)
+
+	assert db.total == 8
+	assert cache.optimus_cache_stats() == (0, 0)
+
+
+def test_the_cache_counts_hits_and_misses():
+	cache = _cache(FakeDb())
+	for _ in range(3):
+		cache.sql("describe `tabItem`")
+
+	assert cache.optimus_cache_stats() == (2, 1)
+
+
+def test_the_first_syntax_error_that_does_not_look_reserved_is_logged_once(env, empty_context, monkeypatch):
+	env.db.failures["cardinality"] = Exception(1064, "You have an error in your SQL syntax near '@@)'")
+	lines = []
+	monkeypatch.setattr(index_suggestions, "log_error_line", lambda m, **kw: lines.append(m))
+
+	result = index_suggestions.analyze(_shapes(10), empty_context)
+
+	suspect = [m for m in lines if "does not look like a reserved column name" in m]
+	assert len(suspect) == 1 and "near '@@)'" in suspect[0]
+	assert any("10 query shape(s) use a column name MariaDB rejects" in w for w in result.warnings)
+
+
+def test_a_reserved_word_syntax_error_is_not_logged(env, empty_context, monkeypatch):
+	env.db.failures["cardinality"] = Exception(1064, "You have an error in your SQL syntax near 'read) from")
+	lines = []
+	monkeypatch.setattr(index_suggestions, "log_error_line", lambda m, **kw: lines.append(m))
+
+	index_suggestions.analyze(_session([_call(i, where="`read` = ?") for i in range(5)]), empty_context)
+
+	assert not [m for m in lines if "reserved" in m]
+
+
+def test_the_operator_log_says_when_the_budget_stopped_the_loop(env, empty_context, monkeypatch):
+	clock = _ticking(env, 1.0)
+	monkeypatch.setattr(index_suggestions, "_monotonic", lambda: clock["now"])
+	monkeypatch.setattr(index_suggestions, "INDEX_SUGGESTIONS_BUDGET_SECONDS", 1.0)
+	env.db.tables.update({f"tabT{i}" for i in range(4)})
+	lines = []
+	monkeypatch.setattr(index_suggestions, "log_error_line", lambda m, **kw: lines.append(m))
+
+	index_suggestions.analyze(_session([_call(i, table=f"T{i}") for i in range(4)]), empty_context)
+
+	assert any("budget reached, 1 of 4 query shapes checked" in m for m in lines)
+
+
+def test_the_operator_log_says_when_no_optimizer_read_was_recognised(env, empty_context, monkeypatch):
+	monkeypatch.setattr(optimizer_db_cache, "_STATEMENTS", ())
+	lines = []
+	monkeypatch.setattr(index_suggestions, "log_error_line", lambda m, **kw: lines.append(m))
+
+	index_suggestions.analyze(_shapes(3), empty_context)
+
+	assert any("none of its table reads were recognised" in m for m in lines)
