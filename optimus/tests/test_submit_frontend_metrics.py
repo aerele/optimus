@@ -392,12 +392,37 @@ def test_metrics_rate_limit_precedes_parse_and_redis_appends(mock_frappe, monkey
     assert not mock_frappe['list_store']
 
 
-@pytest.mark.parametrize('xhr', [{'wrong': 'container'}, ['not an entry']])
+@pytest.mark.parametrize('xhr', [{'wrong': 'container'}, 'text'])
 def test_invalid_metrics_shapes_never_append(mock_frappe, xhr):
     from optimus import api
     # a JSON string, as the endpoint's `payload: str` contract (and Frappe's type check) requires
     assert not api.submit_frontend_metrics(json.dumps({'session_uuid': 's', 'xhr': xhr}))['accepted']
     assert not mock_frappe['list_store']
+
+
+def _own_session(mock_frappe, uuid="S9"):
+    mock_frappe["cache_store"][f"profiler:session:{uuid}:meta"] = {"user": "alice@example.com", "docname": "PS"}
+
+
+def test_one_bad_row_is_dropped_and_the_rest_are_kept(mock_frappe):
+    from optimus import api
+    _own_session(mock_frappe)
+    good = {"name": "fcp", "value_ms": 5, "page_url": "/a"}
+    payload = json.dumps({"session_uuid": "S9", "xhr": ["junk", {"url": "/x"}], "vitals": [7, good, None]})
+    result = api.submit_frontend_metrics(payload)
+    assert result["accepted"] is True
+    assert result["dropped"] == 3
+    assert result["xhr_count"] == 1 and result["vitals_count"] == 1
+
+
+def test_an_oversized_entry_is_dropped_not_stored(mock_frappe):
+    from optimus import api
+    _own_session(mock_frappe)
+    fat = {"name": "fcp", "value_ms": 5, "page_url": "/" + "a" * 20_000}
+    ok = {"name": "fcp", "value_ms": 5, "page_url": "/a"}
+    result = api.submit_frontend_metrics(json.dumps({"session_uuid": "S9", "vitals": [fat, ok]}))
+    assert result["dropped"] == 1
+    assert len(mock_frappe["list_store"]["profiler:frontend:S9:vitals"]) == 1
 
 
 def test_cyclic_internal_metrics_are_bounded(mock_frappe):

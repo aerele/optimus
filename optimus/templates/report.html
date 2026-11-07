@@ -1852,6 +1852,18 @@
   @media (max-width: 760px) {
     .resource-grid { grid-template-columns: repeat(2, 1fr); }
   }
+  /* Frontend: on a phone the tiles stack one per row, and the two wide tables scroll inside
+     their own box instead of widening the page. */
+  #frontend .resource-grid > .resource-card { min-width: 0; }
+  #frontend .rc-value { overflow-wrap: anywhere; }
+  #frontend .tscroll { overflow-x: auto; max-width: 100%; }
+  #frontend .tscroll > table { margin: 12px 0; }
+  #frontend .tscroll > table.xhr-timing-table { min-width: 640px; }
+  #frontend .tscroll > table.vitals-table { min-width: 640px; }
+  #frontend .vitals-table td:first-child { min-width: 150px; overflow-wrap: anywhere; }
+  @media (max-width: 480px) {
+    #frontend .resource-grid { grid-template-columns: minmax(0, 1fr); }
+  }
 
   /* INDEX-REC CARDS - Phase I. One card per database table that has
      an actionable recommendation (composite index, candidate columns,
@@ -3349,6 +3361,8 @@
       Per-XHR timings from the browser joined to the matching server recording,
       plus Web Vitals (FCP, LCP, CLS) per page. Shows what the user actually
       felt - network overhead and page paint time that the server alone can't see.
+      Page-load timings (FCP, LCP, CLS, TTFB, DCL) are captured only for pages loaded after you press Record.
+      To include a page's load, reload it while recording.
     </p>
     {% set _fs = report_data.frontend.summary %}
     <div class="resource-grid">
@@ -3372,6 +3386,7 @@
 
     {% if report_data.frontend.xhr_matched %}
     <h3 style="margin-bottom: 8px;">Per-action XHR timing</h3>
+    <div class="tscroll">
     <table class="data tbl-clip xhr-timing-table">
       <colgroup>
         <col class="col-action">
@@ -3407,6 +3422,7 @@
         {% endfor %}
       </tbody>
     </table>
+    </div>
     {% endif %}
 
     {% if report_data.frontend.web_vitals %}
@@ -3416,6 +3432,7 @@
        classes (vital-good / vital-meh / vital-poor / vital-none) per
        web.dev thresholds. Closes the Phase I.5 partial-vitals loop:
        missing keys → vital-none + em-dash, computed in Python. #}
+    <div class="tscroll">
     <table class="data vitals-table">
       <thead>
         <tr>
@@ -3440,6 +3457,12 @@
         {% endfor %}
       </tbody>
     </table>
+    </div>
+    {% else %}
+    <p class="small muted frontend-empty">No page-load timings were captured in this session.</p>
+    {% endif %}
+    {% if _fs.dropped_rows %}
+    <p class="small muted frontend-dropped">{{ _fs.dropped_rows }} malformed browser timing row{{ "s were" if _fs.dropped_rows != 1 else " was" }} ignored.</p>
     {% endif %}
 
     {% if report_data.frontend.orphans %}
