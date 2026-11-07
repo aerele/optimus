@@ -463,6 +463,7 @@ def _mask_json_value(value: str, extra: tuple[str, ...]) -> str:
 
 OMITTED_SQL = "[SQL omitted: could not be read safely]"
 PLACEHOLDER = "'<REDACTED>'"
+INLINE_PLACEHOLDER = "<REDACTED>"
 LITERALS_MASKED_KEY = "optimus_literals_masked"
 # The comment the analyzer appends to a cut query; it is the one comment redaction keeps.
 SQL_TRUNCATION_MARKER = "-- [Optimus: query truncated"
@@ -488,7 +489,7 @@ _POSTGRES_STRINGS = (
 _MARIADB_COMMENTS = r"(?P<cm>/\*(?!M?!)[\s\S]*?\*/|--(?=[ \t\r\n]|$)[^\n]*|\#[^\n]*)|(?P<cond>/\*M?!)"
 _POSTGRES_COMMENTS = r"(?P<cm>/\*[\s\S]*?\*/|--[^\n]*)"
 _TAIL = r"""
-	|(?P<open>['"`][\s\S]*|/\*[\s\S]*)
+	|(?P<open>['"`][\s\S]*|/\*[\s\S]*{open_extra})
 	|(?P<w>[A-Za-z_\x80-\U0010ffff][\w$]*)
 	|(?P<ph>%\([A-Za-z0-9_]*\)s|%s|\?{placeholders})
 	|(?P<op><=>|!=|<>|<=|>=|::|\|\||->>|->|&&|@@|@>|<@|!~\*|!~|~\*|[=<>(),.;+\-*/%!~^&|@:\[\]{{}}])
@@ -498,18 +499,21 @@ _TAIL = r"""
 """
 
 
-def _build_lexer(strings: str, comments: str, placeholders: str) -> re.Pattern:
+def _build_lexer(strings: str, comments: str, placeholders: str, open_extra: str = "") -> re.Pattern:
 	"""Alternatives are ordered: comments and placeholders before operators, numbers before
 	``w2``, and ``w`` never starts with ``$`` (a PostgreSQL ``$1``)."""
 	return re.compile(
-		r"\s*(?:" + _BACKTICK + "|" + strings + "|" + comments + _TAIL.format(placeholders=placeholders),
+		r"\s*(?:" + _BACKTICK + "|" + strings + "|" + comments + _TAIL.format(placeholders=placeholders, open_extra=open_extra),
 		re.VERBOSE,
 	)
 
 
 _LEXERS = {
 	"mariadb": _build_lexer(_MARIADB_STRINGS, _MARIADB_COMMENTS, ""),
-	"postgres": _build_lexer(_POSTGRES_STRINGS, _POSTGRES_COMMENTS, r"|\$\d+"),
+	# A dollar quote that is never closed (a statement cut inside it) runs to the end as an open token.
+	"postgres": _build_lexer(
+		_POSTGRES_STRINGS, _POSTGRES_COMMENTS, r"|\$\d+", r"|\$(?:[A-Za-z_]\w*)?\$[\s\S]*"
+	),
 }
 _TOKEN_KIND = {"w2": "w"}
 _STRING_KINDS = ("str", "open", "dq", "id")
@@ -591,24 +595,48 @@ DEFAULT_SENSITIVE_SQL_COLUMNS: tuple[str, ...] = _COMPOUND_SQL_NAMES + _EXACT_SQ
 # A string literal shaped like a stored secret is masked wherever it sits.
 _SECRET_SHAPE = re.compile(
 	r"gAAAAA[A-Za-z0-9_-]{90,}={0,2}|\$pbkdf2(?:-sha\d+)?\$\d+\$\S+|\$argon2(?:id|i|d)\$\S+"
-	r"|\$2[aby]\$\d\d\$[./A-Za-z0-9]{53}"
+	r"|\$2[aby]\$\d\d\$[./A-Za-z0-9]{53}|pbkdf2:[a-z0-9]+:\d+\$\S+"
 )
-_SECRET_SHAPE_MARKS = ("gAAAAA", "$pbkdf2-", "$argon2", "$2a$", "$2b$", "$2y$")
+# The same shapes found inside a longer literal: the run stops at a quote or a space.
+_SECRET_SHAPE_INSIDE = re.compile(
+	r"gAAAAA[A-Za-z0-9_-]{90,}={0,2}|\$pbkdf2(?:-sha\d+)?\$\d+\$[^\s'\"\\]+"
+	r"|\$argon2(?:id|i|d)\$[^\s'\"\\]+|\$2[aby]\$\d\d\$[./A-Za-z0-9]{53}"
+	r"|pbkdf2:[a-z0-9]+:\d+\$[^\s'\"\\]+"
+)
+_SECRET_SHAPE_MARKS = ("gAAAAA", "$pbkdf2-", "$argon2", "$2a$", "$2b$", "$2y$", "pbkdf2:")
 _SHORT_NAME_LENGTH = 4
 _KEY_TEXT_MAX = 256
 _IDENTIFIER_MAX = 128
 _NAME_PARTS_MAX = 16
 _MEMO_MAX = 4096
 _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+_SEPARATORS = re.compile(r"[-\s]+")
+_NOT_NAME_CHARS = re.compile(r"[^a-z0-9_]")
 
 
 def _snake_case(text: str) -> str:
-	"""Lowercase with an underscore before each capital: ``accessToken`` -> ``access_token``."""
-	return _CAMEL_BOUNDARY.sub("_", text).lower()
+	"""Lowercase with an underscore before each capital and for each hyphen or space:
+	``accessToken`` -> ``access_token``, ``X-API-Key`` -> ``x_api_key``."""
+	return _SEPARATORS.sub("_", _CAMEL_BOUNDARY.sub("_", text).lower())
+
+
+def _fold(text: str) -> str:
+	"""Lowercase with hyphens and spaces as underscores, capitals left alone as letters:
+	``PassWord`` -> ``password``."""
+	return _SEPARATORS.sub("_", text.lower())
+
+
+def _snake_case_json(text: str) -> str:
+	"""As :func:`_snake_case` but spaces stay, so ``"key" :`` still reads as a JSON key."""
+	return _CAMEL_BOUNDARY.sub("_", text).lower().replace("-", "_")
 
 
 def _normalize_extras(extras) -> tuple[str, ...]:
-	cleaned = (_snake_case(extra.strip()) for extra in extras if isinstance(extra, str))
+	"""Each extra as snake_case and as plain folded text (``PassWord`` is ``pass_word`` and ``password``)."""
+	cleaned = []
+	for extra in extras:
+		if isinstance(extra, str) and extra.strip():
+			cleaned += [_snake_case(extra.strip()), _fold(extra.strip())]
 	return tuple(dict.fromkeys(extra for extra in cleaned if extra))
 
 
@@ -622,7 +650,6 @@ class _Names:
 		parts = _NAME_PARTS_MAX
 		name = rf"(?:[a-z0-9]+_){{0,{parts}}}(?:{compound})(?:_[a-z0-9]+){{0,{parts}}}|{exact}"
 		self.name = re.compile(name)
-		self.key = re.compile(rf"(?:.*[^a-z0-9])?(?:{name})", re.DOTALL)
 		self.json_key = re.compile(rf"""\\?"(?:{name})\\?"\s*[:,]""")
 		# The probe also takes each name without underscores, as a camelCase column lowercases to it.
 		every = tuple(
@@ -635,8 +662,12 @@ class _Names:
 		self.short_boundary = re.compile(
 			"(?<![a-z0-9])(?:" + "|".join(re.escape(n) for n in self.short) + ")(?![a-z0-9])"
 		)
+		# A key is tested by its tail, so a quick probe for any name rejects most keys at once.
+		self.probe = re.compile("|".join(re.escape(n) for n in every))
 		self._memo: dict[str, bool] = {}
 		self._normalized: dict[str, str] = {}
+		self._identifiers: dict[str, str] = {}
+		self._key_memo: dict[str, bool] = {}
 
 	def normalize(self, text: str) -> str:
 		"""``text`` as a lowercase snake_case name; memoised, as names repeat within a statement."""
@@ -645,6 +676,17 @@ class _Names:
 			hit = _snake_case(text)
 			if len(text) <= _IDENTIFIER_MAX and len(self._normalized) < _MEMO_MAX:
 				self._normalized[text] = hit
+		return hit
+
+	def identifier(self, text: str) -> str:
+		"""The form of ``text`` to test as a column name: its folded lowercase when that is a name
+		(``PassWord``), else its snake_case (``accessToken`` -> ``access_token``). Memoised."""
+		hit = self._identifiers.get(text)
+		if hit is None:
+			folded = _fold(text)
+			hit = folded if self.is_name(folded) else self.normalize(text)
+			if len(text) <= _IDENTIFIER_MAX and len(self._identifiers) < _MEMO_MAX:
+				self._identifiers[text] = hit
 		return hit
 
 	def is_name(self, identifier: str | None) -> bool:
@@ -662,14 +704,36 @@ class _Names:
 		return hit
 
 	def is_key(self, text: str) -> bool:
-		"""True when ``text`` (a stored key such as ``a@b.c_otpsecret``) ends in a sensitive name.
-		An absurdly long key counts as sensitive instead of costing a long match."""
-		if len(text) > _KEY_TEXT_MAX:
+		"""True when ``text`` (a stored key such as ``a@b.c_otpsecret`` or ``X-API-Key``) ends in a
+		sensitive name. An absurdly long key counts as sensitive instead of costing a long match.
+		Memoised, as a settings row repeats its keys."""
+		hit = self._key_memo.get(text)
+		if hit is None:
+			hit = len(text) > _KEY_TEXT_MAX or any(
+				self._ends_in_name(form) for form in (_fold(text), _snake_case(text))
+			)
+			if len(text) <= _KEY_TEXT_MAX and len(self._key_memo) < _MEMO_MAX:
+				self._key_memo[text] = hit
+		return hit
+
+	def _ends_in_name(self, form: str) -> bool:
+		"""The name lies inside the last run of ``[a-z0-9_]``, after any other character."""
+		tail = _NOT_NAME_CHARS.split(form)[-1]
+		if len(tail) > _IDENTIFIER_MAX:
 			return True
-		return self.key.fullmatch(text) is not None
+		if not self.probe.search(tail):
+			return False
+		if self.name.fullmatch(tail):
+			return True
+		start = tail.find("_") + 1
+		while start:
+			if self.name.fullmatch(tail, start):
+				return True
+			start = tail.find("_", start) + 1
+		return False
 
 	def hit(self, sql: str) -> bool:
-		lower = sql.lower()
+		lower = _fold(sql) if "-" in sql or " " in sql else sql.lower()
 		if any(name in lower for name in self.long):
 			return True
 		if any(name in lower for name in self.short) and self.short_boundary.search(lower):
@@ -691,6 +755,10 @@ def sql_names_hit(sql: str, extra_columns: tuple[str, ...] = ()) -> bool:
 
 
 # Statement grammar.
+# ``name = value`` inside the text of a string literal (a form body, a callback URL, a header line).
+_INLINE_PAIR = re.compile(r"""(?<![\w.-])([A-Za-z_][\w.-]{0,127})[ \t]*=[ \t]*("[^"\\']*"|[^\s&;'"\\]+)""")
+# Words that start a join: a value before ``LEFT JOIN`` must not swallow ``LEFT``.
+_JOIN_WORDS = frozenset("left right inner cross natural full outer join straight_join".split())
 _BOUNDARY_WORDS = frozenset(
 	"and or xor where on set having when then else end order group limit offset union intersect "
 	"except select from values value returning into join using update delete insert replace conflict "
@@ -837,11 +905,11 @@ class _Masker:
 	def _identifier(self, index) -> str | None:
 		kind = self.kinds[index]
 		if kind == "w":
-			return self.names.normalize(self.text[index])
+			return self.names.identifier(self.text[index])
 		if kind in ("bt", "id") or (kind == "dq" and self.dialect is None):
 			# No real column name is this long, and a string is not a name.
 			return (
-				self.names.normalize(self.text[index][1:-1])
+				self.names.identifier(self.text[index][1:-1])
 				if len(self.text[index]) <= _IDENTIFIER_MAX
 				else None
 			)
@@ -917,6 +985,8 @@ class _Masker:
 		else:
 			if kind == "str" and self._is_secret_literal(index):
 				self._mask(index, index)
+			elif kind in ("str", "dq") and "=" in self.text[index]:
+				self._mask_inline_pairs(index)
 			self._operand(index, kind, frame)
 
 	def _step_operator(self, index, text, frame):
@@ -975,9 +1045,19 @@ class _Masker:
 		text = self.text[index]
 		if ("$" in text or "gAAAAA" in text) and _SECRET_SHAPE.fullmatch(self._string_body(index)):
 			return True
-		return '"' in text and self.names.json_key.search(self.names.normalize(text)) is not None
+		return '"' in text and self.names.json_key.search(_snake_case_json(text)) is not None
+
+	def _mask_inline_pairs(self, index):
+		"""Mask the value of each ``name=value`` of a sensitive name in the text of a literal."""
+		start = self.sig[index][1]
+		for pair in _INLINE_PAIR.finditer(self.text[index]):
+			key, value = pair.group(1).rsplit(".", 1)[-1], pair.group(2)
+			if value != INLINE_PLACEHOLDER and self.names.is_name(self.names.identifier(key)):
+				self.spans.append((start + pair.start(2), start + pair.end(2), INLINE_PLACEHOLDER))
 
 	def _is_boundary_word(self, word) -> bool:
+		if word in _JOIN_WORDS and word != "join" and self._word(self.index + 1) in _JOIN_WORDS:
+			return True
 		if word not in _BOUNDARY_WORDS:
 			return False
 		if word in ("value", "values"):
@@ -1011,7 +1091,7 @@ class _Masker:
 		if not after_arrow and "$" not in self.text[index]:
 			return False
 		body = self._string_body(index)
-		return (after_arrow or body.startswith("$")) and self.names.is_key(self.names.normalize(body))
+		return (after_arrow or body.startswith("$")) and self.names.is_key(body)
 
 	# -- brackets and CASE
 	def _open_paren(self):
@@ -1203,7 +1283,7 @@ class _Masker:
 		)
 
 	def _key_of(self, frame) -> str:
-		return self.names.normalize(self._string_body(frame.first))
+		return self._string_body(frame.first)
 
 	def _record_element(self, frame):
 		kind = frame.kind
@@ -1328,7 +1408,18 @@ def redact_sql_outcome(
 			return OMITTED_SQL, True
 	if len(tokens) > _MAX_TOKENS or _lexically_untrusted(sql_str, tokens):
 		return OMITTED_SQL, True
-	return _Masker(sql_str, tokens, dialect, names).run()
+	text, masked_whole = _Masker(sql_str, tokens, dialect, names).run()
+	return _mask_stored_shapes(text), masked_whole
+
+
+def _mask_stored_shapes(text: str) -> str:
+	"""Last pass over the result: a value shaped like a stored hash or encrypted secret is masked
+	wherever it sits, also inside a longer literal that no name pointed at."""
+	if ("$" in text or "gAAAAA" in text or "pbkdf2:" in text) and any(
+		mark in text for mark in _SECRET_SHAPE_MARKS
+	):
+		return _SECRET_SHAPE_INSIDE.sub(INLINE_PLACEHOLDER, text)
+	return text
 
 
 def _has_many_dollar_tags(sql: str) -> bool:
@@ -1369,17 +1460,19 @@ def redact_sql_literals(
 
 def redact_call_queries(
 	calls, *, extra_columns: tuple[str, ...] = (), dialect: str | None = None, on_error=None
-) -> None:
+) -> dict[str, int]:
 	"""Apply :func:`redact_sql_fail_closed` over a recording's ``calls`` list in place. Touches the
 	``query`` and ``normalized_query`` fields, and sets ``optimus_literals_masked`` on a call
-	whose statement was masked whole.
+	whose statement was masked whole. Returns how many statements it read (``statements``), masked
+	whole (``masked_whole``) and omitted (``omitted``), so a drift to masking most SQL can be seen.
 
 	Mutates input different shape from the dict/list redactor because
 	calls lists are large and copying is wasteful when the caller
 	already owns the recording dict.
 	"""
+	counts = {"statements": 0, "masked_whole": 0, "omitted": 0}
 	if not isinstance(calls, list):
-		return
+		return counts
 	for call in calls:
 		if not isinstance(call, dict):
 			continue
@@ -1389,8 +1482,13 @@ def redact_call_queries(
 			call[field], masked = redact_sql_fail_closed(
 				call[field], extra_columns=extra_columns, dialect=dialect, on_error=on_error
 			)
+			if field == "query":
+				counts["statements"] += 1
+				counts["omitted"] += call[field] == OMITTED_SQL
+				counts["masked_whole"] += masked and call[field] != OMITTED_SQL
 			if masked:
 				call[LITERALS_MASKED_KEY] = True
+	return counts
 
 
 # ---------------------------------------------------------------------------

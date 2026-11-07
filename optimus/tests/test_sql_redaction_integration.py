@@ -227,8 +227,13 @@ def test_raw_gate_strips_a_new_name_and_leaves_sidebar_raw(raw_gate):
 def test_the_ai_gate_names_are_frozen_to_the_old_list():
 	from optimus import ai_privacy
 
-	assert len(ai_privacy._AI_RAW_GATE_NAMES) == 21
-	assert {"credit", "card", "bank"} <= set(ai_privacy._AI_RAW_GATE_NAMES)
+	old = {
+		"password", "pwd", "api_key", "apikey", "token", "secret", "csrf", "authorization", "cookie",
+		"encryption_key", "private_key", "session_id", "access_key", "salt", "hash", "otp", "ssn",
+		"recovery", "credit", "card", "bank",
+	}  # fmt: skip
+	assert len(ai_privacy._AI_RAW_GATE_NAMES) == len(old)
+	assert set(ai_privacy._AI_RAW_GATE_NAMES) == old
 
 
 # --- dialect lookup ----------------------------------------------------------------------------------
