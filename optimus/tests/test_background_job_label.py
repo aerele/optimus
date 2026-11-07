@@ -9,6 +9,7 @@ None.
 """
 
 import json
+import types
 from pathlib import Path
 
 import pytest
@@ -284,3 +285,43 @@ def test_actions_carry_no_inline_finding_field():
 	actions = [{"action_label": "save", "duration_ms": 1}]
 	out = build_report_context(_doc(), _ctx(actions=actions, findings=findings))
 	assert all("finding_inline_html" not in a for a in out["actions"] + out["actions_framework"])
+
+
+def _action_row(event_type, label, path=JOB_PATH):
+	return types.SimpleNamespace(
+		action_label=label, event_type=event_type, http_method="", path=path,
+		recording_uuid="", duration_ms=5000, queries_count=0, query_time_ms=0,
+		slowest_query_ms=0,
+	)
+
+
+def _render_actions(actions):
+	from optimus import renderer
+	from optimus.tests.test_render_duration_threshold import _doc as render_doc
+
+	html = renderer.render_raw(render_doc(actions), recordings=[])
+	start = html.index('id="per-action"')
+	return html[start : html.index("</table>", start)]
+
+
+@pytest.mark.parametrize("event_type", ["Background Job", "RQ Job"])
+def test_rendered_report_shows_a_job_row_with_label_pill_and_bg_class(event_type):
+	section = _render_actions([_action_row(event_type, GET_LABEL)])
+	assert f'<div class="action-name">{JOB_LABEL}</div>' in section
+	assert GET_LABEL not in section
+	assert '<span class="type-tag bg">RQ Job</span>' in section
+
+
+def test_rendered_report_keeps_a_page_request_row_blue():
+	section = _render_actions([_action_row("HTTP Request", "GET /app/todo", path="/app/todo")])
+	assert '<span class="type-tag">HTTP Request</span>' in section
+
+
+def test_action_rows_carry_one_job_flag_from_the_shared_predicate():
+	from optimus.report_context import _build_actions
+
+	rows = _build_actions([
+		{"event_type": "Background Job"}, {"event_type": "RQ Job"}, {"event_type": "HTTP Request"},
+	])
+	assert [r["is_background_job"] for r in rows] == [True, True, False]
+	assert [r["kind"] for r in rows] == ["bg", "bg", "http"]

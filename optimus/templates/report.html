@@ -2401,7 +2401,7 @@
         </div>
       {% endif %}
     </td>
-    <td><span class="type-tag{% if action.event_type == 'RQ Job' %} bg{% endif %}">{{ action.event_type }}</span></td>
+    <td><span class="type-tag{% if action.is_background_job %} bg{% endif %}">{{ action.event_type }}</span></td>
     {% set _ms = action.duration_ms or 0 %}
     {% set _pct = (_ms / max_ms * 100) if max_ms else 0 %}
     <td class="num bar-cell">

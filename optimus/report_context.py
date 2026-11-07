@@ -486,7 +486,7 @@ def _build_waterfall(waterfall_rows, fmt_ms=None) -> list[dict]:
 
 def _build_actions(actions, fmt_ms=None) -> list[dict]:
 	"""Contract ``actions`` = {number, name, meta, kind, duration_display,
-	duration_pct, duration_is_hot, bar_kind, queries, db_time_display}.
+	duration_pct, duration_is_hot, bar_kind, queries, db_time_display, is_background_job}.
 
 	The original action dict is spread through (so the ``action_row`` macro
 	still reads ``action_label``, ``http_method``, ``path`` etc.); contract
@@ -499,7 +499,8 @@ def _build_actions(actions, fmt_ms=None) -> list[dict]:
 	for idx, action in enumerate(actions or []):
 		duration_ms = action.get("duration_ms", 0) or 0
 		event_type = action.get("event_type", "")
-		kind = "bg" if is_background_job(event_type) else "http"
+		is_job = is_background_job(event_type)
+		kind = "bg" if is_job else "http"
 
 		meta_parts = []
 		if action.get("http_method"):
@@ -511,6 +512,7 @@ def _build_actions(actions, fmt_ms=None) -> list[dict]:
 		entry = dict(action)  # preserve original keys
 		entry.update({
 			"number": idx + 1,
+			"is_background_job": is_job,
 			"name": action.get("action_label", "") or "",
 			"meta": meta,
 			"kind": kind,
