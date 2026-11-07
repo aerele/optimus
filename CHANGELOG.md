@@ -8,6 +8,14 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.149] - 2026-11-06
+
+### Fixed
+
+- Line profiling now captures the whole function. Before, the function's source was cut at its first blank line, so any timed line after it was missing from the drill-down, a function whose timed lines were all below the cut was shown as "not invoked", and the function's total time was understated, which inflated the severity of Hot Line findings. Some functions also failed to start with a server error. A function you chose whose source cannot be read in full now refuses the run with a message naming the function and the reason; a function added automatically is skipped instead. A source line longer than 20,000 characters, or too many source lines in one run, now shows a clear message instead of a server error. Runs recorded on 0.12.72 to 0.12.141 may be incomplete, so re-record them.
+
+---
+
 ## [0.12.147] - 2026-11-06
 
 ### Internal
