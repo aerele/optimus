@@ -22,6 +22,7 @@ check is a single attribute lookup and never reads Redis.
 
 import functools
 import hashlib
+import random
 import re
 import sys as _sys
 import time
@@ -172,6 +173,7 @@ TREE_MAX_BYTES = 1 << 20
 TREE_MAX_SAMPLES = 60_000
 TREE_MAX_FRAMES = 300_000
 _THIN_ROUNDS = 6
+_THIN_SEED = 0x0971
 _STRING_OVERHEAD = 3
 _STACK_OVERHEAD = 4
 _SMALL_REF, _LARGE_REF = 2, 5
@@ -193,24 +195,53 @@ def _frame_records(session):
 	return records
 
 
+def _merge_equal_neighbours(records):
+	"""``records`` with each run of identical consecutive stacks summed into one sample.
+
+	Lossless: every stack keeps its total time and the tree analyze builds is the
+	same, so it is the first step before anything is thinned.
+	"""
+	merged = []
+	for stack, seconds in records:
+		if merged and merged[-1][0] == stack:
+			merged[-1] = (merged[-1][0], merged[-1][1] + seconds)
+		else:
+			merged.append((stack, seconds))
+	return merged
+
+
 def _thin_by_time(records, target):
 	"""Keep about ``target`` samples by time, so a long blocking sample keeps its stack.
 
-	Skipped time accumulates until it reaches the step; the sample that reaches it
-	is kept with that time, and any leftover goes to the last kept sample, so total
-	time is exact.
+	The time axis is cut into windows of ``total / target`` seconds. Each window keeps
+	one stack, chosen at a random point inside the window (a fixed seed, so the same
+	input thins the same way) and carries the whole window's time, so total time is
+	exact. A random point per window, not every n-th sample, keeps a periodic call
+	pattern from landing on the same stack each time; a sample longer than a window
+	is kept under its own stack.
 	"""
 	total = sum(seconds for _, seconds in records)
 	step = total / max(target, 1)
 	if step <= 0:
 		return list(records)
+	rng = random.Random(_THIN_SEED)
 	kept = []
-	pending = 0.0
+	elapsed = pending = 0.0
+	boundary = step
+	point = rng.random() * step
+	chosen = None
 	for stack, seconds in records:
+		elapsed += seconds
 		pending += seconds
-		if pending >= step:
-			kept.append((stack, pending))
+		if chosen is None and elapsed > point:
+			chosen = stack
+		if elapsed >= boundary:
+			kept.append((stack if seconds >= step else chosen, pending))
 			pending = 0.0
+			chosen = None
+			while boundary <= elapsed:
+				boundary += step
+			point = boundary - step + rng.random() * step
 	if pending and kept:
 		stack, seconds = kept[-1]
 		kept[-1] = (stack, seconds + pending)
@@ -219,17 +250,28 @@ def _thin_by_time(records, target):
 	return kept
 
 
+def _over_bounds(records):
+	return len(records) > TREE_MAX_SAMPLES or sum(len(stack) for stack, _ in records) > TREE_MAX_FRAMES
+
+
 def _bounded_records(records):
-	"""``records`` thinned by time to at most TREE_MAX_SAMPLES samples and TREE_MAX_FRAMES frames."""
+	"""``(records, merged, thinned)``: ``records`` within TREE_MAX_SAMPLES and TREE_MAX_FRAMES.
+
+	A tree already within them is returned as it is. Otherwise equal neighbours are
+	merged first (lossless) and the rest is thinned by time only if still over.
+	"""
+	if not _over_bounds(records):
+		return records, False, False
+	records, thinned = _merge_equal_neighbours(records), False
 	if len(records) > TREE_MAX_SAMPLES:
-		records = _thin_by_time(records, TREE_MAX_SAMPLES)
+		records, thinned = _thin_by_time(records, TREE_MAX_SAMPLES), True
 	for _ in range(_THIN_ROUNDS):
 		frames = sum(len(stack) for stack, _ in records)
 		if frames <= TREE_MAX_FRAMES or len(records) < 2:
 			break
 		target = int(len(records) * TREE_MAX_FRAMES / frames * 0.9)
-		records = _thin_by_time(records, max(1, min(target, len(records) - 1)))
-	return records
+		records, thinned = _thin_by_time(records, max(1, min(target, len(records) - 1))), True
+	return records, True, thinned
 
 
 def _estimate_bytes(string_bytes, strings, stacks, depth_total, samples):
@@ -263,39 +305,85 @@ def _intern_records(records):
 	return interned, _estimate_bytes(string_bytes, len(strings), len(stacks), depth_total, len(interned))
 
 
-def _original_samples(session, records):
-	thinned = getattr(session, "optimus_thinned", None)
-	return thinned["samples"] if isinstance(thinned, dict) else len(records)
-
-
 def compact_pyi_session(session, budget=None):
 	"""Intern a pyinstrument session's stacks in place and thin it to the byte budget.
 
 	Lossless unless the estimate is over ``budget`` (default TREE_MAX_BYTES) or the
-	session has more than TREE_MAX_SAMPLES samples or TREE_MAX_FRAMES frames; then samples are thinned by time
-	and ``session.optimus_thinned = {"every", "samples"}`` says so. Returns
-	``{"estimate", "samples", "every"}``, or None (session untouched) for a shape this
-	does not know. The new records are built first and assigned in one step.
+	merged session has more than TREE_MAX_SAMPLES samples or TREE_MAX_FRAMES frames;
+	then samples are thinned by time and ``session.optimus_thinned = {"every",
+	"samples"}`` says so. Returns ``{"estimate", "samples", "every"}``, or None
+	(session untouched) for a shape this does not know. The new records are built
+	first and assigned in one step.
 	"""
 	records = _frame_records(session)
 	if records is None:
 		return None
 	budget = TREE_MAX_BYTES if budget is None else budget
-	original = _original_samples(session, records)
-	records = _bounded_records(records)
+	prior = getattr(session, "optimus_thinned", None)
+	count = getattr(session, "sample_count", None)
+	# the raw sample count: kept across rounds, since a merged session has fewer records
+	original = prior["samples"] if isinstance(prior, dict) else max(len(records), count if isinstance(count, int) else 0)
+	records, merged, thinned = _bounded_records(records)
 	interned, estimate = _intern_records(records)
 	for _ in range(_THIN_ROUNDS):
-		target = int(len(records) * budget / estimate) if estimate else 0
 		if estimate <= budget or len(records) < 2:
 			break
-		records = _thin_by_time(records, min(target, len(records) - 1))
+		if not merged:
+			records, merged = _merge_equal_neighbours(records), True
+			interned, estimate = _intern_records(records)
+			continue
+		target = int(len(records) * budget / estimate)
+		records, thinned = _thin_by_time(records, min(target, len(records) - 1)), True
 		interned, estimate = _intern_records(records)
-	every = max(1, round(original / max(len(interned), 1)))
 	session.frame_records = interned
+	if not (thinned or isinstance(prior, dict)):
+		return {"estimate": estimate, "samples": len(interned), "every": 1}
+	every = max(2, round(original / max(len(interned), 1)))
 	session.sample_count = len(interned)
-	if every > 1:
-		session.optimus_thinned = {"every": every, "samples": original}
+	session.optimus_thinned = {"every": every, "samples": original}
 	return {"estimate": estimate, "samples": len(interned), "every": every}
+
+
+class _TooLarge(Exception):
+	pass
+
+
+class _CappedBuffer:
+	"""A pickle target that stops the dump once it has taken more than ``limit`` bytes."""
+
+	def __init__(self, limit):
+		self.limit = limit
+		self.size = 0
+		self.chunks = []
+
+	def write(self, data):
+		self.size += len(data)
+		if self.size > self.limit:
+			raise _TooLarge
+		self.chunks.append(bytes(data))
+
+
+def _capped_dumps(obj, limit):
+	"""``pickle.dumps(obj)``, or None once it would pass ``limit`` bytes, without building the rest."""
+	import pickle
+
+	buffer = _CappedBuffer(limit)
+	try:
+		pickle.Pickler(buffer).dump(obj)
+	except _TooLarge:
+		return None
+	return b"".join(buffer.chunks)
+
+
+# What is stored in place of a tree that cannot fit, so analyze can say why it is missing.
+TREE_DROPPED_KEY = "optimus_tree_dropped"
+
+
+def dropped_tree_blob():
+	"""The pickle stored when a tree is too large to keep: a one-key marker analyze reads."""
+	import pickle
+
+	return pickle.dumps({TREE_DROPPED_KEY: "too_large"})
 
 
 def pickle_pyi_session(session):
@@ -303,23 +391,27 @@ def pickle_pyi_session(session):
 
 	Thins further when the real pickle is over the cap (the estimate is only close).
 	``blob`` is None when it cannot fit or ``info`` is None for an unknown shape that
-	is pickled as is.
+	is pickled as is. A pickle is stopped once it is past twice the cap, so a session
+	that cannot be compacted is never pickled in full.
 	"""
-	import pickle
+	from optimus import safe_call
 
 	budget = TREE_MAX_BYTES
 	info = None
 	for _ in range(_THIN_ROUNDS):
 		try:
 			info = compact_pyi_session(session, budget)
-		except Exception:
+		except Exception as exc:
 			info = None
-		blob = pickle.dumps(session)
-		if len(blob) <= TREE_MAX_BYTES:
+			safe_call.log_error_line(
+				f"optimus: call tree compaction failed ({type(exc).__name__})", dedupe_seconds=3600
+			)
+		blob = _capped_dumps(session, 2 * TREE_MAX_BYTES)
+		if blob is not None and len(blob) <= TREE_MAX_BYTES:
 			return blob, info
 		if info is None or info["samples"] < 2:
 			break
-		budget = int(budget * TREE_MAX_BYTES / len(blob) * 0.9)
+		budget = int(budget * (TREE_MAX_BYTES / len(blob) if blob else 0.25) * 0.9)
 	return None, info
 
 

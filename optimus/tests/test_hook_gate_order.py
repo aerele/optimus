@@ -3,6 +3,9 @@
 
 """The request and job hooks read settings only after the cheap local gates pass."""
 
+import sys
+import types
+
 import pytest
 
 from optimus import hooks_callbacks as hc
@@ -112,3 +115,33 @@ class TestBeforeJobOrder:
 		hc.before_job(method="x.y", kwargs={"_profiler_session_id": "s1"})
 
 		assert env.bg_started == [("s1", "x.y")]
+
+	@pytest.fixture
+	def job(self, monkeypatch):
+		job = types.SimpleNamespace(id="rq-1")
+		fake = types.ModuleType("rq")
+		fake.get_current_job = lambda: job
+		monkeypatch.setitem(sys.modules, "rq", fake)
+		return job
+
+	def test_a_disabled_site_leaves_no_retry_state(self, env, reads, job):  # noqa: F811
+		env.enabled = False
+
+		hc.before_job(method="x.y", kwargs={"_profiler_session_id": "s1"})
+
+		assert not hasattr(job, "_optimus_retry_state")
+
+	def test_an_analyzing_worker_leaves_no_retry_state(self, env, reads, job):  # noqa: F811
+		env.local.optimus_analyzing = True
+
+		hc.before_job(method="x.y", kwargs={"_profiler_session_id": "s1"})
+
+		assert not hasattr(job, "_optimus_retry_state")
+
+	def test_a_recorded_job_keeps_its_session_for_a_retry(self, env, reads, job):  # noqa: F811
+		hc.before_job(method="x.y", kwargs={"_profiler_session_id": "s1"})
+		kwargs = {}
+		hc.before_job(method="x.y", kwargs=kwargs)
+
+		assert job._optimus_retry_state["session_uuid"] == "s1"
+		assert env.bg_started[-1] == ("s1", "x.y")

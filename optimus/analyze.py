@@ -1366,8 +1366,19 @@ def _report_missing_trees(context, recordings: list[dict], meta: dict, now: date
 	if not meta.get("capture_python_tree", True):
 		return
 	missing = [rec for rec in recordings if rec.get("pyi_session") is None]
+	too_large = [rec for rec in missing if rec.get("tree_dropped")]
+	missing = [rec for rec in missing if not rec.get("tree_dropped")]
 	expired = [rec for rec in missing if _outlived_data_ttl(rec, now)]
 	total, hours = len(recordings), RECORDING_DATA_TTL_SECONDS // 3600
+	if too_large:
+		context.warnings.append(
+			f"Python call trees were too large to keep for {len(too_large)} of {total} requests, so "
+			"they are missing from the call tree. SQL findings are complete."
+		)
+		safe_call.log_error_line(
+			f"optimus: {len(too_large)} of {total} Python call trees were too large to keep "
+			f"(session {context.session_uuid})"
+		)
 	if expired:
 		context.warnings.append(
 			f"Python call trees were missing for {len(expired)} of {total} requests: Optimus keeps them "
@@ -1382,9 +1393,9 @@ def _report_missing_trees(context, recordings: list[dict], meta: dict, now: date
 	if never_captured:
 		context.warnings.append(
 			f"Python call trees were not captured for {never_captured} of {total} requests "
-			"(pyinstrument was unavailable or failed, Frappe's Recorder was already running, the tree "
-			"was too large to keep, Redis evicted it when it ran short of memory, or it could not be "
-			"read after an encryption key change). SQL findings are complete."
+			"(pyinstrument was unavailable or failed, Frappe's Recorder was already running, Redis "
+			"evicted them when it ran short of memory, or they could not be read after an encryption "
+			"key change). SQL findings are complete."
 		)
 
 
@@ -1440,6 +1451,7 @@ def _fetch_recordings(recording_uuids: list[str]):
 
 		# Load the pyinstrument tree pickle (best-effort) via the shared,
 		# HMAC-verified loader (see _deserialize_tree).
+		from optimus import capture as _capture
 		from optimus.ai_fix import _InterruptGuard, log_ai_failure
 		guard = _InterruptGuard(base=True)
 		pyi_session = None
@@ -1488,6 +1500,9 @@ def _fetch_recordings(recording_uuids: list[str]):
 		if failed:
 			log_ai_failure("optimus ai recording lock events read", reason="lock_events_read_failed")
 
+		if isinstance(pyi_session, dict) and _capture.TREE_DROPPED_KEY in pyi_session:
+			rec["tree_dropped"] = True  # stored as a marker: the tree was too large to keep
+			pyi_session = None
 		rec["pyi_session"] = pyi_session
 		rec["sidecar"] = sidecar
 		rec["lock_events"] = lock_events

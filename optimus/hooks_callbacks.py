@@ -471,7 +471,7 @@ def before_job(method=None, kwargs=None, **rest):
 		# (kill-switch included): if we leave the marker in kwargs, the user's
 		# method will be called with an unexpected keyword argument and crash.
 		session_uuid = kwargs.pop("_profiler_session_id", None)
-		retry_state = _capture.job_retry_state(create=bool(session_uuid))
+		retry_state = _capture.job_retry_state(create=False)
 		if not session_uuid and retry_state:
 			# Frappe re-runs a deadlocked job with the marker already popped.
 			session_uuid = retry_state.get("session_uuid")
@@ -485,6 +485,9 @@ def before_job(method=None, kwargs=None, **rest):
 
 		if getattr(frappe.local, "optimus_analyzing", False):
 			return
+		# Created only now: a job that records nothing leaves no state behind.
+		if retry_state is None:
+			retry_state = _capture.job_retry_state(create=True)
 		if retry_state is not None:
 			retry_state["session_uuid"] = session_uuid
 
@@ -670,8 +673,8 @@ def _signed_tree_blob(last_session, recording_uuid: str):
 	"""The signed, size-capped pickle of the pyinstrument session, or None to store nothing.
 
 	Sessions of an unknown shape are pickled as they are and stored only if they fit.
-	A tree that cannot fit even thinned is dropped with a warning; analyze reports
-	it as not captured.
+	A tree that cannot fit even thinned is replaced by a small marker, so analyze can
+	report it as too large to keep, and logs one line per hour.
 	"""
 	from optimus import safe_call
 	from optimus.session import _has_stable_hmac_secret, sign_blob
@@ -685,7 +688,7 @@ def _signed_tree_blob(last_session, recording_uuid: str):
 			f"optimus: a Python call tree did not fit {_capture.TREE_MAX_BYTES} bytes even thinned; not stored",
 			dedupe_seconds=3600,
 		)
-		return None
+		return sign_blob(_capture.dropped_tree_blob())
 	signed = sign_blob(blob)
 	try:
 		frappe.logger().debug(

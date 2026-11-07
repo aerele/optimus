@@ -104,7 +104,7 @@ class TestCompaction:
 class TestThinning:
 	def test_samples_above_the_ceiling_are_thinned_before_interning(self, monkeypatch):
 		monkeypatch.setattr(capture, "TREE_MAX_SAMPLES", 1000)
-		session = fake_session([([frame("a", 1)], 0.001) for _ in range(5000)])
+		session = fake_session(unique_records(5000, depth=1))
 		info = capture.compact_pyi_session(session)
 		assert len(session.frame_records) <= 1000
 		assert info["every"] >= 5
@@ -131,7 +131,7 @@ class TestThinning:
 
 	def test_kept_sample_count_is_close_to_the_target(self, monkeypatch):
 		monkeypatch.setattr(capture, "TREE_MAX_SAMPLES", 1000)
-		session = fake_session([([frame("a", 1)], 0.001) for _ in range(10000)])
+		session = fake_session(unique_records(10000, depth=1))
 		capture.compact_pyi_session(session)
 		assert 800 <= len(session.frame_records) <= 1200
 
@@ -224,7 +224,8 @@ class TestThinning:
 		assert blob is None
 
 	def test_real_pickle_over_the_cap_thins_further(self, monkeypatch):
-		monkeypatch.setattr(capture, "_estimate_bytes", lambda *a, **k: 1)
+		real = capture._estimate_bytes
+		monkeypatch.setattr(capture, "_estimate_bytes", lambda *a, **k: real(*a, **k) // 4)
 		monkeypatch.setattr(capture, "TREE_MAX_BYTES", 100_000)
 		session = fake_session(unique_records(3000, depth=20))
 		blob, _ = capture.pickle_pyi_session(session)
@@ -238,6 +239,87 @@ class TestThinning:
 			capture.compact_pyi_session(session)
 		assert session.frame_records is records
 		assert not hasattr(session, "optimus_thinned")
+
+
+def shares(records):
+	times = leaf_times(records)
+	total = sum(times.values())
+	return {leaf: seconds / total for leaf, seconds in times.items()}
+
+
+def periodic_records(pattern, repeats, jitter=0.0):
+	import random
+
+	rng = random.Random(7)
+	return [
+		([frame("base", 0), frame(leaf, 1)], 0.001 * (1 + rng.uniform(-jitter, jitter)))
+		for _ in range(repeats)
+		for leaf in pattern
+	]
+
+
+class TestPeriodicPatterns:
+	def test_identical_neighbours_are_merged_without_loss(self):
+		records = [(["a"], 0.1), (["a"], 0.2), (["b"], 0.3), (["a"], 0.4)]
+		merged = capture._merge_equal_neighbours(records)
+		assert [(stack, round(seconds, 9)) for stack, seconds in merged] == [(["a"], 0.3), (["b"], 0.3), (["a"], 0.4)]
+
+	def test_a_periodic_pattern_over_the_sample_ceiling_keeps_its_shares_unthinned(self, monkeypatch):
+		monkeypatch.setattr(capture, "TREE_MAX_SAMPLES", 30_000)
+		session = fake_session(periodic_records("AAAB", 12_500))
+		capture.compact_pyi_session(session)
+		got = shares(session.frame_records)
+		assert abs(got["A"] - 0.75) < 1e-9 and abs(got["B"] - 0.25) < 1e-9
+		assert not hasattr(session, "optimus_thinned")
+
+	def test_thinning_a_periodic_pattern_keeps_each_share_within_a_few_points(self):
+		records = periodic_records("ABAC", 12_500)
+		kept = capture._thin_by_time(records, 2_500)
+		got = shares(kept)
+		assert abs(got["A"] - 0.5) < 0.03 and abs(got["B"] - 0.25) < 0.03 and abs(got["C"] - 0.25) < 0.03
+
+	def test_thinning_a_jittered_periodic_pattern_keeps_shares(self):
+		records = periodic_records("AAAB", 12_500, jitter=0.05)
+		before = shares(records)
+		kept = capture._thin_by_time(records, 2_500)
+		for leaf, share in before.items():
+			assert abs(shares(kept)[leaf] - share) < 0.03
+
+	def test_a_period_that_divides_the_step_keeps_its_shares_through_the_byte_budget(self, monkeypatch):
+		monkeypatch.setattr(capture, "TREE_MAX_BYTES", 150_000)
+		records = periodic_records("ABAC", 5_000)
+		before = shares(records)
+		session = fake_session(records)
+		blob, info = capture.pickle_pyi_session(session)
+		assert info["every"] > 1
+		after = shares(pickle.loads(blob).frame_records)
+		for leaf, share in before.items():
+			assert abs(after[leaf] - share) < 0.03
+
+	def test_runs_of_equal_stacks_are_merged_before_the_byte_budget_thins_anything(self):
+		records = periodic_records("A" * 100 + "B" * 100, 200)
+		session = fake_session(records)
+		before = shares(records)
+		info = capture.compact_pyi_session(session, 300_000)
+		assert info["every"] == 1 and not hasattr(session, "optimus_thinned")
+		assert len(session.frame_records) == 400
+		assert {k: round(v, 9) for k, v in shares(session.frame_records).items()} == {
+			k: round(v, 9) for k, v in before.items()
+		}
+
+	def test_a_three_percent_overrun_keeps_nearly_all_samples(self):
+		records = unique_records(1030, depth=3)
+		kept = capture._thin_by_time(records, 1000)
+		assert len(kept) >= 950
+
+	def test_a_second_round_still_reports_the_original_sample_count(self, monkeypatch):
+		monkeypatch.setattr(capture, "TREE_MAX_SAMPLES", 1000)
+		session = fake_session(unique_records(8000, depth=2))
+		capture.compact_pyi_session(session)
+		monkeypatch.setattr(capture, "TREE_MAX_SAMPLES", 250)
+		info = capture.compact_pyi_session(session)
+		assert session.optimus_thinned["samples"] == 8000
+		assert info["every"] == round(8000 / len(session.frame_records))
 
 
 def test_thinned_real_session_still_builds_a_tree(monkeypatch):

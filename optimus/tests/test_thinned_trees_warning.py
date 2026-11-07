@@ -67,7 +67,19 @@ def test_a_helper_failure_never_fails_analyze(errors, monkeypatch):
 	assert any("thinned-tree check failed" in line for line in errors)
 
 
-def test_the_never_captured_note_mentions_the_size_limit(errors):
+def test_a_dropped_tree_has_its_own_note_and_is_not_counted_as_never_captured(errors):
 	context = AnalyzeContext(session_uuid="s1", docname="d1")
-	analyze._report_missing_trees(context, [{"pyi_session": None}], {}, datetime(2026, 1, 1))
-	assert "too large to keep" in context.warnings[0]
+	recordings = [{"pyi_session": None, "tree_dropped": True}, {"pyi_session": None}, _rec()]
+	analyze._report_missing_trees(context, recordings, {}, datetime(2026, 1, 1))
+	assert len(context.warnings) == 2
+	assert "too large to keep for 1 of 3 requests" in context.warnings[0]
+	assert "not captured for 1 of 3 requests" in context.warnings[1]
+	assert any("too large to keep" in line and "session s1" in line for line in errors)
+
+
+def test_only_dropped_trees_leave_no_never_captured_note(errors):
+	context = AnalyzeContext(session_uuid="s1", docname="d1")
+	analyze._report_missing_trees(
+		context, [{"pyi_session": None, "tree_dropped": True}], {}, datetime(2026, 1, 1)
+	)
+	assert len(context.warnings) == 1 and "not captured" not in context.warnings[0]
