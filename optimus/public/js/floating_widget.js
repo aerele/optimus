@@ -270,13 +270,18 @@
 		syncPoll(display);
 	}
 
+	// The reducers return translated templates with their values apart; values are escaped (show_alert renders HTML) and a function replacer keeps "$&" literal.
+	function fillTemplate(template, args) {
+		return (args || []).reduce((text, value, i) => text.replace("{" + i + "}", () => frappe.utils.escape_html(String(value))), template);
+	}
+
 	// Apply a {state, ui, alert} result from the pill reducers.
 	function applyResult(res) {
 		if (!res) return;
 		currentState = res.state;
 		if (res.ui) setDisplay(res.ui.display, res.ui.label, res.ui.elapsed, res.ui.tone);
 		if (res.alert) {
-			frappe.show_alert({ message: __(res.alert.message, res.alert.args), indicator: res.alert.indicator });
+			frappe.show_alert({ message: fillTemplate(res.alert.message, res.alert.args), indicator: res.alert.indicator });
 		}
 		if (widget && !currentState.session_uuid) {
 			widget.removeAttribute("data-session-uuid");
@@ -754,9 +759,9 @@
 	function announceStopped(expired, options) {
 		if (expired) {
 			const message = options.capHit
-				? "Recording reached its request limit, so later requests were not captured. Analyzing what was captured."
-				: "Recording stopped after 10 minutes without activity. Analyzing what was captured.";
-			frappe.show_alert({ message: __(message), indicator: "orange" });
+				? __("Recording reached its request limit, so later requests were not captured. Analyzing what was captured.")
+				: __("Recording stopped after 10 minutes without activity. Analyzing what was captured.");
+			frappe.show_alert({ message: message, indicator: "orange" });
 		} else if (!options.auto) {
 			frappe.show_alert({
 				message: __("Profiler stopped analyzing session…"),

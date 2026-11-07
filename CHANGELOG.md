@@ -8,6 +8,24 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.166] - 2026-11-07
+
+### Fixed
+
+- A session whose analysis failed now says why on its form: the error type and where the details are logged (the Error Log entry titled "optimus ai analyze"). Users who can retry also see to use Retry Analyze. Before, the form only said Failed.
+- A line profiling pass left recording past its time window is now analyzed with the lines it captured, as if you had pressed Stop, instead of being failed with its samples deleted. If that cannot be done right away (the session is busy, an AI refresh is running, or the sample count cannot be read), it is tried again on each check for up to an hour; after that, or at once when the user lost access or the retry limit is reached, the run is marked Failed and its samples stay so that Retry can use them while they are kept (up to 24 hours). A run that captured nothing still fails as before.
+- Picking the same function twice (an alias, or a doubled app prefix) now profiles it once. Different functions that cannot be profiled each keep their own reason.
+- Line profiling picker paths are now read correctly when a bench is installed under a folder named `apps`, or when a library is loaded from `site-packages`.
+- More of the pill, the start dialog, the first-visit notice and the session form can now be translated: messages built from pieces (framework frame count, auto-expanded functions, runs in progress, pop-up errors) are whole sentences with placeholders, and the session list shows translated status labels.
+
+### Not covered
+
+- Failure texts written by older versions, and by the stale-analysis check, are shown as stored (English).
+- The picker's "nothing to pick" hints, written by the server, and the default session titles (for example "Profiling session") are still English.
+- A failed analysis on a session that predates this version shows no reason until it is retried and fails again.
+
+---
+
 ## [0.12.154] - 2026-11-07
 
 ### Fixed

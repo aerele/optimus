@@ -241,6 +241,25 @@ test("recordingCheckAction: fetch only for a visible phase 1 recording", () => {
 	assert.strictEqual(Pill.RECORDING_CHECK_MS, 60000);
 });
 
+test("every pill label and message goes through Frappe's translation, templates keep their args apart", () => {
+	const seen = [];
+	globalThis.__ = (text, args) => { seen.push(text); return "T:" + (args ? text.replace(/\{(\d+)\}/g, (m, i) => args[i]) : text); };
+	try {
+		const progress = ev(analyzing(), "optimus_progress", { percent: 41.6 });
+		assert.strictEqual(progress.ui.label, "T:Analyzing {0}%".replace("{0}", "42"));
+		assert.ok(seen.includes("Analyzing {0}%"), "the key keeps its placeholder");
+		const failed = ev(analyzing({ phase2: true }), "phase_2_run_failed", { error: "boom" });
+		assert.strictEqual(failed.alert.message, "T:Line profiling analyze failed: {0}");
+		assert.deepStrictEqual(failed.alert.args, ["boom"]);
+		assert.strictEqual(failed.ui.elapsed, "T:click to view");
+		const hard = Pill.reduceHardStop(analyzing());
+		assert.ok(hard.ui.label.startsWith("T:") && hard.alert.message.startsWith("T:"));
+		assert.strictEqual(Pill.reduceHardStop(analyzing({ docname: null })).ui.label, "T:Profiler");
+	} finally {
+		delete globalThis.__;
+	}
+});
+
 let failed = 0;
 for (const [name, fn] of tests) {
 	try { fn(); console.log("ok   " + name); } catch (e) { failed++; console.log("FAIL " + name + "\n" + e.stack); }

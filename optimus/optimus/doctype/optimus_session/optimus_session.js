@@ -11,6 +11,7 @@
 frappe.ui.form.on("Optimus Session", {
 	refresh(frm) {
 		render_status_indicator(frm);
+		render_failure_reason(frm);
 		render_phase2_progress(frm);
 		render_drain_progress(frm);
 		render_analyze_progress(frm);
@@ -860,10 +861,12 @@ function show_phase2_dialog(frm, data) {
 			fieldname: "intro_html",
 			fieldtype: "HTML",
 			options:
-				"<p style='margin-bottom:8px;'>Tick functions from the profile's " +
-				"top hot frames, or paste a dotted path below. " +
-				"Line profiling will instrument <strong>only</strong> these " +
-				"functions during your next reproduction of the flow.</p>",
+				"<p style='margin-bottom:8px;'>" +
+				frappe.utils.escape_html(__(
+					"Tick functions from the profile's top hot frames, or paste a dotted path below. Line profiling will instrument {0} functions during your next reproduction of the flow.",
+					["\u0000"]
+				)).replace("\u0000", "<strong>" + frappe.utils.escape_html(__("only these")) + "</strong>") +
+				"</p>",
 		},
 	];
 
@@ -874,18 +877,17 @@ function show_phase2_dialog(frm, data) {
 	// it fall back to a generic message.
 	if (primary.length === 0 && framework.length === 0) {
 		var diag = data.diagnostic || {};
-		var hint = diag.hint || (
-			"No curated picks were found. Use the freeform textbox below " +
-			"to type the dotted path of the function you want to profile."
+		var hint = diag.hint || __(
+			"No curated picks were found. Use the freeform textbox below to type the dotted path of the function you want to profile."
 		);
 		fields.push({
 			fieldname: "empty_state_html",
 			fieldtype: "HTML",
 			options: (
 				"<div class='optimus-picker-empty'>" +
-				"<strong>No curated functions available</strong><br>" +
+				"<strong>" + frappe.utils.escape_html(__("No curated functions available")) + "</strong><br>" +
 				"<span class='optimus-picker-empty-hint'>" +
-				hint +
+				frappe.utils.escape_html(hint) +
 				"</span><br><br>" +
 				"<code class='optimus-picker-empty-diag'>" +
 				"actions=" + (diag.action_count || 0) +
@@ -920,10 +922,8 @@ function show_phase2_dialog(frm, data) {
 			label: no_user_app
 				? __("Hot frames (frappe / erpnext / framework code)")
 				: __(
-					"+ " +
-					framework.length +
-					" framework frames (frappe / erpnext) actionable for " +
-					"customizations or framework-level fixes"
+					"+ {0} framework frames (frappe / erpnext) actionable for customizations or framework-level fixes",
+					[framework.length]
 				),
 			collapsible: !no_user_app,
 			collapsible_depends_on: no_user_app ? "" : "0",
@@ -1030,11 +1030,10 @@ function start_phase2(frm, picks, auto_expand) {
 				// Show the first expansion inline so the dev sees what was
 				// added; remaining expansions appear in the form's run row.
 				var first = expansions[0];
-				msg += __(
-					" Auto-expanded " + first.original.split(".").pop() +
-					" → " + first.chain.length + " functions" +
-					(expansions.length > 1 ? " (+ " + (expansions.length - 1) + " more)" : "")
-				);
+				var expanded = [first.original.split(".").pop(), first.chain.length];
+				msg += " " + (expansions.length > 1
+					? __("Auto-expanded {0} → {1} functions (+ {2} more)", expanded.concat(expansions.length - 1))
+					: __("Auto-expanded {0} → {1} functions", expanded));
 			}
 			frappe.show_alert({ message: msg, indicator: "blue" });
 			frm.dashboard.add_indicator(
@@ -1189,12 +1188,34 @@ function render_phase2_progress(frm) {
 	const in_flight = (frm.doc.phase_2_runs || []).filter((r) => r.status === "Analyzing");
 	if (!in_flight.length) return;
 	frm.dashboard.add_indicator(
-		__("Line profiling analyzing… ({0} run{1} in progress)", [
-			in_flight.length,
-			in_flight.length === 1 ? "" : "s",
-		]),
+		in_flight.length === 1
+			? __("Line profiling analyzing… (1 run in progress)")
+			: __("Line profiling analyzing… ({0} runs in progress)", [in_flight.length]),
 		"orange"
 	);
+}
+
+// Why a Failed session failed, as plain text. set_intro shows a string with no element
+// as text, so the reason is wrapped in one: the escaped entities then render as characters
+// and line breaks survive. A refresh clears the intro, so each refresh sets it once.
+const _ANALYZE_FAILED = /^Analysis failed \((\w{1,80})\)\. Details are in the Error Log under 'optimus ai analyze'\.$/;
+
+function _failure_reason_text(warnings, can_act) {
+	const failed = _ANALYZE_FAILED.exec(warnings);
+	if (!failed) return warnings;
+	let text = __("Analysis failed ({0}). Details are in the Error Log under 'optimus ai analyze'.", [failed[1]]);
+	if (can_act) text += " " + __("Use Retry Analyze to run it again while its captured input is available.");
+	return text;
+}
+
+function _failure_intro_html(text) {
+	return '<div class="optimus-failure-reason">' + frappe.utils.escape_html(text).replace(/\n/g, "<br>") + "</div>";
+}
+
+// Relies on Frappe clearing the intro on refresh: call it from refresh only, never from a realtime handler.
+function render_failure_reason(frm) {
+	if (frm.is_new() || frm.doc.status !== "Failed" || !frm.doc.analyzer_warnings) return;
+	frm.set_intro(_failure_intro_html(_failure_reason_text(frm.doc.analyzer_warnings, _can_act(frm))), "red");
 }
 
 function render_status_indicator(frm) {
@@ -1222,7 +1243,7 @@ function _fmt_drain_window(secs) {
 function _drain_suffix(d) {
 	const secs = d.remaining_seconds != null ? d.remaining_seconds : d.window_seconds;
 	const win = _fmt_drain_window(secs);
-	return win ? __(" · up to {0}", [win]) : "";
+	return win ? " · " + __("up to {0}", [win]) : "";
 }
 
 // Background-jobs drain banner (orange variant). Takes plain text (escaped here); null removes it.
@@ -1348,9 +1369,9 @@ function render_download_buttons(frm) {
 						// HTML inline. Works because the report HTML is
 						// self-contained (no external asset references); see
 						// product-thesis "safe report" guarantee.
-						const showError = (msg) =>
+						const showError = (message) =>
 							frappe.show_alert({
-								message: __(msg),
+								message: message,
 								indicator: "red",
 							});
 						fetch(frm.doc.raw_report_file, {
@@ -1370,7 +1391,7 @@ function render_download_buttons(frm) {
 								const win = window.open(url, "_blank");
 								if (!win) {
 									showError(
-										"Pop-up blocked; allow pop-ups for this site to open the report inline.",
+										__("Pop-up blocked; allow pop-ups for this site to open the report inline."),
 									);
 									URL.revokeObjectURL(url);
 									return;
@@ -1386,7 +1407,7 @@ function render_download_buttons(frm) {
 							})
 							.catch(() => {
 								showError(
-									"Could not load the report; try Download Report instead.",
+									__("Could not load the report; try Download Report instead."),
 								);
 							});
 					},

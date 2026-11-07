@@ -48,7 +48,7 @@ function load() {
 		setInterval: () => { env.intervals += 1; return env.intervals; },
 		clearInterval: () => { env.cleared += 1; },
 		frappe: {
-			session: { user: "u" }, boot: {}, get_route: () => ["List", "ToDo"], ui: { Dialog: FakeDialog }, set_route: () => {}, show_alert: (a) => env.alerts.push(a),
+			session: { user: "u" }, boot: {}, utils: { escape_html: (s) => String(s).replace(/[&<>"'`=]/g, (c) => "&#" + c.charCodeAt(0) + ";") }, get_route: () => ["List", "ToDo"], ui: { Dialog: FakeDialog }, set_route: () => {}, show_alert: (a) => env.alerts.push(a),
 			call: (opts) => {
 				env.calls.push(opts);
 				const message = env.reply ? env.reply(opts) : undefined;
@@ -434,6 +434,25 @@ function startFailure(env, status) {
 	env.calls[0].error(status);
 	return d;
 }
+
+test("the start dialog and an applied pill alert go through Frappe's translation", () => {
+	const env = load();
+	env.ctx.__ = (text) => "T:" + text;
+	env.t.openStartDialog();
+	const d = FakeDialog.last;
+	assert.strictEqual(d.title, "T:Start profiling session");
+	assert.strictEqual(d.primary_action_label, "T:Start");
+	assert.strictEqual(d.fields[0].label, "T:Session label");
+	assert.ok(d.fields[0].description.startsWith("T:"));
+	assert.ok(d.fields[1].options.includes("T:Note:") && d.fields[1].options.includes("T:Recording adds"));
+	env.t.applyResult({ state: env.t.state, alert: { message: "Failed: {0}", args: ["$& boom"], indicator: "red" } });
+	assert.strictEqual(env.alerts[0].message, "Failed: $&#38; boom");
+	env.t.applyResult({ state: env.t.state, alert: { message: "Failed: {0}", args: ["<img onerror=x>"], indicator: "red" } });
+	assert.ok(!env.alerts[1].message.includes("<img"), "a value cannot add markup to the toast");
+	env.t.state.session_uuid = "s1";
+	env.t.confirmAndStop({ sessionUuid: "s1" });
+	assert.strictEqual(env.t.widget.label.textContent, "T:Stopping…");
+});
 
 test("a failed start keeps the dialog open with its label and Start usable again", () => {
 	const env = load();

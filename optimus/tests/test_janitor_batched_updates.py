@@ -328,6 +328,7 @@ class TestSweepStalePhase2Runs:
 			calls.append((run_uuid, kw["status"]))
 			return run_uuid != "newer-generation"
 		monkeypatch.setattr(jobs, "expire_legacy", expire)
+		monkeypatch.setattr(capture, "has_samples", lambda run_uuid: False)
 		monkeypatch.setattr(capture, "cleanup_run", cleanups.append)
 		monkeypatch.setattr(ai_jobs, "_transaction", lambda fn: fn())
 		monkeypatch.setattr(ai_jobs, "_retry_sql", lambda fn: fn())
@@ -349,11 +350,48 @@ class TestSweepStalePhase2Runs:
 			if run_uuid == "bad":
 				raise ConnectionError("synthetic Redis failure")
 		monkeypatch.setattr(jobs, "expire_legacy", lambda *a, **kw: True)
+		monkeypatch.setattr(capture, "has_samples", lambda run_uuid: False)
 		monkeypatch.setattr(capture, "cleanup_run", cleanup)
 		monkeypatch.setattr(ai_jobs, "_transaction", lambda fn: fn())
 		monkeypatch.setattr(ai_jobs, "_retry_sql", lambda fn: fn())
 		_reload_janitor(monkeypatch)._sweep_stale_phase2_runs()
 		assert seen == ["bad", "good"]
+
+	def _expiry(self, monkeypatch, has_samples, expired):
+		from optimus import ai_jobs
+		from optimus.line_profile import capture, jobs
+		stub = _install_frappe_stub(monkeypatch)
+		stub.db.get_all = lambda doctype, **kw: (
+			[{"parent": "p", "run_uuid": "run-1"}] if kw["filters"]["status"] == "Recording" else [])
+		seen = types.SimpleNamespace(expire=[], analyzed=[], cleaned=[])
+		def expire(parent, run_uuid, **kw):
+			seen.expire.append(kw["samples"])
+			return expired(kw["samples"])
+		monkeypatch.setattr(jobs, "expire_legacy", expire)
+		monkeypatch.setattr(jobs, "analyze_expired", lambda *a, **kw: seen.analyzed.append((*a, sorted(kw))))
+		monkeypatch.setattr(capture, "has_samples", has_samples)
+		monkeypatch.setattr(capture, "cleanup_run", seen.cleaned.append)
+		monkeypatch.setattr(ai_jobs, "_transaction", lambda fn: fn())
+		monkeypatch.setattr(ai_jobs, "_retry_sql", lambda fn: fn())
+		_reload_janitor(monkeypatch)._sweep_stale_phase2_runs()
+		return seen
+
+	def test_expired_recording_with_samples_is_analyzed_and_keeps_its_input(self, monkeypatch):
+		seen = self._expiry(monkeypatch, lambda run_uuid: True, lambda samples: "analyze" if samples else True)
+		assert seen.expire == [True]
+		assert seen.analyzed == [("p", "run-1", ["cutoff"])]
+		assert seen.cleaned == []
+
+	def test_expired_recording_without_samples_fails_and_cleans(self, monkeypatch):
+		seen = self._expiry(monkeypatch, lambda run_uuid: False, lambda samples: True)
+		assert seen.analyzed == [] and seen.cleaned == ["run-1"]
+
+	def test_unknown_sample_count_retries_next_sweep_and_never_deletes_input(self, monkeypatch):
+		def broken(run_uuid):
+			raise ConnectionError("redis down")
+		seen = self._expiry(monkeypatch, broken, lambda samples: "retry" if samples is None else True)
+		assert seen.expire == [None]
+		assert seen.analyzed == [] and seen.cleaned == []
 
 	def test_no_set_value_when_no_phase2_rows(self, monkeypatch):
 		from optimus import ai_jobs

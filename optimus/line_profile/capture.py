@@ -383,6 +383,7 @@ def prepare_line_profile_picks(picks: list[dict], *, server_expanded=frozenset()
 		raise CaptureError(_("Select a function from an installed app."))
 	resolved: list[dict] = []
 	seen = set()
+	targets = set()
 	for entry in picks:
 		dotted = entry["dotted_path"]
 		if dotted in seen:
@@ -404,6 +405,12 @@ def prepare_line_profile_picks(picks: list[dict], *, server_expanded=frozenset()
 				"ineligible_reason": str(exc),
 			})
 			continue
+		if meta.get("eligible"):
+			# Two spellings of one function (an alias, a doubled app prefix) profile it once.
+			target = (meta["file"], meta["lineno"])
+			if target in targets:
+				continue
+			targets.add(target)
 		meta["source"] = entry.get("source", "freeform")
 		resolved.append(meta)
 
@@ -902,6 +909,13 @@ def read_all_samples(run_uuid: str) -> list[list[dict]]:
 			raise CaptureInputError("Line profiling sample byte accounting is incomplete")
 	_validate_samples(batches)
 	return batches
+
+
+@_interrupt_boundary
+def has_samples(run_uuid: str) -> bool:
+	"""Whether a run captured any sample batch; a Redis failure raises (unknown)."""
+	_require_frappe()
+	return bool(frappe.cache.llen(_redis_keys.lp_samples(run_uuid)))
 
 
 @_interrupt_boundary
