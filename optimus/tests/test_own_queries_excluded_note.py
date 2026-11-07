@@ -101,3 +101,31 @@ class TestReportNote:
 		html = renderer.render(_session_doc(), recordings=[_recording("r1", stamped=5)])
 		assert "T:{0} queries from Optimus's own code were excluded from this report" not in html
 		assert "T:" in _note(html)
+
+
+def _unregistered_recording(uuid):
+	return {"uuid": uuid, "calls": [{"query": "select user", "stack": [USER, UNREGISTERED, SQL]}]}
+
+
+def _use_app_lists(monkeypatch):
+	from optimus import settings
+
+	monkeypatch.setattr(settings, "own_query_app_lists", lambda: (LISTS["tracked_apps"], LISTS["installed_apps"]))
+
+
+class TestAppListsReachTheStrips:
+	def test_the_renderer_keeps_a_call_behind_an_unregistered_wrapper(self, monkeypatch):
+		_use_app_lists(monkeypatch)
+		html = renderer.render(_session_doc(), recordings=[_unregistered_recording("r1")])
+		assert _note(html) is None
+
+	def test_the_ai_loader_keeps_a_call_behind_an_unregistered_wrapper(self, monkeypatch):
+		from optimus import analyze
+
+		_use_app_lists(monkeypatch)
+		bundle = {"recordings": {"r1": {"rec": _unregistered_recording("r1")}}}
+		monkeypatch.setattr(analyze, "_load_recordings_bundle", lambda doc: bundle)
+		monkeypatch.setattr(analyze, "_run_ai_step", lambda fn, **k: (None, True))
+		doc = types.SimpleNamespace(name="d", session_uuid="s", recordings_file="f")
+		(light,) = analyze.load_recordings_light(doc, ["r1"])
+		assert len(light["calls"]) == 1 and OWN_EXCLUDED_KEY not in light

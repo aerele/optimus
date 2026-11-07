@@ -202,9 +202,15 @@ def _writes_into_state(obj):
 def _is_patch(target, value, names, saved):
 	if _is_tag(target, names) or _writes_into_state(target.value):
 		return False
-	wraps_current = isinstance(value, ast.Call) and ast.unparse(target) in {
-		ast.unparse(arg) for arg in value.args
-	}
+	target_text = ast.unparse(target)
+	# the target text anywhere under a call in the value: ``f(x.a)``, ``f(x.a).call``, ``f(g(x.a))``;
+	# a plain expression that merely reads the target (``x.a = x.a or y``) is no wrapper
+	wraps_current = any(
+		ast.unparse(inner) == target_text
+		for call in ast.walk(value)
+		if isinstance(call, ast.Call)
+		for inner in ast.walk(call)
+	)
 	wraps_saved = _passes_saved_original(value, ast.unparse(target.value), repr(target.attr), saved)
 	return (
 		names.is_patch_target(_root_name(target)) or wraps_current or wraps_saved
@@ -278,6 +284,10 @@ UNREGISTERED_WRAPPERS = {
 		"import frappe\n\ndef install():\n\tsetattr(frappe.local.db, 'sql', build(frappe.local.db.sql))\n",
 		("install", "setattr(frappe.local.db, 'sql', build(frappe.local.db.sql))"),
 	),
+	"bound method of a wrapper built around the target": (
+		"def install():\n\tdatabase = find_database_class()\n\tdatabase.sql = Wrapper(database.sql).call\n",
+		("install", "database.sql"),
+	),
 	"lambda onto a class": (
 		"from frappe.model.document import Document\n\nDocument.on_trash = lambda self: None\n",
 		("<module>", "Document.on_trash"),
@@ -304,6 +314,9 @@ NOT_PATCHES = {
 	"a constant on a module": "import frappe.utils as utils\n\ndef f():\n\tutils.DEBUG = True\n",
 	"state on the request": (
 		"import frappe\n\ndef f(user):\n\tfrappe.local.user = lookup(user)\n\tfrappe.flags.seen = fetch()\n"
+	),
+	"a value read back into itself": (
+		"def f(shape, multi):\n\tshape.ambiguous = shape.ambiguous or multi\n"
 	),
 	"a tag on a wrapper": (
 		"def make():\n\tdef wrapper():\n\t\tpass\n\twrapper._patched = original\n\twrapper.__wrapped__ = original\n"
