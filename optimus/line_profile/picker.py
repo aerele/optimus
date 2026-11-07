@@ -17,6 +17,8 @@ Pure: no Frappe DB / Redis access.
 """
 
 import importlib
+import inspect
+import os
 
 from optimus.analyzers.base import FRAMEWORK_APPS
 from optimus.analyzers.call_tree import _is_pure_helper_frame, _top_level_app
@@ -35,6 +37,30 @@ _MIN_TREE_MS = 50.0
 _PER_TREE_CAP = 12
 _TREE_TOTAL_CAP = 60  # overall cap for the multi-tree picker walk (independent
 # of CANDIDATE_CAP, which the legacy _build_candidates_from_trees still uses)
+
+
+# The installed Optimus package, by real path: a co_filename can reach it through a symlinked
+# bench apps/ folder or an editable install, so it is compared after realpath, not by text.
+_OPTIMUS_PACKAGE_DIR = os.path.realpath(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+OWN_CODE_REASON = "Optimus's own code is not line-profiled"
+UNRESOLVED_REASON = "The wrapped function cannot be resolved"
+
+
+def is_optimus_code_file(filename) -> bool:
+	"""True for a file inside the installed Optimus package (not a user app that is merely named like it).
+
+	This takes the real file of LIVE code (an imported function's ``co_filename``), so it resolves
+	symlinks and compares against the installed package. The report side
+	(``optimus.analyzers.base.is_optimus_path``) takes the filename TEXT of a recorded stack frame,
+	which may come from another machine, so it can only match the path shape. They stay separate on
+	purpose: neither input fits the other rule. Change one, check the other."""
+	if not isinstance(filename, str) or not filename or filename.startswith("<"):
+		return False
+	try:
+		real = os.path.realpath(filename)
+	except (OSError, ValueError):
+		return False
+	return real == _OPTIMUS_PACKAGE_DIR or real.startswith(_OPTIMUS_PACKAGE_DIR + os.sep)
 
 
 class PickerError(Exception):
@@ -518,6 +544,24 @@ def _check_eligibility(obj) -> tuple[bool, str | None]:
 	return True, None
 
 
+def _profile_target(obj):
+	"""``(eligible, reason, code)`` for the function line_profiler would profile: ``obj`` with its
+	``__wrapped__`` chain followed, as the worker does, so a decorated or Optimus-wrapped Frappe
+	function resolves to its real file. A chain that cannot be followed makes the pick ineligible."""
+	try:
+		target = inspect.unwrap(obj)
+		eligible, reason = _check_eligibility(target)
+		code = getattr(target, "__code__", None)
+	except Exception as exc:
+		from optimus.line_profile.capture import _raise_if_interrupt
+
+		_raise_if_interrupt(exc)
+		return False, f"{UNRESOLVED_REASON} ({type(exc).__name__})", None
+	if eligible and is_optimus_code_file(getattr(code, "co_filename", "")):
+		return False, OWN_CODE_REASON, None  # no Optimus file path in the pick's metadata
+	return eligible, reason, code
+
+
 def resolve_freeform(dotted_path: str) -> dict:
 	"""Resolve a free-form dotted path, with a fallback for apps whose
 	importable module path doubles the app name. The picker derives the
@@ -647,11 +691,9 @@ def _resolve_freeform_exact(dotted_path: str) -> dict:
 	# use the actual resolved path, not the user's possibly-class-omitting
 	# input.
 	rewritten = ".".join(parts[:module_parts] + resolved_qualname_parts)
-	eligible, reason = _check_eligibility(obj)
-
-	code = getattr(obj, "__code__", None)
-	file_path = code.co_filename if code is not None else "<unknown>"
-	lineno = code.co_firstlineno if code is not None else 0
+	eligible, reason, code = _profile_target(obj)
+	file_path = getattr(code, "co_filename", "<unknown>")
+	lineno = getattr(code, "co_firstlineno", 0)
 
 	return {
 		"dotted_path": rewritten or dotted_path,

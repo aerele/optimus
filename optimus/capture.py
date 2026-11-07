@@ -175,8 +175,8 @@ def _make_wrap(orig, fn_name: str, local_proxy=None):
 	  - A re-entrant call from inside one wrap is a passthrough (prevents
 	    double-counting ``has_permission`` → ``get_doc``).
 	  - Drops entries past SIDECAR_CAP_PER_RECORDING and flags truncation.
-	  - Stores the original on ``wrapped._profiler_original`` for uninstall; never
-	    double-wraps an already-wrapped ``orig``.
+	  - Stores the original on ``wrapped._profiler_original`` (uninstall) and
+	    ``wrapped.__wrapped__`` (line profiling); never double-wraps ``orig``.
 	"""
 	def wrapped(*args, **kwargs):
 		active = getattr(local_proxy, "_profiler_active_session_id", None)
@@ -226,6 +226,8 @@ def _make_wrap(orig, fn_name: str, local_proxy=None):
 					sidecar.append(entry)
 
 	wrapped._profiler_original = orig
+	# Line profiling follows __wrapped__ to the real function, as it does for any decorator.
+	wrapped.__wrapped__ = orig
 	return wrapped
 
 

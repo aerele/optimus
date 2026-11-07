@@ -143,3 +143,21 @@ def test_patch_idempotent(fake_frappe, monkeypatch):
 	assert original is not None
 	# If double-wrapped, original would itself be a patched function.
 	assert not getattr(original, "_profiler_patched", False)
+
+
+def test_a_job_whose_id_cannot_be_read_does_not_break_enqueue(fake_frappe):
+	"""The tracking step is best effort: a job object that raises on ``.id`` still comes back."""
+	fake, fake_bg, _calls = fake_frappe
+	fake.cache.set_value("profiler:active:alice@example.com", "test-session-uuid-abc")
+
+	class Job:
+		@property
+		def id(self):
+			raise RuntimeError("no id")
+
+	job = Job()
+	fake_bg.enqueue = lambda method, **kwargs: job
+	_reset_profiler_modules()
+	import optimus  # noqa: F401
+
+	assert fake_bg.enqueue("m.f", a=1) is job

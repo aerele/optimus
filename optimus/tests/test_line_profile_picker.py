@@ -633,6 +633,7 @@ class TestExpandHotChain:
 			assert "depth" in entry
 
 
+@pytest.mark.usefixtures("suite_functions_are_user_code")
 class TestResolveFreeformClassMethodFallback:
 	"""When the bare function name only exists on a class inside the
 	module (e.g. ``validate`` is on ``SalesInvoice``), ``resolve_freeform``
