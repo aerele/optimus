@@ -369,8 +369,8 @@ class TestBeforeJob:
 		assert env.bg_started == []
 		assert not hasattr(env.local, "optimus_session_id")
 
-	def test_a_user_job_whose_name_resembles_analyze_is_still_recorded(self, env):
-		self._job(env, {"_profiler_session_id": "s1"}, method="optimus.analyze.run_other")
+	def test_a_job_of_an_app_named_like_optimus_is_still_recorded(self, env):
+		self._job(env, {"_profiler_session_id": "s1"}, method="optimus_extras.analyze.run")
 
 		assert env.recorded == [{"force": True}]
 

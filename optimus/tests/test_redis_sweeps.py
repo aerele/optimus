@@ -185,7 +185,7 @@ def test_a_cleanup_that_failed_is_not_counted_or_logged_as_done(fake_frappe):
 	assert not any("no row" in message for message, _ in cache.lines)
 
 
-def test_leftovers_only_get_the_cap_the_orphans_left_over(fake_frappe, monkeypatch):
+def test_orphans_and_leftovers_are_rotated_as_one_pool_under_one_cap(fake_frappe, monkeypatch):
 	from optimus import janitor
 
 	monkeypatch.setattr(janitor, "MAX_DELETIONS_PER_RUN", 3)
@@ -197,7 +197,7 @@ def test_leftovers_only_get_the_cap_the_orphans_left_over(fake_frappe, monkeypat
 	janitor._sweep_orphan_redis_state()
 
 	remaining = {k.split(":")[2] for k in cache.store}
-	assert len(remaining) == 2 and remaining <= {"done0", "done1", "done2"}  # 2 orphans + 1 leftover cleaned
+	assert len(remaining) == 2  # exactly 3 of the 5 sessions are cleaned, no matter their kind
 
 
 def test_a_ready_session_that_just_finished_is_left_to_its_own_cleanup(fake_frappe):
@@ -258,3 +258,110 @@ def test_uninstall_clears_all_optimus_keys(fake_frappe):
 	cache = fake_frappe(install, ["profiler:session:a:meta", "optimus:schema_version", "optimus_settings_cached", "other:key"])
 	install._clear_redis_state()
 	assert cache.store == {PREFIX + "other:key"}
+
+
+DAY = timedelta(days=1)
+
+
+def _run_days(janitor, monkeypatch, days):
+	"""Run the daily sweep once per day over the same keys."""
+	for day in range(days):
+		monkeypatch.setattr(janitor, "now_datetime", lambda day=day: NOW + day * DAY)
+		janitor._sweep_orphan_redis_state()
+
+
+class TestOrphanSweepFairness:
+	@pytest.fixture
+	def attempts(self, monkeypatch):
+		from optimus import janitor
+
+		seen = []
+
+		def cleaned_up(uuid):
+			seen.append(uuid)
+			if uuid.startswith("bad"):
+				raise RuntimeError("redis refused")
+			return True
+
+		monkeypatch.setattr(janitor, "_cleaned_up", cleaned_up)
+		return seen
+
+	def test_failing_orphans_do_not_starve_the_good_ones(self, fake_frappe, monkeypatch, attempts):
+		from optimus import janitor
+
+		keys = [f"profiler:session:bad{i:03d}:meta" for i in range(150)]
+		keys += [f"profiler:session:good{i}:meta" for i in range(10)]
+		fake_frappe(janitor, keys)
+		_run_days(janitor, monkeypatch, 3)
+
+		assert {f"good{i}" for i in range(10)} <= set(attempts)
+
+	def test_failing_orphans_do_not_starve_ready_leftovers(self, fake_frappe, monkeypatch, attempts):
+		from optimus import janitor
+
+		keys = [f"profiler:session:bad{i:03d}:meta" for i in range(150)]
+		keys += [f"profiler:session:good{i}:meta" for i in range(5)]
+		rows = [(f"good{i}", "Ready", LONG_AGO) for i in range(5)]
+		fake_frappe(janitor, keys, session_rows=rows)
+		_run_days(janitor, monkeypatch, 3)
+
+		assert {f"good{i}" for i in range(5)} <= set(attempts)
+
+	def test_each_day_starts_one_window_further_on_and_every_session_is_reached(
+		self, fake_frappe, monkeypatch, attempts
+	):
+		from optimus import janitor
+
+		total = 250
+		fake_frappe(janitor, [f"profiler:session:good{i:03d}:meta" for i in range(total)])
+		window = janitor.MAX_DELETIONS_PER_RUN
+		per_day = []
+		for day in range(3):
+			del attempts[:]
+			# the fake keeps cleaned keys, so a day sees the same pool
+			monkeypatch.setattr(janitor, "now_datetime", lambda day=day: NOW + day * DAY)
+			janitor._sweep_orphan_redis_state()
+			per_day.append(list(attempts))
+
+		first_index = [int(day[0][4:]) for day in per_day]
+		base = first_index[0]
+		assert [(i - base) % total for i in first_index] == [0, window % total, (2 * window) % total]
+		assert set().union(*per_day) == {f"good{i:03d}" for i in range(total)}
+
+	def test_a_run_still_makes_at_most_max_attempts(self, fake_frappe, attempts):
+		from optimus import janitor
+
+		fake_frappe(janitor, [f"profiler:session:bad{i:03d}:meta" for i in range(150)])
+		janitor._sweep_orphan_redis_state()
+
+		assert len(attempts) == janitor.MAX_DELETIONS_PER_RUN
+
+	def test_one_raising_session_does_not_stop_the_batch(self, fake_frappe, attempts):
+		from optimus import janitor
+
+		keys = ["profiler:session:bad:meta", "profiler:session:good1:meta", "profiler:session:good2:meta"]
+		fake_frappe(janitor, keys)
+		janitor._sweep_orphan_redis_state()
+
+		assert sorted(attempts) == ["bad", "good1", "good2"]
+
+	def test_failures_are_logged_once_as_a_count_without_uuids(self, fake_frappe, attempts):
+		from optimus import janitor
+
+		keys = ["profiler:session:bad1:meta", "profiler:session:bad2:meta", "profiler:session:good:meta"]
+		cache = fake_frappe(janitor, keys)
+		janitor._sweep_orphan_redis_state()
+
+		failed = [(m, kw) for m, kw in cache.lines if "could not" in m]
+		assert len(failed) == 1
+		message, kw = failed[0]
+		assert message == "optimus orphan sweep could not clean Redis state of 2 sessions; retried on later runs"
+		assert kw["dedupe_seconds"] == janitor._SWEEP_LOG_DEDUPE_SECONDS
+
+	def test_no_failure_line_when_everything_is_cleaned(self, fake_frappe, attempts):
+		from optimus import janitor
+
+		cache = fake_frappe(janitor, ["profiler:session:good:meta"])
+		janitor._sweep_orphan_redis_state()
+
+		assert not any("could not" in m for m, _ in cache.lines)

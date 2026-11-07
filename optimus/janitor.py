@@ -186,11 +186,9 @@ def _sweep_orphan_redis_state():
 	leftovers = sorted(
 		uuid for uuid, row in rows.items() if row["status"] == "Ready" and row["modified"] < ready_cutoff
 	)
-	cleaned_orphans = orphans[:MAX_DELETIONS_PER_RUN]
-	cleaned_leftovers = leftovers[: MAX_DELETIONS_PER_RUN - len(cleaned_orphans)]
-
-	cleaned_orphans = [uuid for uuid in cleaned_orphans if _cleaned_up(uuid)]
-	cleaned_leftovers = [uuid for uuid in cleaned_leftovers if _cleaned_up(uuid)]
+	cleaned, failed = _clean_batch(_rotated_for_today(orphans + leftovers))
+	cleaned_orphans = [uuid for uuid in orphans if uuid in cleaned]
+	cleaned_leftovers = [uuid for uuid in leftovers if uuid in cleaned]
 
 	# frappe.logger() is silent at the production level, so use the helper that writes at ERROR.
 	if cleaned_orphans:
@@ -204,6 +202,36 @@ def _sweep_orphan_redis_state():
 			"(expected after a background job finished late)",
 			dedupe_seconds=_SWEEP_LOG_DEDUPE_SECONDS,
 		)
+	if failed:
+		safe_call.log_error_line(
+			f"optimus orphan sweep could not clean Redis state of {failed} sessions; retried on later runs",
+			dedupe_seconds=_SWEEP_LOG_DEDUPE_SECONDS,
+		)
+
+
+def _rotated_for_today(pool: list[str]) -> list[str]:
+	"""Start the pool a window further on each day, so sessions that keep failing cannot fill
+	every run and starve the ones behind them."""
+	if not pool:
+		return pool
+	start = (int(now_datetime().timestamp() // 86400) * MAX_DELETIONS_PER_RUN) % len(pool)
+	return pool[start:] + pool[:start]
+
+
+def _clean_batch(pool: list[str]) -> tuple[set[str], int]:
+	"""Try up to MAX_DELETIONS_PER_RUN sessions; return those cleaned and how many failed."""
+	cleaned: set[str] = set()
+	failed = 0
+	for uuid in pool[:MAX_DELETIONS_PER_RUN]:
+		try:
+			done = _cleaned_up(uuid)
+		except Exception:
+			done = False
+		if done:
+			cleaned.add(uuid)
+		else:
+			failed += 1
+	return cleaned, failed
 
 
 def _cleaned_up(uuid: str) -> bool:
@@ -424,44 +452,70 @@ def _sweep_stuck_analyzing():
 	safe_commit()
 
 
+_STOPPING_STATUSES = ["Stopping", "Capturing Background Jobs"]
+
+
 def _sweep_stale_stopping():
-	"""Find rows stuck in ``Stopping`` / ``Capturing Background Jobs`` longer
-	than STALE_RECORDING_MINUTES (the analyze job never ran) and re-enqueue
-	analyze, which is idempotent. Bumps ``modified`` so a still-stuck row backs
-	off ~one window between retries instead of stacking a job every sweep.
+	"""Re-enqueue analyze for rows stuck in ``Stopping`` / ``Capturing Background Jobs``
+	longer than STALE_RECORDING_MINUTES (the analyze job never ran). Each row is claimed
+	under a lock first, which bumps ``modified``, so concurrent sweeps queue it once and a
+	still-stuck row backs off one window between retries.
 	"""
 	cutoff = add_to_date(now_datetime(), minutes=-STALE_RECORDING_MINUTES)
 	stale = frappe.db.get_all(
 		"Optimus Session",
-		filters={
-			"status": ["in", ["Stopping", "Capturing Background Jobs"]],
-			"modified": ["<", cutoff],
-		},
+		filters={"status": ["in", _STOPPING_STATUSES], "modified": ["<", cutoff]},
 		fields=["name", "session_uuid"],
 	)
-	if not stale:
-		return
-
-	# Re-affirm the status to bump ``modified`` → next sweep waits another
-	# window before re-enqueuing the same row.
-	frappe.db.set_value(
-		"Optimus Session",
-		{"name": ("in", [r["name"] for r in stale]), "status": ["in", ["Stopping", "Capturing Background Jobs"]], "modified": ["<", cutoff]},
-		{"status": "Stopping"},
-	)
-	safe_commit()
-
 	for row in stale:
+		if not _claim_stale_stopping(row["name"], cutoff):
+			continue
+		queued = True
 		try:
-			frappe.enqueue(
+			# The claim above is the lock. The fixed id with deduplicate only spares a
+			# second queued job when a sweep runs again; it is check-then-enqueue, not atomic.
+			# While a job with this id is still queued or started, enqueue returns None
+			# without an error, and a later sweep window retries.
+			queued = frappe.enqueue(
 				"optimus.analyze.run",
 				queue="long",
 				session_uuid=row["session_uuid"],
+				job_id=f"optimus-analyze-{row['session_uuid']}",
+				deduplicate=True,
 			)
 		except Exception:
-			frappe.log_error(
-				title=f"optimus janitor stopping re-enqueue {row['session_uuid']}"
+			frappe.log_error(title=f"optimus janitor stopping re-enqueue {row['session_uuid']}")
+			continue
+		if queued is None:
+			safe_call.log_error_line(
+				"optimus janitor: analyze for a stuck session is already queued or running; "
+				"retried in a later sweep window",
+				dedupe_seconds=_SWEEP_LOG_DEDUPE_SECONDS,
 			)
+
+
+def _claim_stale_stopping(name: str, cutoff) -> bool:
+	"""Lock the row, recheck it is still stale, and bump ``modified``; True for the one caller that wins."""
+	locked = frappe.db.get_value(
+		"Optimus Session",
+		{"name": name, "status": ["in", _STOPPING_STATUSES], "modified": ["<", cutoff]},
+		"name",
+		for_update=True,
+	)
+	failed = False
+	try:
+		if locked:
+			frappe.db.set_value("Optimus Session", name, {"status": "Stopping"})
+	except Exception:
+		frappe.db.rollback()
+		locked, failed = None, True
+	if failed:
+		safe_call.log_error_line(
+			"optimus janitor could not claim a stuck session for re-analyze; retried in a later sweep window",
+			dedupe_seconds=_SWEEP_LOG_DEDUPE_SECONDS,
+		)
+	safe_commit()  # also releases the lock
+	return bool(locked)
 
 
 def _sweep_stale_phase2_runs():
