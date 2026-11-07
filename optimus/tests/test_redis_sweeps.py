@@ -185,7 +185,7 @@ def test_a_cleanup_that_failed_is_not_counted_or_logged_as_done(fake_frappe):
 	assert not any("no row" in message for message, _ in cache.lines)
 
 
-def test_orphans_and_leftovers_share_one_cap(fake_frappe, monkeypatch):
+def test_orphans_and_leftovers_are_rotated_as_one_pool_under_one_cap(fake_frappe, monkeypatch):
 	from optimus import janitor
 
 	monkeypatch.setattr(janitor, "MAX_DELETIONS_PER_RUN", 3)
@@ -197,7 +197,7 @@ def test_orphans_and_leftovers_share_one_cap(fake_frappe, monkeypatch):
 	janitor._sweep_orphan_redis_state()
 
 	remaining = {k.split(":")[2] for k in cache.store}
-	assert len(remaining) == 2  # 3 of the 5 sessions are cleaned
+	assert len(remaining) == 2  # exactly 3 of the 5 sessions are cleaned, no matter their kind
 
 
 def test_a_ready_session_that_just_finished_is_left_to_its_own_cleanup(fake_frappe):
@@ -306,6 +306,27 @@ class TestOrphanSweepFairness:
 		_run_days(janitor, monkeypatch, 3)
 
 		assert {f"good{i}" for i in range(5)} <= set(attempts)
+
+	def test_each_day_starts_one_window_further_on_and_every_session_is_reached(
+		self, fake_frappe, monkeypatch, attempts
+	):
+		from optimus import janitor
+
+		total = 250
+		fake_frappe(janitor, [f"profiler:session:good{i:03d}:meta" for i in range(total)])
+		window = janitor.MAX_DELETIONS_PER_RUN
+		per_day = []
+		for day in range(3):
+			del attempts[:]
+			# the fake keeps cleaned keys, so a day sees the same pool
+			monkeypatch.setattr(janitor, "now_datetime", lambda day=day: NOW + day * DAY)
+			janitor._sweep_orphan_redis_state()
+			per_day.append(list(attempts))
+
+		first_index = [int(day[0][4:]) for day in per_day]
+		base = first_index[0]
+		assert [(i - base) % total for i in first_index] == [0, window % total, (2 * window) % total]
+		assert set().union(*per_day) == {f"good{i:03d}" for i in range(total)}
 
 	def test_a_run_still_makes_at_most_max_attempts(self, fake_frappe, attempts):
 		from optimus import janitor

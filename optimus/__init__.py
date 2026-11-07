@@ -92,10 +92,18 @@ _OPTIMUS_PREFIX = "optimus."
 _RUN_SCHEDULED_JOB = "frappe.core.doctype.scheduled_job_type.scheduled_job_type.run_scheduled_job"
 
 
-def _method_path(method) -> str:
+def method_path(method) -> str:
 	if isinstance(method, str):
 		return method
 	return f"{getattr(method, '__module__', '')}.{getattr(method, '__qualname__', '')}"
+
+
+_method_path = method_path
+
+
+def is_scheduled_job(method) -> bool:
+	"""True for the scheduler's cron runner, whichever app's job it runs."""
+	return _method_path(method) == _RUN_SCHEDULED_JOB
 
 
 def is_internal_job(method, kwargs=None) -> bool:
@@ -108,8 +116,13 @@ def is_internal_job(method, kwargs=None) -> bool:
 
 
 def _is_scheduler_enqueue(method, local) -> bool:
-	"""A cron queued by the scheduler (no web request) is not part of the user's flow."""
-	return _method_path(method) == _RUN_SCHEDULED_JOB and getattr(local, "request", None) is None
+	"""A cron queued with no web request and no running job is not part of the user's flow.
+	``bench execute`` and the console look the same, and are left out too."""
+	return (
+		_method_path(method) == _RUN_SCHEDULED_JOB
+		and getattr(local, "request", None) is None
+		and getattr(local, "job", None) is None
+	)
 
 
 def _outside_user_flow(method, kwargs, local) -> bool:
@@ -187,6 +200,7 @@ def _patch_enqueue():
 
 	def _profiler_enqueue(method, *args, **kwargs):
 		active = None
+		tagging_error = None
 		synchronous = _is_synchronous_enqueue(args, kwargs, _positions)
 		try:
 			# Lazy import to avoid circular dependency on app init.
@@ -217,9 +231,15 @@ def _patch_enqueue():
 					# phase 2 stays off for this job; phase 1 (if active)
 					# still rides along.
 					pass
-		except Exception:
+		except Exception as exc:
 			# Never break enqueue. The profiler is best-effort by design.
-			pass
+			tagging_error = type(exc).__name__
+		if tagging_error:
+			from optimus import safe_call
+
+			safe_call.log_error_line(
+				f"optimus: could not decide whether to tag an enqueued job ({tagging_error}); it runs untagged"
+			)
 
 		# enqueue_after_commit returns None, so pick the id ourselves.
 		deferred_job_id = None

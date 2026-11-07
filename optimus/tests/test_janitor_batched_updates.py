@@ -353,6 +353,48 @@ class TestSweepStaleStopping:
 		assert kwargs["deduplicate"] is True
 		assert kwargs["session_uuid"] == "u1" and kwargs["queue"] == "long"
 
+	def test_a_deduplicated_enqueue_is_logged(self, monkeypatch):
+		stub = _install_frappe_stub(monkeypatch)
+		stub._get_all_return["Optimus Session"] = [{"name": "PS-1", "session_uuid": "u1"}]
+		janitor = _reload_janitor(monkeypatch)
+		lines = []
+		monkeypatch.setattr(janitor.safe_call, "log_error_line", lambda msg, **kw: lines.append(msg))
+		janitor._sweep_stale_stopping()  # the stub enqueue returns None, as a deduplicated job does
+		assert len(lines) == 1 and "already queued or running" in lines[0]
+
+	def test_a_queued_job_is_not_logged_as_deduplicated(self, monkeypatch):
+		stub = _install_frappe_stub(monkeypatch)
+		stub._get_all_return["Optimus Session"] = [{"name": "PS-1", "session_uuid": "u1"}]
+		stub.enqueue = lambda *a, **kw: object()
+		janitor = _reload_janitor(monkeypatch)
+		lines = []
+		monkeypatch.setattr(janitor.safe_call, "log_error_line", lambda msg, **kw: lines.append(msg))
+		janitor._sweep_stale_stopping()
+		assert lines == []
+
+	def test_a_failing_claim_write_skips_the_row_and_releases_the_lock(self, monkeypatch):
+		stub = _install_frappe_stub(monkeypatch)
+		self._two_stale(stub)
+		calls = []
+
+		def set_value(doctype, name, fields, *a, **kw):
+			calls.append(name)
+			if name == "PS-1":
+				raise RuntimeError("lock wait timeout")
+			return True
+
+		stub.db.set_value = set_value
+		rollbacks = []
+		stub.db.rollback = lambda: rollbacks.append(1)
+		janitor = _reload_janitor(monkeypatch)
+		lines = []
+		monkeypatch.setattr(janitor.safe_call, "log_error_line", lambda msg, **kw: lines.append(msg))
+		janitor._sweep_stale_stopping()
+
+		assert [c[1]["session_uuid"] for c in stub._enqueue_calls] == ["u2"]
+		assert rollbacks == [1]
+		assert any("could not claim" in m for m in lines)
+
 	def test_a_failed_enqueue_does_not_stop_the_other_rows(self, monkeypatch):
 		stub = _install_frappe_stub(monkeypatch)
 		self._two_stale(stub)

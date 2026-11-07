@@ -464,12 +464,13 @@ def _sweep_stale_stopping():
 	for row in stale:
 		if not _claim_stale_stopping(row["name"], cutoff):
 			continue
+		queued = True
 		try:
 			# The claim above is the lock. The fixed id with deduplicate only spares a
 			# second queued job when a sweep runs again; it is check-then-enqueue, not atomic.
 			# While a job with this id is still queued or started, enqueue returns None
 			# without an error, and a later sweep window retries.
-			frappe.enqueue(
+			queued = frappe.enqueue(
 				"optimus.analyze.run",
 				queue="long",
 				session_uuid=row["session_uuid"],
@@ -478,6 +479,13 @@ def _sweep_stale_stopping():
 			)
 		except Exception:
 			frappe.log_error(title=f"optimus janitor stopping re-enqueue {row['session_uuid']}")
+			continue
+		if queued is None:
+			safe_call.log_error_line(
+				"optimus janitor: analyze for a stuck session is already queued or running; "
+				"retried in a later sweep window",
+				dedupe_seconds=_SWEEP_LOG_DEDUPE_SECONDS,
+			)
 
 
 def _claim_stale_stopping(name: str, cutoff) -> bool:
@@ -488,8 +496,18 @@ def _claim_stale_stopping(name: str, cutoff) -> bool:
 		"name",
 		for_update=True,
 	)
-	if locked:
-		frappe.db.set_value("Optimus Session", name, {"status": "Stopping"})
+	failed = False
+	try:
+		if locked:
+			frappe.db.set_value("Optimus Session", name, {"status": "Stopping"})
+	except Exception:
+		frappe.db.rollback()
+		locked, failed = None, True
+	if failed:
+		safe_call.log_error_line(
+			"optimus janitor could not claim a stuck session for re-analyze; retried in a later sweep window",
+			dedupe_seconds=_SWEEP_LOG_DEDUPE_SECONDS,
+		)
 	safe_commit()  # also releases the lock
 	return bool(locked)
 

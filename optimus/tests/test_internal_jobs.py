@@ -32,6 +32,12 @@ class TestScheduledJobs:
 		env.enqueue(RUN_SCHEDULED, job_type="erpnext.accounts.tasks.daily")
 		assert env.calls[-1]["kwargs"]["_profiler_session_id"] == SESSION
 
+	def test_a_cron_queued_from_inside_a_job_is_not_a_scheduler_enqueue(self, env):  # noqa: F811
+		# No web request, but a worker job is running: this is not the scheduler.
+		env.fake.local.job = object()
+		env.enqueue(RUN_SCHEDULED, job_type="erpnext.accounts.tasks.daily")
+		assert env.calls[-1]["kwargs"]["_profiler_session_id"] == SESSION
+
 	def test_an_optimus_cron_started_from_a_request_is_not_tagged(self, env):  # noqa: F811
 		env.fake.local.request = object()
 		env.enqueue(RUN_SCHEDULED, job_type="optimus.janitor.sweep_stale_sessions")
@@ -41,6 +47,22 @@ class TestScheduledJobs:
 		env.fake.local.request = object()
 		env.enqueue("myapp.tasks.go")
 		assert env.calls[-1]["kwargs"]["_profiler_session_id"] == SESSION
+
+
+class TestDetectionFailure:
+	def test_a_failing_session_lookup_still_enqueues_and_is_logged(self, env, monkeypatch):  # noqa: F811
+		from optimus import safe_call, session
+
+		def boom(user):
+			raise RuntimeError("redis down")
+
+		monkeypatch.setattr(session, "get_active_session_for", boom)
+		lines = []
+		monkeypatch.setattr(safe_call, "log_error_line", lambda msg, **kw: lines.append(msg))
+		env.enqueue("myapp.tasks.go")
+		env.enqueue("myapp.tasks.go")
+		assert len(env.calls) == 2 and not _marked(env)
+		assert len(lines) == 2 and all("RuntimeError" in m for m in lines)
 
 
 class TestOptimusMethods:
@@ -98,23 +120,54 @@ class TestBeforeJob:
 
 	def test_other_jobs_are_not_flagged(self, hc, env, monkeypatch):  # noqa: F811
 		monkeypatch.setattr(hc, "_track_bg_job_started", lambda *a: None)
-		hc.before_job(method=RUN_SCHEDULED, kwargs={"job_type": "erpnext.x"})
+		hc.before_job(method="myapp.tasks.go", kwargs={})
 		assert not hasattr(env.fake.local, "optimus_internal_job")
 
-	def test_an_inline_internal_job_leaves_the_requests_flag_as_it_found_it(self, hc, env):  # noqa: F811
-		hc.before_job(method="optimus.analyze.run", kwargs={})
+	def test_a_foreign_cron_is_flagged_so_its_child_is_not_tagged(self, hc, env):  # noqa: F811
+		hc.before_job(method=RUN_SCHEDULED, kwargs={"job_type": "erpnext.accounts.tasks.daily"})
 		assert env.fake.local.optimus_internal_job is True
-		hc.after_job(method="optimus.analyze.run", kwargs={})
+		env.enqueue("erpnext.accounts.tasks.child")
+		assert not _marked(env)
+		assert _pending(env) == set()
+
+	def test_a_foreign_cron_drops_a_stale_marker(self, hc, env):  # noqa: F811
+		kwargs = {"job_type": "erpnext.x", "_profiler_session_id": "s", "_lp_session_id": "l"}
+		hc.before_job(method=RUN_SCHEDULED, kwargs=kwargs)
+		assert kwargs == {"job_type": "erpnext.x"}
+
+	def test_after_a_foreign_cron_the_next_user_job_is_tagged_again(self, hc, env):  # noqa: F811
+		kw = {"job_type": "erpnext.x"}
+		hc.before_job(method=RUN_SCHEDULED, kwargs=kw)
+		hc.after_job(method=RUN_SCHEDULED, kwargs=kw)
+		env.enqueue("myapp.tasks.go")
+		assert env.calls[-1]["kwargs"]["_profiler_session_id"] == SESSION
+
+	def test_after_job_pops_only_what_its_own_before_job_pushed(self, hc, env):  # noqa: F811
+		outer, inner = {}, {}
+		hc.before_job(method="optimus.outer", kwargs=outer)
+		# A user job whose before_job pushed nothing must not unwind the outer job.
+		hc.before_job(method="myapp.tasks.go", kwargs=inner)
+		hc.after_job(method="myapp.tasks.go", kwargs=inner)
+		assert env.fake.local.optimus_internal_job is True
+		hc.after_job(method="optimus.outer", kwargs=outer)
+		assert env.fake.local.optimus_internal_job is False
+
+	def test_an_inline_internal_job_leaves_the_requests_flag_as_it_found_it(self, hc, env):  # noqa: F811
+		kw = {}
+		hc.before_job(method="optimus.analyze.run", kwargs=kw)
+		assert env.fake.local.optimus_internal_job is True
+		hc.after_job(method="optimus.analyze.run", kwargs=kw)
 		assert env.fake.local.optimus_internal_job is False
 		env.enqueue("myapp.tasks.go")
 		assert env.calls[-1]["kwargs"]["_profiler_session_id"] == SESSION
 
 	def test_nested_inline_internal_jobs_unwind_in_order(self, hc, env):  # noqa: F811
-		hc.before_job(method="optimus.a", kwargs={})
-		hc.before_job(method="optimus.b", kwargs={})
-		hc.after_job(method="optimus.b", kwargs={})
+		a, b = {}, {}
+		hc.before_job(method="optimus.a", kwargs=a)
+		hc.before_job(method="optimus.b", kwargs=b)
+		hc.after_job(method="optimus.b", kwargs=b)
 		assert env.fake.local.optimus_internal_job is True
-		hc.after_job(method="optimus.a", kwargs={})
+		hc.after_job(method="optimus.a", kwargs=a)
 		assert env.fake.local.optimus_internal_job is False
 
 	def test_after_job_without_an_internal_job_changes_nothing(self, hc, env):  # noqa: F811
