@@ -4,8 +4,8 @@
 """Settings are read once per request or job, never once per recorded query."""
 
 import sys
-import time
 import types
+from collections import defaultdict
 
 import pytest
 
@@ -13,6 +13,11 @@ import optimus
 from optimus import redis_keys, redis_schema, settings
 
 KEY = redis_keys.settings_cache()
+
+
+def fresh_local():
+	"""What frappe.init gives each request and job."""
+	return types.SimpleNamespace(request_cache=defaultdict(dict))
 
 
 class Env:
@@ -27,8 +32,7 @@ class Env:
 		self.row_error = None
 		self.transaction_writes = 0
 		self.get_error = None
-		self.now = 1000.0
-		self.local = types.SimpleNamespace()
+		self.local = fresh_local()
 		self.db = types.SimpleNamespace(transaction_writes=0)
 
 	def get_value(self, key, expires=False):
@@ -50,8 +54,11 @@ class Env:
 			raise self.row_error
 		return dict(self.row)
 
+	def memoized(self):
+		return bool(self.local.request_cache.get(settings._MEMO_KEY))
+
 	def new_request(self):
-		self.local = types.SimpleNamespace()
+		self.local = fresh_local()
 		frappe = sys.modules["frappe"]
 		frappe.local = self.local
 
@@ -74,7 +81,6 @@ def env(monkeypatch):
 	monkeypatch.setattr(frappe, "local", state.local, raising=False)
 	monkeypatch.setattr(frappe, "db", state.db, raising=False)
 	monkeypatch.setattr(settings, "_read_doctype_row", state.read_row)
-	monkeypatch.setattr(time, "monotonic", lambda: state.now)
 	return state
 
 
@@ -109,7 +115,7 @@ def test_invalidate_config_forces_one_fresh_read_and_one_database_read(env):
 
 def test_invalidate_config_clears_the_memo_even_if_the_redis_delete_fails(env, monkeypatch):
 	settings.get_config()
-	assert hasattr(env.local, "optimus_config")
+	assert env.memoized()
 
 	def fail(key):
 		raise RuntimeError("redis down")
@@ -117,14 +123,14 @@ def test_invalidate_config_clears_the_memo_even_if_the_redis_delete_fails(env, m
 	monkeypatch.setattr(sys.modules["frappe"].cache, "delete_value", fail)
 	with pytest.raises(RuntimeError):
 		settings.invalidate_config()
-	assert not hasattr(env.local, "optimus_config")
+	assert not env.memoized()
 
 
 def test_a_first_read_that_raises_is_retried_and_not_memoized(env):
 	env.get_error = RuntimeError("blip")
 	env.row_error = RuntimeError("blip")
 	assert settings.get_config().sensitive_sql_columns == ()
-	assert not hasattr(env.local, "optimus_config")
+	assert not env.memoized()
 	env.get_error = env.row_error = None
 	env.row["sensitive_sql_columns"] = ["secret_col"]
 	assert settings.get_config().sensitive_sql_columns == ("secret_col",)
@@ -133,7 +139,7 @@ def test_a_first_read_that_raises_is_retried_and_not_memoized(env):
 def test_a_failed_resolve_returns_defaults_and_is_not_memoized(env, monkeypatch):
 	monkeypatch.setattr(settings, "_resolve", lambda row=None: 1 / 0)
 	assert settings.get_config().sensitive_sql_columns == ()
-	assert not hasattr(env.local, "optimus_config")
+	assert not env.memoized()
 
 
 def test_a_config_whose_redis_write_failed_is_not_memoized(env, monkeypatch):
@@ -142,14 +148,14 @@ def test_a_config_whose_redis_write_failed_is_not_memoized(env, monkeypatch):
 
 	monkeypatch.setattr(sys.modules["frappe"].cache, "set_value", fail)
 	assert settings.get_config().enabled
-	assert not hasattr(env.local, "optimus_config")
+	assert not env.memoized()
 
 
 def test_settings_read_during_a_pending_write_are_not_memoized(env):
 	env.db.transaction_writes = 1
 	env.row["enabled"] = 0
 	assert not settings.get_config().enabled
-	assert KEY not in env.redis and not hasattr(env.local, "optimus_config")
+	assert KEY not in env.redis and not env.memoized()
 	env.db.transaction_writes = 0
 	env.row["enabled"] = 1
 	assert settings.get_config().enabled
@@ -157,7 +163,7 @@ def test_settings_read_during_a_pending_write_are_not_memoized(env):
 
 def test_a_config_written_to_redis_is_memoized(env):
 	settings.get_config()
-	assert KEY in env.redis and hasattr(env.local, "optimus_config")
+	assert KEY in env.redis and env.memoized()
 
 
 def test_an_unbound_frappe_local_still_returns_a_config(env, monkeypatch):
@@ -176,16 +182,6 @@ def test_an_unbound_frappe_local_still_returns_a_config(env, monkeypatch):
 def test_a_frappe_without_local_still_returns_a_config(env, monkeypatch):
 	monkeypatch.delattr(sys.modules["frappe"], "local")
 	assert settings.get_config().enabled
-
-
-def test_the_memo_expires_after_the_config_cache_seconds(env):
-	settings.get_config()
-	env.row["enabled"] = 0
-	env.redis.clear()
-	env.now += settings.CONFIG_CACHE_SECONDS - 1
-	assert settings.get_config().enabled
-	env.now += 2
-	assert not settings.get_config().enabled
 
 
 class FakeRecorder:

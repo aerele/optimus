@@ -797,30 +797,36 @@ def _resolve(*, row=_UNREAD_ROW) -> OptimusConfig:
 	)
 
 
-_MEMO_ATTR = "optimus_config"
+_MEMO_KEY = "optimus_config"
+
+
+# Not ``@frappe.request_cache``: that decorator stores every return value, and a failure
+# default or settings read next to a pending write must not be memoised. It does reuse
+# the same per-request dict, ``frappe.local.request_cache``, which frappe.init creates
+# afresh for each request and job, so nothing outlives them and no TTL is needed.
+def _request_memo(frappe):
+	cache = getattr(frappe.local, "request_cache", None)
+	return cache if isinstance(cache, dict) else None
 
 
 def _memoized_config(frappe):
-	"""The config resolved earlier in this request or job, or None once it is a minute old."""
+	"""The config resolved earlier in this request or job, or None."""
 	try:
-		stamp, cfg = getattr(frappe.local, _MEMO_ATTR)
-		if time.monotonic() - stamp < CONFIG_CACHE_SECONDS:
-			return cfg
+		return _request_memo(frappe).get(_MEMO_KEY, {}).get("config")
 	except Exception:
-		pass
-	return None
+		return None
 
 
 def _memoize_config(frappe, cfg) -> None:
 	try:
-		setattr(frappe.local, _MEMO_ATTR, (time.monotonic(), cfg))
+		_request_memo(frappe).setdefault(_MEMO_KEY, {})["config"] = cfg
 	except Exception:
 		pass
 
 
 def _forget_config(frappe) -> None:
 	try:
-		delattr(frappe.local, _MEMO_ATTR)
+		_request_memo(frappe).pop(_MEMO_KEY, None)
 	except Exception:
 		pass
 
@@ -836,7 +842,7 @@ def invalidate_config() -> None:
 def get_config() -> OptimusConfig:
 	"""Return cached configuration, falling back on ordinary errors, never RQ timeouts.
 
-	The result is also kept on ``frappe.local`` (at most CONFIG_CACHE_SECONDS), so a
+	The result is also kept in Frappe's per-request cache, so a
 	request or job reads Redis once, not once per recorded query. Only a Redis hit or
 	a config written to Redis is kept: never a failure default, and never settings
 	that a pending write could still roll back.

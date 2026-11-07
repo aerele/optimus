@@ -397,18 +397,6 @@ def _reset_log_line_dedupe():
 	yield
 
 
-@pytest.fixture(autouse=True)
-def _reset_config_memo():
-	"""settings.get_config memoizes on frappe.local, which the stub shares across tests."""
-	try:
-		import frappe
-
-		del frappe.local.optimus_config
-	except Exception:
-		pass
-	yield
-
-
 def load_fixture(name: str) -> dict:
 	"""Load a JSON fixture from tests/fixtures/<name>.json."""
 	path = os.path.join(FIXTURES_DIR, f"{name}.json")

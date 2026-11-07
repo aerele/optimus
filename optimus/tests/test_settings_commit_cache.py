@@ -1,4 +1,5 @@
 """Commit, rollback, lost invalidation and failure-cache timelines."""
+from collections import defaultdict
 from types import SimpleNamespace
 
 from optimus import settings
@@ -16,8 +17,8 @@ def environment(monkeypatch):
 		state.writes.append(expires_in_sec)
 	fake.cache = SimpleNamespace(get_value=get, set_value=put, delete_value=lambda key: setattr(state, "value", None))
 	fake.conf = {}
-	fake.local = SimpleNamespace()
-	state.new_request = lambda: setattr(fake, "local", SimpleNamespace())
+	fake.local = SimpleNamespace(request_cache=defaultdict(dict))
+	state.new_request = lambda: setattr(fake, "local", SimpleNamespace(request_cache=defaultdict(dict)))
 	fake.db = SimpleNamespace(exists=lambda *a: True, after_commit=SimpleNamespace(add=state.callbacks.append))
 	fake.get_doc = lambda *a: dict(state.committed)
 	return Controller(), fake, state
@@ -66,7 +67,7 @@ def test_uncommitted_settings_reads_cannot_populate_shared_cache(monkeypatch):
 	state.committed = {"enabled": 0}  # This connection can read its pending write.
 	assert not settings.get_config().enabled
 	assert not state.writes
-	assert not hasattr(fake.local, "optimus_config")
+	assert not fake.local.request_cache.get(settings._MEMO_KEY)
 	fake.db.transaction_writes = 0
 	state.committed = {"enabled": 1}  # Rollback restored the committed value.
 	assert settings.get_config().enabled
