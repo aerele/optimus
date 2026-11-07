@@ -13,6 +13,9 @@ import types
 
 import frappe
 
+from optimus import api, hooks_callbacks
+from optimus.hooks_callbacks import _inject_correlation_header
+
 
 def _set_fake_local(headers=None):
     """Replace frappe.local with a minimal SimpleNamespace holding a
@@ -26,8 +29,6 @@ def _set_fake_local(headers=None):
 
 
 def test_inject_correlation_header_sets_both_headers():
-    from optimus.hooks_callbacks import _inject_correlation_header
-
     headers = {}
     _set_fake_local(headers)
 
@@ -40,8 +41,6 @@ def test_inject_correlation_header_sets_both_headers():
 def test_inject_correlation_header_merges_with_existing_expose():
     """If another app has already set Access-Control-Expose-Headers,
     our value must be appended, not overwritten."""
-    from optimus.hooks_callbacks import _inject_correlation_header
-
     headers = {"Access-Control-Expose-Headers": "X-Some-Other-Header"}
     _set_fake_local(headers)
 
@@ -54,8 +53,6 @@ def test_inject_correlation_header_merges_with_existing_expose():
 
 def test_inject_correlation_header_idempotent():
     """Calling the injector twice must not duplicate the expose entry."""
-    from optimus.hooks_callbacks import _inject_correlation_header
-
     headers = {}
     _set_fake_local(headers)
 
@@ -72,8 +69,6 @@ def test_inject_correlation_header_tokenwise_match_not_substring():
     ``X-Optimus-Recording-Id-Legacy`` entry makes the substring check skip
     adding the real header, which then never gets exposed to JavaScript.
     """
-    from optimus.hooks_callbacks import _inject_correlation_header
-
     headers = {"Access-Control-Expose-Headers": "X-Optimus-Recording-Id-Legacy"}
     _set_fake_local(headers)
 
@@ -97,8 +92,6 @@ def test_correlation_header_gated_on_profiler_session_id():
     """
     import inspect
 
-    from optimus import hooks_callbacks
-
     src = inspect.getsource(hooks_callbacks.after_request)
     # The correlation header injection must check optimus_session_id
     # (from frappe.local), not just the recording UUID.
@@ -119,8 +112,6 @@ def test_inject_correlation_header_case_insensitive_idempotency():
     """HTTP header names are case-insensitive, so the token check must be too:
     an existing lowercase expose entry shouldn't get a duplicate added in
     different casing."""
-    from optimus.hooks_callbacks import _inject_correlation_header
-
     headers = {"Access-Control-Expose-Headers": "x-profiler-recording-id"}
     _set_fake_local(headers)
 
@@ -134,8 +125,6 @@ def test_inject_correlation_header_case_insensitive_idempotency():
 def test_inject_correlation_header_noop_without_response_headers():
     """If frappe.local has no response_headers attribute (non-HTTP context
     like a script shell), the injector must no-op, not raise."""
-    from optimus.hooks_callbacks import _inject_correlation_header
-
     _set_fake_local()  # no response_headers attribute
 
     # Must not raise.
@@ -146,8 +135,6 @@ def test_hooks_callbacks_invokes_snapshot():
     """Source-inspection guard: the before/after request and job hooks must
     call infra_capture."""
     import inspect
-
-    from optimus import hooks_callbacks
 
     before = inspect.getsource(hooks_callbacks.before_request)
     after = inspect.getsource(hooks_callbacks.after_request)
@@ -169,16 +156,12 @@ def test_hooks_callbacks_invokes_snapshot():
 def test_stop_session_force_stops_infra_inflight():
     import inspect
 
-    from optimus import api
-
     src = inspect.getsource(api._stop_session)
     assert "infra_capture._force_stop_inflight" in src
 
 
 def test_after_request_injects_correlation_header():
     import inspect
-
-    from optimus import hooks_callbacks
 
     src = inspect.getsource(hooks_callbacks.after_request)
     assert "_inject_correlation_header" in src

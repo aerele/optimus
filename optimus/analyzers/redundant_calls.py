@@ -113,6 +113,16 @@ def _to_hashable(value):
 	return value
 
 
+def _hashable_or_none(value):
+	"""``_to_hashable(value)``, or None when it holds a dict or nests past the recursion limit."""
+	try:
+		result = _to_hashable(value)
+		hash(result)
+	except (TypeError, RecursionError):
+		return None
+	return result
+
+
 _LIBRARY_MARKERS = ("/site-packages/", "/dist-packages/", "/lib/python", "/Lib/")
 
 
@@ -226,12 +236,11 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 			if _is_optimus_own(caller_stack):
 				# Optimus's own call (its per-query settings read), not the user's.
 				continue
-			try:
-				key = (fn_name, _to_hashable(safe))
-				buckets[key].append((action_idx, raw, caller_stack))
-			except TypeError:
+			hashable = _hashable_or_none(safe)
+			if hashable is None:
 				skipped_unhashable += 1
 				continue
+			buckets[(fn_name, hashable)].append((action_idx, raw, caller_stack))
 
 	if skipped_unhashable:
 		context.warnings.append(

@@ -71,7 +71,7 @@ def _extract_cmd_from_request() -> str:
 		form_dict = getattr(frappe.local, "form_dict", None)
 		if isinstance(form_dict, dict):
 			cmd = form_dict.get("cmd")
-			if cmd:
+			if cmd and isinstance(cmd, str):
 				return cmd
 	except Exception:
 		pass
