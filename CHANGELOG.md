@@ -8,6 +8,35 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.161] - 2026-11-07
+
+### Fixed
+
+- Secrets in URL query strings and fragments are now masked. A password-reset link, an `api_key`, `token`, `sid` or signed-link `_signature` in the URL no longer shows in a recorded header (the `Referer`), in the browser timing URLs of a report (XHR and page URLs), or in a report's request details. Only the secret value is replaced; the rest of the URL stays readable (`?api_key=<REDACTED>&doctype=User`). The browser URLs are also masked before they are stored. A URL inside a longer text value is masked too, and `user:password@` in a URL becomes `<REDACTED>@`.
+- In a URL, these parameter names are always masked: `key`, `signature`, `sig`, `code`, `auth`, `jwt`, `bearer`, `session`, `pin`, `refresh`, `reset_key`, anything ending in `_signature` or `_sig` (`X-Amz-Signature`, `oauth_signature`), `X-Amz-Credential` and `X-Amz-Security-Token`, plus every name that is sensitive as a field (`token`, `password`, `sid`, ...). Names that only contain these words (`item_code`, `code_name`, `session_user`) stay visible. `code`, `session` and the other short names are masked in URLs only, never as form fields or header names.
+- Header and field names such as `X-Api-Key`, `api-key`, `X-Session-Id`, `X-Session`, `accessKey`, `privateKey`, `sid`, `Cf-Access-Jwt-Assertion`, `jwt`, `X-Signature`, `X-Hub-Signature-256`, `Stripe-Signature`, `WWW-Authenticate`, `Proxy-Authenticate`, `Authentication` and `Sec-WebSocket-Key` are now treated as sensitive. `Content-Type`, `Accept`, `Origin`, `Referer`, `Host`, `Keep-Alive`, `Sec-Fetch-Site` and `X-Frappe-CMD` stay visible, and the CSRF token stays masked.
+- A bare `key` is always masked inside a URL string. In the recorded form data it is masked only on a password reset (`/update-password?key=...`) or a print share link (`/printview?...&key=...`), where it is a credential; on any other request `key` is usually an ordinary field such as a setting name and stays visible.
+- The Error Log scrub for AI errors also masks secret query values in any URL it finds in a record.
+- A secret in a list filter is masked too: a row such as `["User", "password", "=", "..."]` in the filters of a request or of a URL has its value replaced when the field name is sensitive. Punctuation after a URL in running text (`).,;`, a closing quote or bracket) is kept.
+- Not covered: a secret inside a URL path (for example `/reset/<token>`), a name written with look-alike characters (homoglyphs), and a `key=value` pair in free text that is not inside a URL cannot be detected and are shown as is. OAuth `state` is not masked (`code` now is, in URLs). Sessions recorded before this version keep their raw URLs in the stored session data (the Desk form and the exported JSON); their reports and the AI Steps text show them masked, so delete a session that profiled a reset or API-key link. A URL longer than 8 KiB loses its whole query part (`?<query omitted>`).
+- Masking a URL is now linear in its length. A guest could send a long run of text ending in `@` (a form value, the `Referer` header or a browser timing URL) and keep a worker busy for many seconds. A URL over 8 KiB is no longer scanned past its first 8 KiB, and user info (`user:pass@`) stops at a space.
+- A secret inside a URL that is itself the value of a parameter is masked too, whether it is percent-encoded or not: `/login?redirect-to=%2Fupdate-password%3Fkey%3D...`, `?next=/a?token=...` and a second `?`. The rest of the URL stays readable. A value nested more than four levels deep is masked whole.
+- Header names that end in `-Key` (`Ocp-Apim-Subscription-Key`, `X-Master-Key`, `X-Key`) and names with an `auth` or `bearer` part (`X-Auth`, `Auth`, `X-Bearer`) are masked. `Idempotency-Key` stays visible. This applies to header names only, so a form field called `sort_key` or `auth` is not changed.
+- The `code` of an OAuth login callback is masked in the recorded form data.
+- If masking the form data or the headers of a recorded request fails, that field is stored as `{"_optimus": "<REDACTION FAILED: omitted>"}` (the other field is still masked) and one ERROR line naming the error class is written to the log. Before, a failure left both fields raw and silent.
+- Your own `sensitive_form_keys` are now applied in every place a URL or header is masked (capture, the browser timing store, report context, the frontend analyzer, AI Steps and the AI error scrub). If Optimus Settings cannot be read, one ERROR line is logged and only the built-in names are applied; before, the failure was silent.
+- A list is treated as a filter row only when its operator is a real one (`=`, `like`, `in`, ...), and JSON text that is cut short or nested too deeply to parse has the values after secret names masked instead of being kept as it was.
+
+### Action needed
+
+Masking applies as data is recorded and rendered. Rows stored before this version are not rewritten:
+
+- Delete any Optimus Session that profiled a password-reset link, a print share link, an OAuth login or a request with an API key in its URL or headers. Its stored form data and headers keep the raw values (the report and the AI Steps text show them masked).
+- Old AI error rows can still hold URLs with secrets. Run `bench --site <site> execute optimus.maintenance.scrub_error_log_secrets --kwargs "{'dry_run': False}"`; to delete them instead, count with `bench --site <site> execute optimus.maintenance.purge_ai_error_logs --kwargs "{'dry_run': True}"`, then run it with `'dry_run': False`. Both lock Error Log while they run, so prefer off-peak hours.
+- Rotate any credential that appeared in a stored URL or header, and in a backup taken before this upgrade.
+
+---
+
 ## [0.12.152] - 2026-11-06
 
 ### Security

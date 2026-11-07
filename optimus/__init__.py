@@ -1,4 +1,4 @@
-__version__ = "0.12.152"
+__version__ = "0.12.161"
 
 
 def safe_commit() -> None:
@@ -279,6 +279,19 @@ def _omit_unredacted_query(data):
 	data[LITERALS_MASKED_KEY] = True
 
 
+def _omit_capture_fields(recorder):
+	"""The redaction module could not be imported: store no request fields rather than raw ones."""
+	for name in ("form_dict", "headers"):
+		if isinstance(getattr(recorder, name, None), dict):
+			setattr(recorder, name, {"_optimus": "<REDACTION FAILED: omitted>"})
+	try:
+		import logging
+
+		logging.getLogger("optimus").error("Optimus redaction module unavailable; request fields omitted")
+	except Exception:
+		pass
+
+
 def _patch_recorder():
 	"""Install capture-time redaction on Frappe's recorder. Idempotent via the
 	``_profiler_patched`` marker; best-effort so a patch failure never breaks
@@ -324,31 +337,46 @@ def _patch_recorder():
 				tuple(cfg.sensitive_sql_columns or ()),
 			)
 		except Exception as error:
-			try:
-				from optimus.redaction_log import log_extras_unreadable
+			from optimus.redaction_extras import log_extras_failure
 
-				log_extras_unreadable(error)
-			except Exception:
-				pass
+			log_extras_failure(error)
 			return ((), ())
 		finally:
 			frappe.local.optimus_reading_extras = False
 
 	def _profiler_init(self, *args, **kwargs):
 		_original_init(self, *args, **kwargs)
+		# Each field is masked in its own try: if one pass fails, the other still runs, and the
+		# failed field keeps a placeholder, never its raw value. Our scrubber never breaks the request.
 		try:
-			from optimus.redaction import redact_sensitive
-
-			extra_keys, _ = _read_extras()
-			if isinstance(getattr(self, "form_dict", None), dict):
-				self.form_dict = redact_sensitive(self.form_dict, extra_keys=extra_keys)
-			if isinstance(getattr(self, "headers", None), dict):
-				self.headers = redact_sensitive(self.headers, extra_keys=extra_keys)
+			from optimus import redaction
+			from optimus.redaction_log import log_capture_failure
 		except Exception:
-			# Never break the user's request because OUR scrubber failed.
-			# Renderer-side defense-in-depth still catches anything that
-			# slipped through.
-			pass
+			_omit_capture_fields(self)
+			return
+		path, cmd = getattr(self, "path", None), getattr(self, "cmd", None)
+		try:
+			extra_keys, _ = _read_extras()
+		except Exception as error:
+			log_capture_failure("settings", error)
+			extra_keys = ()
+		if isinstance(getattr(self, "form_dict", None), dict):
+			try:
+				self.form_dict = redaction.redact_sensitive(
+					self.form_dict,
+					extra_keys=extra_keys,
+					mask_key=redaction.is_key_bearing_endpoint(path, cmd),
+					mask_code=redaction.is_oauth_callback(path, cmd),
+				)
+			except Exception as error:
+				log_capture_failure("form_dict", error)
+				self.form_dict = {"_optimus": "<REDACTION FAILED: omitted>"}
+		if isinstance(getattr(self, "headers", None), dict):
+			try:
+				self.headers = redaction.redact_sensitive(self.headers, extra_keys=extra_keys, header=True)
+			except Exception as error:
+				log_capture_failure("headers", error)
+				self.headers = {"_optimus": "<REDACTION FAILED: omitted>"}
 
 	def _profiler_register(self, data):
 		try:

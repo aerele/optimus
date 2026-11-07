@@ -752,8 +752,7 @@ def _build_frontend(ctx) -> dict | None:
 	``kpis`` tile set was dropped: the template never rendered it and the XHR /
 	web-vitals cells already roll over to seconds via ``_ms_display``.)
 	"""
-	vitals_by_page = ctx.get("frontend_vitals_by_page") or {}
-	xhrs = ctx.get("frontend_xhr_matched") or []
+	vitals_by_page, xhrs, orphans = _masked_frontend_urls(ctx)
 	summary = ctx.get("frontend_summary") or {}
 
 	if not vitals_by_page and not xhrs and not summary:
@@ -816,8 +815,21 @@ def _build_frontend(ctx) -> dict | None:
 		"web_vitals": web_vitals,
 		"summary": summary or {},
 		"xhr_matched": xhrs or [],
-		"orphans": ctx.get("frontend_orphans") or [],
+		"orphans": orphans,
 	}
+
+
+def _masked_frontend_urls(ctx) -> tuple[dict, list, list]:
+	"""The stored page, XHR and orphan URLs with secret query values masked: a session
+	analyzed before the capture-side mask keeps raw URLs in its aggregate."""
+	from optimus.redaction import redact_url, redact_url_field
+	from optimus.redaction_extras import form_key_extras
+
+	extra_keys = form_key_extras()
+	pages = {redact_url(page, extra_keys): v for page, v in (ctx.get("frontend_vitals_by_page") or {}).items()}
+	xhrs = [redact_url_field(x, "url", extra_keys) for x in ctx.get("frontend_xhr_matched") or []]
+	orphans = [redact_url_field(x, "url", extra_keys) for x in ctx.get("frontend_orphans") or []]
+	return pages, xhrs, orphans
 
 
 def _build_hot_frames(hot_frames_rows, ignored_apps, fmt_ms=None) -> list[dict]:

@@ -17,6 +17,21 @@ def log_redaction_failure(error: BaseException) -> None:
 	logging.getLogger(__name__).warning("Optimus SQL redaction failed, statement omitted: %s", name)
 
 
+_logged_capture: set[tuple[str, str]] = set()
+
+
+def log_capture_failure(field: str, error: BaseException) -> None:
+	"""One ERROR line per (field, error class) per process: a recorded request field could not be
+	masked, so a placeholder was stored instead. The class only, never the value."""
+	key = (field, type(error).__name__)
+	if key in _logged_capture:
+		return
+	_logged_capture.add(key)
+	logging.getLogger(__name__).error(
+		"Optimus could not redact the recorded request %s (%s); a placeholder was stored", field, key[1]
+	)
+
+
 def log_extras_unreadable(error: BaseException) -> None:
 	"""The Optimus Settings lists could not be read, so only the default names are masked."""
 	name = "extras:" + type(error).__name__
