@@ -180,6 +180,11 @@ def is_secret_header_name(name) -> bool:
 	except ``Idempotency-Key``) or an ``auth`` / ``bearer`` part (``X-Auth``, ``X-Bearer``)."""
 	if not isinstance(name, str) or not name or len(name) > _IDENTIFIER_MAX:
 		return False
+	return _secret_header_name(name)
+
+
+@lru_cache(maxsize=_KEY_CACHE_MAX)
+def _secret_header_name(name: str) -> bool:
 	normalised = _normalize_name(name)
 	if normalised in _HEADER_KEY_ALLOWED:
 		return False

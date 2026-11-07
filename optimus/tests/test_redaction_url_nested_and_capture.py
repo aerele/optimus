@@ -61,6 +61,10 @@ class TestNestedUrlValues:
 		url = "/x?" + "a=/b?" * 40 + "token=DEEPSECRET"
 		assert "DEEPSECRET" not in redaction.redact_url(url)
 
+	def test_a_value_nested_past_the_depth_limit_is_masked_whole(self):
+		out = redaction.redact_url("/x?" + "a=/b?" * 6 + "token=S")
+		assert out == f"/x?a=/b?a=/b?a=/b?a=/b?a={REDACTED}"
+
 	def test_nested_masking_is_bounded(self):
 		url = "/x?" + "a=/b?" * 1500 + "token=DEEPSECRET"
 		assert _seconds(redaction.redact_url, url) < 1.5
