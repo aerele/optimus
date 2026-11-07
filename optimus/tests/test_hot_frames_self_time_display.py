@@ -224,6 +224,24 @@ class TestMobileScroll:
 		assert re.search(r"\.hot-frames-scroll\s*\{[^}]*overflow-x:\s*auto", html)
 		assert re.search(r"@media print\s*\{\s*\.hot-frames-scroll\s*\{\s*overflow-x:\s*visible", html)
 
+	def test_each_scroll_box_has_a_phone_only_swipe_hint(self):
+		html = _html([NEW, FRAMEWORK])
+		for heading_id in ("hot-frames-app", "hot-frames-framework"):
+			start = html.index(f'id="{heading_id}"')
+			box = html.index('<div class="hot-frames-scroll">', start)
+			assert 'class="hot-frames-swipe-hint"' in html[start:box]
+		assert html.count('class="hot-frames-swipe-hint"') == 2
+		# hidden by default, shown in a phone width query, never printed
+		assert re.search(r"\.hot-frames-swipe-hint\s*\{[^}]*display:\s*none", html)
+		assert re.search(
+			r"@media \(max-width:\s*\d+px\)\s*\{[^@]*\.hot-frames-swipe-hint\s*\{[^}]*display:\s*block", html
+		)
+
+	def test_scroll_box_keeps_a_visible_scrollbar_on_phones(self):
+		html = _html([NEW])
+		assert re.search(r"\.hot-frames-scroll::-webkit-scrollbar\s*\{[^}]*height:", html)
+		assert re.search(r"\.hot-frames-scroll\s*\{[^}]*scrollbar-width:\s*thin", html)
+
 
 class TestSelfNodesAreGone:
 	def _tree(self):

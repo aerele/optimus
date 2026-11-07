@@ -1581,8 +1581,14 @@
   /* The hot-frames tables keep their single-line headers, so on a phone they are wider
      than the card. Scroll the table inside this box so the page never scrolls sideways.
      Same pattern as .phase2-func; paper cannot scroll, so print shows it in full. */
-  .hot-frames-scroll { max-width: 100%; overflow-x: auto; }
-  @media print { .hot-frames-scroll { overflow-x: visible; } }
+  .hot-frames-scroll { max-width: 100%; overflow-x: auto; scrollbar-width: thin; }
+  /* Phones draw overlay scrollbars that vanish, so the box keeps a visible bar and a hint. */
+  .hot-frames-scroll::-webkit-scrollbar { height: 8px; }
+  .hot-frames-scroll::-webkit-scrollbar-track { background: var(--bg-tint); }
+  .hot-frames-scroll::-webkit-scrollbar-thumb { background: var(--ink-mute); border-radius: 4px; }
+  .hot-frames-swipe-hint { display: none; margin: 4px 0 0; font-size: 12px; color: var(--ink-mute); }
+  @media (max-width: 600px) { .hot-frames-swipe-hint { display: block; } }
+  @media print { .hot-frames-scroll { overflow-x: visible; } .hot-frames-swipe-hint { display: none; } }
 
   /* EMPTY-STATE - green "✓ Clear" card shown when slowest-queries
      (or any future section) has no rows. */
@@ -3521,6 +3527,7 @@
     {% if report_data.hot_frames %}
     {% set self_missing = report_data.hot_frames | rejectattr("self_ms", "number") | list %}
     <h3 class="hot-frames-group-title" id="hot-frames-app">Your app's code ({{ report_data.hot_frames | length }})</h3>
+    <p class="hot-frames-swipe-hint">Swipe the table sideways to see every column.</p>
     <div class="hot-frames-scroll">
     <table class="data hot-frames-table">
       <thead>
@@ -3555,6 +3562,7 @@
         Framework rows show <em>cumulative</em> time (includes nested
         calls), because a wrapper's own time is usually a small part of it.
       </p>
+      <p class="hot-frames-swipe-hint">Swipe the table sideways to see every column.</p>
       <div class="hot-frames-scroll">
       <table class="data hot-frames-table">
         <thead>

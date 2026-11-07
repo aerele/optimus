@@ -37,6 +37,10 @@ def redact_frame_name(node: dict) -> str:
 def build_donut_data(breakdown: dict) -> list:
 	"""Convert session_time_breakdown_json into ordered (label, ms, color)
 	tuples. Slices under 1ms are hidden as noise.
+
+	``by_app`` is raw python self time and still includes the SQL wait, which ``sql_ms``
+	counts too. Nothing renders these slices today (the report template ignores them); a
+	renderer that does must first take the per-action SQL wait out of ``by_app``.
 	"""
 	if not breakdown:
 		return []
