@@ -304,3 +304,22 @@ def test_multiline_lambda_in_a_call_says_its_source_spans_several_lines():
 	with pytest.raises(capture.SourceUnavailable) as caught:
 		capture._function_block(text.split("\n")[:-1], code)
 	assert caught.value.reason == "its source spans several lines"
+
+
+def test_refusal_reason_is_not_spliced_into_a_translated_sentence(tmp_path, monkeypatch):
+	path, fn = load(tmp_path, monkeypatch, BLANKS)
+	path.write_text("x = 1\n")
+	msgids = []
+
+	def translate(msg):
+		msgids.append(msg)
+		return msg
+
+	monkeypatch.setattr(capture, "_", translate)
+	with pytest.raises(capture.CaptureError) as caught:
+		prepare(monkeypatch, fn)
+	reason = capture._pick_source(fn)[1]
+	assert reason in msgids and reason in str(caught.value)
+	sentences = [m for m in msgids if "{1}" in m]
+	assert sentences
+	assert all(not m.split("{1}")[0].endswith(("because ", "is ")) for m in sentences)

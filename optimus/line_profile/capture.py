@@ -451,7 +451,7 @@ def _pick_snapshot(pick: dict) -> list[dict] | None:
 		pick["ineligible_reason"] = _("Its source is unavailable: {0}.").format(reason)
 		return None
 	raise CaptureError(
-		_("Source for {0} is unavailable because {1}. Restart the workers if its file changed, "
+		_("Source for {0} is unavailable. Reason: {1}. Restart the workers if its file changed, "
 			"or choose another function.").format(pick["dotted_path"], reason)
 	)
 
