@@ -10,6 +10,7 @@ recording-count safety cap that keeps inline analyze under the gunicorn timeout.
 """
 
 import inspect
+from types import SimpleNamespace
 
 import pytest
 
@@ -325,7 +326,11 @@ def test_stop_flags_an_empty_inline_session(monkeypatch, row, expected):
 	monkeypatch.setattr(api.session, "get_active_session_for", lambda user: "s")
 	monkeypatch.setattr(api.ratelimit, "enforce_user_rate_limit", lambda *a, **kw: None)
 	monkeypatch.setattr(api, "_stop_session", lambda user, active: ("doc", True))
-	monkeypatch.setattr(api.frappe.db, "get_value", lambda *a, **kw: row, raising=False)
+	# Replace frappe.db wholesale rather than patching an attribute on it. On a real
+	# bench frappe.db is an unbound LocalProxy, so touching an attribute dereferences
+	# the unbound frappe.local and raises during setup. The CI stub exposes frappe.db
+	# as a SimpleNamespace, so replacing the whole object works in both environments.
+	monkeypatch.setattr(api.frappe, "db", SimpleNamespace(get_value=lambda *a, **kw: row))
 	out = api.stop()
 	assert out["status"] == row[0]
 	assert out["empty"] is expected
