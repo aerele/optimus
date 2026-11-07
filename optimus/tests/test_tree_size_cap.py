@@ -129,6 +129,69 @@ class TestThinning:
 		assert abs(times["slow_sql_execute"] - 2.0) <= interval
 		assert abs(sum(times.values()) - total_time(records)) < 1e-9
 
+	def test_kept_sample_count_is_close_to_the_target(self, monkeypatch):
+		monkeypatch.setattr(capture, "TREE_MAX_SAMPLES", 1000)
+		session = fake_session([([frame("a", 1)], 0.001) for _ in range(10000)])
+		capture.compact_pyi_session(session)
+		assert 800 <= len(session.frame_records) <= 1200
+
+	def test_total_frames_are_bounded_before_interning(self, monkeypatch):
+		monkeypatch.setattr(capture, "TREE_MAX_FRAMES", 20_000)
+		records = unique_records(2000, depth=100)
+		total = total_time(records)
+		session = fake_session(records)
+		info = capture.compact_pyi_session(session)
+		assert sum(len(stack) for stack, _ in session.frame_records) <= 20_000
+		assert info["every"] > 1
+		assert abs(total_time(session.frame_records) - total) < 1e-9
+
+	def test_the_default_frame_bound_applies(self):
+		session = fake_session([([frame("a", d) for d in range(400)], 0.001) for _ in range(1000)])
+		capture.compact_pyi_session(session)
+		assert sum(len(stack) for stack, _ in session.frame_records) <= 300_000
+
+	def test_a_long_sample_survives_the_frame_bound(self, monkeypatch):
+		monkeypatch.setattr(capture, "TREE_MAX_FRAMES", 20_000)
+		records = unique_records(2000, depth=100)
+		records[777] = (records[777][0], 2.0)
+		slow_leaf = records[777][0][-1]
+		session = fake_session(records)
+		capture.compact_pyi_session(session)
+		assert any(stack[-1] == slow_leaf and seconds >= 2.0 for stack, seconds in session.frame_records)
+
+	def test_the_frame_bound_runs_before_the_interning_work(self, monkeypatch):
+		seen = []
+		real = capture._intern_records
+		monkeypatch.setattr(capture, "TREE_MAX_FRAMES", 5_000)
+		monkeypatch.setattr(
+			capture,
+			"_intern_records",
+			lambda records: seen.append(sum(len(s) for s, _ in records)) or real(records),
+		)
+		capture.compact_pyi_session(fake_session(unique_records(1000, depth=50)))
+		assert seen[0] <= 5_000
+
+	def test_estimate_is_calibrated_to_the_real_pickle(self):
+		records = unique_records(4000, depth=60)
+		session = fake_session(records)
+		info = capture.compact_pyi_session(session)
+		real = len(pickle.dumps(session))
+		assert real <= info["estimate"] <= real * 1.25
+
+	def test_estimate_is_calibrated_for_few_strings_and_many_samples(self):
+		names = [frame(f"f{i}", i) for i in range(20)]
+		records = [([names[(i + d) % 20] for d in range(200)], 0.001) for i in range(5000)]
+		session = fake_session(records)
+		info = capture.compact_pyi_session(session)
+		real = len(pickle.dumps(session))
+		assert real * 0.9 <= info["estimate"] <= real * 1.3
+
+	def test_a_tree_just_over_the_budget_keeps_most_of_it(self, monkeypatch):
+		monkeypatch.setattr(capture, "TREE_MAX_BYTES", 400_000)
+		session = fake_session(unique_records(4000, depth=20))
+		blob, _ = capture.pickle_pyi_session(session)
+		assert 0.75 * 400_000 <= len(blob) <= 400_000
+
 	def test_thinning_is_deterministic(self, monkeypatch):
 		monkeypatch.setattr(capture, "TREE_MAX_SAMPLES", 100)
 		first, second = fake_session(slow_sql_records()), fake_session(slow_sql_records())

@@ -165,14 +165,18 @@ SIDECAR_CAP_PER_RECORDING = 10_000
 # The stored pyinstrument tree is at most TREE_MAX_BYTES per recording. pyinstrument
 # builds a fresh string per frame per sample, so the raw pickle is ~7 KB per sample.
 # Interning the strings and stacks shrinks it without loss; only a tree still over
-# the cap is thinned. TREE_MAX_SAMPLES bounds the interning work and analyze cost.
+# the cap is thinned. TREE_MAX_SAMPLES and TREE_MAX_FRAMES (total stack depth over all
+# samples) bound the work: interning runs at the end of the recorded request and
+# analyze rebuilds the tree at about 1 us per frame.
 TREE_MAX_BYTES = 1 << 20
 TREE_MAX_SAMPLES = 60_000
+TREE_MAX_FRAMES = 300_000
 _THIN_ROUNDS = 6
-_STRING_OVERHEAD = 6
+_STRING_OVERHEAD = 3
 _STACK_OVERHEAD = 4
-_RECORD_OVERHEAD = 24
-_ENVELOPE_OVERHEAD = 1024
+_SMALL_REF, _LARGE_REF = 2, 5
+_RECORD_OVERHEAD = 16
+_ENVELOPE_OVERHEAD = 512
 
 
 def _frame_records(session):
@@ -215,8 +219,23 @@ def _thin_by_time(records, target):
 	return kept
 
 
-def _estimate_bytes(string_bytes, stacks, depth_total, samples):
-	return _ENVELOPE_OVERHEAD + string_bytes + stacks * _STACK_OVERHEAD + depth_total * 3 + samples * _RECORD_OVERHEAD
+def _bounded_records(records):
+	"""``records`` thinned by time to at most TREE_MAX_SAMPLES samples and TREE_MAX_FRAMES frames."""
+	if len(records) > TREE_MAX_SAMPLES:
+		records = _thin_by_time(records, TREE_MAX_SAMPLES)
+	for _ in range(_THIN_ROUNDS):
+		frames = sum(len(stack) for stack, _ in records)
+		if frames <= TREE_MAX_FRAMES or len(records) < 2:
+			break
+		target = int(len(records) * TREE_MAX_FRAMES / frames * 0.9)
+		records = _thin_by_time(records, max(1, min(target, len(records) - 1)))
+	return records
+
+
+def _estimate_bytes(string_bytes, strings, stacks, depth_total, samples):
+	# a pickle back-reference is 2 bytes for the first 256 memoized objects, 5 after
+	ref = _SMALL_REF if strings < 256 else _LARGE_REF
+	return _ENVELOPE_OVERHEAD + string_bytes + stacks * _STACK_OVERHEAD + depth_total * ref + samples * _RECORD_OVERHEAD
 
 
 def _intern_records(records):
@@ -241,7 +260,7 @@ def _intern_records(records):
 			stacks[key] = shared
 			depth_total += len(shared)
 		interned.append((shared, seconds))
-	return interned, _estimate_bytes(string_bytes, len(stacks), depth_total, len(interned))
+	return interned, _estimate_bytes(string_bytes, len(strings), len(stacks), depth_total, len(interned))
 
 
 def _original_samples(session, records):
@@ -253,7 +272,7 @@ def compact_pyi_session(session, budget=None):
 	"""Intern a pyinstrument session's stacks in place and thin it to the byte budget.
 
 	Lossless unless the estimate is over ``budget`` (default TREE_MAX_BYTES) or the
-	session has more than TREE_MAX_SAMPLES samples; then samples are thinned by time
+	session has more than TREE_MAX_SAMPLES samples or TREE_MAX_FRAMES frames; then samples are thinned by time
 	and ``session.optimus_thinned = {"every", "samples"}`` says so. Returns
 	``{"estimate", "samples", "every"}``, or None (session untouched) for a shape this
 	does not know. The new records are built first and assigned in one step.
@@ -263,8 +282,7 @@ def compact_pyi_session(session, budget=None):
 		return None
 	budget = TREE_MAX_BYTES if budget is None else budget
 	original = _original_samples(session, records)
-	if len(records) > TREE_MAX_SAMPLES:
-		records = _thin_by_time(records, TREE_MAX_SAMPLES)
+	records = _bounded_records(records)
 	interned, estimate = _intern_records(records)
 	for _ in range(_THIN_ROUNDS):
 		target = int(len(records) * budget / estimate) if estimate else 0

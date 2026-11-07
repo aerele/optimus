@@ -7,7 +7,7 @@ import types
 
 import pytest
 
-from optimus import analyze, capture, redis_keys
+from optimus import analyze, capture, redis_keys, safe_call
 from optimus import hooks_callbacks as hc
 from optimus.tests.test_tree_size_cap import fake_session, unique_records
 
@@ -53,14 +53,31 @@ def test_the_stored_blob_is_within_the_cap_and_round_trips(env):
 	assert loaded.optimus_thinned["samples"] == 30000
 
 
-def test_a_tree_over_the_cap_writes_nothing_and_warns_once(env, monkeypatch):
+def test_a_tree_over_the_cap_writes_nothing_and_logs_one_line_per_process(env, monkeypatch):
+	lines = []
+	monkeypatch.setattr(safe_call, "log_error_line", lambda message, **kw: lines.append((message, kw)))
 	monkeypatch.setattr(capture, "TREE_MAX_BYTES", 2000)
 	env.local.optimus_pyinstrument = Prof(fake_session([(["x" * 5000], 1.0)]))
 	env.local.optimus_sidecar = [{"a": 1}]
 	hc._dump_capture_state_to_redis(recording_uuid="rec-1")
+	env.local.optimus_pyinstrument = Prof(fake_session([(["x" * 5000], 1.0)]))
+	hc._dump_capture_state_to_redis(recording_uuid="rec-2")
 	assert redis_keys.tree("rec-1") not in env.cache.values
 	assert redis_keys.sidecar("rec-1") in env.cache.values
-	assert len(env.warnings) == 1 and "rec-1" in env.warnings[0]
+	assert len(lines) == 2 and lines[0] == lines[1]
+	assert "rec-" not in lines[0][0] and lines[0][1]["dedupe_seconds"] >= 3600
+
+
+def test_the_over_the_cap_line_is_written_once_by_the_real_dedupe(env, monkeypatch):
+	written = []
+	monkeypatch.setattr(
+		frappe, "logger", lambda *a, **kw: types.SimpleNamespace(error=written.append, debug=lambda *x: None)
+	)
+	monkeypatch.setattr(capture, "TREE_MAX_BYTES", 2000)
+	for uuid in ("rec-1", "rec-2", "rec-3"):
+		env.local.optimus_pyinstrument = Prof(fake_session([(["x" * 5000], 1.0)]))
+		hc._dump_capture_state_to_redis(recording_uuid=uuid)
+	assert len(written) == 1
 
 
 def test_a_failing_helper_never_breaks_the_request(env, monkeypatch):

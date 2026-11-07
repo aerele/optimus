@@ -673,15 +673,17 @@ def _signed_tree_blob(last_session, recording_uuid: str):
 	A tree that cannot fit even thinned is dropped with a warning; analyze reports
 	it as not captured.
 	"""
+	from optimus import safe_call
 	from optimus.session import _has_stable_hmac_secret, sign_blob
 
 	if last_session is None:
 		return None
 	blob, info = _capture.pickle_pyi_session(last_session)
 	if blob is None:
-		frappe.logger("optimus").warning(
-			f"optimus pyi dump: {recording_uuid} did not fit {_capture.TREE_MAX_BYTES} bytes "
-			f"({len(getattr(last_session, 'frame_records', None) or ())} samples); tree not stored"
+		# No uuid in the text: the line is the same for every request, so it logs once per hour.
+		safe_call.log_error_line(
+			f"optimus: a Python call tree did not fit {_capture.TREE_MAX_BYTES} bytes even thinned; not stored",
+			dedupe_seconds=3600,
 		)
 		return None
 	signed = sign_blob(blob)
