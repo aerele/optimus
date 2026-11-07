@@ -293,7 +293,7 @@ CASES = [
 ]
 
 UNCHANGED = [
-	(M, "SELECT 1 FROM t WHERE note = 'my password = abc'"),
+	(M, "SELECT 1 FROM t WHERE note = 'my password is abc'"),
 	(
 		M,
 		"SELECT `password` FROM `__Auth` WHERE `doctype`='User' AND `name`='a@b.c' AND `fieldname`='password'",

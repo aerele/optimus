@@ -323,7 +323,13 @@ def _patch_recorder():
 				tuple(cfg.sensitive_form_keys or ()),
 				tuple(cfg.sensitive_sql_columns or ()),
 			)
-		except Exception:
+		except Exception as error:
+			try:
+				from optimus.redaction_log import log_extras_unreadable
+
+				log_extras_unreadable(error)
+			except Exception:
+				pass
 			return ((), ())
 		finally:
 			frappe.local.optimus_reading_extras = False
