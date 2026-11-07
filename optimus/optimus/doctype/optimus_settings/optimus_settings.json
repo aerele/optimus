@@ -303,11 +303,11 @@
   {
    "fieldname": "sensitivity_description",
    "fieldtype": "HTML",
-   "options": "<p class=\"text-muted small\">Pick a preset to set every tunable threshold across Optimus in one move analyzer thresholds (the original nine), capture knobs (max queries / sampler interval / background-job wait), retention, display filters, line profiling defaults and the AI auto-suggest cap. <b>Strict</b> catches more (more findings, more noise) and keeps data longer; <b>Relaxed</b> catches less and prunes faster; <b>Recommended</b> is the shipped default and automatically tracks future tuning. Choose <b>Custom</b> to edit the individual fields yourself they stay locked under the named presets.</p>"
+   "options": "<p class=\"text-muted small\">Pick a preset to set every tunable threshold across Optimus in one move analyzer thresholds, capture knobs (max queries / sampler interval / background-job wait), retention, display filters, line profiling defaults and the AI auto-suggest cap. <b>Strict</b> catches more (more findings, more noise) but keeps sessions only 1 day; <b>Relaxed</b> catches less and keeps them 7 days; <b>Recommended</b> keeps them 30 days, is the shipped default and automatically tracks future tuning. Choose <b>Custom</b> to edit the individual fields yourself they stay locked under the named presets.</p>"
   },
   {
    "default": "Recommended",
-   "description": "A preset for how sensitive the detection thresholds below should be. The named presets (Strict, Recommended, Relaxed) set those thresholds for you and keep the individual fields read-only. Recommended follows the shipped defaults across upgrades. Switch to Custom to set the thresholds by hand.",
+   "description": "A preset for the fields below that list reference values (retention, capture, display, detection thresholds, line profiling and the AI auto-suggest cap). The named presets (Strict, Recommended, Relaxed) set those fields for you and keep them read-only. Recommended follows the shipped defaults across upgrades. Switch to Custom to set them by hand.",
    "fieldname": "config_profile",
    "fieldtype": "Select",
    "label": "Sensitivity Profile",
@@ -434,7 +434,7 @@
   },
   {
    "default": "10",
-   "description": "Each session keeps at most this many line profiling runs in full. Once there are more, the oldest run's full results are moved to a private file and only its summary row stays on the record. Set it to 0 for no limit, but keep an eye on record size for heavy users. Reference values: Strict: 0  ·  Recommended: 10  ·  Relaxed: 5.",
+   "description": "Each session can hold at most this many line profiling runs. Once it has that many, new runs are refused and auto-arm stops. Set it to 0 for no limit, but keep an eye on record size for heavy users. Reference values: Strict: 0  ·  Recommended: 10  ·  Relaxed: 5.",
    "fieldname": "phase2_max_runs_per_session",
    "fieldtype": "Int",
    "label": "Line Profiling: Max Runs per Session",
@@ -685,7 +685,7 @@
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-10-31 12:00:00.000000",
+ "modified": "2026-11-07 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Optimus",
  "name": "Optimus Settings",
