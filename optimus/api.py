@@ -469,6 +469,8 @@ def stop(session_uuid: str | None = None) -> dict:
 	terminal state (Analyzing / Report ready / No data / Analyze failed).
 	"""
 	user = _require_profiler_user()
+	if not (isinstance(session_uuid, str) or session_uuid is None):
+		frappe.throw(_("Invalid session reference"), frappe.ValidationError)
 	active = session.get_active_session_for(user)
 	if active and session_uuid in (None, active):
 		return _stop_active(user, active)
