@@ -40,6 +40,7 @@ from optimus.analyzers.base import (
 # ``sensitive_form_keys`` (additive never replaces the defaults).
 from optimus.dbdialect import redaction_dialect
 from optimus.redaction import is_key_bearing_endpoint as _is_key_bearing_endpoint
+from optimus.redaction import is_oauth_callback as _is_oauth_callback
 from optimus.redaction import redact_call_queries as _redact_call_queries_base
 from optimus.redaction import redact_sensitive as _redact_sensitive_base
 from optimus.redaction import redact_sql_literals as _redact_sql_literals_base
@@ -63,24 +64,25 @@ def _settings_extras() -> tuple[tuple[str, ...], tuple[str, ...]]:
 	"""Read the live ``sensitive_form_keys`` / ``sensitive_sql_columns`` extras
 	from Optimus Settings. Falls back to empty tuples on any error (the
 	``optimus.redaction`` defaults still apply)."""
+	from optimus.redaction_extras import form_key_extras
+
 	try:
 		from optimus.settings import get_config
 
-		cfg = get_config()
-		return (
-			tuple(getattr(cfg, "sensitive_form_keys", ()) or ()),
-			tuple(getattr(cfg, "sensitive_sql_columns", ()) or ()),
-		)
+		columns = tuple(getattr(get_config(), "sensitive_sql_columns", ()) or ())
 	except Exception:
-		return ((), ())
+		columns = ()
+	return (form_key_extras(), columns)
 
 
-def _redact_sensitive(payload, mask_key=False):
+def _redact_sensitive(payload, mask_key=False, mask_code=False, header=False):
 	"""Redact sensitive keys from ``payload`` via
 	``optimus.redaction.redact_sensitive``, reading the live extra-keys
 	list from settings."""
 	extra_keys, _ = _settings_extras()
-	return _redact_sensitive_base(payload, extra_keys=extra_keys, mask_key=mask_key)
+	return _redact_sensitive_base(
+		payload, extra_keys=extra_keys, mask_key=mask_key, mask_code=mask_code, header=header
+	)
 
 
 def _redact_request_fields(rec: dict) -> None:
@@ -88,10 +90,12 @@ def _redact_request_fields(rec: dict) -> None:
 	bare ``key`` of a key-bearing endpoint (reset and share links)."""
 	if isinstance(rec.get("form_dict"), dict):
 		rec["form_dict"] = _redact_sensitive(
-			rec["form_dict"], mask_key=_is_key_bearing_endpoint(rec.get("path"), rec.get("cmd"))
+			rec["form_dict"],
+			mask_key=_is_key_bearing_endpoint(rec.get("path"), rec.get("cmd")),
+			mask_code=_is_oauth_callback(rec.get("path"), rec.get("cmd")),
 		)
 	if isinstance(rec.get("headers"), dict):
-		rec["headers"] = _redact_sensitive(rec["headers"])
+		rec["headers"] = _redact_sensitive(rec["headers"], header=True)
 
 
 def _redact_sql_literals(sql_str: str) -> str:

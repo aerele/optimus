@@ -823,13 +823,9 @@ def _masked_frontend_urls(ctx) -> tuple[dict, list, list]:
 	"""The stored page, XHR and orphan URLs with secret query values masked: a session
 	analyzed before the capture-side mask keeps raw URLs in its aggregate."""
 	from optimus.redaction import redact_url, redact_url_field
+	from optimus.redaction_extras import form_key_extras
 
-	try:
-		from optimus.settings import get_config
-
-		extra_keys = tuple(get_config().sensitive_form_keys or ())
-	except Exception:
-		extra_keys = ()
+	extra_keys = form_key_extras()
 	pages = {redact_url(page, extra_keys): v for page, v in (ctx.get("frontend_vitals_by_page") or {}).items()}
 	xhrs = [redact_url_field(x, "url", extra_keys) for x in ctx.get("frontend_xhr_matched") or []]
 	orphans = [redact_url_field(x, "url", extra_keys) for x in ctx.get("frontend_orphans") or []]

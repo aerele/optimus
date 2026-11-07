@@ -14,6 +14,7 @@ recording_id and dedupes multi-fire LCP per page. Emits three finding types:
 
 import json
 
+from optimus import redaction_extras
 from optimus.analyzers.base import SEVERITY_ORDER, AnalyzerResult, dur
 from optimus.redaction import redact_url_field
 
@@ -27,8 +28,9 @@ HEAVY_RESPONSE_BYTES = 500_000
 
 def analyze(recordings: list[dict], context) -> AnalyzerResult:
     frontend_data = getattr(context, "frontend_data", None) or {"xhr": [], "vitals": []}
-    xhr_entries = [redact_url_field(x, "url") for x in frontend_data.get("xhr") or []]
-    vitals_entries = [redact_url_field(v, "page_url") for v in frontend_data.get("vitals") or []]
+    extra_keys = redaction_extras.form_key_extras()
+    xhr_entries = [redact_url_field(x, "url", extra_keys) for x in frontend_data.get("xhr") or []]
+    vitals_entries = [redact_url_field(v, "page_url", extra_keys) for v in frontend_data.get("vitals") or []]
 
     # Build a recording_id → action_idx map.
     rec_index = {}

@@ -96,19 +96,34 @@ def is_key_bearing_endpoint(path, cmd) -> bool:
 	return any(token in target for token in _KEY_BEARING_ENDPOINTS)
 
 
-def redact_sensitive(payload, *, extra_keys: tuple[str, ...] = (), mask_key: bool = False):
+def redact_sensitive(
+	payload,
+	*,
+	extra_keys: tuple[str, ...] = (),
+	mask_key: bool = False,
+	mask_code: bool = False,
+	header: bool = False,
+):
 	"""Walk a dict / list / tuple and return a deep copy with values
 	under sensitive keys replaced by ``"<REDACTED:keyname>"``. A string value
 	that is a URL has its sensitive query values masked (:func:`redact_url`).
 	``mask_key`` also masks the top-level bare ``key`` (see
-	:func:`is_key_bearing_endpoint`). Other scalars pass through unchanged.
+	:func:`is_key_bearing_endpoint`) and ``mask_code`` the bare ``code`` of an OAuth callback (see
+	:func:`is_oauth_callback`). ``header`` treats the top-level names as HTTP header names, which
+	also masks a ``-Key`` suffix and ``auth`` / ``bearer`` names (:func:`is_secret_header_name`).
+	Other scalars pass through unchanged.
 
 	Pure never mutates the input.
 	"""
 	if isinstance(payload, dict):
 		out = {}
 		for k, v in payload.items():
-			if is_sensitive_key(k, extra=extra_keys) or (mask_key and _is_bare_key(k)):
+			if (
+				is_sensitive_key(k, extra=extra_keys)
+				or (mask_key and _is_bare_name(k, "key"))
+				or (mask_code and _is_bare_name(k, "code"))
+				or (header and is_secret_header_name(k))
+			):
 				out[k] = f"<REDACTED:{k}>"
 			else:
 				out[k] = redact_sensitive(v, extra_keys=extra_keys)
@@ -126,10 +141,22 @@ def redact_sensitive(payload, *, extra_keys: tuple[str, ...] = (), mask_key: boo
 	return payload
 
 
+_FILTER_OPERATORS = frozenset(
+	{
+		"=", "!=", "<>", "<", ">", "<=", ">=", "like", "not like", "in", "not in", "between",
+		"not between", "is", "is not", "descendants of", "ancestors of", "not descendants of",
+		"not ancestors of", "timespan", "ilike", "not ilike",
+	}
+)
+
+
 def _mask_filter_value(row: list, extra_keys: tuple[str, ...]) -> list:
 	"""A Frappe filter row ``[doctype, field, op, value]`` or ``[field, op, value]`` whose field is
 	sensitive, with its value masked: the key-based walk cannot see a secret in a list."""
 	if len(row) not in (3, 4):
+		return row
+	op = row[-2]
+	if not isinstance(op, str) or op.strip().lower() not in _FILTER_OPERATORS:
 		return row
 	field = row[len(row) - 3]
 	if is_sensitive_key(field, extra=extra_keys):
@@ -137,8 +164,35 @@ def _mask_filter_value(row: list, extra_keys: tuple[str, ...]) -> list:
 	return row
 
 
-def _is_bare_key(name) -> bool:
-	return isinstance(name, str) and name.lower() == "key"
+def _is_bare_name(name, expected: str) -> bool:
+	return isinstance(name, str) and name.lower() == expected
+
+
+def is_oauth_callback(path, cmd) -> bool:
+	"""True for an OAuth login callback, whose bare ``code`` argument is a one-time credential."""
+	target = f"{path if isinstance(path, str) else ''} {cmd if isinstance(cmd, str) else ''}".lower()
+	return any(token in target for token in _OAUTH_ENDPOINTS)
+
+
+def is_secret_header_name(name) -> bool:
+	"""True for an HTTP header name that carries a credential and is not covered by
+	:func:`is_sensitive_key`: a ``-Key`` ending (``Ocp-Apim-Subscription-Key``, ``X-Master-Key``,
+	except ``Idempotency-Key``) or an ``auth`` / ``bearer`` part (``X-Auth``, ``X-Bearer``)."""
+	if not isinstance(name, str) or not name or len(name) > _IDENTIFIER_MAX:
+		return False
+	normalised = _normalize_name(name)
+	if normalised in _HEADER_KEY_ALLOWED:
+		return False
+	return normalised.endswith("_key") or normalised == "key" or not _HEADER_AUTH_PARTS.isdisjoint(
+		normalised.split("_")
+	)
+
+
+def redact_string_value(text: str, extra_keys: tuple[str, ...] = ()) -> str:
+	"""``text`` with secrets masked as ``redact_sensitive`` does for a string value: JSON inside it
+	by name, URLs inside it by query parameter and user info. For callers that hold a string, not a
+	dict (a SQL string literal, a log line)."""
+	return _redact_string(text, tuple(extra_keys or ())) if isinstance(text, str) else text
 
 
 def _redact_string(text: str, extra_keys: tuple[str, ...]) -> str:
@@ -168,9 +222,7 @@ def redact_url_run(run: str, extra_keys: tuple[str, ...] = (), placeholder: str 
 
 
 def _may_hold_url(text: str) -> bool:
-	if ("?" in text or "#" in text) and "=" in text:
-		return True
-	return "//" in text and "@" in text
+	return _looks_like_url(text)
 
 
 def _redact_json_string(text: str, extra_keys: tuple[str, ...]) -> str:
@@ -183,8 +235,24 @@ def _redact_json_string(text: str, extra_keys: tuple[str, ...]) -> str:
 			return text
 		redacted = redact_sensitive(parsed, extra_keys=extra_keys)
 	except (ValueError, RecursionError):
-		return text
+		return _mask_unparsed_json(text, extra_keys)
 	return text if redacted == parsed else json.dumps(redacted)
+
+
+_JSON_PAIR = re.compile(r'("(?:[^"\\]|\\.){1,128}")(\s*:\s*)("(?:[^"\\]|\\.)*(?:"|$)|[^,{}\[\]\s"]+)')
+
+
+def _mask_unparsed_json(text: str, extra_keys: tuple[str, ...]) -> str:
+	"""JSON text that does not parse (cut short, or nested too deeply): the values after secret names are
+	masked pair by pair, so a cut or deep value is not stored raw."""
+
+	def mask(match):
+		name = match.group(1)[1:-1]
+		if not is_sensitive_key(name, extra=extra_keys):
+			return match.group(0)
+		return f'{match.group(1)}{match.group(2)}"{URL_PLACEHOLDER}"'
+
+	return _JSON_PAIR.sub(mask, text)
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +285,10 @@ _HEADER_SECRET_NAMES = frozenset(
 	{"x_session", "www_authenticate", "proxy_authenticate", "authentication", "sec_websocket_key", "sec_web_socket_key"}
 )
 _HEADER_SECRET_PARTS = frozenset({"jwt", "assertion"})
+# Header names only (a form field called ``sort_key`` or ``auth`` is not a credential).
+_HEADER_AUTH_PARTS = frozenset({"auth", "bearer"})
+_HEADER_KEY_ALLOWED = frozenset({"idempotency_key", "x_idempotency_key"})
+_OAUTH_ENDPOINTS = ("oauth", "login_via", "social_login")
 _SIGNATURE_NAME = re.compile(r"_signature(?:_\d+)?$")
 _PARAM_SPLIT = re.compile(r"([&;])")
 # Text holds URLs between whitespace, quotes and angle brackets; a run of anything else is a candidate when it has a ``?`` or ``#`` followed by an ``=``, or an ``@``
@@ -224,7 +296,10 @@ _PARAM_SPLIT = re.compile(r"([&;])")
 # position, and prose costs no Python call per word).
 _CANDIDATE_RUN = re.compile(r"""(?<![^\s'"<>])[^\s'"<>?#@]*(?:[?#][^\s'"<>=]*=|@)[^\s'"<>]*""")
 _TRAILING = frozenset(").,;")
-_USERINFO = re.compile(r"((?:[A-Za-z][A-Za-z0-9+.-]*:)?//)[^/?#]*@")
+# The look-behind lets the scheme start only at the start of a run of scheme characters, so a long
+# run is scanned once and not from every position (linear, not quadratic); the user info stops at a space.
+_USERINFO = re.compile(r"(?<![A-Za-z0-9+.-])((?:[A-Za-z][A-Za-z0-9+.-]*:)?//)[^/?#\s]*@")
+_NESTED_URL_DEPTH = 4
 _JSON_VALUE_STARTS = ("%7b", "%5b", "{", "[")
 _NAME_SEPARATORS = re.compile(r"[-. ]")
 
@@ -268,18 +343,33 @@ def redact_url(text, extra_keys: tuple[str, ...] = (), placeholder: str = URL_PL
 	its query omitted instead. Pure, linear, never raises; non-strings pass through."""
 	if not isinstance(text, str):
 		return text
+	if len(text) > URL_MAX_CHARS:
+		return _redact_long_url(text, placeholder)
 	text = _mask_userinfo(text, placeholder)
-	cut = min((i for i in (text.find("?"), text.find("#")) if i >= 0), default=-1)
+	cut = _query_start(text)
 	if cut < 0:
 		return text
-	if len(text) > URL_MAX_CHARS:
-		return _omit_query(text, cut)
 	if "=" not in text:
 		return text
 	try:
 		return _mask_url(text, tuple(extra_keys or ()), placeholder)
 	except (ValueError, RecursionError):
 		return _omit_query(text, cut)
+
+
+def _query_start(text: str) -> int:
+	"""Index of the first ``?`` or ``#``, or -1."""
+	return min((i for i in (text.find("?"), text.find("#")) if i >= 0), default=-1)
+
+
+def _redact_long_url(text: str, placeholder: str) -> str:
+	"""A URL over the limit: no regex reads more than the first ``URL_MAX_CHARS`` characters (the
+	user info of a real URL sits there), and the query is omitted."""
+	cut = _query_start(text)
+	end = len(text) if cut < 0 else cut
+	head = _mask_userinfo(text[: min(end, URL_MAX_CHARS)], placeholder)
+	base = head + text[URL_MAX_CHARS:end]
+	return base if cut < 0 else _omit_query(base + text[cut], len(base))
 
 
 def _mask_userinfo(text: str, placeholder: str) -> str:
@@ -293,35 +383,62 @@ def _omit_query(text: str, cut: int) -> str:
 	return text[:cut] + ("?<query omitted>" if text[cut] == "?" else "#<fragment omitted>")
 
 
-def _mask_url(text: str, extra: tuple[str, ...], placeholder: str) -> str:
+def _mask_url(text: str, extra: tuple[str, ...], placeholder: str, depth: int = 0) -> str:
 	before, hash_sep, fragment = text.partition("#")
 	base, query_sep, query = before.partition("?")
-	out = base + query_sep + _mask_params(query, extra, placeholder) + hash_sep
+	out = base + query_sep + _mask_params(query, extra, placeholder, depth) + hash_sep
 	route, route_sep, route_query = fragment.partition("?")
 	if route_sep:
-		return out + route + route_sep + _mask_params(route_query, extra, placeholder)
-	return out + _mask_params(fragment, extra, placeholder)
+		return out + route + route_sep + _mask_params(route_query, extra, placeholder, depth)
+	return out + _mask_params(fragment, extra, placeholder, depth)
 
 
-def _mask_params(segment: str, extra: tuple[str, ...], placeholder: str) -> str:
+def _mask_params(segment: str, extra: tuple[str, ...], placeholder: str, depth: int = 0) -> str:
 	parts = _PARAM_SPLIT.split(segment)
 	for i in range(0, len(parts), 2):
-		parts[i] = _mask_param(parts[i], extra, placeholder)
+		parts[i] = _mask_param(parts[i], extra, placeholder, depth)
 	return "".join(parts)
 
 
-def _mask_param(part: str, extra: tuple[str, ...], placeholder: str) -> str:
+def _mask_param(part: str, extra: tuple[str, ...], placeholder: str, depth: int = 0) -> str:
 	name, eq, value = part.partition("=")
 	if eq:
 		if value and is_secret_param(name, extra):
 			return f"{name}={placeholder}"
-		return f"{name}={_mask_json_value(value, extra)}"
+		value = _mask_json_value(value, extra)
+		return f"{name}={_mask_nested_url(value, extra, placeholder, depth)}"
 	if "%" not in part:
 		return part
 	name, eq, _ = unquote_plus(part).partition("=")
 	if eq and is_secret_param(name, extra):
 		return f"{quote(name, safe='')}={placeholder}"
 	return part
+
+
+def _looks_like_url(text: str) -> bool:
+	"""Cheap, linear test: a query or fragment with an ``=``, or a ``//`` with an ``@``."""
+	if ("?" in text or "#" in text) and "=" in text:
+		return True
+	return "//" in text and "@" in text
+
+
+def _mask_nested_url(value: str, extra: tuple[str, ...], placeholder: str, depth: int) -> str:
+	"""A parameter whose value is itself a URL or a path with a query (``redirect-to=%2Fupdate-password%3Fkey%3D...``,
+	``next=/a?token=...``), masked inside, whether it is percent-encoded or not. Past ``_NESTED_URL_DEPTH`` levels
+	the value is masked whole."""
+	decoded = unquote_plus(value) if "%" in value else value
+	if "%" in decoded:
+		decoded = unquote_plus(decoded)
+	if not _looks_like_url(decoded):
+		return value
+	if depth >= _NESTED_URL_DEPTH:
+		return placeholder
+	inner = _mask_userinfo(decoded, placeholder)
+	if _query_start(inner) >= 0 and "=" in inner:
+		inner = _mask_url(inner, extra, placeholder, depth + 1)
+	if inner == decoded:
+		return value
+	return quote(inner, safe="") if "%" in value else inner
 
 
 def _mask_json_value(value: str, extra: tuple[str, ...]) -> str:
@@ -1425,6 +1542,14 @@ def _literal_length(api_key) -> int:
 	return len(api_key) if isinstance(api_key, str) else 0
 
 
+def _form_key_extras() -> tuple[str, ...]:
+	"""The Settings extras, from the one place every caller reads them (imported late: this module
+	stays importable before Frappe is)."""
+	from optimus.redaction_extras import form_key_extras
+
+	return form_key_extras()
+
+
 def scrub_secrets(text: str, *, literals: tuple[str, ...] = ()) -> str:
 	"""Return ``text`` with API keys replaced by ``********``.
 
@@ -1459,5 +1584,8 @@ def scrub_secrets(text: str, *, literals: tuple[str, ...] = ()) -> str:
 	for pattern in _SECRET_PATTERNS:
 		out = pattern.sub(lambda m: m.group(1) + SECRET_PLACEHOLDER + (m.group(4) or ""), out)
 	if "://" in out:
-		out = _URL_TAIL.sub(lambda m: redact_url_run(m.group(0), placeholder=SECRET_PLACEHOLDER), out)
+		extra_keys = _form_key_extras()
+		out = _URL_TAIL.sub(
+			lambda m: redact_url_run(m.group(0), extra_keys, placeholder=SECRET_PLACEHOLDER), out
+		)
 	return out

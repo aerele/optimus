@@ -985,12 +985,9 @@ def _frontend_payload_bounded(value):
 def _mask_frontend_urls(rows: list[dict], field: str) -> list[dict]:
 	"""``rows`` with each row's URL ``field`` masked, so no secret query value reaches Redis."""
 	from optimus.redaction import redact_url_field
-	from optimus.settings import get_config
+	from optimus.redaction_extras import form_key_extras
 
-	try:
-		extra_keys = tuple(get_config().sensitive_form_keys or ())
-	except Exception:
-		extra_keys = ()
+	extra_keys = form_key_extras()
 	return [redact_url_field(row, field, extra_keys) for row in rows]
 
 
