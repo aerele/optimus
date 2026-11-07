@@ -13,8 +13,10 @@ frappe.listview_settings["Optimus Session"] = {
 
 		// Sessions still in progress → color by status
 		if (status === "Recording") return [__("Recording"), "green", "status,=,Recording"];
-		if (status === "Stopping" || status === "Analyzing" || status === "Capturing Background Jobs") {
-			return [__(status), "orange", `status,=,${status}`];
+		if (status === "Stopping") return [__("Stopping"), "orange", "status,=,Stopping"];
+		if (status === "Analyzing") return [__("Analyzing"), "orange", "status,=,Analyzing"];
+		if (status === "Capturing Background Jobs") {
+			return [__("Capturing Background Jobs"), "orange", "status,=,Capturing Background Jobs"];
 		}
 		if (status === "Failed") return [__("Failed"), "red", "status,=,Failed"];
 
@@ -26,7 +28,7 @@ frappe.listview_settings["Optimus Session"] = {
 			return [__("No issues"), "green", "top_severity,=,None"];
 		}
 
-		return [__(status || "Unknown"), "gray", ""];
+		return [status || __("Unknown"), "gray", ""];
 	},
 
 	// Round 2 fix #26: quick time-range filters.

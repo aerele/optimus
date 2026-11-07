@@ -291,14 +291,19 @@
 		syncPoll(display);
 	}
 
+	// The reducers return translated templates with their values apart; values are escaped (show_alert renders HTML) and a function replacer keeps "$&" literal.
+	function fillTemplate(template, args) {
+		return (args || []).reduce((text, value, i) => text.replace("{" + i + "}", () => frappe.utils.escape_html(String(value))), template);
+	}
+
 	// Apply a {state, ui, alert} result from the pill reducers.
 	function applyResult(res) {
 		if (!res) return;
 		currentState = res.state;
 		if (res.ui) setDisplay(res.ui.display, res.ui.label, res.ui.elapsed, res.ui.tone);
 		if (res.alert) {
-			// pill_state translated the message where it built it.
-			frappe.show_alert({ message: res.alert.message, indicator: res.alert.indicator });
+			// pill_state translated the message where it built it; fillTemplate only escapes and fills its values.
+			frappe.show_alert({ message: fillTemplate(res.alert.message, res.alert.args), indicator: res.alert.indicator });
 		}
 		if (widget && !currentState.session_uuid) {
 			widget.removeAttribute("data-session-uuid");
