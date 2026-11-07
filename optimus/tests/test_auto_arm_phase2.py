@@ -245,18 +245,58 @@ class TestAutoArmChoosesAndSkips:
 		picks = arm_env.start_calls[0]["picks"]
 		assert len(picks) == 100 and all(p["dotted_path"].startswith("my_app.") for p in picks)
 
-	def test_nothing_capturable_logs_one_error_level_line_and_is_not_an_ai_failure(self, arm_env, monkeypatch):
+	def nothing(self, arm_env, monkeypatch, skipped):
 		import optimus.line_profile.capture as cap_real
 		from optimus import ai_fix, safe_call
 		lines, failures = [], []
-		monkeypatch.setattr(safe_call, "log_error_line", lambda message, **kw: lines.append(message))
+		monkeypatch.setattr(safe_call, "log_line", lambda message, **kw: lines.append((message, kw)))
 		monkeypatch.setattr(ai_fix, "log_ai_failure", lambda *a, **k: failures.append(a))
+
 		def refuse(picks, **kwargs):
-			raise cap_real.CaptureError("No selected function has eligible source.")
+			raise cap_real.NoEligibleSource("No selected function has eligible source.", skipped)
+
 		monkeypatch.setattr(cap_real, "prepare_line_profile_picks", refuse)
+		return lines, failures
+
+	def test_nothing_capturable_logs_the_first_reasons_and_publishes_them(self, arm_env, monkeypatch):
+		skipped = [{"function": f"my_app.mod.f{i}", "reason": f"reason {i}"} for i in range(7)]
+		lines, failures = self.nothing(arm_env, monkeypatch, skipped)
 		analyze._auto_arm_phase2("PS-1", _ctx())
 		assert not arm_env.start_calls and not failures
-		assert len(lines) == 1 and "my_app" not in lines[0] and "ugly_code" not in lines[0]
+		assert len(lines) == 1
+		message, kwargs = lines[0]
+		assert kwargs == {"level": "error"}
+		assert "none of 1 hot function(s)" in message and "reason 0" in message and "reason 2" in message
+		assert "reason 3" not in message and "my_app" not in message and "/" not in message
+		event = arm_env.published[0][0]
+		assert event[0] == "optimus_phase2_not_armed"
+		assert event[1]["skipped_count"] == 7 and len(event[1]["skipped"]) == 7
+
+	def test_a_capture_error_that_is_not_nothing_capturable_is_not_hidden(self, arm_env, monkeypatch):
+		import optimus.line_profile.capture as cap_real
+
+		def broken(picks, **kwargs):
+			raise cap_real.CaptureError("Line profiling is unavailable.")
+
+		monkeypatch.setattr(cap_real, "prepare_line_profile_picks", broken)
+		from optimus import ai_fix
+		seen = []
+		monkeypatch.setattr(ai_fix, "log_ai_failure", lambda label, exc: seen.append(exc))
+		analyze._auto_arm_phase2("PS-1", _ctx())
+		assert not arm_env.start_calls and not arm_env.published
+		assert [str(exc) for exc in seen] == ["Line profiling is unavailable."], "the real failure is logged"
+
+	def test_a_partial_skip_is_logged_below_error(self, arm_env, monkeypatch):
+		import optimus.line_profile.capture as cap_real
+		from optimus import safe_call
+		lines = []
+		monkeypatch.setattr(safe_call, "log_line", lambda message, **kw: lines.append((message, kw)))
+		monkeypatch.setattr(cap_real, "start_line_profile_pass", lambda *a, **k: [
+			{"dotted_path": "my_app.mod.good", "source": "curated", "eligible": True},
+			{"dotted_path": "my_app.mod.bad", "source": "curated", "eligible": False, "ineligible_reason": "r"}])
+		analyze._auto_arm_phase2("PS-1", _ctx())
+		assert len(lines) == 1 and lines[0][1] == {"level": "info"}
+		assert "skipped 1 hot function(s)" in lines[0][0] and "my_app" not in lines[0][0]
 
 	def test_the_alert_lists_skipped_functions_and_the_run_row_keeps_them(self, arm_env, monkeypatch):
 		import optimus.line_profile.capture as cap_real
@@ -268,7 +308,7 @@ class TestAutoArmChoosesAndSkips:
 		monkeypatch.setattr(frappe, "as_json", json.dumps, raising=False)
 		analyze._auto_arm_phase2("PS-1", _ctx())
 		payload = arm_env.published[0][0][1]
-		assert payload["skipped"] == [{"function": "bad", "reason": "it is longer than 5000 lines"}]
+		assert payload["skipped"] == [{"function": "my_app.mod.bad", "reason": "it is longer than 5000 lines"}]
 		assert payload["skipped_count"] == 1 and payload["count"] == 1
 		stored = json.loads(arm_env.doc.get("phase_2_runs")[0]["picks_json"])
 		assert {"dotted_path": "my_app.mod.bad", "source": "curated", "eligible": False,

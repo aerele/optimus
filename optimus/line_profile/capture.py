@@ -403,6 +403,14 @@ class CaptureError(Exception):
 	should communicate to the customer (e.g. all picks ineligible)."""
 
 
+class NoEligibleSource(CaptureError):
+	"""No selected function could be captured; ``skipped`` lists each with its reason."""
+
+	def __init__(self, message, skipped=()):
+		super().__init__(message)
+		self.skipped = list(skipped)
+
+
 class SourceUnavailable(CaptureError):
 	"""A selected function's source cannot be captured whole; ``reason`` says why."""
 
@@ -450,12 +458,21 @@ def _pick_source(fn) -> tuple[list[dict], str | None]:
 	return lines, None
 
 
-def skipped_functions(resolved, limit=5) -> list[dict]:
-	"""The first ``limit`` skipped functions as ``{function, reason}`` for display."""
-	return [
-		{"function": r["dotted_path"].rsplit(".", 1)[-1], "reason": r.get("ineligible_reason") or ""}
+def skipped_functions(resolved, limit=None) -> list[dict]:
+	"""The skipped functions (the first ``limit``, or all) as ``{function, reason}`` for display.
+
+	``function`` is the full dotted path: the last segment alone cannot tell two apps' ``validate`` apart."""
+	skipped = [
+		{"function": r["dotted_path"], "reason": r.get("ineligible_reason") or ""}
 		for r in resolved if not r.get("eligible")
-	][:limit]
+	]
+	return skipped if limit is None else skipped[:limit]
+
+
+def _nothing_eligible(resolved) -> NoEligibleSource:
+	return NoEligibleSource(
+		_("No selected function has eligible source. Check the selected paths."), skipped_functions(resolved)
+	)
 
 
 def _skip_pick(pick: dict, reason: str) -> None:
@@ -497,6 +514,43 @@ def _refuse_over_limit(resolved: dict, *, server_chosen: bool, reason: str) -> N
 	_skip_pick(resolved, reason)
 
 
+def _resolve_pick(dotted: str, server_chosen: bool) -> tuple[dict | None, str | None]:
+	"""``(meta, None)``, or ``(None, reason)`` for a pick that does not resolve.
+
+	A user's pick keeps the resolver's diagnostic and any other failure propagates. A
+	server-chosen pick is skipped with a fixed reason for every ordinary failure, so a raw
+	import error (which can hold file paths) is never stored or broadcast."""
+	from optimus.line_profile import picker
+
+	if not server_chosen:
+		try:
+			return picker.resolve_freeform(dotted), None
+		except picker.PickerError as exc:
+			return None, str(exc)
+	failure = None
+	try:
+		return picker.resolve_freeform(dotted), None
+	except Exception as exc:
+		_raise_if_interrupt(exc)
+		failure = _("It could not be found or imported.")
+	return None, failure
+
+
+def _drop_invalid_picks(eligible: list[dict], picks_meta: list[dict], snapshot: dict) -> list[dict]:
+	"""Keep the server-chosen picks whose captured source validates; skip the rest with a reason."""
+	by_path = {r["dotted_path"]: r for r in eligible}
+	kept = []
+	for meta in picks_meta:
+		try:
+			_validate_captured_picks([{**meta, "source_lines": snapshot[meta["dotted_path"]]}])
+		except CaptureInputError:
+			_skip_pick(by_path[meta["dotted_path"]], _("Its captured source could not be validated."))
+			del snapshot[meta["dotted_path"]]
+			continue
+		kept.append(meta)
+	return kept
+
+
 def _snapshot_picks(eligible: list[dict], *, server_chosen: bool) -> tuple[list[dict], dict]:
 	"""Source rows for each eligible pick, keeping the running line and byte totals within the run limits."""
 	snapshot: dict[str, list[dict]] = {}
@@ -533,8 +587,6 @@ def prepare_line_profile_picks(
 	a function it cannot read or fit is skipped with a reason instead of refusing the run.
 	"""
 	_require_line_profiler()
-	from optimus.line_profile import picker
-
 	validate_picks(picks)
 	from optimus.renderer.source import _installed_apps
 	installed = _installed_apps()
@@ -554,14 +606,13 @@ def prepare_line_profile_picks(
 			resolved.append({"dotted_path": dotted, "source": entry.get("source", "freeform"), "eligible": False,
 				"ineligible_reason": _("It is outside the installed apps.")})
 			continue
-		try:
-			meta = picker.resolve_freeform(dotted)
-		except picker.PickerError as exc:
+		meta, reason = _resolve_pick(dotted, server_chosen)
+		if reason is not None:
 			resolved.append({
 				"dotted_path": dotted,
 				"source": entry.get("source", "freeform"),
 				"eligible": False,
-				"ineligible_reason": str(exc),
+				"ineligible_reason": reason,
 			})
 			continue
 		meta["source"] = entry.get("source", "freeform")
@@ -569,11 +620,13 @@ def prepare_line_profile_picks(
 
 	eligible = [r for r in resolved if r.get("eligible")]
 	if not eligible:
-		raise CaptureError(_("No selected function has eligible source. Check the selected paths."))
+		raise _nothing_eligible(resolved)
 
 	picks_meta, source_snapshot = _snapshot_picks(eligible, server_chosen=server_chosen)
+	if server_chosen:
+		picks_meta = _drop_invalid_picks(eligible, picks_meta, source_snapshot)
 	if not picks_meta:
-		raise CaptureError(_("No selected function has eligible source. Check the selected paths."))
+		raise _nothing_eligible(resolved)
 
 	try:
 		_validate_captured_picks([{**pick, "source_lines": source_snapshot[pick["dotted_path"]]} for pick in picks_meta])

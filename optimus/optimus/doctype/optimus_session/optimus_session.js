@@ -327,7 +327,7 @@ function _ai_end_message(run, frm) {
 // place instead of rewriting its HTML. The element is prepended to
 // .form-layout, outside .form-message-container, so Frappe's own show_message()
 // clearing on each refresh never removes it.
-function _single_banner(frm, idClass, extraClasses, html, update) {
+function _single_banner(frm, idClass, extraClasses, html, update, attrs) {
 	const root = frm.$wrapper;
 	if (!root || !root.length) return null;
 	if (html == null) {
@@ -339,6 +339,8 @@ function _single_banner(frm, idClass, extraClasses, html, update) {
 	if (!$b.length) {
 		const cls = extraClasses ? idClass + " " + extraClasses : idClass;
 		$b = $('<div class="' + cls + '"></div>');
+		// Set before the content is inserted so a live region announces it.
+		if (attrs) $b.attr(attrs);
 		const $host = root.find(".form-layout").first();
 		($host.length ? $host : root).prepend($b);
 	}
@@ -464,6 +466,20 @@ function subscribe_session_progress(frm) {
 		);
 		reload();
 	});
+	// Auto-arm found nothing it could capture: no run row exists, so show the reasons here.
+	frappe.realtime.on("optimus_phase2_not_armed", (p) => {
+		if (!p || p.docname !== frm.doc.name || !_new_session_event(frm, p)) return;
+		const skips = p.skipped || [];
+		_phase2_not_armed_banner(frm, skips);
+		frappe.show_alert(
+			{
+				message: __("No line profiling run was started: none of the hot functions could be captured.") +
+					_phase2_skipped_text(skips, p.skipped_count),
+				indicator: "orange",
+			},
+			12
+		);
+	});
 }
 
 function render_ai_refill_button(frm, state) {
@@ -583,16 +599,36 @@ function _can_act(frm) {
 	return !!(frm.doc.__onload && frm.doc.__onload.optimus_can_act);
 }
 
-const PHASE2_SKIPPED_SHOWN = 5;
+const PHASE2_SKIPPED_IN_ALERT = 3;
+// A long dotted path has no break opportunity of its own; let it wrap instead of widening the page.
+const PHASE2_WRAP = "overflow-wrap:anywhere";
+// The notice colours differ by theme; keep the path readable on both.
+const PHASE2_CODE_STYLE = ' style="color:inherit;background:none;padding:0"';
 
-// " Skipped: name (reason), ... and N more." from [{function, reason}], HTML-escaped.
+function _phase2_skipped_item(item) {
+	const name = frappe.utils.escape_html(item.function);
+	return item.reason ? __("{0} ({1})", [name, frappe.utils.escape_html(item.reason)]) : name;
+}
+
+// A short, HTML-escaped alert summary from [{function, reason}]: the first few full paths and a count.
 function _phase2_skipped_text(items, total) {
 	if (!items.length) return "";
-	const shown = items.slice(0, PHASE2_SKIPPED_SHOWN).map(
-		(i) => frappe.utils.escape_html(i.function) + " (" + frappe.utils.escape_html(i.reason) + ")"
-	);
-	const more = Math.max(total || items.length, items.length) - shown.length;
-	return " " + __("Skipped:") + " " + shown.join(", ") + (more > 0 ? " " + __("and {0} more", [more]) : "") + ".";
+	const count = Math.max(total || items.length, items.length);
+	const shown = items.slice(0, PHASE2_SKIPPED_IN_ALERT).map(_phase2_skipped_item).join(", ");
+	const more = count - Math.min(items.length, PHASE2_SKIPPED_IN_ALERT);
+	const text = more > 0
+		? __("Skipped {0} function(s): {1} and {2} more. The session form lists them all.", [count, shown, more])
+		: __("Skipped {0} function(s): {1}.", [count, shown]);
+	return ' <span style="' + PHASE2_WRAP + '">' + text + "</span>";
+}
+
+// A collapsed <details> holding every skipped function: the full path and, when there is one, the reason.
+function _phase2_skipped_details(summary, items) {
+	const rows = items.map(function (item) {
+		const reason = item.reason ? " " + __("({0})", [frappe.utils.escape_html(item.reason)]) : "";
+		return "<li><code" + PHASE2_CODE_STYLE + ">" + frappe.utils.escape_html(item.function) + "</code>" + reason + "</li>";
+	});
+	return '<details style="' + PHASE2_WRAP + '"><summary>' + summary + "</summary><ul>" + rows.join("") + "</ul></details>";
 }
 
 function _phase2_run_skips(row) {
@@ -602,7 +638,7 @@ function _phase2_run_skips(row) {
 	} catch (e) { /* a run row without readable picks has nothing to show */ }
 	return (Array.isArray(picks) ? picks : [])
 		.filter((p) => p && p.eligible === false)
-		.map((p) => ({ function: String(p.dotted_path || "").split(".").pop(), reason: p.ineligible_reason || "" }));
+		.map((p) => ({ function: String(p.dotted_path || ""), reason: p.ineligible_reason || "" }));
 }
 
 // The notice for the newest Line Profiling run, only when that run skipped functions, so a
@@ -615,14 +651,27 @@ function _phase2_skipped_banner(frm) {
 		_single_banner(frm, "optimus-phase2-skipped", "form-message yellow", null);
 		return;
 	}
-	const $banner = _single_banner(
-		frm,
-		"optimus-phase2-skipped",
-		"form-message yellow",
-		__("Line profiling run {0} could not include {1} function(s).", [row.run_uuid.slice(0, 8), skips.length]) +
-			_phase2_skipped_text(skips, skips.length)
-	);
-	if ($banner) $banner.attr("role", "status");
+	const summary = __("Line profiling run {0} could not include {1} function(s).", [
+		frappe.utils.escape_html(String(row.run_uuid).slice(0, 8)),
+		skips.length,
+	]);
+	_single_banner(frm, "optimus-phase2-skipped", "form-message yellow", _phase2_skipped_details(summary, skips), null, {
+		role: "status",
+	});
+}
+
+// Shown when automatic line profiling started no run at all, so no run row can hold the reasons.
+function _phase2_not_armed_banner(frm, skips) {
+	if (!skips || !skips.length) {
+		_single_banner(frm, "optimus-phase2-notarmed", "form-message yellow", null);
+		return;
+	}
+	const summary = __("No line profiling run was started: none of the {0} hot function(s) could be captured.", [
+		skips.length,
+	]);
+	_single_banner(frm, "optimus-phase2-notarmed", "form-message yellow", _phase2_skipped_details(summary, skips), null, {
+		role: "status",
+	});
 }
 
 function render_phase2_button(frm) {
@@ -631,6 +680,7 @@ function render_phase2_button(frm) {
 		// reused form wrapper by a session that was mid-Recording.
 		_phase2_armed_banner(frm, null);
 		_single_banner(frm, "optimus-phase2-skipped", "form-message yellow", null);
+		_phase2_not_armed_banner(frm, null);
 		return;
 	}
 	_phase2_skipped_banner(frm);
@@ -1110,8 +1160,9 @@ function start_phase2(frm, picks, auto_expand) {
 				);
 			}
 			const skips = resolved.filter(function (p) { return !p.eligible; }).map(function (p) {
-				return { function: String(p.dotted_path || "").split(".").pop(), reason: p.ineligible_reason || "" };
+				return { function: String(p.dotted_path || ""), reason: p.ineligible_reason || "" };
 			});
+			_phase2_not_armed_banner(frm, null);
 			frappe.show_alert({ message: msg + _phase2_skipped_text(skips, skips.length), indicator: "blue" });
 			frm.dashboard.add_indicator(
 				__("Line profiling recording run {0}...", [run_uuid.slice(0, 8)]),

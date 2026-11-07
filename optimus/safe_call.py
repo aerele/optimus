@@ -156,10 +156,15 @@ _RECENT_LINES_CAP = 64
 
 
 def log_error_line(message: str, *, dedupe_seconds: float = 60.0) -> None:
-	"""One ``frappe.logger("optimus")`` line at ERROR (Frappe drops lower levels on a
-	production site), skipped when the same text was logged on the same site in the last
-	``dedupe_seconds`` so a failure that repeats per finding writes one line. It never raises (an RQ job
-	timeout excepted) and must be called outside any ``except``."""
+	"""``log_line`` at ERROR (Frappe drops lower levels on a production site)."""
+	log_line(message, level="error", dedupe_seconds=dedupe_seconds)
+
+
+def log_line(message: str, *, level: str = "error", dedupe_seconds: float = 60.0) -> None:
+	"""One ``frappe.logger("optimus")`` line at ``level`` ("error", "warning" or "info"), skipped
+	when the same text was logged on the same site in the last ``dedupe_seconds`` so a failure
+	that repeats per finding writes one line. It never raises (an RQ job timeout excepted) and
+	must be called outside any ``except``."""
 	import time
 
 	def _site() -> str | None:
@@ -180,6 +185,6 @@ def log_error_line(message: str, *, dedupe_seconds: float = 60.0) -> None:
 	def _write() -> None:
 		import frappe
 
-		frappe.logger("optimus").error(message)
+		getattr(frappe.logger("optimus"), level if level in ("error", "warning", "info") else "error")(message)
 
 	best_effort(_write, None)

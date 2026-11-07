@@ -115,3 +115,21 @@ def test_safe_call_holds_the_one_copy_of_the_interrupt_idiom():
 	]
 	assert outside_stores == []
 	assert "__traceback__ = None" not in (_PKG / "ai_fix.py").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+	("level", "expected"), [("info", "info"), ("warning", "warning"), ("error", "error"), ("bogus", "error")]
+)
+def test_log_line_writes_at_the_requested_level(monkeypatch, level, expected):
+	import types
+
+	import frappe
+
+	written = []
+	logger = types.SimpleNamespace(
+		**{name: (lambda message, name=name: written.append((name, message))) for name in ("info", "warning", "error")}
+	)
+	monkeypatch.setattr(frappe, "logger", lambda *a, **k: logger, raising=False)
+	safe_call.log_line("one line", level=level)
+	safe_call.log_line("one line", level=level)
+	assert written == [(expected, "one line")], "written once at the level, the repeat is deduped"
