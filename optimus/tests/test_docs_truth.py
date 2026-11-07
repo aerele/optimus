@@ -31,6 +31,7 @@ _REMOVED_FEATURE_PATTERNS = {
 	"missing test file": r"test_safe_report_self_contained\.py",
 	"removed modules": r"(?<!\w)(renderer|recorder)\.py",
 	"personal path": r"/Users/navin",
+	"partner-shop handoff": r"partner shop",
 	"archived line-profile runs": r"moved to a private file|archived to a private",
 }
 
@@ -99,7 +100,7 @@ def test_preset_intro_matches_retention_presets():
 	assert not re.search(r"Strict</b>[^;]*keeps data longer", intro)
 	assert not re.search(r"Relaxed</b>[^;]*prunes faster", intro)
 	for days in (profiles["Strict"]["session_retention_days"], profiles["Relaxed"]["session_retention_days"]):
-		assert f"{days} day" in intro
+		assert re.search(rf"\b{days} days?\b", intro), f"intro does not state {days} day(s)"
 
 
 _NUMBER_WORDS = {"Nine": 9, "Ten": 10, "Eleven": 11, "Twelve": 12, "Thirteen": 13, "Fourteen": 14}
@@ -137,3 +138,32 @@ def test_readme_finding_type_counts_match_enum():
 		assert rows == int(heading.group(1)), heading.group(0).splitlines()[0]
 		documented += rows
 	assert documented == total
+
+
+def _readme():
+	return (_APP / "README.md").read_text()
+
+
+def test_readme_retention_sentences_match_presets():
+	text = _readme()
+	days = {
+		p: int(settings._PROFILES[p]["session_retention_days"]) for p in ("Strict", "Recommended", "Relaxed")
+	}
+	assert f"**Strict keeps sessions for only {days['Strict']} day" in text
+	assert f"**Strict deletes Ready/Failed sessions after {days['Strict']} day" in text
+	assert f"(Recommended {days['Recommended']}, Relaxed {days['Relaxed']})" in text
+
+
+def test_readme_redaction_marker_matches_code():
+	from optimus.redaction import redact_sensitive
+
+	assert redact_sensitive({"password": "x"})["password"] == "<REDACTED:password>"
+	row = next(l for l in _readme().splitlines() if l.startswith("| Headers + form data"))
+	assert "`<REDACTED:keyname>`" in row
+
+
+def test_readme_no_pdf_button_claim_matches_code():
+	assert "there is no PDF button" in _readme()
+	assert "download_pdf" in _readme()
+	js = "".join(p.read_text() for p in (_APP / "optimus" / "public" / "js").glob("*.js"))
+	assert "download_pdf" not in js

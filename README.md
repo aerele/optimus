@@ -370,7 +370,7 @@ These do real analytical work without pulling a dependency:
 
 **Positioning:** commercial APMs are always-on monitoring for *"something regressed, find it."* optimus is on-demand debugging for *"this specific customer flow is slow, what should my dev shop fix."* They're complementary, not competitive. Most ERPNext shops run only optimus because Datadog is expensive and leaks customer data off-site.
 
-For the specific job of *"debug a slow ERPNext workflow and hand the report to a partner shop,"* optimus produces a better report than any commercial APM because of callsite-grouped N+1, framework-native findings and flow-aware session. None of those exist anywhere else at any price.
+For the specific job of *"debug a slow ERPNext workflow and get a report you can review with your team,"* optimus produces a better report than any commercial APM because of callsite-grouped N+1, framework-native findings and flow-aware session. None of those exist anywhere else at any price.
 
 ---
 
