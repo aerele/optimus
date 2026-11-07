@@ -118,3 +118,62 @@ def test_nothing_is_said_when_every_request_has_a_tree(errors):
 def test_nothing_is_said_for_a_session_that_chose_sql_only_capture(errors):
 	assert _notes([_rec(RECORDING_DATA_TTL_SECONDS + 1)], {"capture_python_tree": False}) == []
 	assert errors == []
+
+
+def _run_analyze_and_capture_warnings(monkeypatch):
+	"""Run the real ``analyze.run`` on one recording that has no call tree and return the
+	warnings the context carries when it reaches ``_persist``."""
+	from types import SimpleNamespace
+
+	import frappe
+
+	seen = []
+	db = SimpleNamespace(
+		get_value=lambda *a, **k: "Analyzing" if len(a) > 2 and a[2] == "status" else "PS-A",
+		set_value=lambda *a, **k: None,
+		rollback=lambda *a, **k: None,
+	)
+	monkeypatch.setattr(frappe, "db", db, raising=False)
+	monkeypatch.setattr(frappe, "local", SimpleNamespace(), raising=False)
+	monkeypatch.setattr(frappe, "conf", {"optimus_analyze_gc_collect": False}, raising=False)
+	monkeypatch.setattr(frappe, "cache", SimpleNamespace(get_value=lambda *a, **k: None), raising=False)
+	monkeypatch.setattr(frappe, "log_error", lambda *a, **k: None, raising=False)
+	monkeypatch.setattr(analyze, "is_scheduler_disabled", lambda: True)
+	monkeypatch.setattr(analyze, "safe_commit", lambda: None)
+	monkeypatch.setattr(
+		analyze,
+		"session",
+		SimpleNamespace(
+			get_recordings=lambda *a, **k: ["rec-1"],
+			get_session_meta=lambda *a, **k: {},
+			delete_session_state=lambda *a, **k: None,
+		),
+	)
+	monkeypatch.setattr(analyze, "_bg_wait_for_pending_jobs", lambda *a, **k: 0)
+	monkeypatch.setattr(analyze, "_acquire_singleflight", lambda *a, **k: True)
+	monkeypatch.setattr(analyze, "_fetch_recordings", lambda *a, **k: iter([_rec(10, uuid="rec-1")]))
+	monkeypatch.setattr(analyze, "_enrich_recordings", lambda *a, **k: [])
+	monkeypatch.setattr(analyze, "_get_analyzers", lambda: [])
+	monkeypatch.setattr("optimus.api._read_frontend_data", lambda *a, **k: {"xhr": [], "vitals": []})
+	monkeypatch.setattr(analyze, "_persist", lambda docname, context, *a, **k: seen.append(list(context.warnings)))
+	for name in (
+		"_publish_session_event",
+		"_publish_progress",
+		"_touch_singleflight",
+		"_render_and_attach_reports",
+		"_persist_recordings_file",
+		"_cleanup_redis",
+		"_persist_representative_callsites",
+		"_enrich_findings_with_source_snippets",
+		"_begin_analysis",
+	):
+		monkeypatch.setattr(analyze, name, lambda *a, **k: True, raising=False)
+	analyze.run("A")
+	return seen
+
+
+def test_run_puts_the_missing_tree_note_into_the_persisted_warnings(monkeypatch, errors):
+	seen = _run_analyze_and_capture_warnings(monkeypatch)
+
+	assert len(seen) == 1
+	assert any("Python call trees" in w or "call trees" in w for w in seen[0])

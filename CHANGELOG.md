@@ -31,6 +31,10 @@ versions may contain breaking changes see migration notes below).
 - Requests and background jobs dropped at the per-session recording limit no longer leave their Frappe Recorder entry in Redis forever, and no longer leave a profiler running on the worker thread. A cleanup that failed part-way keeps its index so the daily sweep can finish it, and the sweep now also removes the entries of sessions without a row and of finished sessions that a late background job left data on.
 - The start dialog now says the session stops after 10 minutes without activity, and that recording ends at the per-session request limit.
 
+### Action needed
+
+- Check the Frappe Recorder for old entries. Before this update, requests and background jobs dropped at the per-session recording limit left their full Recorder entry (SQL, form data and headers) in Redis with no expiry, and nothing removes those old entries. Check the size of the `recorder-requests` and `recorder-requests-sparse` Redis hashes by counting the rows in the Recorder page or running `frappe.cache.hlen("recorder-requests")` in `bench console`. If nobody uses the Recorder, clear them from the Recorder page or with `frappe.recorder.delete()` in `bench console`. Entries dropped after this update are removed automatically.
+
 ### Upgrade note
 
 - Restart the web and worker processes after updating. Sessions still recording at the time of the update keep the old 10-minute lifetime for the data they already captured, and may lose their Python call trees.
