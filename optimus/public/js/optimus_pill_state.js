@@ -275,13 +275,13 @@
 			return {
 				state: withState(state, { display: "ready", phase2: false, run_uuid: null }),
 				ui: { display: "ready", label: __("Check report"), elapsed: __("click to view"), tone: "stale" },
-				alert: { message: "Profiler is taking unusually long open the session to check its status", indicator: "orange" },
+				alert: { message: __("Profiler is taking unusually long open the session to check its status"), indicator: "orange" },
 			};
 		}
 		return {
 			state: resetState(state),
 			ui: { display: "inactive", label: __("Profiler"), elapsed: "" },
-			alert: { message: "Profiler status could not be confirmed check the Optimus Session list", indicator: "orange" },
+			alert: { message: __("Profiler status could not be confirmed check the Optimus Session list"), indicator: "orange" },
 		};
 	}
 
