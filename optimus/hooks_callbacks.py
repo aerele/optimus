@@ -9,7 +9,7 @@ that request only (per-user isolation: other users' concurrent traffic is NOT
 recorded). After the request, the new recording UUID is registered with the
 session so the analyze pipeline can find every recording in a flow.
 
-Activation uses ``frappe.recorder.record(force=True)`` rather than
+Activation uses ``frappe.recorder.record(force=True)`` (via ``capture.record_forced``) rather than
 ``frappe.recorder.start()`` (which would record every request from every
 user). Frappe's own ``after_request`` runs before ours, so the recording is
 already dumped to Redis by the time we register its UUID.
@@ -55,6 +55,40 @@ _IGNORED_CMD_PREFIXES = (
 	# plumbing, not user code.
 	"frappe.core.doctype.recorder.recorder.",
 )
+
+
+def _has_live_recorder() -> bool:
+	"""True when Frappe's own Recorder is already recording this request or job."""
+	recorder = getattr(frappe.local, "_recorder", None)
+	return recorder is not None and _capture.is_recording(recorder)
+
+
+# Settings of a shared Frappe Recorder that degrade an Optimus recording, with the value Optimus needs.
+_RECORDER_SETTINGS_WANTED = (("record_sql", 1), ("capture_stack", 1), ("profile", 0))
+
+
+def _flag_sql_recording_off(recorder, recording_uuid) -> None:
+	"""Remember a recording whose shared Frappe Recorder had SQL recording or stack capture off, or its
+	profiler on (queries or call details are missing). Never raises: this is a footnote, so a Redis
+	error must not lose the recording."""
+	try:
+		config = getattr(recorder, "config", None)
+		if config is None:
+			return
+		degraded = [
+			name
+			for name, wanted in _RECORDER_SETTINGS_WANTED
+			if bool(getattr(config, name, wanted)) != bool(wanted)
+		]
+		if not degraded:
+			return
+		from optimus import redis_keys
+
+		frappe.cache.set_value(
+			redis_keys.sql_off(recording_uuid), degraded, expires_in_sec=session.SESSION_TTL_SECONDS
+		)
+	except Exception:
+		frappe.log_error(title="optimus recorder settings note")
 
 
 def _extract_cmd_from_request() -> str:
@@ -237,7 +271,7 @@ def before_request(*args, **kwargs):
 		# instance do NOT create a second Recorder because that would
 		# overwrite frappe.local._recorder and orphan the first one's
 		# SQL patch, corrupting both recordings.
-		if getattr(frappe.local, "_recorder", None) is not None:
+		if _has_live_recorder():
 			return
 
 		# Force-activate the existing recorder for THIS request only.
@@ -245,7 +279,7 @@ def before_request(*args, **kwargs):
 		# global RECORDER_INTERCEPT_FLAG, leaving the standalone
 		# Recorder UI's flag untouched.
 		# (frappe.recorder is imported at module top see comment there.)
-		frappe.recorder.record(force=True)
+		_capture.record_forced()
 
 		# v0.5.1: snapshot infra metrics FIRST, BEFORE pyinstrument starts.
 		# Pre-v0.5.1 the order was reversed: _start_pyi_session was called
@@ -310,6 +344,7 @@ def after_request(*args, **kwargs):
 		registered = session.register_recording(
 			session_uuid, recording_uuid, user=user
 		)
+		_flag_sql_recording_off(recorder, recording_uuid)
 		if not registered:
 			# Cap hit the recording is in RECORDER_REQUEST_HASH but not
 			# registered against our session. The cap_warning is already
@@ -538,11 +573,11 @@ def before_job(method=None, kwargs=None, **rest):
 		# Same clobber protection as before_request: if the standalone
 		# recorder already activated (global flag + frappe's own
 		# before_job hook), piggyback on its instance.
-		if getattr(frappe.local, "_recorder", None) is not None:
+		if _has_live_recorder():
 			return
 
 		# (frappe.recorder is imported at module top see comment there.)
-		frappe.recorder.record(force=True)
+		_capture.record_forced()
 
 		# v0.5.1: snapshot BEFORE _start_pyi_session mirrors the order
 		# fix in before_request. See the rationale comment there.
@@ -584,6 +619,7 @@ def after_job(method=None, kwargs=None, result=None, **rest):
 		registered = session.register_recording(
 			session_uuid, recording_uuid, user=user
 		)
+		_flag_sql_recording_off(recorder, recording_uuid)
 		if not registered:
 			frappe.logger().warning(
 				f"optimus: recording cap hit for session "

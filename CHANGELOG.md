@@ -8,6 +8,22 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.163] - 2026-11-07
+
+### Fixed
+
+- A Recorder setting left in cache after the Frappe Recorder was stopped (it lingers for up to 10 minutes), such as a job filter that does not match, "Record SQL" off, or "Profile" on, could fail a recorded background job, lose its queries, or fail the analysis. Optimus now records its own requests and jobs with Frappe's default settings, so that leftover setting no longer changes or breaks an Optimus recording. Your stored Recorder settings are not changed.
+- While the Frappe Recorder is actively recording at the same time, Optimus shares that recording and its settings. When that shared recording has SQL recording or call stacks turned off, or its profiler turned on, the report now says how many actions were affected and that some queries or call details are missing. A failure while saving this note no longer loses the recording.
+- A request was silently missing from a session when Frappe's Recorder was switched on with a path filter that did not match it. Optimus now starts its own recording for that request.
+- The Event Type of every recorded action is now always "HTTP Request" or "Background Job", so saving the analysis no longer fails on any other value.
+- Not covered: only verified against Frappe 16; on Frappe 15 Optimus keeps its previous behaviour for the Recorder settings.
+
+### Internal
+
+- If this and the URL/header redaction change both edit `_patch_recorder` and `_profiler_init` in `optimus/__init__.py`, this one lands after it; the two touch different functions and should merge with a small textual conflict at most.
+
+---
+
 ## [0.12.149] - 2026-11-06
 
 ### Fixed

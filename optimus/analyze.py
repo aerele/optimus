@@ -296,6 +296,38 @@ def _note_heartbeat_problem(session_uuid: str, problem: str) -> None:
 	safe_call.log_error_line(f"optimus: analyze {session_uuid}: {problem}")
 
 
+_RECORDER_SETTING_PHRASES = {
+	"record_sql": "SQL recording turned off",
+	"capture_stack": "call stacks turned off",
+	"profile": "its profiler turned on",
+}
+
+
+def _sql_off_warning(recordings: list[dict]) -> str | None:
+	"""One plain note when some actions shared a Frappe Recorder with SQL recording or stack capture
+	off, or its profiler on."""
+	count = 0
+	degraded: set[str] = set()
+	for rec in recordings:
+		rec_uuid = rec.get("uuid")
+		flag = frappe.cache.get_value(_redis_keys.sql_off(rec_uuid)) if rec_uuid else None
+		if not flag:
+			continue
+		count += 1
+		# An older worker stored plain True for "SQL recording was off".
+		degraded.update(flag if isinstance(flag, (list, tuple)) else ["record_sql"])
+	if not count:
+		return None
+	subject = "1 action was" if count == 1 else f"{count} actions were"
+	phrases = [text for name, text in _RECORDER_SETTING_PHRASES.items() if name in degraded]
+	if not phrases:
+		phrases = [_RECORDER_SETTING_PHRASES["record_sql"]]
+	said = phrases[0] if len(phrases) == 1 else ", ".join(phrases[:-1]) + " and " + phrases[-1]
+	sql_only = phrases == [_RECORDER_SETTING_PHRASES["record_sql"]]
+	effect = "their queries are missing" if sql_only else "some queries or call details are missing"
+	return f"{subject} recorded while Frappe's Recorder was running with {said}, so {effect}."
+
+
 def _touch_singleflight(session_uuid: str) -> bool:
 	"""Refresh the single-flight flag's TTL while this session holds it, or take it back
 	when it lapsed and nobody took it. Never writes over another session's flag (taken
@@ -934,6 +966,10 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		meta = session.get_session_meta(session_uuid) or {}
 		if meta.get("cap_warning"):
 			context.warnings.append(meta["cap_warning"])
+
+		sql_off_warning = _sql_off_warning(recordings)
+		if sql_off_warning:
+			context.warnings.append(sql_off_warning)
 
 		# v0.5.0: load the frontend metrics posted by optimus_frontend.js
 		# for consumption by the frontend_timings analyzer. Reads from the
@@ -3624,5 +3660,9 @@ def _cleanup_redis(session_uuid: str, recording_uuids: list[str]) -> None:
 			pass  # best-effort cleanup
 		try:
 			frappe.cache.delete_value(_redis_keys.resolved_doc(uuid))
+		except Exception:
+			pass
+		try:
+			frappe.cache.delete_value(_redis_keys.sql_off(uuid))
 		except Exception:
 			pass

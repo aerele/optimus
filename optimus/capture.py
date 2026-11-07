@@ -525,6 +525,27 @@ def uninstall_lock_capture() -> None:
 DEFAULT_SAMPLER_INTERVAL_MS = 1
 
 
+def record_forced():
+	"""Start Frappe's recorder for this request or job regardless of its own switch.
+
+	While it runs, ``RecorderConfig.retrieve`` (patched in ``optimus._patch_recorder_config``)
+	returns Frappe's defaults, so a Recorder UI config cached for up to 10 minutes cannot
+	change what Optimus records. The stored settings are never modified.
+	"""
+	import frappe
+
+	frappe.local.optimus_forcing = True
+	try:
+		return frappe.recorder.record(force=True)
+	finally:
+		frappe.local.optimus_forcing = False
+
+
+def is_recording(recorder) -> bool:
+	"""False for the inert recorder Frappe leaves when its switch is on but the filters match nothing."""
+	return getattr(recorder, "_recording", True) is not False
+
+
 def _start_pyi_session(local_proxy, interval_ms: float = DEFAULT_SAMPLER_INTERVAL_MS):
 	"""Start a pyinstrument profiler scoped to this request.
 
