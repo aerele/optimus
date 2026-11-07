@@ -12,7 +12,9 @@
 	z-index: 1999;
 	display: none; /* hidden until JS confirms the user has permission */
 	min-width: 96px;
+	max-width: calc(100vw - 40px);
 	margin: 0;
+	white-space: nowrap;
 	padding: 6px 12px;
 	appearance: none;
 	border-radius: 999px;
@@ -121,11 +123,21 @@ body.modal-open #frappe-profiler-widget {
 	}
 }
 
-#frappe-profiler-widget .fp-label {
+#frappe-profiler-widget .fp-label,
+#frappe-profiler-widget .fp-elapsed {
+	display: inline-block;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 	vertical-align: middle;
 }
 
+#frappe-profiler-widget .fp-label {
+	max-width: min(12em, 38vw);
+}
+
 #frappe-profiler-widget .fp-elapsed {
+	max-width: min(9em, 26vw);
 	margin-left: 6px;
 	font-variant-numeric: tabular-nums;
 	color: inherit;

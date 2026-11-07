@@ -494,17 +494,50 @@ test("a label typed on another page is not carried over", () => {
 	assert.notStrictEqual(FakeDialog.last.value, "my flow");
 });
 
-test("focus returns to the pill when the dialog hides and focus fell to the page", () => {
+test("focus returns to the pill when the dialog hides, even if a click never focused the button", () => {
 	const env = load();
-	env.active = env.t.widget;
-	env.t.openStartDialog();
 	env.active = null;
+	env.t.openStartDialog();
 	FakeDialog.last.hide();
 	assert.strictEqual(env.t.widget.focused, 1);
 	env.active = {};
 	env.t.openStartDialog();
 	FakeDialog.last.hide();
-	assert.strictEqual(env.t.widget.focused, 1, "no focus grab when the pill did not have it");
+	assert.strictEqual(env.t.widget.focused, 1, "no focus grab when focus went to another control");
+});
+
+test("an inline stop of an expired session gives exactly one notice with the expired wording", () => {
+	const env = load();
+	enterRecording(env);
+	env.t.confirmAndStop({ sessionUuid: "s1", auto: true });
+	callsTo(env, "optimus.api.stop")[0].callback({ message: { stopped: true, ran_inline: true, expired: true, status: "Ready", docname: "OS-1" } });
+	assert.strictEqual(env.alerts.length, 1);
+	assert.ok(/without activity/.test(env.alerts[0].message), env.alerts[0].message);
+	assert.strictEqual(env.t.state.display, "ready");
+});
+
+test("an inline stop of an expired session that hit the request limit says so", () => {
+	const env = load();
+	enterRecording(env);
+	env.t.confirmAndStop({ sessionUuid: "s1", auto: true, capHit: true });
+	callsTo(env, "optimus.api.stop")[0].callback({ message: { stopped: true, ran_inline: true, expired: true, status: "Ready", docname: "OS-1" } });
+	assert.strictEqual(env.alerts.length, 1);
+	assert.ok(/request limit/.test(env.alerts[0].message), env.alerts[0].message);
+});
+
+test("an inline stop of a live session keeps the report-ready notice, and a failed one stays red", () => {
+	const env = load();
+	enterRecording(env);
+	env.t.confirmAndStop();
+	callsTo(env, "optimus.api.stop")[0].callback({ message: { stopped: true, ran_inline: true, status: "Ready", docname: "OS-1" } });
+	assert.strictEqual(env.alerts.length, 1);
+	assert.ok(/report ready/.test(env.alerts[0].message));
+	const bad = load();
+	enterRecording(bad);
+	bad.t.confirmAndStop({ sessionUuid: "s1", auto: true });
+	callsTo(bad, "optimus.api.stop")[0].callback({ message: { stopped: true, ran_inline: true, expired: true, status: "Failed", docname: "OS-1" } });
+	assert.strictEqual(bad.alerts.length, 1);
+	assert.strictEqual(bad.alerts[0].indicator, "red");
 });
 
 let failed = 0;

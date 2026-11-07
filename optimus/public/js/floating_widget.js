@@ -144,13 +144,14 @@
 		toast.className = "optimus-onboarding-toast";
 		toast.setAttribute("role", "status");
 		toast.innerHTML = [
-			'<div class="optimus-onboarding-title">Optimus is installed</div>',
+			'<div class="optimus-onboarding-title">' + __("Optimus is installed") + "</div>",
 			'<div class="optimus-onboarding-body">',
-			"Click the <strong>Profiler</strong> pill in the bottom-right corner ",
-			"to record your first slow flow.",
+			__("Click the {0} pill in the bottom-right corner to record your first slow flow.", [
+				"<strong>" + __("Profiler") + "</strong>",
+			]),
 			"</div>",
 			'<button type="button" id="frappe-profiler-onboarding-dismiss" ',
-			'class="optimus-onboarding-dismiss">Got it</button>',
+			'class="optimus-onboarding-dismiss">' + __("Got it") + "</button>",
 		].join("");
 		document.body.appendChild(toast);
 
@@ -210,7 +211,7 @@
 		// The per-second elapsed timer stays out of the accessible name.
 		widget.innerHTML = `
 			<span class="fp-dot" aria-hidden="true"></span>
-			<span class="fp-label">Profiler</span>
+			<span class="fp-label">${__("Profiler")}</span>
 			<span class="fp-elapsed" aria-hidden="true"></span>
 		`;
 		widget.addEventListener("click", onClick);
@@ -258,6 +259,7 @@
 		widget.querySelector(".fp-label").textContent = label;
 		widget.querySelector(".fp-elapsed").textContent = elapsed || "";
 		widget.title = pillTitle(display, currentState.phase2);
+		widget.setAttribute("aria-label", label);
 		if (Pill.isTransient(display)) {
 			widget.setAttribute("aria-disabled", "true");
 		} else {
@@ -381,10 +383,10 @@
 				applyResult(Pill.reduceServer(currentState, (r && r.message) || {}, Date.now()));
 				if (currentState.display === "recording" && prev !== "recording") {
 					if (currentState.phase2) {
-						setDisplay("recording", "Line profiling recording…", "click pill or form to stop");
+						setDisplay("recording", __("Line profiling recording…"), __("click pill or form to stop"));
 					} else {
 						startElapsedTimer();
-						setDisplay("recording", "Recording", computeElapsed());
+						setDisplay("recording", __("Recording"), computeElapsed());
 					}
 					if (widget) widget.setAttribute("data-session-uuid", currentState.session_uuid || "");
 				}
@@ -419,7 +421,7 @@
 			resyncEpoch += 1;
 			currentState = Pill.resetState(currentState);
 			if (widget) widget.removeAttribute("data-session-uuid");
-			setDisplay("inactive", "Profiler", "");
+			setDisplay("inactive", __("Profiler"), "");
 		}
 		// stopping/analyzing: clicks are no-op until the state resolves
 	}
@@ -431,7 +433,7 @@
 		// Optimistic UI: the realtime phase_2_run_analyzing event will
 		// arrive within ~1s and confirm the transition.
 		currentState.display = "stopping";
-		setDisplay("stopping", "Stopping line profiling…", "");
+		setDisplay("stopping", __("Stopping line profiling…"), "");
 		frappe.call({
 			method: "optimus.api.stop_line_profile_pass",
 			args: { run_uuid: run_uuid },
@@ -446,7 +448,7 @@
 			error: () => {
 				// The stop may have landed server-side; resync after reverting.
 				currentState.display = "recording";
-				setDisplay("recording", "Line profiling recording…", "click form to stop");
+				setDisplay("recording", __("Line profiling recording…"), __("click form to stop"));
 				refreshStatus();
 			},
 		});
@@ -614,7 +616,7 @@
 		currentState.started_at = data.started_at;
 		currentState.display = "recording";
 		startElapsedTimer();
-		setDisplay("recording", "Recording", "0:00");
+		setDisplay("recording", __("Recording"), "0:00");
 		// v0.5.0: expose session UUID for optimus_frontend.js.
 		if (widget) {
 			widget.setAttribute("data-session-uuid", data.session_uuid || "");
@@ -626,42 +628,38 @@
 	}
 
 	function openStartDialog() {
-		const hadFocus = !!widget && document.activeElement === widget;
 		let started = false;
 		const initialLabel = labelForNewDialog();
 		const d = new frappe.ui.Dialog({
-			title: "Start profiling session",
+			title: __("Start profiling session"),
 			fields: [
 				{
 					fieldname: "label",
 					fieldtype: "Data",
-					label: "Session label",
+					label: __("Session label"),
 					reqd: 1,
 					length: 140,
 					default: initialLabel,
-					description:
-						"Give this session a name you'll recognize later e.g. 'Sales Invoice flow with 50 items'. (up to 140 characters)",
+					description: __(
+						"Give this session a name you'll recognize later e.g. 'Sales Invoice flow with 50 items'. (up to 140 characters)"
+					),
 				},
 				{
 					fieldname: "warning_html",
 					fieldtype: "HTML",
-					options: `
-						<div class="optimus-start-note">
-							<strong>Note:</strong> Recording adds ~1.5–2× wall-clock overhead per request while it's running.
-							Only your traffic will be captured other users on this site are not affected.
-							The session auto-stops after 10 minutes without activity, and stops recording once it reaches the per-session request limit. Captured data stays in Redis for up to 6 hours, until analysis completes.
-						</div>
-					`,
+					options: '<div class="optimus-start-note"><strong>' + __("Note:") + "</strong> "
+						+ __("Recording adds ~1.5–2× wall-clock overhead per request while it's running. Only your traffic will be captured other users on this site are not affected. The session auto-stops after 10 minutes without activity, and stops recording once it reaches the per-session request limit. Captured data stays in Redis for up to 6 hours, until analysis completes.")
+						+ "</div>",
 				},
 			],
-			primary_action_label: "Start",
+			primary_action_label: __("Start"),
 			primary_action: (values) => startSession(d, values, () => { started = true; }),
 		});
 		d.onhide = () => {
 			const typed = d.get_value("label");
 			if (!started && typed !== initialLabel) remember(typed);
 			const active = document.activeElement;
-			if (hadFocus && widget && (!active || active === document.body)) widget.focus();
+			if (widget && (!active || active === document.body)) widget.focus();
 		};
 		d.show();
 	}
@@ -681,7 +679,7 @@
 		const sessionUuid = options.sessionUuid || currentState.session_uuid || undefined;
 		_diag("[optimus] confirmAndStop: click received");
 		resyncEpoch += 1;
-		setDisplay("stopping", "Stopping…", "");
+		setDisplay("stopping", __("Stopping…"), "");
 		currentState.display = "stopping";
 		stopElapsedTimer();
 
@@ -719,26 +717,30 @@
 					currentState.display = "ready";
 					currentState.docname = data.docname;
 					if (data.status === "Failed") {
-						setDisplay("ready", "Analyze failed", "click to view", "failed");
+						setDisplay("ready", __("Analyze failed"), __("click to view"), "failed");
 						frappe.show_alert({
 							message: __("Profiler analyze failed click the pill to see details"),
 							indicator: "red",
 						});
 					} else {
 						const empty = !!data.empty;
-						setDisplay("ready", empty ? "No data" : "Report ready", "click to view");
-						frappe.show_alert({
-							message: empty
-								? __("Profiling finished, but no requests were recorded")
-								: __("Profiler report ready"),
-							indicator: empty ? "orange" : "blue",
-						});
+						setDisplay("ready", empty ? __("No data") : __("Report ready"), __("click to view"));
+						if (data.expired) {
+							announceStopped(true, options);
+						} else {
+							frappe.show_alert({
+								message: empty
+									? __("Profiling finished, but no requests were recorded")
+									: __("Profiler report ready"),
+								indicator: empty ? "orange" : "blue",
+							});
+						}
 					}
 				} else if (currentState.display === "ready") {
 					// The ready event arrived before the stop response.
 					currentState.docname = data.docname || currentState.docname;
 				} else {
-					setDisplay("analyzing", "Analyzing…", "");
+					setDisplay("analyzing", __("Analyzing…"), "");
 					currentState.display = "analyzing";
 					currentState.docname = data.docname || currentState.docname;
 					announceStopped(data.expired, options);
@@ -769,7 +771,7 @@
 			if (!ok || currentState.display !== "stopping") return;
 			currentState = Pill.resetState(currentState);
 			if (widget) widget.removeAttribute("data-session-uuid");
-			setDisplay("inactive", "Profiler", "");
+			setDisplay("inactive", __("Profiler"), "");
 			frappe.show_alert({
 				message: __("Nothing to stop: this session had already ended."),
 				indicator: "gray",
@@ -782,7 +784,7 @@
 	function recoverFromFailedStop(sessionUuid) {
 		_diag("[optimus] stop failed for", sessionUuid);
 		currentState.display = "recording";
-		setDisplay("recording", "Recording", computeElapsed());
+		setDisplay("recording", __("Recording"), computeElapsed());
 		startElapsedTimer();
 		refreshStatus((ok) => {
 			if (!ok) {
@@ -1007,7 +1009,7 @@
 			if (currentState.display === "recording") {
 				currentState.display = "stopping";
 				stopElapsedTimer();
-				setDisplay("stopping", "Stopping…", "");
+				setDisplay("stopping", __("Stopping…"), "");
 			}
 		});
 
@@ -1027,8 +1029,8 @@
 			currentState.session_uuid = data.session_uuid;
 			setDisplay(
 				"recording",
-				"Line profiling recording…",
-				"click pill or form to stop"
+				__("Line profiling recording…"),
+				__("click pill or form to stop")
 			);
 		});
 

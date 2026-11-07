@@ -264,3 +264,14 @@ def test_another_users_recording_row_is_idle(env):
 	env(sessions=[_s("OS-9", "u9", "Recording", user="bob")])
 	assert api.pill_state(session_uuid="u9") == {"phase": "idle"}
 	assert api.pill_state() == {"phase": "idle"}
+
+
+def test_a_recording_row_without_a_start_time_is_idle_and_never_parsed(env, monkeypatch):
+	env(sessions=[{**_s("OS-1", "u1", "Recording"), "started_at": None}])
+
+	def boom(value):
+		raise AssertionError("get_datetime must not be called for a missing start time")
+
+	monkeypatch.setattr(api, "get_datetime", boom)
+	assert api.pill_state(session_uuid="u1")["phase"] == "idle"
+	assert api.pill_state()["phase"] == "idle"

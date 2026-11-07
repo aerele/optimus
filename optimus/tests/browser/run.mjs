@@ -337,9 +337,13 @@ for (const cap of [false, true]) {
 	check("a 417 keeps the dialog open with the label and Start enabled", st.open && st.value === "FAIL" && st.disabled === false, st);
 	await page.screenshot({ path: path.join(SHOTS, "failed-start.png") });
 	await page.fill(".modal input", "second try");
-	await page.keyboard.press("Enter");
-	await page.keyboard.press("Enter");
-	await page.waitForFunction(() => document.querySelector("#frappe-profiler-widget").className.includes("recording"));
+	// Both Enters reach the open dialog in the same task, as a double key press does before the first reply.
+	// (A second real Enter after the reply would land on the pill, which has taken focus back, and stop the session.)
+	await page.evaluate(() => {
+		const input = document.querySelector(".modal input");
+		for (let i = 0; i < 2; i++) input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+	});
+	await page.waitForFunction(() => /fp-state-(recording|analyzing)/.test(document.querySelector("#frappe-profiler-widget").className));
 	await settle(page);
 	check("double Enter starts exactly one session after the retry", server.calls("start").length === 2, server.calls("start").length);
 	await ctx.close();
@@ -370,6 +374,26 @@ for (const cap of [false, true]) {
 	await startRecording(page);
 	const anim = await page.evaluate(() => getComputedStyle(document.querySelector("#frappe-profiler-widget .fp-dot")).animationName);
 	check("reduced motion: the recording dot does not pulse", anim === "none", anim);
+	await ctx.close();
+}
+
+// ---------- 8b. A long translated label truncates ----------
+for (const width of [1440, 320]) {
+	const { ctx, page } = await open(makeServer(), { width });
+	await startRecording(page);
+	await page.evaluate(() => {
+		document.querySelector("#frappe-profiler-widget .fp-label").textContent = "Aufzeichnung läuft, bitte warten Sie auf das Ende";
+		document.querySelector("#frappe-profiler-widget .fp-elapsed").textContent = "klicken Sie hier, um die Sitzung anzuzeigen";
+		document.querySelectorAll(".es-toast").forEach((t) => t.remove());
+	});
+	const m = await page.evaluate(() => {
+		const w = document.querySelector("#frappe-profiler-widget");
+		const l = w.querySelector(".fp-label");
+		const r = w.getBoundingClientRect();
+		return { truncated: l.scrollWidth > l.clientWidth, inside: r.left >= 0 && r.right <= innerWidth, hscroll: document.documentElement.scrollWidth > innerWidth, width: r.width };
+	});
+	check(`long label @${width}: ellipsis, pill inside the viewport, no horizontal scroll`, m.truncated && m.inside && !m.hscroll, m);
+	await page.screenshot({ path: path.join(SHOTS, `long-label-${width}.png`) });
 	await ctx.close();
 }
 

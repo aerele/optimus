@@ -350,3 +350,26 @@ def test_the_picker_and_start_dialog_carry_no_hard_coded_colours():
 	widget = _read(WIDGET_JS)
 	assert not re.findall(r"#[0-9a-fA-F]{6}\b", widget)
 	assert "optimus-start-note" in widget
+
+
+def test_user_visible_strings_in_the_pill_dialog_and_notice_are_translatable():
+	src = _read(WIDGET_JS)
+	for text in (
+		"Start profiling session", "Session label", "Start", "Optimus is installed", "Got it", "Recording",
+		"Stopping…", "Analyzing…", "Report ready", "click to view", "Line profiling recording…", "Profiler",
+	):
+		assert f'__("{text}")' in src, text
+	assert 'title: "Start profiling session"' not in src
+	state = _read(os.path.join(os.path.dirname(WIDGET_JS), "optimus_pill_state.js"))
+	for text in ("Profiler", "Recording", "Stopping…", "Analyzing…", "Report ready", "click to view"):
+		assert f'__("{text}")' in state, text
+
+
+def test_pill_label_and_timer_truncate_instead_of_growing_with_a_long_translation():
+	css = _read(WIDGET_CSS)
+	rule = re.search(r"#frappe-profiler-widget \.fp-label,\s*#frappe-profiler-widget \.fp-elapsed \{([^}]*)\}", css)
+	assert rule
+	for decl in ("overflow: hidden", "text-overflow: ellipsis", "white-space: nowrap"):
+		assert decl in rule.group(1), decl
+	assert re.search(r"\.fp-label \{\s*max-width:", css)
+	assert "aria-label" in _read(WIDGET_JS)

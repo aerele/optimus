@@ -13,6 +13,12 @@
 })(typeof window !== "undefined" ? window : null, function () {
 	"use strict";
 
+	// Desk's translator when present (labels are translated at the point they are built); identity in node tests.
+	function __(text, args) {
+		const t = typeof globalThis.__ === "function" ? globalThis.__ : null;
+		return t ? t(text, args) : (args ? text.replace(/\{(\d+)\}/g, (m, i) => args[i]) : text);
+	}
+
 	// Safety poll: backoff capped at 30s, hard stop at 15 min.
 	const POLL = { baseMs: 3000, factor: 1.6, maxMs: 30000, hardStopMs: 15 * 60 * 1000 };
 	// An "analyzing" event right after a terminal one is a reordered delivery.
@@ -71,14 +77,14 @@
 	function terminalLabel(kind, phase2, pending, empty) {
 		if (kind === "ready") {
 			if (phase2 && pending) {
-				return "Line profiling results saved";
+				return __("Line profiling results saved");
 			}
 			if (empty) {
-				return "No data";
+				return __("No data");
 			}
-			return phase2 ? "Line profiling report ready" : "Report ready";
+			return phase2 ? __("Line profiling report ready") : __("Report ready");
 		}
-		return phase2 ? "Line profiling failed" : "Analyze failed";
+		return phase2 ? __("Line profiling failed") : __("Analyze failed");
 	}
 
 	function withState(state, patch) {
@@ -120,7 +126,7 @@
 				docname: data.docname || data.parent || state.docname,
 				terminal: markTerminal(state, key, now),
 			}),
-			ui: { display: "ready", label: terminalLabel(kind, phase2, pending, !!data.empty), elapsed: "click to view", tone: failed ? "failed" : null },
+			ui: { display: "ready", label: terminalLabel(kind, phase2, pending, !!data.empty), elapsed: __("click to view"), tone: failed ? "failed" : null },
 			alert: already ? null : {
 				message: failed
 					? (phase2 ? (data.error ? "Line profiling analyze failed: {0}" : "Line profiling analyze failed, open the session for details") : "Profiler analyze failed, check Error Log")
@@ -150,7 +156,7 @@
 				return null;
 			}
 			const pct = typeof data.percent === "number" ? Math.round(data.percent) : 0;
-			return { state: state, ui: { display: "analyzing", label: "Analyzing " + pct + "%", elapsed: data.description || "" }, alert: null };
+			return { state: state, ui: { display: "analyzing", label: __("Analyzing {0}%", [pct]), elapsed: data.description || "" }, alert: null };
 		}
 		const next = withState(state, {
 			display: "analyzing",
@@ -159,11 +165,13 @@
 			docname: data.docname || state.docname,
 			run_uuid: spec.phase2 ? (data.run_uuid || state.run_uuid) : state.run_uuid,
 		});
-		const label = spec.phase2 ? "Line profiling analyzing…" : "Analyzing…";
+		const label = spec.phase2 ? __("Line profiling analyzing…") : __("Analyzing…");
 		return { state: next, ui: { display: "analyzing", label: label, elapsed: spec.phase2 ? "" : "0%" }, alert: null };
 	}
 
-	const INACTIVE_UI = { display: "inactive", label: "Profiler", elapsed: "" };
+	function inactiveUi() {
+		return { display: "inactive", label: __("Profiler"), elapsed: "" };
+	}
 
 	// Server wins for terminal states; a stale recording snapshot is ignored.
 	function reduceServer(state, srv, now) {
@@ -177,8 +185,8 @@
 			}
 			const phase2 = srv.scope === "phase2";
 			const ui = phase2
-				? { display: "recording", label: "Line profiling recording…", elapsed: "click pill or form to stop" }
-				: { display: "recording", label: "Recording", elapsed: "" };
+				? { display: "recording", label: __("Line profiling recording…"), elapsed: __("click pill or form to stop") }
+				: { display: "recording", label: __("Recording"), elapsed: "" };
 			return {
 				state: withState(state, {
 					active: true, display: "recording", session_uuid: srv.session_uuid,
@@ -215,7 +223,7 @@
 		}
 		if (state.autoStopped && state.autoStopped[srv.session_uuid]) {
 			// The automatic stop already failed: stop claiming a recording.
-			return display === "recording" ? { state: resetState(state), ui: INACTIVE_UI, alert: null } : null;
+			return display === "recording" ? { state: resetState(state), ui: inactiveUi(), alert: null } : null;
 		}
 		const autoStopped = Object.assign({}, state.autoStopped);
 		autoStopped[srv.session_uuid] = true;
@@ -224,7 +232,7 @@
 				active: false, display: "stopping", session_uuid: srv.session_uuid,
 				docname: srv.docname, autoStopped: autoStopped,
 			}),
-			ui: { display: "stopping", label: "Stopping…", elapsed: "" },
+			ui: { display: "stopping", label: __("Stopping…"), elapsed: "" },
 			alert: null,
 			effect: { stop: srv.session_uuid, capHit: !!srv.cap_hit },
 		};
@@ -241,7 +249,7 @@
 				display: "analyzing", phase2: phase2, session_uuid: srv.session_uuid,
 				docname: srv.docname, run_uuid: phase2 ? srv.run_uuid : state.run_uuid,
 			}),
-			ui: { display: "analyzing", label: phase2 ? "Line profiling analyzing…" : "Analyzing…", elapsed: "" },
+			ui: { display: "analyzing", label: phase2 ? __("Line profiling analyzing…") : __("Analyzing…"), elapsed: "" },
 			alert: null,
 		};
 	}
@@ -253,7 +261,7 @@
 			return null;
 		}
 		if (state.display === "recording" || state.display === "analyzing") {
-			return { state: resetState(state), ui: { display: "inactive", label: "Profiler", elapsed: "" }, alert: null };
+			return { state: resetState(state), ui: { display: "inactive", label: __("Profiler"), elapsed: "" }, alert: null };
 		}
 		return null;
 	}
@@ -266,13 +274,13 @@
 		if (state.docname) {
 			return {
 				state: withState(state, { display: "ready", phase2: false, run_uuid: null }),
-				ui: { display: "ready", label: "Check report", elapsed: "click to view", tone: "stale" },
+				ui: { display: "ready", label: __("Check report"), elapsed: __("click to view"), tone: "stale" },
 				alert: { message: "Profiler is taking unusually long open the session to check its status", indicator: "orange" },
 			};
 		}
 		return {
 			state: resetState(state),
-			ui: { display: "inactive", label: "Profiler", elapsed: "" },
+			ui: { display: "inactive", label: __("Profiler"), elapsed: "" },
 			alert: { message: "Profiler status could not be confirmed check the Optimus Session list", indicator: "orange" },
 		};
 	}
