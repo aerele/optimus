@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import time
 import types
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -315,7 +315,7 @@ class TestSiteTimeZone:
 	def test_aware_datetime_is_converted(self):
 		from optimus.renderer.time_format import _format_datetime_display
 
-		assert _format_datetime_display(datetime(2026, 11, 7, 4, 30, tzinfo=UTC)) == "2026-11-07 10:00"
+		assert _format_datetime_display(datetime(2026, 11, 7, 4, 30, tzinfo=timezone.utc)) == "2026-11-07 10:00"
 
 	def test_naive_value_is_unchanged(self):
 		from optimus.renderer.time_format import _format_datetime_display
