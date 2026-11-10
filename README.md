@@ -132,11 +132,10 @@ read-only sections:
      download URL bypasses the hook and grants access to anyone who
      can read the parent Optimus Session, including a read-sharee.
    - **Re-analyze**: re-runs the analyze pipeline from the captured
-     recordings (which live in Redis for 10 minutes after Stop).
-     Useful when a session ends `Failed` because of a transient
-     error. After 10 minutes the recordings are gone re-analyze
-     can still re-render reports from the persisted DocType data,
-     but cannot recompute findings.
+     recordings. Useful when a session ends `Failed` because of a
+     transient error. The per-request call trees, argument logs,
+     server metrics and lock events stay in Redis for 24 hours, so a
+     retry after that recomputes findings without them.
    - **Regenerate Reports**: re-renders both HTML files from the
      persisted Action/Finding rows. Cheaper than a full re-analyze;
      useful after an Optimus upgrade that improves the renderer. It

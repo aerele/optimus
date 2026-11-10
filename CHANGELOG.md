@@ -8,6 +8,15 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.149] - 2026-11-10
+
+### Fixed
+
+- A session recorded for more than 10 minutes no longer loses the call trees of its earlier actions. Each request's call tree, argument log, server metrics, lock events and created-document name used to expire from Redis 10 minutes after the request, so analysis of a long session silently showed no call tree, hot path or line profiling candidates for those actions. These keys now last 24 hours, and analysis still deletes them as soon as the report is saved.
+- The server metrics key of each request is now deleted with the rest of the session's Redis input once analysis finishes, instead of waiting for it to expire.
+
+---
+
 ## [0.12.147] - 2026-11-06
 
 ### Internal

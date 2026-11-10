@@ -3620,3 +3620,7 @@ def _cleanup_redis(session_uuid: str, recording_uuids: list[str]) -> None:
 			frappe.cache.delete_value(_redis_keys.resolved_doc(uuid))
 		except Exception:
 			pass
+		try:
+			frappe.cache.delete_value(_redis_keys.infra(uuid))
+		except Exception:
+			pass

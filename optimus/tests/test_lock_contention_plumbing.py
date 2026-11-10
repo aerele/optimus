@@ -224,14 +224,14 @@ def redis_env(monkeypatch):
 
 def test_dump_stores_lock_events_with_ttl_and_clears_locals(redis_env):
 	from optimus import hooks_callbacks as hc
-	from optimus.session import SESSION_TTL_SECONDS
+	from optimus.session import RECORDING_DATA_TTL_SECONDS
 
 	redis_env.local.optimus_lock_events = [_event(), _event("lock_wait_timeout")]
 	hc._dump_capture_state_to_redis(recording_uuid="rec-1")
 
 	key = "profiler:lock_events:rec-1"
 	assert redis_env.cache.store[key] == [_event(), _event("lock_wait_timeout")]
-	assert redis_env.cache.ttls[key] == SESSION_TTL_SECONDS
+	assert redis_env.cache.ttls[key] == RECORDING_DATA_TTL_SECONDS
 	assert not hasattr(redis_env.local, "optimus_lock_events")
 
 

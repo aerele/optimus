@@ -341,7 +341,7 @@ def after_request(*args, **kwargs):
 				frappe.cache.set_value(
 					redis_keys.infra(recording_uuid_for_dump),
 					infra_capture.diff(start_snap, end_snap),
-					expires_in_sec=session.SESSION_TTL_SECONDS,
+					expires_in_sec=session.RECORDING_DATA_TTL_SECONDS,
 				)
 		except Exception:
 			frappe.log_error(title="optimus infra end snapshot")
@@ -361,7 +361,7 @@ def after_request(*args, **kwargs):
 					frappe.cache.set_value(
 						redis_keys.resolved_doc(recording_uuid_for_dump),
 						resolved,
-						expires_in_sec=session.SESSION_TTL_SECONDS,
+						expires_in_sec=session.RECORDING_DATA_TTL_SECONDS,
 					)
 		except Exception:
 			frappe.log_error(title="optimus resolve target doc")
@@ -609,7 +609,7 @@ def after_job(method=None, kwargs=None, result=None, **rest):
 				frappe.cache.set_value(
 					redis_keys.infra(recording_uuid_for_dump),
 					infra_capture.diff(start_snap, end_snap),
-					expires_in_sec=session.SESSION_TTL_SECONDS,
+					expires_in_sec=session.RECORDING_DATA_TTL_SECONDS,
 				)
 		except Exception:
 			frappe.log_error(title="optimus infra end snapshot (job)")
@@ -666,8 +666,8 @@ def _dump_capture_state_to_redis(recording_uuid: str | None) -> None:
 
 	Called from after_request / after_job after the recorder dumped its own SQL
 	recording. Writes ``profiler:tree:<uuid>`` (HMAC-signed pickle of
-	pyi.last_session) and ``profiler:sidecar:<uuid>`` (list[dict]), both with the
-	same TTL as RECORDER_REQUEST_HASH.
+	pyi.last_session) and ``profiler:sidecar:<uuid>`` (list[dict]), both with
+	``RECORDING_DATA_TTL_SECONDS`` so they outlive a long session's analysis.
 
 	SECURITY: the pickle is HMAC-SHA256 signed with the site's ``encryption_key``
 	so analyze refuses to unpickle a poisoned blob (Redis-poisoning RCE guard).
@@ -675,7 +675,7 @@ def _dump_capture_state_to_redis(recording_uuid: str | None) -> None:
 	"""
 	import pickle
 
-	from optimus.session import SESSION_TTL_SECONDS, sign_blob
+	from optimus.session import RECORDING_DATA_TTL_SECONDS, sign_blob
 
 	if not recording_uuid:
 		# No recorder ran on this request nothing to dump.
@@ -706,7 +706,7 @@ def _dump_capture_state_to_redis(recording_uuid: str | None) -> None:
 			frappe.cache.set_value(
 				redis_keys.tree(recording_uuid),
 				tree_blob,
-				expires_in_sec=SESSION_TTL_SECONDS,
+				expires_in_sec=RECORDING_DATA_TTL_SECONDS,
 			)
 		except Exception:
 			frappe.log_error(title="optimus pyi dump")
@@ -724,7 +724,7 @@ def _dump_capture_state_to_redis(recording_uuid: str | None) -> None:
 			frappe.cache.set_value(
 				redis_keys.sidecar(recording_uuid),
 				payload,
-				expires_in_sec=SESSION_TTL_SECONDS,
+				expires_in_sec=RECORDING_DATA_TTL_SECONDS,
 			)
 		except Exception:
 			frappe.log_error(title="optimus sidecar dump")
@@ -740,7 +740,7 @@ def _dump_capture_state_to_redis(recording_uuid: str | None) -> None:
 			frappe.cache.set_value(
 				redis_keys.lock_events(recording_uuid),
 				payload,
-				expires_in_sec=SESSION_TTL_SECONDS,
+				expires_in_sec=RECORDING_DATA_TTL_SECONDS,
 			)
 		except Exception:
 			frappe.log_error(title="optimus lock events dump")

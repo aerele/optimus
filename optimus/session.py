@@ -25,6 +25,10 @@ import frappe
 # auto-stops at the same point as the underlying recorder would.
 SESSION_TTL_SECONDS = 10 * 60
 
+# Per-recording analyze inputs (tree, sidecar, infra, lock events, resolved doc) must outlive a long
+# session and its analysis; _cleanup_redis deletes them after analysis, this only bounds orphans.
+RECORDING_DATA_TTL_SECONDS = 24 * 60 * 60
+
 # Hard cap on the number of recordings registered against a single session.
 # Prevents pathological flows from filling Redis. Configurable per site
 # via site_config.json: optimus_max_recordings_per_session

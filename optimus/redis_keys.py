@@ -95,7 +95,7 @@ def session_jobs(session_uuid: str) -> str:
 def tree(recording_uuid: str) -> str:
 	"""HMAC-signed pickle of the pyinstrument ``Profiler.last_session``.
 	Envelope: 32-byte signature prefix + pickled tree (see
-	:func:`optimus.session.sign_blob`). TTL: ``SESSION_TTL_SECONDS``."""
+	:func:`optimus.session.sign_blob`). TTL: ``RECORDING_DATA_TTL_SECONDS``."""
 	return f"profiler:tree:{recording_uuid}"
 
 
@@ -103,24 +103,24 @@ def sidecar(recording_uuid: str) -> str:
 	"""List of sidecar argument-log entries captured during a recording.
 	Frappe-pickled ``list[dict]``; an optional ``{"_truncated": True}``
 	marker appears at the tail when the sidecar exceeded its cap. TTL:
-	``SESSION_TTL_SECONDS``."""
+	``RECORDING_DATA_TTL_SECONDS``."""
 	return f"profiler:sidecar:{recording_uuid}"
 
 
 def infra(recording_uuid: str) -> str:
 	"""Per-recording infra metric delta (CPU / RAM / DB / RQ). Frappe-
 	pickled dict produced by :func:`optimus.infra_capture.diff`. TTL:
-	``SESSION_TTL_SECONDS``."""
+	``RECORDING_DATA_TTL_SECONDS``."""
 	return f"profiler:infra:{recording_uuid}"
 
 
 def resolved_doc(recording_uuid: str) -> str:
-	"""Per-recording sidecar holding a created doc's save-assigned ``{doctype, name}``, written by ``after_request`` and merged onto the recording as ``resolved_target_doc`` at analyze time. Frappe-pickled dict; TTL ``SESSION_TTL_SECONDS``."""
+	"""Per-recording sidecar holding a created doc's save-assigned ``{doctype, name}``, written by ``after_request`` and merged onto the recording as ``resolved_target_doc`` at analyze time. Frappe-pickled dict; TTL ``RECORDING_DATA_TTL_SECONDS``."""
 	return f"profiler:resolved_doc:{recording_uuid}"
 
 
 def lock_events(recording_uuid: str) -> str:
-	"""Deadlock / lock-wait events of a recording (``list[dict]``). TTL: ``SESSION_TTL_SECONDS``."""
+	"""Deadlock / lock-wait events of a recording (``list[dict]``). TTL: ``RECORDING_DATA_TTL_SECONDS``."""
 	return f"profiler:lock_events:{recording_uuid}"
 
 

@@ -142,7 +142,7 @@ def _sweep_orphan_redis_state():
 	# are frontend metrics is still discovered. (profiler:session:<uuid>:* and
 	# profiler:frontend:<uuid>:*). Per-RECORDING keys profiler:tree/sidecar/
 	# infra:<recording_uuid> carry a recording uuid (no session linkage in the
-	# key), so they can't be orphan-checked here; they rely on SESSION_TTL expiry.
+	# key), so they can't be orphan-checked here; they rely on RECORDING_DATA_TTL_SECONDS expiry.
 	markers = ("profiler:session:", "profiler:frontend:")
 
 	# Collect session UUIDs from the Redis keyspace

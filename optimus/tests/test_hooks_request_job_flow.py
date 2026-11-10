@@ -14,6 +14,7 @@ frappe = hc.frappe  # patch the module object hc really uses
 
 class FakeStore:
 	SESSION_TTL_SECONDS = 123
+	RECORDING_DATA_TTL_SECONDS = 456
 
 	def __init__(self):
 		self.active = {}
@@ -60,6 +61,7 @@ def env(monkeypatch):
 		dumped=[],
 		headers=[],
 		cache_writes={},
+		cache_ttls={},
 		enabled=True,
 		skip_users=[],
 		bg_started=[],
@@ -77,7 +79,7 @@ def env(monkeypatch):
 		frappe,
 		"cache",
 		types.SimpleNamespace(
-			set_value=lambda key, value, expires_in_sec=None: state.cache_writes.__setitem__(key, value)
+			set_value=lambda key, value, expires_in_sec=None: (state.cache_writes.__setitem__(key, value), state.cache_ttls.__setitem__(key, expires_in_sec))
 		),
 		raising=False,
 	)
@@ -237,6 +239,7 @@ class TestAfterRequest:
 		hc.after_request()
 
 		assert env.cache_writes[redis_keys.infra("rec-1")] == {"diff": True}
+		assert env.cache_ttls[redis_keys.infra("rec-1")] == FakeStore.RECORDING_DATA_TTL_SECONDS
 
 	def test_request_outside_a_session_registers_nothing_and_adds_no_header(self, env):
 		env.local._recorder = types.SimpleNamespace(uuid="global-recorder")
@@ -306,6 +309,7 @@ class TestAfterRequest:
 		hc.after_request()
 
 		assert env.cache_writes[redis_keys.resolved_doc("rec-1")] == "SO-0001"
+		assert env.cache_ttls[redis_keys.resolved_doc("rec-1")] == FakeStore.RECORDING_DATA_TTL_SECONDS
 
 
 class TestBeforeJob:
@@ -463,6 +467,7 @@ class TestAfterJob:
 		assert env.store.job_recordings == [("s1", "rq-1", "rec-9")]
 		assert env.bg_finished == [("s1", "rq-1")]
 		assert env.cache_writes[redis_keys.infra("rec-9")] == {"diff": True}
+		assert env.cache_ttls[redis_keys.infra("rec-9")] == FakeStore.RECORDING_DATA_TTL_SECONDS
 		assert env.dumped == ["rec-9"]
 
 	def test_all_per_job_markers_are_cleared(self, env, rq):
