@@ -48,6 +48,62 @@ def test_stop_loses_a_race_without_deleting_new_capture(env):
 	assert cache.get_value(redis_keys.lp_active("fake-user")) == "new-run"
 
 
+def _renew_during_execute(cache, times):
+	"""A profiled request's EXPIRE touches the key between WATCH and EXEC."""
+	key = cache.make_key(redis_keys.lp_active("fake-user"))
+	left = [times]
+	def touch():
+		if left[0]:
+			left[0] -= 1
+			cache.versions[key] = cache.versions.get(key, 0) + 1
+	cache.before_execute = touch
+	return left
+
+
+def test_stop_retries_after_a_renewal_and_clears_the_run(env):
+	cache, _local = env
+	cache.set_value(redis_keys.lp_active("fake-user"), "old-run")
+	left = _renew_during_execute(cache, 2)
+	assert capture.stop_line_profile_pass("old-run", "fake-user") is True
+	assert cache.get_value(redis_keys.lp_active("fake-user")) is None
+	assert left == [0]
+
+
+def test_stop_logs_when_the_key_never_settles(env, monkeypatch):
+	from optimus import safe_call
+	cache, _local = env
+	cache.set_value(redis_keys.lp_active("fake-user"), "old-run")
+	_renew_during_execute(cache, capture.STOP_ATTEMPTS)
+	logged = []
+	monkeypatch.setattr(safe_call, "log_error_line", logged.append)
+	assert capture.stop_line_profile_pass("old-run", "fake-user") is False
+	assert cache.get_value(redis_keys.lp_active("fake-user")) == "old-run"
+	assert len(logged) == 1 and "old-run" in logged[0]
+
+
+def test_stop_pauses_between_attempts_only_after_a_conflict(env, monkeypatch):
+	cache, _local = env
+	slept = []
+	monkeypatch.setattr(capture.time, "sleep", slept.append)
+	cache.set_value(redis_keys.lp_active("fake-user"), "old-run")
+	assert capture.stop_line_profile_pass("old-run", "fake-user") is True
+	assert slept == []
+	cache.set_value(redis_keys.lp_active("fake-user"), "old-run")
+	_renew_during_execute(cache, 2)
+	assert capture.stop_line_profile_pass("old-run", "fake-user") is True
+	assert len(slept) == 2 and all(0 < pause <= 0.1 for pause in slept)
+
+
+def test_stop_that_finds_another_run_does_not_log(env, monkeypatch):
+	from optimus import safe_call
+	cache, _local = env
+	cache.set_value(redis_keys.lp_active("fake-user"), "new-run")
+	logged = []
+	monkeypatch.setattr(safe_call, "log_error_line", logged.append)
+	assert capture.stop_line_profile_pass("old-run", "fake-user") is False
+	assert logged == []
+
+
 def test_missing_source_snapshot_is_an_error(env):
 	cache, _local = env
 	cache.set_value(redis_keys.lp_picks("fake-run"), json.dumps([{

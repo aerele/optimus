@@ -371,6 +371,93 @@ class TestSweepStalePhase2Runs:
 		_reload_janitor(monkeypatch)._sweep_stale_phase2_runs()
 		assert seen == ["bad", "good"]
 
+	def _sweep(self, monkeypatch, recordings, analyses, is_active):
+		from optimus import ai_jobs
+		from optimus.line_profile import capture, jobs
+		stub = _install_frappe_stub(monkeypatch)
+		stub.db.get_all = lambda doctype, **kw: recordings if kw["filters"]["status"] == "Recording" else analyses
+		calls, cleanups = [], []
+		monkeypatch.setattr(jobs, "expire_legacy", lambda parent, run_uuid, **kw: calls.append((run_uuid, kw["status"])) or True)
+		monkeypatch.setattr(capture, "cleanup_run", cleanups.append)
+		monkeypatch.setattr(capture, "is_active", is_active)
+		monkeypatch.setattr(ai_jobs, "_transaction", lambda fn: fn())
+		monkeypatch.setattr(ai_jobs, "_retry_sql", lambda fn: fn())
+		_reload_janitor(monkeypatch)._sweep_stale_phase2_runs()
+		return calls, cleanups
+
+	def test_live_recording_keeps_its_samples(self, monkeypatch):
+		recordings = [
+			{"parent": "p", "run_uuid": "live", "recording_user": "a@x.com"},
+			{"parent": "p", "run_uuid": "walked-away", "recording_user": "b@x.com"},
+			{"parent": "p", "run_uuid": "replaced", "recording_user": "c@x.com"},
+		]
+		analyses = [{"parent": "p", "run_uuid": "stale-analysis", "recording_user": "a@x.com"}]
+		active = {"a@x.com": "live", "c@x.com": "newer-run"}
+		asked = []
+		def is_active(user, fresh=False):
+			asked.append((user, fresh))
+			return active.get(user)
+		calls, cleanups = self._sweep(monkeypatch, recordings, analyses, is_active)
+		assert calls == [("walked-away", "Recording"), ("replaced", "Recording"), ("stale-analysis", "Analyzing")]
+		assert cleanups == ["walked-away", "replaced"]
+		assert asked == [("a@x.com", True), ("b@x.com", True), ("c@x.com", True)], "Analyzing rows are not gated on the key"
+
+	def test_unreadable_active_key_still_expires_the_recording(self, monkeypatch):
+		recordings = [{"parent": "p", "run_uuid": "r", "recording_user": "a@x.com"}]
+		def is_active(user, fresh=False):
+			raise ConnectionError("synthetic Redis failure")
+		calls, cleanups = self._sweep(monkeypatch, recordings, [], is_active)
+		assert calls == [("r", "Recording")] and cleanups == ["r"]
+
+	def _sweep_aged(self, monkeypatch, pages, is_active):
+		from datetime import timedelta
+
+		from optimus import ai_jobs
+		from optimus.line_profile import capture, jobs
+		stub = _install_frappe_stub(monkeypatch)
+		def get_all(doctype, **kw):
+			if kw["filters"]["status"] != "Recording":
+				return []
+			return pages[kw.get("limit_start", 0) // 100] if kw.get("limit_start", 0) // 100 < len(pages) else []
+		stub.db.get_all = get_all
+		calls, stops, cleanups = [], [], []
+		monkeypatch.setattr(jobs, "expire_legacy", lambda parent, run_uuid, **kw: calls.append(run_uuid) or True)
+		monkeypatch.setattr(capture, "stop_line_profile_pass", lambda run, user: stops.append((run, user)))
+		monkeypatch.setattr(capture, "cleanup_run", cleanups.append)
+		monkeypatch.setattr(capture, "is_active", is_active)
+		monkeypatch.setattr(ai_jobs, "_transaction", lambda fn: fn())
+		monkeypatch.setattr(ai_jobs, "_retry_sql", lambda fn: fn())
+		janitor = _reload_janitor(monkeypatch)
+		monkeypatch.setattr(janitor, "add_to_date", lambda d, minutes: d + timedelta(minutes=minutes))
+		janitor._sweep_stale_phase2_runs()
+		return calls, stops, cleanups
+
+	def test_a_live_run_past_the_age_cap_is_stopped_and_expired(self, monkeypatch):
+		from datetime import datetime, timedelta
+
+		from optimus.timing import LINE_PROFILE_MAX_RUN_MINUTES
+		now = datetime(2026, 5, 13, 12, 0, 0)
+		old = now - timedelta(minutes=LINE_PROFILE_MAX_RUN_MINUTES + 1)
+		young = now - timedelta(minutes=LINE_PROFILE_MAX_RUN_MINUTES - 1)
+		rows = [
+			{"parent": "p", "run_uuid": "forgotten", "recording_user": "a@x.com", "started_at": old},
+			{"parent": "p", "run_uuid": "busy", "recording_user": "b@x.com", "started_at": young},
+		]
+		active = {"a@x.com": "forgotten", "b@x.com": "busy"}
+		calls, stops, cleanups = self._sweep_aged(monkeypatch, [rows], lambda user, fresh=False: active.get(user))
+		assert calls == ["forgotten"] and cleanups == ["forgotten"]
+		assert stops == [("forgotten", "a@x.com")]
+
+	def test_an_expired_run_is_found_behind_a_full_page_of_live_runs(self, monkeypatch):
+		from datetime import datetime
+		started = datetime(2026, 5, 13, 11, 50, 0)
+		live = [{"parent": "p", "run_uuid": f"live-{i}", "recording_user": f"u{i}@x.com", "started_at": started} for i in range(100)]
+		gone = [{"parent": "p", "run_uuid": "gone", "recording_user": "z@x.com", "started_at": started}]
+		def is_active(user, fresh=False):
+			return None if user == "z@x.com" else f"live-{user[1:].split('@')[0]}"
+		calls, stops, cleanups = self._sweep_aged(monkeypatch, [live, gone], is_active)
+		assert calls == ["gone"] and cleanups == ["gone"] and stops == []
+
 	def test_no_set_value_when_no_phase2_rows(self, monkeypatch):
 		from optimus import ai_jobs
 		stub = _install_frappe_stub(monkeypatch)
