@@ -21,9 +21,11 @@ import importlib
 import inspect
 import json
 import pickle
+import random
 import re
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from functools import wraps
 
@@ -91,6 +93,7 @@ def _require_line_profiler() -> None:
 # values from older bench versions resolve unchanged.
 
 DATA_TTL_SECONDS = 24 * 60 * 60  # orphaned inputs must not survive indefinitely
+STOP_ATTEMPTS = 5
 
 
 # ---------------------------------------------------------------------------
@@ -529,25 +532,42 @@ def stop_line_profile_pass(run_uuid: str, user: str) -> bool:
 	# Frappe 15 uses pickle's default protocol, 16 explicitly uses protocol 5.
 	expected = {pickle.dumps(run_uuid, protocol=protocol) for protocol in (4, 5)}
 	guard = _InterruptGuard(base=True)
-	cleared = False
+	cleared = settled = False
 	try:
-		with guard:
-			with frappe.cache.pipeline() as pipe:
-				pipe.watch(key)
-				if pipe.get(key) in expected:
-					pipe.multi()
-					pipe.delete(key)
-					pipe.execute()
-					cleared = True
-	except WatchError:
-		pass  # Ownership changed; a later explicit stop may target that run.
+		for attempt in range(STOP_ATTEMPTS):
+			if attempt:
+				time.sleep(random.uniform(0.01, 0.05) * attempt)  # let the renewing request finish
+			try:
+				with guard:
+					with frappe.cache.pipeline() as pipe:
+						pipe.watch(key)
+						if pipe.get(key) in expected:
+							pipe.multi()
+							pipe.delete(key)
+							pipe.execute()
+							cleared = True
+				settled = True
+				break
+			except WatchError:
+				continue  # A profiled request renewed or replaced the key; read it again.
 	finally:
 		frappe.local._lp_active = None
 		frappe.local._lp_active_user = None
 		frappe.local.cache.pop(key, None)
 	if guard.pending():
 		raise guard.interrupt()
+	if not settled:
+		from optimus.safe_call import log_error_line
+
+		log_error_line(f"optimus line profiling stop {run_uuid}: the active key kept changing and was left in place")
 	return cleared
+
+
+def renew_active(user: str) -> None:
+	"""Slide the user's active key while profiled traffic continues; EXPIRE never recreates it."""
+	from optimus.session import expire_key
+
+	expire_key(_redis_keys.lp_active(user), SESSION_TTL_SECONDS)
 
 
 def is_active(user: str, *, fresh: bool = False) -> str | None:
