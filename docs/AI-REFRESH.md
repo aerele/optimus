@@ -745,7 +745,8 @@ source lines, 10,000 sample batches and 250,000 sample records. Source files are
 independently limited to 4 MiB. Sample appends use a bounded optimistic transaction
 and a byte counter; overflow, repeated contention or an evicted list becomes an
 explicit incomplete-input failure. New input keys expire after 24 hours and the
-active flag after 10 minutes. Failed analysis can retry only while valid input
+active flag 10 minutes after the last profiled request. The janitor expires any
+run two hours after it started. Failed analysis can retry only while valid input
 remains. Legacy keys may lack TTLs. Replace all workers on deployment: mixed old
 and new sample writers cannot provide complete accounting and need a new pass.
 

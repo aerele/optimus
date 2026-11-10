@@ -26,6 +26,9 @@ JOB_KEYS_TTL_SECONDS = 24 * 60 * 60
 # gone; longer than SESSION_TTL_SECONDS so the natural expiry comes first.
 STALE_RECORDING_MINUTES = 11
 
+# A line profiling run is expired at this age even while its traffic keeps the key alive.
+LINE_PROFILE_MAX_RUN_MINUTES = 2 * 60
+
 # Analyzing rows older than this are failed as a crashed worker. The analyze
 # budget and the RQ long-queue timeout (25 minutes) both end before it.
 STALE_ANALYZING_MINUTES = 30
