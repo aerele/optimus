@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from optimus import api
+from optimus.line_profile.jobs import runs_counted_by_limit
 from optimus.tests.gate_fakes import (
 	DOCNAME,
 	OWNER,
@@ -58,7 +59,7 @@ def _env(monkeypatch, *, user=OWNER, roles=("Optimus User",), perms=None, run_st
 	def request(docname, session_uuid, run_uuid, requested_by, **kw):
 		seen.queued.append((docname, session_uuid, run_uuid, requested_by, kw))
 		return {"run_uuid": run_uuid, "session_uuid": session_uuid, "status": "Analyzing", "ran_inline": False, "reason": None}
-	install_module(monkeypatch, "optimus.line_profile.jobs", SimpleNamespace(request=request,
+	install_module(monkeypatch, "optimus.line_profile.jobs", SimpleNamespace(request=request, runs_counted_by_limit=runs_counted_by_limit,
 		capture_creation=lambda *args: nullcontext()))
 	scheduler = types.ModuleType("frappe.utils.scheduler")
 	scheduler.is_scheduler_disabled = lambda: False
@@ -164,7 +165,7 @@ def test_batch_isolates_a_foreign_run(monkeypatch):
 	def request(docname, session_uuid, run_uuid, requested_by):
 		queued.append(run_uuid)
 		return {"run_uuid": run_uuid, "session_uuid": session_uuid, "status": "Analyzing", "ran_inline": False}
-	install_module(monkeypatch, "optimus.line_profile.jobs", SimpleNamespace(request=request))
+	install_module(monkeypatch, "optimus.line_profile.jobs", SimpleNamespace(request=request, runs_counted_by_limit=runs_counted_by_limit))
 	out = api.retry_phase2_analyzes_batch(run_uuids='["run-1", "run-2"]')
 	assert queued == ["run-1"] and not analyzed
 	assert out["tallies"] == {"Ready": 0, "Failed": 1, "Analyzing": 1, "Skipped": 0}
@@ -213,7 +214,7 @@ def test_stop_never_falls_back_inline_when_scheduler_is_disabled(monkeypatch):
 def test_manual_start_obeys_the_configured_run_cap_before_capture(monkeypatch):
 	_, _, seen = _env(monkeypatch)
 	monkeypatch.setattr("optimus.settings.get_config", lambda: SimpleNamespace(phase2_max_runs_per_session=1))
-	with pytest.raises(FakeValidationError, match="run limit"):
+	with pytest.raises(FakeValidationError, match="the most allowed"):
 		api.start_line_profile_pass(SESSION_UUID, PICKS, auto_expand=False)
 	assert not seen.capture and not seen.saved
 

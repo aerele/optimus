@@ -2143,12 +2143,8 @@ def start_line_profile_pass(session_uuid: str, picks: str | list, auto_expand: b
 
 	_lock_phase2_for_write(parent_docname)
 	_session_action_gate(session_uuid, action="start_line_profile_pass")
-	from optimus.settings import get_config
 	parent = frappe.get_doc("Optimus Session", parent_docname)
-	cap = get_config().phase2_max_runs_per_session
-	if cap > 0 and len(parent.phase_2_runs or []) >= cap:
-		frappe.throw(_("The line profiling run limit for this session has been reached."),
-			frappe.ValidationError, title=_("Optimus"))
+	_refuse_at_run_cap(parent)
 	resolved = _persist_phase2_capture(parent, parent_docname, session_uuid, run_uuid, user, prepared)
 
 	from optimus.realtime import publish_session_event
@@ -2262,10 +2258,27 @@ def retry_phase2_analyze(run_uuid: str) -> dict:
 	queued or running; completion arrives through the saved row/realtime event.
 	"""
 	ref, _run = _phase2_run_gate(run_uuid, action="retry_phase2_analyze", run_statuses=("Analyzing", "Failed"))
+	if _run["status"] == "Failed":
+		# A retried Failed run counts toward the limit again, so it needs a free slot.
+		_refuse_at_run_cap(frappe.get_doc("Optimus Session", ref.docname))
 	ratelimit.enforce_user_rate_limit("retry_phase2_analyze", **_ACTION_LIMITS["retry_phase2_analyze"])
 	from optimus.line_profile import jobs as _lp_jobs
 
 	return _phase2_admission_result(_lp_jobs.request(ref.docname, ref.session_uuid, run_uuid, frappe.session.user))
+
+
+def _refuse_at_run_cap(parent) -> None:
+	from optimus.line_profile.jobs import runs_counted_by_limit
+	from optimus.settings import get_config
+
+	cap = get_config().phase2_max_runs_per_session
+	if cap > 0 and runs_counted_by_limit(parent.phase_2_runs) >= cap:
+		frappe.throw(
+			_(
+				"This session already has {0} line profiling runs, the most allowed. "
+				"Record a new session, or raise Line Profiling: Max Runs per Session in Optimus Settings."
+			).format(cap),
+			frappe.ValidationError, title=_("Optimus"))
 
 
 def _phase2_admission_result(out: dict) -> dict:
@@ -2277,6 +2290,10 @@ def _phase2_admission_result(out: dict) -> dict:
 			"not_ready": _("Line profiling requires a Ready session. Wait for profiling analysis to finish."),
 			"not_retryable": _("This line profiling run is no longer retryable. Reload the session."),
 			"retry_limit": _("Line profiling retry limit reached. Record a new line-profile pass."),
+			"run_limit": _(
+				"This session is at its line profiling run limit. "
+				"Record a new session, or raise Line Profiling: Max Runs per Session in Optimus Settings."
+			),
 			"permission": _("Session permissions changed. Reload the session before retrying."),
 		}
 		frappe.throw(messages.get(out.get("reason"), _("The line profiling run is unavailable. Reload the session.")),
@@ -2290,7 +2307,7 @@ def retry_phase2_analyzes_batch(run_uuids: str | list) -> dict:
 	``run_uuid``s in a single server round-trip instead of N client calls.
 
 	At most five entries are accepted; duplicate runs are retried once.
-	Each retry uses the single-run per-user limit. A limit refusal stops the
+	Each retry uses the single-run per-user limit. A rate limit refusal stops the
 	batch; other per-run failures are isolated. The response carries a per-run
 	status list plus an aggregate tally."""
 	import json as _json
