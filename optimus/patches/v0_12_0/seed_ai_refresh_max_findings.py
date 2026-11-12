@@ -5,7 +5,7 @@
 
 import frappe
 
-from optimus import redis_keys
+from optimus import settings
 from optimus.safe_call import InterruptGuard
 
 
@@ -26,7 +26,7 @@ def _seed():
 	cache_failed = False
 	try:
 		with guard:
-			frappe.cache.delete_value(redis_keys.settings_cache())
+			settings.invalidate_config()
 			frappe.clear_document_cache("Optimus Settings", "Optimus Settings")
 	except Exception:
 		cache_failed = True

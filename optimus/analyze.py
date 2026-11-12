@@ -54,7 +54,9 @@ from optimus.analyzers.base import (
 	AnalyzeContext,
 	dur,
 	is_error_log_hook_query,
+	own_query_frame,
 	row_get,
+	strip_own_calls,
 	strip_profiler_own_calls,
 )
 from optimus.dbdialect import get_dialect
@@ -375,8 +377,8 @@ def _acquire_singleflight(session_uuid: str, docname: str, deadline) -> bool:
 		return True
 
 	try:
-		max_wait = int(frappe.conf.get("optimus_singleflight_max_wait_seconds")
-			or _SINGLEFLIGHT_MAX_WAIT_SECONDS)
+		configured = frappe.conf.get("optimus_singleflight_max_wait_seconds")
+		max_wait = _SINGLEFLIGHT_MAX_WAIT_SECONDS if configured is None else int(configured)
 	except Exception:
 		max_wait = _SINGLEFLIGHT_MAX_WAIT_SECONDS
 	if max_wait <= 0:
@@ -777,7 +779,18 @@ def _arm_phase2(docname: str, context) -> None:
 	if not picks:
 		return
 
-	prepared = _lp_capture.prepare_line_profile_picks(picks)
+	try:
+		prepared = _lp_capture.prepare_line_profile_picks(picks)
+	except _lp_capture.NoEligiblePickError:
+		# Every recommended function is ineligible (for example Optimus's own code): nothing to arm.
+		try:
+			frappe.logger("optimus").debug(
+				f"optimus: auto-arm skipped for session {context.session_uuid}: every recommended function"
+				" was ineligible for line profiling (for example Optimus's own code)"
+			)
+		except Exception:
+			pass  # a log line never fails the analysis
+		return
 	run_uuid = _uuid.uuid4().hex
 	from optimus.api import _lock_phase2_for_write, _persist_phase2_capture
 	from optimus.line_profile.jobs import _authorized
@@ -887,6 +900,7 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		# each recording's pyi_session is dropped after call_tree finishes
 		# with it (handled in the analyzer itself).
 		recordings = list(_fetch_recordings(recording_uuids))
+		_strip_own_calls(recordings, session_uuid)
 		from optimus.recording_bundle import SnapshotUnavailable
 		if set(recording_uuids) - {rec.get("uuid") for rec in recordings}:
 			raise SnapshotUnavailable("snapshot_recording_missing")
@@ -1366,8 +1380,19 @@ def _report_missing_trees(context, recordings: list[dict], meta: dict, now: date
 	if not meta.get("capture_python_tree", True):
 		return
 	missing = [rec for rec in recordings if rec.get("pyi_session") is None]
+	too_large = [rec for rec in missing if rec.get("tree_dropped")]
+	missing = [rec for rec in missing if not rec.get("tree_dropped")]
 	expired = [rec for rec in missing if _outlived_data_ttl(rec, now)]
 	total, hours = len(recordings), RECORDING_DATA_TTL_SECONDS // 3600
+	if too_large:
+		context.warnings.append(
+			f"Python call trees were too large to keep for {len(too_large)} of {total} requests, so "
+			"they are missing from the call tree. SQL findings are complete."
+		)
+		safe_call.log_error_line(
+			f"optimus: {len(too_large)} of {total} Python call trees were too large to keep "
+			f"(session {context.session_uuid})"
+		)
 	if expired:
 		context.warnings.append(
 			f"Python call trees were missing for {len(expired)} of {total} requests: Optimus keeps them "
@@ -1388,6 +1413,25 @@ def _report_missing_trees(context, recordings: list[dict], meta: dict, now: date
 		)
 
 
+def _report_thinned_trees(context, recordings: list[dict]) -> None:
+	"""Warn when call trees were thinned to fit the stored size cap (see capture.TREE_MAX_BYTES)."""
+	steps = []
+	for rec in recordings:
+		if not isinstance(rec, dict):
+			continue
+		thinned = getattr(rec.get("pyi_session"), "optimus_thinned", None)
+		if isinstance(thinned, dict) and isinstance(thinned.get("every"), int):
+			steps.append(thinned["every"])
+	if not steps:
+		return
+	context.warnings.append(
+		f"Python call trees for {len(steps)} of {len(recordings)} requests were too long to keep in "
+		f"full, so Optimus kept about 1 in every {max(steps)} samples of them. The slowest paths are "
+		"kept; shares can be off by a few points and paths under 1% of a request may be missing. "
+		"SQL findings are complete, but SQL may appear under a parent function in those call trees."
+	)
+
+
 def _note_missing_trees(context, recordings: list[dict], meta: dict) -> None:
 	"""``_report_missing_trees`` as a diagnostic: a failure in it must never fail analyze."""
 	from frappe.utils import now_datetime
@@ -1396,6 +1440,11 @@ def _note_missing_trees(context, recordings: list[dict], meta: dict) -> None:
 		lambda: _report_missing_trees(context, recordings, meta, now_datetime()),
 		None,
 		on_error=lambda kind: safe_call.log_error_line(f"optimus: missing-tree check failed ({kind})"),
+	)
+	safe_call.best_effort(
+		lambda: _report_thinned_trees(context, recordings),
+		None,
+		on_error=lambda kind: safe_call.log_error_line(f"optimus: thinned-tree check failed ({kind})"),
 	)
 
 
@@ -1416,6 +1465,7 @@ def _fetch_recordings(recording_uuids: list[str]):
 
 		# Load the pyinstrument tree pickle (best-effort) via the shared,
 		# HMAC-verified loader (see _deserialize_tree).
+		from optimus import capture as _capture
 		from optimus.ai_fix import _InterruptGuard, log_ai_failure
 		guard = _InterruptGuard(base=True)
 		pyi_session = None
@@ -1464,11 +1514,66 @@ def _fetch_recordings(recording_uuids: list[str]):
 		if failed:
 			log_ai_failure("optimus ai recording lock events read", reason="lock_events_read_failed")
 
+		if isinstance(pyi_session, dict) and _capture.TREE_DROPPED_KEY in pyi_session:
+			rec["tree_dropped"] = True  # stored as a marker: the tree was too large to keep
+			pyi_session = None
 		rec["pyi_session"] = pyi_session
 		rec["sidecar"] = sidecar
 		rec["lock_events"] = lock_events
-		strip_profiler_own_calls(rec)
 		yield rec
+
+
+def _frame_source(frame) -> str:
+	"""``file:function`` of an Optimus frame, or "unknown" without one."""
+	if not isinstance(frame, dict):
+		return "unknown"
+	function = frame.get("function")
+	return f"{frame.get('filename')}:{function if isinstance(function, str) else '?'}"
+
+
+def _own_source(stack) -> str:
+	"""``file:function`` of the Optimus frame that made a dropped call's stack Optimus's own."""
+	return _frame_source(own_query_frame(stack))
+
+
+def _top_sources(frames: list, limit: int = 2) -> str:
+	return ", ".join(f"{source} x{n}" for source, n in Counter(_frame_source(f) for f in frames).most_common(limit))
+
+
+def _strip_own_calls(recordings: list, session_uuid: str) -> None:
+	"""Drop Optimus's own SQL calls from every recording and log the count at debug. A call that looks
+	like a user's query forwarded by an Optimus frame that is not registered (``own_query_verdict``) is
+	kept, and logged at ERROR (Frappe's logger keeps ERROR and above by default, so production sees it)
+	with its count and source, so the wrapper gets registered. This is the one analysis-time log: renders
+	repeat the rule on every refresh and stay silent."""
+	from optimus.settings import own_query_app_lists
+
+	tracked_apps, installed_apps = own_query_app_lists()
+	total = 0
+	dropped, suspicious = [], []  # the deciding frame of each
+	for rec in recordings:
+		if not isinstance(rec, dict):
+			continue
+		total += len(rec.get("calls") if isinstance(rec.get("calls"), list) else [])
+		result = strip_own_calls(rec, tracked_apps, installed_apps)
+		dropped += result.dropped_frames
+		suspicious += result.suspicious_frames
+	try:
+		logger = frappe.logger("optimus")
+		if suspicious:
+			logger.error(
+				f"optimus: kept {len(suspicious)} suspicious queries in session {session_uuid}: an Optimus frame"
+				f" with a developer's code outside it ran them (top sources: {_top_sources(suspicious)})."
+				" Register the wrapper in _OPTIMUS_PASS_THROUGH or the hook in _OPTIMUS_HOOK_ENTRY_POINTS"
+				" (optimus/analyzers/base.py) if it only forwards the user's call."
+			)
+		if dropped:
+			logger.debug(
+				f"optimus: dropped {len(dropped)} of {total} queries as Optimus's own from session {session_uuid}"
+				f" (top sources: {_top_sources(dropped)})"
+			)
+	except Exception:
+		pass  # a log line never fails the analysis
 
 
 # Per-recording enrichment caps. On a session that hit the 200-recording
@@ -3061,6 +3166,9 @@ def load_recordings_light(doc, uuids=None, *, memo=None) -> list[dict]:
 	result = []
 	redis_failed = False
 	session_uuid = row_get(doc, "session_uuid")
+	from optimus.settings import own_query_app_lists
+
+	tracked_apps, installed_apps = own_query_app_lists()
 	for uuid in uuids:
 		rec = None
 		if not redis_failed:
@@ -3075,7 +3183,7 @@ def load_recordings_light(doc, uuids=None, *, memo=None) -> list[dict]:
 			rec = memo[memo_key].get(uuid)
 		if isinstance(rec, dict) and rec:
 			light = {key: value for key, value in rec.items() if key not in {"pyi_session", "sidecar", "tree_b64"}}
-			strip_profiler_own_calls(light)
+			strip_profiler_own_calls(light, tracked_apps, installed_apps)
 			result.append(light)
 	return result
 

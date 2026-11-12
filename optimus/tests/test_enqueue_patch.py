@@ -167,3 +167,21 @@ def test_a_tracking_failure_logs_the_class_not_the_connection_details(fake_frapp
 	message, key = lines[0]
 	assert "ConnectionError" in message and "redis-prod" not in message and "6379" not in message
 	assert key == "could not track a job (ConnectionError)"
+
+
+def test_a_job_whose_id_cannot_be_read_does_not_break_enqueue(fake_frappe):
+	"""The tracking step is best effort: a job object that raises on ``.id`` still comes back."""
+	fake, fake_bg, _calls = fake_frappe
+	fake.cache.set_value("profiler:active:alice@example.com", "test-session-uuid-abc")
+
+	class Job:
+		@property
+		def id(self):
+			raise RuntimeError("no id")
+
+	job = Job()
+	fake_bg.enqueue = lambda method, **kwargs: job
+	_reset_profiler_modules()
+	import optimus  # noqa: F401
+
+	assert fake_bg.enqueue("m.f", a=1) is job

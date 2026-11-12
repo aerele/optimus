@@ -150,6 +150,27 @@ def _track_enqueued_job(session_uuid, job_id, method) -> None:
 	_profiler_session.record_enqueued_job(session_uuid, job_id, method_str, parent)
 
 
+def _warn_untracked_job(job, deferred_job_id, session_uuid, exc) -> None:
+	"""Log a tracking failure as one deduplicated ERROR line, never into the caller's transaction.
+
+	The line names the error class only, so a failed Redis connection does not leak its host.
+	"""
+	try:
+		from optimus.safe_call import log_error_line
+
+		error_type = type(exc).__name__
+		try:
+			job_id = getattr(job, "id", None) or deferred_job_id
+		except Exception:
+			job_id = deferred_job_id
+		log_error_line(
+			f"optimus: could not track job {job_id} for session {session_uuid}: {error_type}",
+			dedupe_key=f"could not track a job ({error_type})",
+		)
+	except Exception:
+		pass
+
+
 def _patch_enqueue():
 	"""Install the enqueue wrapper. No-ops when frappe isn't installed (e.g.
 	running analyzer unit tests from a plain Python interpreter)."""
@@ -215,24 +236,13 @@ def _patch_enqueue():
 		# picked up by a worker shortly after Stop aren't lost. `job` is
 		# None for `now=True` inline jobs (nothing async to wait for). Never
 		# track our own analyze job (it would deadlock the wait on itself).
-		track_failure = None
 		try:
 			if active and not synchronous:
 				job_id = getattr(job, "id", None) or deferred_job_id
 				if job_id:
 					_track_enqueued_job(active, job_id, method)
 		except Exception as exc:
-			track_failure = (
-				f"optimus: could not track job {getattr(job, 'id', None) or deferred_job_id} "
-				f"for session {active}: {type(exc).__name__}",
-				type(exc).__name__,
-			)
-		if track_failure is not None:
-			# Log instead of writing an Error Log row into the caller's transaction.
-			from optimus.safe_call import log_error_line
-
-			message, error_type = track_failure
-			log_error_line(message, dedupe_key=f"could not track a job ({error_type})")
+			_warn_untracked_job(job, deferred_job_id, active, exc)
 
 		return job
 

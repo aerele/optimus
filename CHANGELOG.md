@@ -28,6 +28,42 @@ Not covered: index suggestions still log an "optimizer failure" for tables with 
 
 ---
 
+## [0.12.159] - 2026-11-07
+
+### Fixed
+
+- The README and the Settings help now match the shipped Sensitivity Profiles. Strict keeps sessions for only 1 day (not 90), has no limit on queries per recording or line profiling runs per session, and hides actions under 1 ms; the README rows for those fields, and the note that the profile covers only nine thresholds, were wrong. The Settings intro no longer says Strict "keeps data longer" or Relaxed "prunes faster". The Settings help for "Line Profiling: Max Runs per Session" no longer says old runs are moved to a private file: once a session has that many runs, new runs are refused.
+- Setting `optimus_singleflight_max_wait_seconds` to `0` now turns single-flight off, as the README says. Before, `0` was read as "not set" and the 600 second default applied.
+- The README, CONTRIBUTING and the renderer notes no longer describe things that were removed or never existed: the Safe report, the PDF button, baseline comparison, the customer-to-partner handoff, `renderer.py` and `recorder.py`. A short "Sharing a report" note says the report holds sensitive data, so redact it yourself before sharing it. The README now says 23 finding types and 11 analyzers, lists the four types it missed, and shows redacted values as `<REDACTED:keyname>`. Not covered: other open pull requests still own some README and Redis schema wording.
+
+### Internal
+
+- New guard tests fail when a README preset row differs from the code, or when the docs mention a removed feature again.
+- The API hardening integration checks (`test_api_hardening`) now run in the Integration workflow, and their cleanup now removes the metrics lists they write.
+
+### Upgrade notes
+
+- Run `bench migrate` once so the Optimus Settings form shows the corrected help text.
+
+---
+
+## [0.12.157] - 2026-11-07
+
+### Fixed
+
+- Long requests no longer flood Redis with their Python call tree. Sizes depend on how deep the call stacks are. Examples measured on generated profiles: a 3-second busy request went from 366 KB to 21 KB, a 3-second request recursing 500 deep from 28.6 MB to 249 KB, and one 400 deep from 167 MB to 264 KB. Nothing is lost while a tree is small. A tree larger than 1 MB, or with more than 300,000 stack frames in total, is first shrunk by merging identical neighbouring samples, which loses nothing, and only then thinned to fit (a long wait, such as a slow query, keeps its own place in it); thinning picks a random sample from each stretch of time, so a repeating call pattern keeps its share, and the report says which requests were thinned. This work runs once at the end of a recorded request. It takes about 0.2 seconds for up to 60,000 samples and grows in step with the sample count beyond that (a million samples took 1.6 seconds); analyze rebuilds a stored tree in about 0.2 seconds or less. SQL findings are never affected, though SQL can appear under a parent function in a thinned tree. A tree that cannot fit even thinned is not stored, and the report says it was too large to keep. Trees stored before this version are read as before.
+- Optimus reads its settings once per request or job instead of once per recorded database query, and no longer reads them for requests that have no recording session or for background jobs that are not part of one. Recorded timings are no longer inflated by Optimus's own settings reads. The hook's own Redis reads for a request without a session drop from three to one; other Optimus hooks (for example line profiling) still make their own. A settings change still takes effect on the next request; a long-running console session keeps the settings it first read until it is restarted. Nothing changes for users.
+
+---
+
+## [0.12.156] - 2026-11-07
+
+### Fixed
+
+- Optimus Settings now says plainly that turning on AI Fix Suggestions also sends findings, and Steps to Reproduce while the humanized-steps option is on (the default), to your AI provider automatically when a session reaches Ready, up to the automatic-suggestion limit. The text also says that "Send raw values to the AI provider" controls whether raw values are included, and that unticking "Run AI suggestions automatically after profiling" turns automatic sending off. Behaviour is unchanged: automatic sending is still on by default once AI is enabled, and nothing is migrated.
+
+---
+
 ## [0.12.153] - 2026-11-06
 
 ### Fixed
@@ -50,6 +86,39 @@ Not covered: index suggestions still log an "optimizer failure" for tables with 
 ### Internal
 
 - The Redis lifetimes and stale-session limits now live in `optimus/timing.py`, with a test of how they relate.
+
+---
+
+## [0.12.151] - 2026-11-06
+
+### Fixed
+
+- Hot frames under "Your app's code" no longer show 0ms. The table now has a Total time column (the function and the functions it calls, with a recursive function counted once) and a Self time column (the function's own lines), and it is ordered by Self time. Since May 2026 the row time was the self time, which was never recorded, so every row read 0ms.
+- Self time is shown only when it adds up to the sampled time of the session. If it is missing or does not add up, the table shows Total only and is ordered by Total.
+- The hot-frames tables scroll inside their own box on a phone instead of widening the page. The box keeps a visible scrollbar and shows a "Swipe the table sideways" hint on phones.
+- A report that has no Self time recorded shows Total and a "-" for Self, with a note to record the flow again. This applies to every report analyzed before 0.12.151, because their self time was never recorded and cannot be recovered. Their list is ordered by Total, so it may not be the true top 20, and their Total may count a recursive function more than once.
+- Total Python Time on the session is now filled in: it is the Python time without the SQL time, taken off action by action and never below zero for an action, so one SQL-heavy action cannot erase the Python time of the others.
+- The call tree no longer shows "[self]" rows, and a function that spends time in its own lines shows "self ..." beside its time.
+- Repeated Hot Frame findings and the self-time hot path findings can appear again. They are raised only when Self time is recorded and adds up to the sampled time. Some Slow Hot Path findings are now titled as a self-time hot path. Self time is wall-clock, so a function that waits on I/O inside its own lines can still be flagged; the finding says so.
+
+---
+
+## [0.12.150] - 2026-11-06
+
+### Fixed
+
+- Line profiling no longer captures Optimus's own wrapper code when a Frappe function such as `frappe.get_doc` is picked. It now profiles the Frappe function itself. A function typed from Optimus's own code is refused with a visible reason, and a run where every pick is refused now lists each pick with its reason.
+- Decorated functions, including `@frappe.whitelist()` ones, now get line-profiling hits. Before, the pick pointed at the decorator's file while the worker profiled the real function, so every line showed 0 hits.
+- Optimus's own checks on File inserts, File reads, settings reads and job queueing no longer show up as the user's queries or redundant calls, even when they run inside the user's own code. The hide is fail-safe: an Optimus frame that is not a known entry point and has a developer's code outside it (for example a new wrapper that only forwards the user's call) keeps its query in the report, and the analysis logs an error that names the count, the session and the frame so the wrapper can be registered. A normal session that hides many of its own queries logs nothing above debug. The report footer now says how many queries from Optimus's own code were excluded, so a wrongly hidden query shows.
+- A form load, permission check or File insert that only runs Frappe code is no longer hidden as Optimus's own query. One malformed stack frame in a recording is skipped instead of failing the analysis.
+- Auto-arming a line-profiling pass after analysis now does nothing, without recording a failure, when none of the recommended functions can be profiled (for example Optimus's own code). The skip is logged at debug with the session. Picking them by hand still shows the reason.
+- An app whose name or folder contains "optimus" (for example `acme_optimus` or `myapp/optimus/`) is no longer hidden from the call tree and the line-profiling picker.
+
+### Upgrade notes
+
+- Restart the web server and the workers after updating: the wrappers are installed when the app loads.
+- To refresh a report made by an older version, use Regenerate Reports: it re-renders the stored recordings with the new rule. Recording the flow again is only certain to be needed for the repeated-call findings (stored sidecar data) and for stored line-profiling runs. Reports from sessions whose recordings were stored as reduced (degraded) snapshots are not corrected.
+- An editable install that is not under the bench's `apps/optimus/` folder or a `site-packages/` or `dist-packages/` folder is not recognised by the path rule.
 
 ---
 
