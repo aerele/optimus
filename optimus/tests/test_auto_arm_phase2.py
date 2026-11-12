@@ -241,6 +241,14 @@ class TestAutoArmPhase2:
 		analyze._auto_arm_phase2("PS-1", _ctx())
 		assert arm_env.start_calls == []
 
+	def test_failed_runs_do_not_use_up_the_run_cap(self, arm_env, monkeypatch):
+		import optimus.settings as settings_mod
+		monkeypatch.setattr(settings_mod, "get_config",
+			lambda: types.SimpleNamespace(phase2_max_runs_per_session=2))
+		arm_env.doc._tables["phase_2_runs"] = [{"run_uuid": "a", "status": "Failed"}, {"run_uuid": "b", "status": "Ready"}]
+		analyze._auto_arm_phase2("PS-1", _ctx())
+		assert len(arm_env.start_calls) == 1
+
 	def test_zero_cap_means_unlimited(self, arm_env, monkeypatch):
 		"""``phase2_max_runs_per_session = 0`` means no cap: auto-arm fires
 		even with many existing runs."""
@@ -301,6 +309,17 @@ def test_auto_arm_rechecks_run_cap_after_taking_the_admission_lock(arm_env, monk
 	monkeypatch.setattr(api, "_lock_phase2_for_write", locked)
 	analyze._auto_arm_phase2("PS-1", _ctx())
 	assert not arm_env.start_calls and not arm_env.doc.saved
+
+
+def test_the_cap_recheck_under_the_lock_also_ignores_failed_runs(arm_env, monkeypatch):
+	from optimus import api, settings
+	monkeypatch.setattr(settings, "get_config", lambda: types.SimpleNamespace(phase2_max_runs_per_session=1))
+	def locked(*a):
+		arm_env.lock_calls.append("PS-1")
+		arm_env.doc._tables["phase_2_runs"] = [{"run_uuid": "concurrent-pass", "status": "Failed"}]
+	monkeypatch.setattr(api, "_lock_phase2_for_write", locked)
+	analyze._auto_arm_phase2("PS-1", _ctx())
+	assert len(arm_env.start_calls) == 1
 
 
 def test_auto_arm_prepares_before_lock_and_persists_actor(arm_env, monkeypatch):

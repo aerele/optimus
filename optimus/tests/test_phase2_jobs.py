@@ -64,6 +64,19 @@ def test_retry_cannot_overwrite_recording_or_finished_results(phase2, status):
 	assert phase2.row()["status"] == status
 
 
+@pytest.mark.parametrize("status,other,refused", [
+	("Failed", "Ready", True), ("Failed", "Failed", False), ("Analyzing", "Ready", False),
+])
+def test_retry_of_a_failed_run_rechecks_the_run_cap_under_the_lock(phase2, monkeypatch, status, other, refused):
+	"""A start admitted between the endpoint's check and this lock must not push the session over the cap."""
+	monkeypatch.setattr("optimus.settings.get_config", lambda: SimpleNamespace(phase2_max_runs_per_session=1))
+	phase2.row()["status"] = status
+	phase2.db.rows[phase2.mod.TABLE]["other"] = {"name": "other", "parent": "fake-session-doc", "run_uuid": "x", "status": other}
+	out = admit(phase2)
+	assert (out.get("reason") == "run_limit") is refused
+	assert phase2.row()["analyze_attempts"] == (0 if refused else 1)
+
+
 def test_stopping_recording_uses_same_durable_queue(phase2):
 	phase2.row()["status"] = "Recording"
 	assert admit(phase2, from_recording=True)["status"] == "queued"
