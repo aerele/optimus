@@ -1985,6 +1985,7 @@ def _index_patch_on(sql, monkeypatch):
 			else pytest.fail("MariaDB must not read the catalog")
 		),
 		add_index=add_index,
+		table_exists=lambda doctype: doctype in patch.JOURNAL_DOCTYPES,
 	)
 	monkeypatch.setattr(
 		patch, "frappe", SimpleNamespace(db=db, get_meta=lambda d: SimpleNamespace(fields=fields(d)))

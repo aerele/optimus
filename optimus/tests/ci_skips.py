@@ -32,8 +32,8 @@ ALLOWED = (
 	Row(
 		None,
 		r"^could not import 'rq(\.timeouts)?': No module named 'rq'",
-		113,
-		"rq tests run in ai-quality.yml, which installs rq; ci.yml has no rq (113 on 3.10 and 3.14)",
+		114,
+		"rq tests run in ai-quality.yml, which installs rq; ci.yml has no rq (114 on 3.10 and 3.14)",
 	),
 	Row(
 		None,
@@ -68,6 +68,12 @@ ALLOWED = (
 		"ci.yml installs line_profiler through the project deps, so none skip there",
 	),
 	Row(None, r"^frappe\.recorder unavailable", 0, "bench-only: no Frappe-free test is expected to skip"),
+	Row(
+		"test_timing_relations.py",
+		r"^frappe is stubbed$",
+		1,
+		"compares the session TTL with Frappe's real RECORDER_AUTO_DISABLE; the stub has none, so it runs on a bench",
+	),
 	Row(
 		None,
 		r"^pyinstrument (not available|not installed)",
