@@ -92,7 +92,9 @@ def test_fifty_calls_in_one_request_make_one_redis_read(env):
 
 
 def test_a_redis_hit_is_memoized_without_touching_the_database(env):
-	env.redis[KEY] = redis_schema.wrap_value(settings._resolve(row={"enabled": 0}).__dict__)
+	env.redis[KEY] = redis_schema.wrap_value(
+		settings._resolve(row={"enabled": 0}).__dict__, version=settings.CONFIG_CACHE_ENVELOPE_VERSION
+	)
 	for _ in range(5):
 		assert not settings.get_config().enabled
 	assert env.settings_gets() == 1 and env.row_reads == 0

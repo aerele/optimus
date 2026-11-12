@@ -11,7 +11,7 @@ pre-migration).
 """
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 
 from optimus.ai_privacy import opted_in
 from optimus.analyzers.base import DEFAULT_DISPLAY_THRESHOLD_MS
@@ -605,6 +605,10 @@ def _site_conf_fallback(key: str) -> int | None:
 
 _UNREAD_ROW = object()
 CONFIG_CACHE_SECONDS = 60
+# Bump when OptimusConfig gains or loses a field. A web worker and an RQ worker on
+# different releases then ignore each other's entries (and read the DB) instead of
+# crashing on, or rewriting, a payload of the other shape.
+CONFIG_CACHE_ENVELOPE_VERSION = 2
 
 
 def _resolve(*, row=_UNREAD_ROW) -> OptimusConfig:
@@ -858,9 +862,12 @@ def get_config() -> OptimusConfig:
 		return memoized
 
 	def cached_config():
-		payload, _version = redis_schema.unwrap_value(frappe.cache.get_value(_CACHE_KEY, expires=True))
+		payload, _version = redis_schema.unwrap_value(
+			frappe.cache.get_value(_CACHE_KEY, expires=True), expected=CONFIG_CACHE_ENVELOPE_VERSION
+		)
 		if isinstance(payload, dict) and payload:
-			return OptimusConfig(**payload)
+			known = {item.name for item in fields(OptimusConfig)}
+			return OptimusConfig(**{key: value for key, value in payload.items() if key in known})
 		return None
 
 	cached = _best_effort(cached_config)
@@ -880,7 +887,7 @@ def get_config() -> OptimusConfig:
 
 
 def _store_config(frappe, redis_schema, cfg) -> bool:
-	frappe.cache.set_value(_CACHE_KEY, redis_schema.wrap_value(cfg.__dict__), expires_in_sec=CONFIG_CACHE_SECONDS)
+	frappe.cache.set_value(_CACHE_KEY, redis_schema.wrap_value(cfg.__dict__, version=CONFIG_CACHE_ENVELOPE_VERSION), expires_in_sec=CONFIG_CACHE_SECONDS)
 	return True
 
 

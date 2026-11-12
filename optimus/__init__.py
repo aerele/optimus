@@ -1,4 +1,4 @@
-__version__ = "0.12.159"
+__version__ = "0.12.164"
 
 
 def safe_commit() -> None:
@@ -151,13 +151,21 @@ def _track_enqueued_job(session_uuid, job_id, method) -> None:
 
 
 def _warn_untracked_job(job, deferred_job_id, session_uuid, exc) -> None:
-	"""Log a tracking failure instead of writing an Error Log row into the caller's transaction."""
-	try:
-		import frappe
+	"""Log a tracking failure as one deduplicated ERROR line, never into the caller's transaction.
 
-		job_id = getattr(job, "id", None) or deferred_job_id
-		frappe.logger("optimus").warning(
-			f"optimus: could not track job {job_id} for session {session_uuid}: {exc!r}"
+	The line names the error class only, so a failed Redis connection does not leak its host.
+	"""
+	try:
+		from optimus.safe_call import log_error_line
+
+		error_type = type(exc).__name__
+		try:
+			job_id = getattr(job, "id", None) or deferred_job_id
+		except Exception:
+			job_id = deferred_job_id
+		log_error_line(
+			f"optimus: could not track job {job_id} for session {session_uuid}: {error_type}",
+			dedupe_key=f"could not track a job ({error_type})",
 		)
 	except Exception:
 		pass
@@ -418,7 +426,7 @@ def _startup_probe_tool2() -> None:
 		try:
 			import frappe
 
-			log = frappe.logger().warning
+			log = frappe.logger("optimus").error
 		except Exception:
 			log = print
 

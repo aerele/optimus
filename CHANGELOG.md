@@ -8,6 +8,26 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.164] - 2026-11-07
+
+### Fixed
+
+- Problems that used to be logged below error level (a recording dropped at the session limit, a background job that could not be tracked, an unreadable permission check, line profiling recovery, the retention backlog) now reach the log on production sites, which drop warnings.
+- A capture problem that repeats on every request or job now writes one Error Log entry a minute per title and exception type, shared across web and worker processes, instead of one per request. A failing logger can no longer break the request or job it was reporting on. The one-minute window needs Redis; without it each process still limits itself.
+- Clearing the cache or migrating no longer resets Optimus's analysis lock, rate limits and error-log windows. `bench clear-cache` also no longer clears `optimus:*` keys (the analyze-inflight lock, AI refresh entries, the schema version). The lock and the other timed keys expire by their own TTL; `optimus:schema_version` has none and is rewritten at every app start. If an analysis is stuck behind a lock that does not expire, delete the key as described in `docs/REDIS-SCHEMA.md`.
+- A failed AI store setup no longer fails `install-app`, the patch run or other apps' migrate hooks. It is logged once, and the next migrate retries it. A migrate that changes nothing no longer commits.
+- The line profiling status scan, which runs every minute, now has an index on `status`, declared on the DocType so a migrate keeps it. On PostgreSQL, if another table already owns the index name `status`, a table-qualified index is added instead.
+- During a rolling update, a web worker and a background worker on different releases no longer crash or overwrite each other's cached settings.
+- The retention backlog marker now lasts 25 hours, so it is still there when the daily sweep next runs.
+
+Not covered: index suggestions still log an "optimizer failure" for tables with reserved column names, and Error Log rows written outside request and job hooks (the janitor, install and API calls) are not deduplicated.
+
+### Upgrade note
+
+- Run `bench migrate` after updating: it adds the scan index. Restart the web and worker processes.
+
+---
+
 ## [0.12.159] - 2026-11-07
 
 ### Fixed
