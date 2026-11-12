@@ -6,8 +6,8 @@ job's ``frappe.local.cache``.
 
 Frappe's ``RedisWrapper.get_value`` answers from ``frappe.local.cache`` once a key is in it,
 and that dict lives for the whole RQ job (``frappe.init`` makes one per job). The helpers
-run here through Frappe v16's REAL ``RedisWrapper`` (bench runs only) and through a
-transcription of v15's value API (every run), over an in-memory Redis, with one
+run here through Frappe v16's REAL ``RedisWrapper`` (bench runs only) and through
+transcriptions of v16's and v15's value APIs (every run), over an in-memory Redis, with one
 ``frappe.local.cache`` dict per simulated job. No real Redis is touched.
 """
 
@@ -19,6 +19,7 @@ import frappe
 import pytest
 
 from optimus import analyze
+from optimus.tests.frappe_v16_shapes import V16ValueApi
 from optimus.tests.singleflight_fakes import SITE, FakeRedis, connection_error, flag_key
 
 TTL = analyze._SINGLEFLIGHT_TTL_SECONDS
@@ -141,10 +142,17 @@ class _V15Shaped:
 		self.delete(*keys)
 
 
-@pytest.fixture(params=["v16", "v15"])
+_CACHES = {
+	"v16": _real_v16,
+	"v16-shaped": V16ValueApi,
+	"v15": _V15Shaped,
+}
+
+
+@pytest.fixture(params=list(_CACHES))
 def env(request, monkeypatch):
 	server = FakeRedis()
-	cache = _real_v16(server) if request.param == "v16" else _V15Shaped(server)
+	cache = _CACHES[request.param](server)
 	local = SimpleNamespace(cache={}, conf=_Conf(db_name=SITE))
 	jobs: dict = {}
 	lines: list = []
@@ -511,3 +519,21 @@ def test_a_healthy_run_logs_nothing(env):
 		analyze._touch_singleflight("A")
 	analyze._release_singleflight("A")
 	assert env.lines == []
+
+
+@pytest.mark.parametrize("env", ["v16-shaped"], indirect=True)
+def test_the_v16_shape_swallows_connection_errors_like_frappe_v16(env):
+	"""Pins the transcription itself: v16 answers a failed read as missing and ignores a failed
+	write or delete, so the tests above see the behaviour a real v16 gives."""
+	cache = frappe.cache
+
+	def down(command):
+		raise connection_error()("redis down")
+
+	cache.set_value("k", "v", expires_in_sec=10)
+	env.server.before = down
+	assert cache.get_value("k", expires=True, use_local_cache=False) is None
+	cache.set_value("k2", "v")
+	cache.delete_value("k")
+	env.server.before = None
+	assert env.server.peek(cache.make_key("k")) is not None
