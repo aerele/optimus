@@ -1047,6 +1047,18 @@ def read_picks_meta(run_uuid: str) -> list[dict]:
 	return out
 
 
+def runs_with_input(run_uuids: list[str]) -> set[str]:
+	"""Runs whose picks and source, the input a retry reads, are still in Redis; one round trip, errors raise."""
+	_require_frappe()
+	if not run_uuids:
+		return set()
+	with frappe.cache.pipeline() as pipe:
+		for run_uuid in run_uuids:
+			pipe.exists(*(frappe.cache.make_key(key(run_uuid)) for key in (_redis_keys.lp_picks, _redis_keys.lp_source)))
+		found = pipe.execute()
+	return {run_uuid for run_uuid, count in zip(run_uuids, found, strict=True) if count == 2}
+
+
 @_interrupt_boundary
 def cleanup_run(run_uuid: str) -> None:
 	"""Delete exact-run input; recovery callers must observe a Redis failure."""
