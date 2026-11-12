@@ -377,8 +377,8 @@ def _acquire_singleflight(session_uuid: str, docname: str, deadline) -> bool:
 		return True
 
 	try:
-		max_wait = int(frappe.conf.get("optimus_singleflight_max_wait_seconds")
-			or _SINGLEFLIGHT_MAX_WAIT_SECONDS)
+		configured = frappe.conf.get("optimus_singleflight_max_wait_seconds")
+		max_wait = _SINGLEFLIGHT_MAX_WAIT_SECONDS if configured is None else int(configured)
 	except Exception:
 		max_wait = _SINGLEFLIGHT_MAX_WAIT_SECONDS
 	if max_wait <= 0:

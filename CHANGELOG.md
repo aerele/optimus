@@ -8,6 +8,25 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.159] - 2026-11-07
+
+### Fixed
+
+- The README and the Settings help now match the shipped Sensitivity Profiles. Strict keeps sessions for only 1 day (not 90), has no limit on queries per recording or line profiling runs per session, and hides actions under 1 ms; the README rows for those fields, and the note that the profile covers only nine thresholds, were wrong. The Settings intro no longer says Strict "keeps data longer" or Relaxed "prunes faster". The Settings help for "Line Profiling: Max Runs per Session" no longer says old runs are moved to a private file: once a session has that many runs, new runs are refused.
+- Setting `optimus_singleflight_max_wait_seconds` to `0` now turns single-flight off, as the README says. Before, `0` was read as "not set" and the 600 second default applied.
+- The README, CONTRIBUTING and the renderer notes no longer describe things that were removed or never existed: the Safe report, the PDF button, baseline comparison, the customer-to-partner handoff, `renderer.py` and `recorder.py`. A short "Sharing a report" note says the report holds sensitive data, so redact it yourself before sharing it. The README now says 23 finding types and 11 analyzers, lists the four types it missed, and shows redacted values as `<REDACTED:keyname>`. Not covered: other open pull requests still own some README and Redis schema wording.
+
+### Internal
+
+- New guard tests fail when a README preset row differs from the code, or when the docs mention a removed feature again.
+- The API hardening integration checks (`test_api_hardening`) now run in the Integration workflow, and their cleanup now removes the metrics lists they write.
+
+### Upgrade notes
+
+- Run `bench migrate` once so the Optimus Settings form shows the corrected help text.
+
+---
+
 ## [0.12.157] - 2026-11-07
 
 ### Fixed
