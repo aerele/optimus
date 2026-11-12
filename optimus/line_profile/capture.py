@@ -22,6 +22,7 @@ import importlib
 import inspect
 import json
 import pickle
+import re
 import sys
 import threading
 import tokenize
@@ -30,6 +31,7 @@ from functools import wraps
 
 from optimus import redis_keys as _redis_keys
 from optimus.line_profile import diff
+from optimus.timing import SESSION_TTL_SECONDS
 
 # ---------------------------------------------------------------------------
 # Optional dependencies guarded so the pure layer loads everywhere
@@ -90,7 +92,6 @@ def _require_line_profiler() -> None:
 # byte-identical to the pre-v0.12.20 local helpers, so on-disk Redis
 # values from older bench versions resolve unchanged.
 
-SESSION_TTL_SECONDS = 10 * 60  # match phase-1's session TTL
 DATA_TTL_SECONDS = 24 * 60 * 60  # orphaned inputs must not survive indefinitely
 
 
@@ -394,6 +395,11 @@ class CaptureError(Exception):
 	should communicate to the customer (e.g. all picks ineligible)."""
 
 
+class NoEligiblePickError(CaptureError):
+	"""Raised when none of the selected functions can be line-profiled. The manual path shows it to
+	the user; auto-arm treats it as "nothing to arm" (``analyze._arm_phase2``)."""
+
+
 class SourceUnavailable(CaptureError):
 	"""A selected function's source cannot be captured whole; ``reason`` says why."""
 
@@ -423,6 +429,21 @@ def validate_picks(picks):
 		source = entry.get("source", "freeform")
 		if not isinstance(source, str) or source not in {"freeform", "curated", "auto_expand"}:
 			raise CaptureError(_("Each selected function needs a known source label."))
+
+
+_PATH_IN_REASON_RE = re.compile(r"(?:[A-Za-z]:)?[/\\][^\s)'\"]*")
+
+
+def _no_eligible_pick_message(resolved: list[dict]) -> str:
+	"""The error for a run where no pick is eligible: up to five picks with their reasons, paths removed."""
+	reasons = [
+		f"{r['dotted_path']}: {_PATH_IN_REASON_RE.sub('...', str(r['ineligible_reason']))[:200]}"
+		for r in resolved[:5]
+		if r.get("ineligible_reason")
+	]
+	if not reasons:
+		return _("No selected function has eligible source. Check the selected paths.")
+	return _("No selected function can be line-profiled: {0}").format("; ".join(reasons))
 
 
 def _pick_source(fn) -> tuple[list[dict], str | None]:
@@ -496,7 +517,7 @@ def prepare_line_profile_picks(picks: list[dict], *, server_expanded=frozenset()
 
 	eligible = [r for r in resolved if r.get("eligible")]
 	if not eligible:
-		raise CaptureError(_("No selected function has eligible source. Check the selected paths."))
+		raise NoEligiblePickError(_no_eligible_pick_message(resolved))
 
 	# Snapshot source for each eligible pick. Stored as a dict keyed by
 	# dotted_path so aggregate_samples can pull lines per pick.
@@ -519,7 +540,7 @@ def prepare_line_profile_picks(picks: list[dict], *, server_expanded=frozenset()
 			"source": r["source"],
 		})
 	if not picks_meta:
-		raise CaptureError(_("No selected function has eligible source. Check the selected paths."))
+		raise NoEligiblePickError(_no_eligible_pick_message(resolved))
 
 	try:
 		_validate_captured_picks([{**pick, "source_lines": source_snapshot[pick["dotted_path"]]} for pick in picks_meta])

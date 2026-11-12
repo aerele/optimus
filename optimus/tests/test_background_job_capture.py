@@ -120,6 +120,40 @@ class TestEnqueueRegistersPendingJob:
 		fake_bg.enqueue("optimus.analyze.run", session_uuid="sess-1")
 		assert fake.cache.smembers(_pending_key("sess-1")) == set()
 
+	def test_analyze_job_never_carries_a_session_marker(self, fake_frappe):
+		fake, fake_bg, calls = fake_frappe
+		# The user stopped A and started B: analyze for A must not be tagged B.
+		fake.cache.set_value("profiler:active:alice@example.com", "sess-B")
+		_reset_profiler_modules()
+		import optimus  # noqa: F401
+
+		fake_bg.enqueue("optimus.analyze.run", queue="long", session_uuid="sess-A")
+
+		assert "_profiler_session_id" not in calls[-1]["kwargs"]
+		assert "_lp_session_id" not in calls[-1]["kwargs"]
+		assert fake.cache.smembers(_pending_key("sess-B")) == set()
+
+	def test_analyze_job_given_as_a_callable_is_skipped_too(self, fake_frappe):
+		fake, fake_bg, calls = fake_frappe
+		fake.cache.set_value("profiler:active:alice@example.com", "sess-B")
+		_reset_profiler_modules()
+		import optimus  # noqa: F401
+		from optimus import analyze
+
+		fake_bg.enqueue(analyze.run, session_uuid="sess-A")
+
+		assert "_profiler_session_id" not in calls[-1]["kwargs"]
+
+	def test_a_method_that_only_starts_like_the_analyze_job_is_still_tagged(self, fake_frappe):
+		fake, fake_bg, calls = fake_frappe
+		fake.cache.set_value("profiler:active:alice@example.com", "sess-B")
+		_reset_profiler_modules()
+		import optimus  # noqa: F401
+
+		fake_bg.enqueue("optimus.analyze.run_other", session_uuid="sess-A")
+
+		assert calls[-1]["kwargs"]["_profiler_session_id"] == "sess-B"
+
 	def test_inline_job_returns_no_handle_nothing_to_track(self, fake_frappe):
 		fake, fake_bg, calls = fake_frappe
 		fake.cache.set_value("profiler:active:alice@example.com", "sess-1")

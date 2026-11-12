@@ -358,6 +358,22 @@ class TestBeforeJob:
 
 		assert env.errors == ["optimus before_job unexpected kwargs"]
 
+	def test_a_queued_analyze_job_drops_its_marker_and_is_never_recorded(self, env):
+		# A job queued before the enqueue wrapper learned to skip analyze still carries one.
+		kwargs = {"session_uuid": "s0", "_profiler_session_id": "s1", "_lp_session_id": "lp1"}
+
+		self._job(env, kwargs, method="optimus.analyze.run")
+
+		assert kwargs == {"session_uuid": "s0"}
+		assert env.recorded == []
+		assert env.bg_started == []
+		assert not hasattr(env.local, "optimus_session_id")
+
+	def test_a_user_job_whose_name_resembles_analyze_is_still_recorded(self, env):
+		self._job(env, {"_profiler_session_id": "s1"}, method="optimus.analyze.run_other")
+
+		assert env.recorded == [{"force": True}]
+
 	def test_the_analyze_job_itself_is_never_recorded(self, env):
 		env.local.optimus_analyzing = True
 
