@@ -8,6 +8,14 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.156] - 2026-11-07
+
+### Fixed
+
+- Optimus Settings now says plainly that turning on AI Fix Suggestions also sends findings, and Steps to Reproduce while the humanized-steps option is on (the default), to your AI provider automatically when a session reaches Ready, up to the automatic-suggestion limit. The text also says that "Send raw values to the AI provider" controls whether raw values are included, and that unticking "Run AI suggestions automatically after profiling" turns automatic sending off. Behaviour is unchanged: automatic sending is still on by default once AI is enabled, and nothing is migrated.
+
+---
+
 ## [0.12.153] - 2026-11-06
 
 ### Fixed
