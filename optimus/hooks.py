@@ -32,6 +32,7 @@ required_apps = ["frappe"]
 import os as _os
 
 from optimus import __version__ as _frappe_profiler_version
+from optimus.timing import JANITOR_INTERVAL_MINUTES as _JANITOR_INTERVAL_MINUTES
 
 
 def _asset_version(relative_path: str) -> str:
@@ -134,7 +135,7 @@ persistent_cache_keys = ["profiler:*"]
 scheduler_events = {
 	"cron": {
 		"* * * * *": ["optimus.ai_jobs.recover_pending", "optimus.line_profile.jobs.recover_pending"],
-		"*/5 * * * *": [
+		f"*/{_JANITOR_INTERVAL_MINUTES} * * * *": [
 			"optimus.janitor.sweep_stale_sessions",
 		],
 	},

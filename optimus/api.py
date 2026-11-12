@@ -18,6 +18,7 @@ from frappe.utils import add_to_date, now_datetime
 
 from optimus import ratelimit, safe_call, safe_commit, session
 from optimus.permissions import may_act_on_session
+from optimus.timing import RECORDING_DATA_TTL_SECONDS
 
 # Roles allowed to call the profiler API. System Manager is always allowed
 # (Frappe's superuser role); Optimus User is our dedicated role created
@@ -449,28 +450,62 @@ def start(
 
 
 @frappe.whitelist(methods=["POST"])
-def stop() -> dict:
-	"""End the calling user's active profiling session.
+def stop(session_uuid: str | None = None) -> dict:
+	"""End the calling user's profiling session.
 
 	Clears the Redis active pointer, marks the row ``Stopping`` and either
 	enqueues the analyze job or runs it inline (scheduler-aware fallback, see
 	``_enqueue_analyze``).
 
+	The active session is stopped when ``session_uuid`` is omitted or names it.
+	Any other session (its pointer expired after 10 minutes without activity, or
+	the user started a new one in another tab) is stopped by its own Recording
+	row; the active session and its pointer are never touched on that path.
+
 	Returns a dict with ``stopped``, ``session_uuid``, ``docname``,
-	``ran_inline`` and, only when ran_inline is True, the final ``status``
+	``ran_inline``, ``expired`` (True only when a session whose pointer had
+	expired was stopped), and, only when ran_inline is True, the final ``status``
 	(``Ready`` or ``Failed``) and ``empty`` (a Ready session with no recorded
 	requests). The widget uses ran_inline + status + empty to pick its
 	terminal state (Analyzing / Report ready / No data / Analyze failed).
 	"""
 	user = _require_profiler_user()
+	session_uuid = session_uuid or None
 	active = session.get_active_session_for(user)
-	if not active:
-		return {"stopped": False, "reason": "no active session"}
+	if active and session_uuid in (None, active):
+		return _stop_active(user, active)
+	return _stop_expired(user, session_uuid)
 
+
+# Both paths act only on the caller's own rows (``_mark_stopping`` and
+# ``_latest_recording_uuid`` filter on the user), so Stop needs no share-aware gate.
+def _stop_active(user: str, active: str) -> dict:
 	ratelimit.enforce_user_rate_limit("stop", **_ACTION_LIMITS["stop"])
 
 	docname, ran_inline = _stop_session(user, active)
+	return _stop_result(active, docname, ran_inline)
 
+
+def _stop_expired(user: str, session_uuid: str | None) -> dict:
+	"""Stop the user's Recording row whose pointer is gone, naming it or taking the latest."""
+	ratelimit.enforce_user_rate_limit("stop", **_ACTION_LIMITS["stop"])
+	session_uuid = session_uuid or _latest_recording_uuid(user)
+	docname, ran_inline = _stop_session(user, session_uuid, pointer=False) if session_uuid else (None, False)
+	if not docname:
+		return {"stopped": False, "reason": "no active session"}
+	return {**_stop_result(session_uuid, docname, ran_inline), "expired": True}
+
+
+def _latest_recording_uuid(user: str) -> str | None:
+	return frappe.db.get_value(
+		"Optimus Session",
+		{"user": user, "status": "Recording"},
+		"session_uuid",
+		order_by="started_at desc",
+	)
+
+
+def _stop_result(session_uuid: str, docname: str | None, ran_inline: bool) -> dict:
 	# v0.5.0: when analyze runs inline, the session is already finalized
 	# by the time we return. Read the actual status so the widget can
 	# transition to the right terminal state otherwise a failed
@@ -489,7 +524,7 @@ def stop() -> dict:
 
 	return {
 		"stopped": True,
-		"session_uuid": active,
+		"session_uuid": session_uuid,
 		"docname": docname,
 		"ran_inline": ran_inline,
 		"status": final_status,
@@ -497,8 +532,9 @@ def stop() -> dict:
 	}
 
 
-def _stop_session(user: str, session_uuid: str) -> tuple[str | None, bool]:
-	"""Clear the active pointer, mark the row Stopping and enqueue (or
+def _stop_session(user: str, session_uuid: str, pointer: bool = True) -> tuple[str | None, bool]:
+	"""Clear the active pointer (unless ``pointer`` is False: it then names a
+	different session or none), mark the row Stopping and enqueue (or
 	inline-run) the analyze job.
 
 	Returns ``(docname, ran_inline)``: docname is None if no row matched;
@@ -520,7 +556,8 @@ def _stop_session(user: str, session_uuid: str) -> tuple[str | None, bool]:
 
 	infra_capture._force_stop_inflight(frappe.local)
 
-	_clear_active(user)
+	if pointer:
+		_clear_active(user)
 	docname = _mark_stopping(user, session_uuid)
 	if not docname:
 		return None, False
@@ -608,25 +645,33 @@ def _clear_active(user: str) -> None:
 
 
 def _mark_stopping(user: str, session_uuid: str) -> str | None:
-	"""Transition the Optimus Session row to the Stopping state.
+	"""Move the user's session row from Recording to Stopping.
 
-	Returns the docname on success or None if no matching row exists.
+	Returns the docname, or None when there is no such row or it already left
+	Recording (the janitor or another tab got there first, or it is finished): a
+	finished session must never be flipped back and analyzed again.
 	"""
-	docname = frappe.db.get_value(
-		"Optimus Session",
-		{"session_uuid": session_uuid, "user": user},
-		"name",
-	)
-	if not docname:
+	return claim_for_stop({"session_uuid": session_uuid, "user": user})
+
+
+def claim_for_stop(filters: str | dict) -> str | None:
+	"""Atomically move one Optimus Session row from Recording to Stopping.
+
+	The row is locked while its status is checked, so of several callers (a Stop
+	click, the janitor) exactly one gets the docname and goes on to queue analyze.
+	"""
+	row = frappe.db.get_value("Optimus Session", filters, ["name", "status"], for_update=True, as_dict=True)
+	if not row or row.get("status") != "Recording":
+		safe_commit()  # release the lock
 		return None
 
 	frappe.db.set_value(
 		"Optimus Session",
-		docname,
+		row["name"],
 		{"status": "Stopping", "stopped_at": now_datetime()},
 	)
 	safe_commit()
-	return docname
+	return row["name"]
 
 
 def _enqueue_analyze(session_uuid: str, docname: str | None = None) -> bool:
@@ -1048,7 +1093,7 @@ def submit_frontend_metrics(payload: str) -> dict:
 		# Tail-preferring trim: keep the last N entries.
 		try:
 			frappe.cache.ltrim(xhr_key, -SOFT_CAP_FRONTEND_XHR, -1)
-			session.expire_key(xhr_key, session.SESSION_TTL_SECONDS)
+			session.expire_key(xhr_key, RECORDING_DATA_TTL_SECONDS)
 		except Exception:
 			frappe.log_error(title="optimus frontend ltrim (xhr)")
 
@@ -1060,7 +1105,7 @@ def submit_frontend_metrics(payload: str) -> dict:
 				frappe.log_error(title="optimus frontend rpush (vitals)")
 		try:
 			frappe.cache.ltrim(vitals_key, -SOFT_CAP_FRONTEND_VITALS, -1)
-			session.expire_key(vitals_key, session.SESSION_TTL_SECONDS)
+			session.expire_key(vitals_key, RECORDING_DATA_TTL_SECONDS)
 		except Exception:
 			frappe.log_error(title="optimus frontend ltrim (vitals)")
 
