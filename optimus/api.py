@@ -463,7 +463,7 @@ def stop() -> dict:
 	terminal state (Analyzing / Report ready / No data / Analyze failed).
 	"""
 	user = _require_profiler_user()
-	active = session.get_active_session_for(user)
+	active = session.get_active_session_for(user) or _idle_recording_for(user)
 	if not active:
 		return {"stopped": False, "reason": "no active session"}
 
@@ -495,6 +495,12 @@ def stop() -> dict:
 		"status": final_status,
 		"empty": empty,
 	}
+
+
+def _idle_recording_for(user: str) -> str | None:
+	"""The user's latest Recording session whose active pointer expired while idle."""
+	return frappe.db.get_value("Optimus Session", {"user": user, "status": "Recording"},
+		"session_uuid", order_by="started_at desc")
 
 
 def _stop_session(user: str, session_uuid: str) -> tuple[str | None, bool]:

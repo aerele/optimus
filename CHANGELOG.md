@@ -8,6 +8,14 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.150] - 2026-11-12
+
+### Fixed
+
+- Clicking Stop after the tab sat idle for 10 minutes now stops and analyzes the session. Before, the server answered "no active session" because the session's active flag had expired, the pill reset, and the session stayed in Recording (for good when the scheduler is disabled). Stop now falls back to the user's latest session that is still Recording.
+
+---
+
 ## [0.12.147] - 2026-11-06
 
 ### Internal
