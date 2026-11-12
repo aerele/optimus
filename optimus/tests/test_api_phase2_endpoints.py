@@ -219,6 +219,45 @@ def test_manual_start_obeys_the_configured_run_cap_before_capture(monkeypatch):
 	assert not seen.capture and not seen.saved
 
 
+@pytest.mark.parametrize("statuses,refused", [
+	(("Failed", "Failed"), False), (("Ready", "Failed"), False), (("Ready", "Analyzing"), True), (("Recording", "Failed"), False),
+])
+def test_run_cap_counts_only_runs_that_are_not_failed(monkeypatch, statuses, refused):
+	_, _, seen = _env(monkeypatch)
+	api.frappe.get_doc("Optimus Session", DOCNAME).phase_2_runs = [
+		SimpleNamespace(run_uuid=f"old-{i}", status=status, ended_at=None) for i, status in enumerate(statuses)]
+	monkeypatch.setattr("optimus.settings.get_config", lambda: SimpleNamespace(phase2_max_runs_per_session=2))
+	if refused:
+		with pytest.raises(FakeValidationError, match="already has 2 line profiling runs"):
+			api.start_line_profile_pass(SESSION_UUID, PICKS, auto_expand=False)
+		assert not seen.capture
+	else:
+		api.start_line_profile_pass(SESSION_UUID, PICKS, auto_expand=False)
+		assert seen.saved
+
+
+def test_runs_counted_by_limit_reads_rows_and_dicts():
+	rows = [SimpleNamespace(status="Ready"), {"status": "Failed"}, {"status": "Recording"}, SimpleNamespace(status="Failed")]
+	assert runs_counted_by_limit(rows) == 2
+	assert runs_counted_by_limit(None) == 0
+
+
+@pytest.mark.parametrize("status,others,refused", [
+	("Failed", ("Ready",), True), ("Failed", ("Failed",), False), ("Analyzing", ("Ready",), False),
+])
+def test_retrying_a_failed_run_needs_room_under_the_run_cap(monkeypatch, status, others, refused):
+	_, doc, seen = _env(monkeypatch, run_status=status)
+	doc.phase_2_runs = [SimpleNamespace(run_uuid="run-1", status=status, ended_at=None)] + [
+		SimpleNamespace(run_uuid=f"old-{i}", status=other, ended_at=None) for i, other in enumerate(others)]
+	monkeypatch.setattr("optimus.settings.get_config", lambda: SimpleNamespace(phase2_max_runs_per_session=1))
+	if refused:
+		with pytest.raises(FakeValidationError, match="already has 1 line profiling runs"):
+			api.retry_phase2_analyze(run_uuid="run-1")
+		assert not seen.queued
+	else:
+		assert api.retry_phase2_analyze(run_uuid="run-1")["status"] == "Analyzing"
+
+
 def test_start_prepares_picks_before_sql_lock(monkeypatch):
 	_, _, seen = _env(monkeypatch)
 	def lock(*args, **kwargs):
