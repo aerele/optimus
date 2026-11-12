@@ -8,6 +8,15 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.157] - 2026-11-07
+
+### Fixed
+
+- Long requests no longer flood Redis with their Python call tree. Sizes depend on how deep the call stacks are. Examples measured on generated profiles: a 3-second busy request went from 366 KB to 21 KB, a 3-second request recursing 500 deep from 28.6 MB to 249 KB, and one 400 deep from 167 MB to 264 KB. Nothing is lost while a tree is small. A tree larger than 1 MB, or with more than 300,000 stack frames in total, is first shrunk by merging identical neighbouring samples, which loses nothing, and only then thinned to fit (a long wait, such as a slow query, keeps its own place in it); thinning picks a random sample from each stretch of time, so a repeating call pattern keeps its share, and the report says which requests were thinned. This work runs once at the end of a recorded request. It takes about 0.2 seconds for up to 60,000 samples and grows in step with the sample count beyond that (a million samples took 1.6 seconds); analyze rebuilds a stored tree in about 0.2 seconds or less. SQL findings are never affected, though SQL can appear under a parent function in a thinned tree. A tree that cannot fit even thinned is not stored, and the report says it was too large to keep. Trees stored before this version are read as before.
+- Optimus reads its settings once per request or job instead of once per recorded database query, and no longer reads them for requests that have no recording session or for background jobs that are not part of one. Recorded timings are no longer inflated by Optimus's own settings reads. The hook's own Redis reads for a request without a session drop from three to one; other Optimus hooks (for example line profiling) still make their own. A settings change still takes effect on the next request; a long-running console session keeps the settings it first read until it is restarted. Nothing changes for users.
+
+---
+
 ## [0.12.156] - 2026-11-07
 
 ### Fixed

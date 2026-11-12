@@ -135,6 +135,8 @@ read-only sections:
      recordings. Call trees and timings expire from Redis 6 hours after
      they are captured; the SQL recordings stay until the session is
      analyzed or cleaned up, so SQL findings can still be recomputed.
+     A call tree is stored compacted and at most 1 MiB per request; a very
+     long or branchy request is thinned to fit and the report says so.
      Useful when a session ends `Failed` because of a transient
      error. Once the SQL recordings are gone re-analyze can still
      re-render reports from the persisted DocType data, but cannot
