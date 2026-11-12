@@ -57,6 +57,11 @@ class FakeDB:
 			if isinstance(fieldname, list):  # Frappe returns a tuple for a field list
 				return tuple(row.get(f) for f in fieldname) if row else None
 			return row.get(fieldname) if row else None
+		if "session_uuid" not in filters:  # latest matching row, as order_by started_at desc
+			hits = [dict(r, session_uuid=u) for u, r in self.rows.items()
+				if all(r.get(k) == v for k, v in filters.items())]
+			hits.sort(key=lambda r: r.get("started_at") or 0, reverse=True)
+			return hits[0].get(fieldname) if hits else None
 		row = self.rows.get(filters.get("session_uuid"))
 		if row is None:
 			return None
@@ -180,6 +185,26 @@ class TestStart:
 class TestStop:
 	def test_without_active_session_reports_nothing_stopped(self, env):
 		assert api.stop() == {"stopped": False, "reason": "no active session"}
+
+	def test_stop_after_idle_expiry_still_stops_the_latest_recording_row(self, env, monkeypatch):
+		_scheduler(monkeypatch, disabled=False)
+		_row(env, uuid="old", name="OPT-OLD")
+		_row(env, uuid="u1")
+		env.db.rows["old"]["started_at"], env.db.rows["u1"]["started_at"] = 1, 2
+
+		out = api.stop()
+
+		assert out["stopped"] is True and out["session_uuid"] == "u1"
+		assert env.db.rows["u1"]["status"] == "Stopping"
+		assert env.db.rows["old"]["status"] == "Recording"
+		assert env.enqueued[0][1]["session_uuid"] == "u1"
+
+	def test_idle_fallback_ignores_other_users_and_finished_rows(self, env):
+		_row(env, uuid="u1", user="bob@example.com")
+		_row(env, uuid="u2", name="OPT-2", status="Ready")
+
+		assert api.stop() == {"stopped": False, "reason": "no active session"}
+		assert env.enqueued == []
 
 	def test_async_stop_marks_stopping_and_queues_analyze(self, env, monkeypatch):
 		_scheduler(monkeypatch, disabled=False)
