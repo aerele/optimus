@@ -147,10 +147,29 @@ def _normalize_dict_tree(node: dict) -> dict:
 	}
 
 
+# Names pyinstrument gives its synthetic frames; the fallback when a frame has no ``is_synthetic``.
+_SYNTHETIC_FRAME_NAMES = frozenset({"[self]", "[await]", "[out-of-context]", "[root]"})
+
+
+def _is_synthetic_frame(frame) -> bool:
+	flag = getattr(frame, "is_synthetic", None)
+	if flag is not None:
+		return bool(flag)
+	return getattr(frame, "function", "") in _SYNTHETIC_FRAME_NAMES
+
+
 def _walk_pyi_frame(frame) -> dict:
-	"""Convert one pyinstrument frame (and its descendants) into our dict shape."""
-	# pyinstrument's Frame object exposes:
-	#   function, file_path_short, line_no, self_time, time, children
+	"""Convert one pyinstrument frame (and its descendants) into our dict shape.
+
+	pyinstrument exposes self time only on some versions (``total_self_time``, and
+	as per-sample ``[self]`` children), so it is derived the same way everywhere: a
+	frame's own time (``self_ms``) is ``time`` minus its real children's time. The
+	synthetic ``[self]`` children are dropped, their time stays in the parent's
+	``self_ms``. ``time`` is read without a default so an API change fails loudly.
+	"""
+	children = [c for c in getattr(frame, "children", ()) if not _is_synthetic_frame(c)]
+	cumulative_s = frame.time
+	self_s = max(0.0, cumulative_s - sum(c.time for c in children))
 	return {
 		"function": getattr(frame, "function", "<unknown>"),
 		"filename": (
@@ -159,10 +178,10 @@ def _walk_pyi_frame(frame) -> dict:
 			or ""
 		),
 		"lineno": getattr(frame, "line_no", 0),
-		"self_ms": float(getattr(frame, "self_time", 0)) * 1000,
-		"cumulative_ms": float(getattr(frame, "time", 0)) * 1000,
+		"self_ms": round(self_s * 1000, 3),
+		"cumulative_ms": round(cumulative_s * 1000, 3),
 		"kind": "python",
-		"children": [_walk_pyi_frame(c) for c in getattr(frame, "children", [])],
+		"children": [_walk_pyi_frame(c) for c in children],
 	}
 
 
@@ -677,7 +696,6 @@ def _prune_recursive(node: dict, threshold: float) -> None:
 	children = node.get("children", [])
 	kept = []
 	dropped_count = 0
-	dropped_self_ms = 0.0
 	dropped_cumulative_ms = 0.0
 	for child in children:
 		# Never prune SQL leaves they're always meaningful
@@ -686,7 +704,6 @@ def _prune_recursive(node: dict, threshold: float) -> None:
 			continue
 		if child.get("cumulative_ms", 0) < threshold:
 			dropped_count += 1
-			dropped_self_ms += child.get("self_ms", 0)
 			dropped_cumulative_ms += child.get("cumulative_ms", 0)
 			continue
 		_prune_recursive(child, threshold)
@@ -696,7 +713,8 @@ def _prune_recursive(node: dict, threshold: float) -> None:
 			"function": f"[other: {dropped_count} frames]",
 			"filename": "",
 			"lineno": 0,
-			"self_ms": dropped_self_ms,
+			# Its time was spent inside the dropped frames, so it is the placeholder's own time.
+			"self_ms": dropped_cumulative_ms,
 			"cumulative_ms": dropped_cumulative_ms,
 			"kind": "python",
 			"children": [],
@@ -729,10 +747,14 @@ def _soft_cap_recursive(node: dict, max_nodes: int, state: dict) -> None:
 	kept = []
 	omitted_count = 0
 	omitted_ms = 0.0
+	omitted_python_ms = 0.0
 	for child in children:
 		if state["count"] >= max_nodes:
 			omitted_count += 1
 			omitted_ms += child.get("cumulative_ms", 0)
+			# SQL leaves are not python time: their wait is already inside a python frame's own time.
+			if child.get("kind") == "python":
+				omitted_python_ms += child.get("cumulative_ms", 0)
 			continue
 		_soft_cap_recursive(child, max_nodes, state)
 		kept.append(child)
@@ -741,7 +763,7 @@ def _soft_cap_recursive(node: dict, max_nodes: int, state: dict) -> None:
 			"function": f"[{omitted_count} more frames omitted]",
 			"filename": "",
 			"lineno": 0,
-			"self_ms": 0.0,
+			"self_ms": omitted_python_ms,
 			"cumulative_ms": omitted_ms,
 			"kind": "python",
 			"children": [],
@@ -915,6 +937,7 @@ def _emit_per_action_findings(
 	action_wall_time_ms: float,
 	tracked_apps: tuple[str, ...] | None = None,
 	installed_apps: frozenset[str] | None = None,
+	self_time_trusted: bool = True,
 ) -> list:
 	"""Walk the tree and emit Slow Hot Path / Hook Bottleneck findings.
 
@@ -926,6 +949,10 @@ def _emit_per_action_findings(
 	any per-frame finding but ARE slow, emit a Slow Background Job
 	finding rooted at the deepest user-code frame so the reader has an
 	actionable callsite instead of an unexplained 12s job entry.
+
+	``self_time_trusted`` False (self time missing or inconsistent, see
+	``_self_time_measured``) stops a node's own ``self_ms`` from raising a self-time hot
+	path; the subtree findings that run on cumulative time are unaffected.
 	"""
 	if action_wall_time_ms <= 0:
 		return []
@@ -940,6 +967,7 @@ def _emit_per_action_findings(
 		findings=findings,
 		tracked_apps=tracked_apps,
 		installed_apps=installed_apps,
+		self_time_trusted=self_time_trusted,
 	)
 
 	# v0.7.x: BG-job fallback. When the walker emits nothing for a slow
@@ -1002,6 +1030,7 @@ def _walk_for_findings(
 	findings: list,
 	tracked_apps: tuple[str, ...] | None = None,
 	installed_apps: frozenset[str] | None = None,
+	self_time_trusted: bool = True,
 ) -> None:
 	cumulative = node.get("cumulative_ms", 0)
 	# v0.7.x A.CR1: clamp pct at the gating + severity site too. The
@@ -1152,9 +1181,11 @@ def _walk_for_findings(
 					before = len(findings)
 					_walk_children(
 						node, parent_chain, action_idx, action_label, action_wall_time_ms,
-						findings, tracked_apps, installed_apps,
+						findings, tracked_apps, installed_apps, self_time_trusted,
 					)
-					own_ms = node.get("self_ms") or 0
+					# Untrusted self time must not raise a self-time hot path: the time then
+					# reads as callees (the "and its callees" finding), as before self time existed.
+					own_ms = (node.get("self_ms") or 0) if self_time_trusted else 0
 					own_pct = min(1.0, own_ms / action_wall_time_ms) if action_wall_time_ms else 0
 					if own_pct >= med_pct and own_ms >= med_ms:
 						impact_ms = own_ms
@@ -1239,7 +1270,7 @@ def _walk_for_findings(
 
 	_walk_children(
 		node, parent_chain, action_idx, action_label, action_wall_time_ms, findings,
-		tracked_apps, installed_apps,
+		tracked_apps, installed_apps, self_time_trusted,
 	)
 
 
@@ -1252,6 +1283,7 @@ def _walk_children(
 	findings: list,
 	tracked_apps: tuple[str, ...] | None = None,
 	installed_apps: frozenset[str] | None = None,
+	self_time_trusted: bool = True,
 ) -> None:
 	"""Run ``_walk_for_findings`` over the node's python children."""
 	new_chain = parent_chain + [node]
@@ -1260,7 +1292,7 @@ def _walk_children(
 			continue
 		_walk_for_findings(
 			child, new_chain, action_idx, action_label, action_wall_time_ms, findings,
-			tracked_apps, installed_apps,
+			tracked_apps, installed_apps, self_time_trusted,
 		)
 
 
@@ -1343,13 +1375,18 @@ def _row_labels(identities) -> dict:
 	return labels
 
 
-def _trim_occurrences(occurrences: dict, frame_class: dict) -> dict:
-	"""Keep the top rows per group (app by self time, framework by cumulative) and prune frame_class."""
+def _trim_occurrences(occurrences: dict, frame_class: dict, app_by_self: bool = False) -> dict:
+	"""Keep the top rows per group and prune frame_class.
+
+	Rows rank by Total (outermost cumulative); the app group ranks by Self instead when
+	``app_by_self``, matching the leaderboard cap in ``_aggregate_hot_frames``.
+	"""
 	keep = HOT_FRAMES_INTERMEDIATE_CAP // 2
 	kept: dict = defaultdict(list)
-	for is_framework, col in ((False, 1), (True, 2)):
+	for is_framework in (False, True):
 		group = [kv for kv in occurrences.items() if frame_class.get(kv[0], False) is is_framework]
-		group.sort(key=lambda kv: sum(o[col] for o in kv[1]), reverse=True)
+		slot = 1 if (app_by_self and not is_framework) else 2
+		group.sort(key=lambda kv: sum(o[slot] for o in kv[1]), reverse=True)
 		kept.update(group[:keep])
 	for k in [k for k in frame_class if k not in kept]:
 		del frame_class[k]
@@ -1368,16 +1405,20 @@ def _aggregate_hot_frames(
 	               no action_ref)
 	  leaderboard list of top-N dicts for hot_frames_json
 	"""
-	# {(full_path, function): [(action_idx, self_ms, cumulative_ms), ...]}
+	# {(full_path, function): [(action_idx, self_ms, total_ms), ...]}; total_ms is the node's
+	# cumulative_ms for the outermost occurrence on its path and 0 for a nested one.
 	occurrences: dict = defaultdict(list)
 	# {(full_path, function): is_framework}
 	frame_class: dict = {}
+	self_time_measured = _self_time_measured(per_action_trees)
 
 	for action_idx, tree in enumerate(per_action_trees):
-		_walk_for_aggregation(tree, action_idx, occurrences, tracked_apps, installed_apps, frame_class)
+		_walk_for_aggregation(
+			tree, action_idx, occurrences, tracked_apps, installed_apps, frame_class, set()
+		)
 		# Cap intermediate map size to bound memory.
 		if len(occurrences) > HOT_FRAMES_INTERMEDIATE_CAP * 2:
-			occurrences = _trim_occurrences(occurrences, frame_class)
+			occurrences = _trim_occurrences(occurrences, frame_class, app_by_self=self_time_measured)
 
 	findings = []
 	leaderboard_rows = []
@@ -1386,63 +1427,84 @@ def _aggregate_hot_frames(
 	for ident, occs in occurrences.items():
 		key = labels[ident]
 		distinct_actions = {idx for idx, _, _ in occs}
-		total_self_ms = sum(self_ms for _, self_ms, _ in occs)
-		total_cum_ms = sum(cum_ms for _, _, cum_ms in occs)
+		self_sum_ms = sum(self_ms for _, self_ms, _ in occs)
+		total_outermost_ms = sum(total for _, _, total in occs)
 		row = {
 			"function": key,
-			# A.AE1: self-sum is the precise "time in this function
-			# across the whole tree" metric what the user-app
-			# variant displays.
-			"total_ms": round(total_self_ms, 2),
-			# Cumulative-sum what the framework variant displays.
-			# See _walk_for_aggregation's comment for the why.
-			"total_cumulative_ms": round(total_cum_ms, 2),
+			# Stored meaning (kept for stored reports and the renderer): ``total_ms`` is the
+			# SELF-sum, not the user-facing Total. ``total_cumulative_ms`` is the Total
+			# (outermost occurrences only, so recursion counts once).
+			"total_ms": round(self_sum_ms, 2),
+			"total_cumulative_ms": round(total_outermost_ms, 2),
+			"self_time_measured": self_time_measured,
 			"occurrences": len(occs),
 			"distinct_actions": len(distinct_actions),
 			"action_refs": sorted(distinct_actions),
 			"is_framework": frame_class.get(ident, False),
 		}
 		leaderboard_rows.append(row)
-		total_ms = total_self_ms  # alias for downstream Repeated Hot Frame logic
 
+		# Repeated Hot Frame is judged on the self-sum, which is wall-clock. A query's wait lands
+		# in the deepest frame sampled while it ran (usually the driver or db layer, not the app
+		# frame that issued it), so an app frame is inflated only when those frames were pruned
+		# or stripped. Telling that apart needs per-node SQL attribution that is not recorded,
+		# so the SQL wait is NOT discounted here (deferred); the finding text states the limit.
+		# Gated on self_time_measured: it is a self-based finding, so untrusted self time must not
+		# raise it. Before self time was recorded this finding never fired in practice.
 		if (
-			len(distinct_actions) >= DEFAULT_REPEATED_FRAME_MIN_ACTIONS
-			and total_ms >= DEFAULT_REPEATED_FRAME_MIN_TOTAL_MS
+			self_time_measured
+			and len(distinct_actions) >= DEFAULT_REPEATED_FRAME_MIN_ACTIONS
+			and self_sum_ms >= DEFAULT_REPEATED_FRAME_MIN_TOTAL_MS
 		):
-			severity = "High" if total_ms >= 2000 else "Medium"
+			severity = "High" if self_sum_ms >= 2000 else "Medium"
 			findings.append({
 				"finding_type": "Repeated Hot Frame",
 				"severity": severity,
 				"title": (
 					f"{key} appeared in {len(distinct_actions)} actions "
-					f"and consumed {dur(total_ms)} total"
+					f"and consumed {dur(self_sum_ms)} total"
 				),
 				"customer_description": (
 					f"The function **{key}** ran across {len(distinct_actions)} "
-					f"different actions in this session, consuming {dur(total_ms)} "
-					"in total. Optimizing it would help every flow that touches it."
+					f"different actions in this session, consuming {dur(self_sum_ms)} "
+					"in its own lines. Optimizing it would help every flow that touches it."
+					"\n\nNote: this is wall-clock time in the function's own lines, so a wait "
+					"on I/O or on the database that is not shown as a separate call counts "
+					"too. Check the call tree before optimising its code."
 				),
 				"technical_detail_json": json.dumps({
 					"function": key,
-					"total_ms": round(total_ms, 2),
+					# Same self-sum as the leaderboard row's stored ``total_ms``.
+					"total_ms": round(self_sum_ms, 2),
 					"distinct_actions": len(distinct_actions),
 					"action_refs": sorted(distinct_actions),
 				}, default=str),
-				"estimated_impact_ms": round(total_ms, 2),
+				"estimated_impact_ms": round(self_sum_ms, 2),
 				"affected_count": len(occs),
 				"action_ref": None,
 			})
 
-	# Cap each group separately so app frames cannot crowd out the framework group.
+	# Cap each group separately so app frames cannot crowd out the framework group. The app
+	# group ranks by Self when self time was measured (the column the report orders it by),
+	# else by Total. The framework group always ranks by Total: its table shows Total only,
+	# and a wrapper's own time is usually a small part of it.
+	def app_rank(row):
+		return row["total_ms"] if self_time_measured else row["total_cumulative_ms"]
+
+	def framework_rank(row):
+		return row["total_cumulative_ms"]
+
 	custom_rows = sorted(
-		(r for r in leaderboard_rows if not r["is_framework"]),
-		key=lambda r: r["total_ms"], reverse=True,
+		(r for r in leaderboard_rows if not r["is_framework"]), key=app_rank, reverse=True,
 	)[:HOT_FRAMES_LEADERBOARD_SIZE]
 	framework_rows = sorted(
-		(r for r in leaderboard_rows if r["is_framework"]),
-		key=lambda r: r["total_cumulative_ms"], reverse=True,
+		(r for r in leaderboard_rows if r["is_framework"]), key=framework_rank, reverse=True,
 	)[:HOT_FRAMES_LEADERBOARD_SIZE]
-	leaderboard = sorted(custom_rows + framework_rows, key=lambda r: r["total_ms"], reverse=True)
+	leaderboard = sorted(
+		custom_rows + framework_rows,
+		key=lambda r: framework_rank(r) if r["is_framework"] else app_rank(r),
+		reverse=True,
+	)
 
 	return findings, leaderboard
 
@@ -1452,21 +1514,20 @@ def _walk_for_aggregation(
 	tracked_apps: tuple[str, ...] | None = None,
 	installed_apps: frozenset[str] | None = None,
 	frame_class: dict | None = None,
+	active: set | None = None,
 ) -> None:
+	"""Record each frame's self time and Total contribution per identity.
+
+	``active`` holds the identities on the path from the root to ``node``. A frame whose
+	identity is already active (recursion, re-entry) contributes 0 to Total, so a function's
+	Total counts each outermost call once and never exceeds its action's time.
+	"""
+	if active is None:
+		active = set()
+	entered = None
 	if node.get("kind") == "python":
-		# v0.5.1: skip PURE HELPER frames only, not all framework code.
-		# This is the narrower _is_pure_helper_frame check we want to
-		# keep Document.run_method, permission checks, naming and other
-		# application-layer Frappe code in the leaderboard because they
-		# can be legitimate optimization targets (e.g. a slow doc-event
-		# hook bubbles up as Document.run_method). Only frappe/utils/*,
-		# frappe/handler.py, frappe/app.py and infrastructure libs
-		# (werkzeug, rq, etc.) are suppressed.
-		#
-		# An earlier v0.5.1 draft used the broader _is_framework_frame
-		# here, which hid ALL frappe/* frames that was too aggressive
-		# and blinded the analyzer to real application-layer bottlenecks
-		# inside Frappe that users could act on.
+		# Skip pure helper frames only, not all framework code: application-layer Frappe code
+		# (Document.run_method, permissions, naming) stays visible as an optimization target.
 		if not _is_pure_helper_frame(node, tracked_apps, installed_apps):
 			key = _frame_identity(node.get("function", ""), node.get("filename", ""))
 			if key:
@@ -1474,28 +1535,21 @@ def _walk_for_aggregation(
 					frame_class[key] = _is_framework_frame_file(
 						node.get("filename", ""), tracked_apps, installed_apps
 					)
-				# v0.7.x A.AE1: track self_ms (immune to recursion
-				# double-counting) for the user-app variant that's
-				# the exact "time in this function's body across the
-				# whole action's tree" answer.
-				#
-				# v0.7.x: also track cumulative_ms because the
-				# framework variant of the hot-frames table needs it.
-				# Framework wrapper frames have sub-sampler-interval
-				# self_ms (rounds to 0); aggregated → 0 across rows.
-				# The framework column displays cumulative_ms instead
-				# (renderer.build_hot_frames_table chooses per
-				# variant). Risk: nested same-name framework frames
-				# would double-count cumulative acceptable on the
-				# collapsed-by-default framework table, where the
-				# column is informational rather than decision-grade.
-				occurrences[key].append(
-					(action_idx, node.get("self_ms", 0), node.get("cumulative_ms", 0))
-				)
+				nested = key in active
+				occurrences[key].append((
+					action_idx,
+					node.get("self_ms", 0),
+					0 if nested else node.get("cumulative_ms", 0),
+				))
+				if not nested:
+					active.add(key)
+					entered = key
 	for child in node.get("children", []):
 		_walk_for_aggregation(
-			child, action_idx, occurrences, tracked_apps, installed_apps, frame_class
+			child, action_idx, occurrences, tracked_apps, installed_apps, frame_class, active
 		)
+	if entered is not None:
+		active.discard(entered)
 
 
 def _is_framework_frame_file(filename: str, tracked_apps, installed_apps) -> bool:
@@ -1632,13 +1686,28 @@ def _top_level_app(function: str, filename: str) -> str:
 	return first
 
 
-def _build_session_breakdown(per_action_trees: list, sql_total_ms: float) -> dict:
-	"""Compute the donut data: sql ms + python ms + per-app self ms."""
+def _build_session_breakdown(
+	per_action_trees: list, sql_total_ms: float, per_action_sql_ms: list | None = None
+) -> dict:
+	"""Compute the donut data: sql ms + python ms + per-app self ms.
+
+	``python_ms`` is the python self time without the SQL wait, which is already in ``sql_ms``
+	and sits inside python self times. The wait is removed per action, clamped at zero, so one
+	SQL-heavy action cannot erase the python time of the others. ``per_action_sql_ms`` aligns
+	with ``per_action_trees``; absent entries count as no SQL. When pyinstrument misses a SQL
+	wait (the wait is then not in the python self time), ``python_ms`` is under-reported,
+	bounded at 0 per action.
+
+	``by_app`` is raw self time and still includes the SQL wait. It must not be rendered
+	against ``sql_ms`` without the same per-action exclusion.
+	"""
 	by_app: dict = defaultdict(float)
 	python_total = 0.0
-	for tree in per_action_trees:
+	sql_per_action = per_action_sql_ms or []
+	for idx, tree in enumerate(per_action_trees):
 		_walk_for_breakdown(tree, by_app)
-		python_total += _sum_self_python(tree)
+		action_sql_ms = sql_per_action[idx] if idx < len(sql_per_action) else 0.0
+		python_total += max(0.0, _sum_self_python(tree) - action_sql_ms)
 	return {
 		"sql_ms": round(sql_total_ms, 2),
 		"python_ms": round(python_total, 2),
@@ -1661,6 +1730,33 @@ def _sum_self_python(node: dict) -> float:
 	for child in node.get("children", []):
 		total += _sum_self_python(child)
 	return total
+
+
+def _total_python_self_ms(trees: list) -> float:
+	return sum(_sum_self_python(t) for t in trees)
+
+
+# Self time is trusted only when the python self times add up to the sampled time. Verified
+# against ``_walk_pyi_frame`` and ``reconcile``: a python frame's ``self_ms`` is its ``time``
+# minus its real children's time, and SQL leaves are separate ``kind == "sql"`` nodes grafted
+# on top without being subtracted, so the SQL wait stays INSIDE the python self times. Prune
+# and soft-cap placeholders carry the time of the frames they drop. Hence, per tree, the sum
+# of python self times is the root ``cumulative_ms`` (SQL is NOT subtracted from the target).
+# The tolerance absorbs what legitimately breaks the identity: self clamped to 0 when children
+# overshoot their parent (sum slightly above), 3-decimal rounding, and profiler frames stripped
+# after reconcile (sum below). Outside it the self times are missing or implausible and the
+# report falls back to Total only.
+SELF_TIME_MIN_COVERAGE = 0.5   # sum(self) / sum(root cumulative) at or above this
+SELF_TIME_MAX_COVERAGE = 1.05  # ... and at or below this
+
+
+def _self_time_measured(trees: list) -> bool:
+	"""True when python self time is present and consistent with the sampled wall time."""
+	self_ms = _total_python_self_ms(trees)
+	sampled_ms = sum(t.get("cumulative_ms", 0) for t in trees)
+	if self_ms <= 0 or sampled_ms <= 0:
+		return False
+	return SELF_TIME_MIN_COVERAGE <= self_ms / sampled_ms <= SELF_TIME_MAX_COVERAGE
 
 
 def _conf_float(key: str, default: float) -> float:
@@ -1699,6 +1795,9 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 	aggregate: dict = {}
 	per_action_trees: list = []
 	sql_total_ms = 0.0
+	# SQL ms per action, aligned with per_action_trees (the wait sits inside python self time).
+	per_action_sql_ms: list = []
+	pending_action_findings: list = []
 
 	# Threshold config (read once)
 	prune_pct = _conf_float("optimus_tree_prune_threshold_pct", DEFAULT_PRUNE_THRESHOLD_PCT)
@@ -1730,7 +1829,8 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 			if isinstance(c, dict) and not is_error_log_hook_query(c.get("stack"))
 		]
 		# Track SQL time even if no pyi tree
-		sql_total_ms += sum(c.get("duration", 0) for c in calls)
+		action_sql_ms = sum(c.get("duration", 0) for c in calls)
+		sql_total_ms += action_sql_ms
 
 		# Action label / wall time from context if available, else fall back
 		action_label = "?"
@@ -1741,6 +1841,7 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 			action_wall_time = a.get("duration_ms") or 0
 
 		if pyi is None:
+			per_action_sql_ms.append(action_sql_ms)
 			per_action_trees.append({
 				"function": "<root>", "children": [],
 				"cumulative_ms": 0, "self_ms": 0, "kind": "python",
@@ -1776,10 +1877,11 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 			}
 
 		per_action_trees.append(tree)
+		per_action_sql_ms.append(action_sql_ms)
 
-		# Per-action findings
-		findings.extend(_emit_per_action_findings(
-			tree,
+		# Per-action findings wait for the session-wide self time check below.
+		pending_action_findings.append(dict(
+			tree=tree,
 			action_idx=action_idx,
 			action_label=action_label,
 			action_wall_time_ms=action_wall_time or tree.get("cumulative_ms", 0),
@@ -1794,6 +1896,11 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 			context.actions[action_idx]["call_tree_json"] = tree_json
 			context.actions[action_idx]["call_tree_size_bytes"] = len(tree_json)
 
+	# Per-action findings: self time is trusted only when it is consistent across the session.
+	self_time_trusted = _self_time_measured(per_action_trees)
+	for pending in pending_action_findings:
+		findings.extend(_emit_per_action_findings(**pending, self_time_trusted=self_time_trusted))
+
 	# Cross-action aggregation
 	repeated_findings, leaderboard = _aggregate_hot_frames(
 		per_action_trees, tracked_apps, installed_apps
@@ -1801,10 +1908,21 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 	findings.extend(repeated_findings)
 
 	# Donut breakdown
-	breakdown = _build_session_breakdown(per_action_trees, sql_total_ms=sql_total_ms)
+	breakdown = _build_session_breakdown(
+		per_action_trees, sql_total_ms=sql_total_ms, per_action_sql_ms=per_action_sql_ms
+	)
+
+	# Time was sampled but self time is missing or does not add up: hot frames show Total only.
+	sampled = any(t.get("cumulative_ms", 0) > 0 for t in per_action_trees)
+	if sampled and not _self_time_measured(per_action_trees):
+		context.warnings.append(
+			"Self time could not be measured: the call trees carry no own time per function, "
+			"or it does not add up to the sampled time, so hot frames show Total time only."
+		)
 
 	aggregate["hot_frames"] = leaderboard
 	aggregate["session_time_breakdown"] = breakdown
+	# python_ms already excludes each action's SQL wait (see _build_session_breakdown).
 	aggregate["total_python_ms"] = breakdown["python_ms"]
 	aggregate["total_sql_ms"] = breakdown["sql_ms"]
 

@@ -1567,11 +1567,28 @@
   }
   .row-finding strong { font-weight: 600; }
 
+  /* Text for screen readers only (the dash in a Self time cell). */
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+    overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+  }
+
   /* HOT-FRAMES - user-code rows get a yellow-tinted background to
      stand out from the framework rows the developer can't patch. */
   .hot-frames-table tr.is-hot td {
     background: rgba(254, 243, 199, 0.4);
   }
+  /* The hot-frames tables keep their single-line headers, so on a phone they are wider
+     than the card. Scroll the table inside this box so the page never scrolls sideways.
+     Same pattern as .phase2-func; paper cannot scroll, so print shows it in full. */
+  .hot-frames-scroll { max-width: 100%; overflow-x: auto; scrollbar-width: thin; }
+  /* Phones draw overlay scrollbars that vanish, so the box keeps a visible bar and a hint. */
+  .hot-frames-scroll::-webkit-scrollbar { height: 8px; }
+  .hot-frames-scroll::-webkit-scrollbar-track { background: var(--bg-tint); }
+  .hot-frames-scroll::-webkit-scrollbar-thumb { background: var(--ink-mute); border-radius: 4px; }
+  .hot-frames-swipe-hint { display: none; margin: 4px 0 0; font-size: 12px; color: var(--ink-mute); }
+  @media (max-width: 600px) { .hot-frames-swipe-hint { display: block; } }
+  @media print { .hot-frames-scroll { overflow-x: visible; } .hot-frames-swipe-hint { display: none; } }
 
   /* EMPTY-STATE - green "✓ Clear" card shown when slowest-queries
      (or any future section) has no rows. */
@@ -2533,15 +2550,24 @@
   </tr>
 {% endmacro %}
 
-{% macro hot_frame_row(row) %}
+{% macro hot_frame_row(row, show_self=false) %}
   {# v0.7.x Phase E: user-code rows get `is-hot` class so the
      `.hot-frames-table tr.is-hot td` CSS rule applies the
      yellow-tinted background. The flag is precomputed by
      renderer.build_hot_frames_table; defensive .get() in case the
-     dict was hand-built by an older test fixture. #}
+     dict was hand-built by an older test fixture.
+     show_self adds the Self time cell (user table only): the value when the row
+     recorded it (a measured 0 reads "0ms"), else a dash. #}
   <tr{% if row.is_hot %} class="is-hot"{% endif %}>
     <td class="fn-cell"><code>{{ row.display_name }}</code></td>
     <td class="num">{{ fmt_ms(row.total_ms) }}</td>
+    {% if show_self %}
+    {% if row.self_ms is number %}
+    <td class="num">{{ fmt_ms(row.self_ms) }}</td>
+    {% else %}
+    <td class="num"><span title="Self time not recorded for this report">-<span class="sr-only"> not recorded</span></span></td>
+    {% endif %}
+    {% endif %}
     <td class="num">{{ row.occurrences }}</td>
     <td class="num">{{ row.distinct_actions }}</td>
   </tr>
@@ -3499,22 +3525,32 @@
     </div>
     {% endif %}
     {% if report_data.hot_frames %}
+    {% set self_missing = report_data.hot_frames | rejectattr("self_ms", "number") | list %}
     <h3 class="hot-frames-group-title" id="hot-frames-app">Your app's code ({{ report_data.hot_frames | length }})</h3>
+    <p class="hot-frames-swipe-hint">Swipe the table sideways to see every column.</p>
+    <div class="hot-frames-scroll">
     <table class="data hot-frames-table">
       <thead>
         <tr>
           <th>Function</th>
-          <th class="num">Total time <small class="scope-tag">consolidated</small></th>
+          <th class="num" title="Time in the function including the functions it calls{% if not self_missing %}; recursion counted once{% endif %}.">Total time <small class="scope-tag">consolidated</small></th>
+          <th class="num" title="Time in the function's own lines, not in the functions it calls.{% if not self_missing %} The table is ordered by this column.{% endif %}">Self time</th>
           <th class="num" title="Sampler hits: proportional to call count but not exact. Use Line-Level Drilldown for a true call count.">Samples</th>
           <th class="num">Distinct actions</th>
         </tr>
       </thead>
       <tbody>
         {% for row in report_data.hot_frames %}
-          {{ hot_frame_row(row) }}
+          {{ hot_frame_row(row, true) }}
         {% endfor %}
       </tbody>
     </table>
+    </div>
+    {% if self_missing %}
+    <p class="small muted" id="hot-frames-self-note" style="margin: 6px 0 8px;">
+      Self time was not recorded for this report. Record the flow again with the current version to see it. The list is ordered by Total time, so it may not be the true top 20.
+    </p>
+    {% endif %}
     {% else %}
       <p class="small muted">No hot frames in your own app's code - all frames ran in framework code. Expand the block below to see what.</p>
     {% endif %}
@@ -3524,9 +3560,10 @@
       <summary class="small muted"><strong>{{ report_data.hot_frames_framework | length }}</strong> framework frame{{ "s" if report_data.hot_frames_framework | length != 1 else "" }} (click to expand) - <code>frappe</code>, <code>erpnext</code> and friends; the developer can't easily patch these</summary>
       <p class="small muted" style="margin: 6px 0 8px; font-style: italic;">
         Framework rows show <em>cumulative</em> time (includes nested
-        calls) wrapper self-time is sub-sampler-interval and
-        would round to 0ms otherwise.
+        calls), because a wrapper's own time is usually a small part of it.
       </p>
+      <p class="hot-frames-swipe-hint">Swipe the table sideways to see every column.</p>
+      <div class="hot-frames-scroll">
       <table class="data hot-frames-table">
         <thead>
           <tr>
@@ -3542,6 +3579,7 @@
           {% endfor %}
         </tbody>
       </table>
+      </div>
     </details>
     {% endif %}
   </section>
