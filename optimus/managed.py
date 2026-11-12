@@ -145,10 +145,15 @@ def _protect_file_source(doc):
 			_deny(artifact=True)
 
 
+def _optimus_installed():
+	"""Whether this site has Optimus installed (a helper, so the wrapper below stays a pass-through)."""
+	return "optimus" in frappe.get_installed_apps()
+
+
 def _wrap_file_input(original):
 	@wraps(original)
 	def before_insert(doc, *args, **kwargs):
-		active = "optimus" in frappe.get_installed_apps()
+		active = _optimus_installed()
 		supplied = doc.get("content")
 		checked = bool(doc.get("file_url")) or isinstance(supplied, (str, bytes, bytearray)) and bool(supplied)
 		remote_source = False

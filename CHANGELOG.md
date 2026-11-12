@@ -16,6 +16,64 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.153] - 2026-11-06
+
+### Fixed
+
+- Re-queued or retried analysis no longer gets recorded into the session you started next. Before, stopping a session and starting another could make the first one's analysis run count as part of the second.
+- A session's Python call trees now survive until it is analyzed. They were kept for only 10 minutes after each request, so a session that stopped by itself (the janitor stops one after 10 minutes without activity) was analyzed with no call trees at all. They, and the other per-request data (infrastructure readings, lock events, browser timings), are now kept for 6 hours. A report whose trees expired says so and names the 6 hour limit. One whose trees were never captured says that instead. SQL findings are never affected. Held in Redis, a session can take 10 MB to 400 MB while it waits (up to 200 requests of 50 KB to 2 MB each); if memory runs short Redis drops the oldest data first, which costs the call trees, not correctness.
+- Stop works after the 10-minute idle timeout. Before, it said "No active session" and left the session recording until the janitor stopped it, up to 16 minutes later. It now stops the session that timed out and analyzes it. That includes a bare Stop with no active session: it ends your latest timed-out recording. Stopping an old session from a stale tab never touches the session you are recording in another tab, and a finished session is never reopened.
+- The janitor and a Stop click no longer both analyze the same timed-out session.
+- Requests and background jobs dropped at the per-session recording limit no longer leave their Frappe Recorder entry in Redis forever, and no longer leave a profiler running on the worker thread. A cleanup that failed part-way keeps its index so the daily sweep can finish it, and the sweep now also removes the entries of sessions without a row and of finished sessions that a late background job left data on.
+- The start dialog now says the session stops after 10 minutes without activity, and that recording ends at the per-session request limit.
+
+### Action needed
+
+- Check the Frappe Recorder for old entries. Before this update, requests and background jobs dropped at the per-session recording limit left their full Recorder entry (SQL, form data and headers) in Redis with no expiry, and nothing removes those old entries. Check the size of the `recorder-requests` and `recorder-requests-sparse` Redis hashes by counting the rows in the Recorder page or running `frappe.cache.hlen("recorder-requests")` in `bench console`. If nobody uses the Recorder, clear them from the Recorder page or with `frappe.recorder.delete()` in `bench console`. Entries dropped after this update are removed automatically.
+
+### Upgrade note
+
+- Restart the web and worker processes after updating. Sessions still recording at the time of the update keep the old 10-minute lifetime for the data they already captured, and may lose their Python call trees.
+
+### Internal
+
+- The Redis lifetimes and stale-session limits now live in `optimus/timing.py`, with a test of how they relate.
+
+---
+
+## [0.12.151] - 2026-11-06
+
+### Fixed
+
+- Hot frames under "Your app's code" no longer show 0ms. The table now has a Total time column (the function and the functions it calls, with a recursive function counted once) and a Self time column (the function's own lines), and it is ordered by Self time. Since May 2026 the row time was the self time, which was never recorded, so every row read 0ms.
+- Self time is shown only when it adds up to the sampled time of the session. If it is missing or does not add up, the table shows Total only and is ordered by Total.
+- The hot-frames tables scroll inside their own box on a phone instead of widening the page. The box keeps a visible scrollbar and shows a "Swipe the table sideways" hint on phones.
+- A report that has no Self time recorded shows Total and a "-" for Self, with a note to record the flow again. This applies to every report analyzed before 0.12.151, because their self time was never recorded and cannot be recovered. Their list is ordered by Total, so it may not be the true top 20, and their Total may count a recursive function more than once.
+- Total Python Time on the session is now filled in: it is the Python time without the SQL time, taken off action by action and never below zero for an action, so one SQL-heavy action cannot erase the Python time of the others.
+- The call tree no longer shows "[self]" rows, and a function that spends time in its own lines shows "self ..." beside its time.
+- Repeated Hot Frame findings and the self-time hot path findings can appear again. They are raised only when Self time is recorded and adds up to the sampled time. Some Slow Hot Path findings are now titled as a self-time hot path. Self time is wall-clock, so a function that waits on I/O inside its own lines can still be flagged; the finding says so.
+
+---
+
+## [0.12.150] - 2026-11-06
+
+### Fixed
+
+- Line profiling no longer captures Optimus's own wrapper code when a Frappe function such as `frappe.get_doc` is picked. It now profiles the Frappe function itself. A function typed from Optimus's own code is refused with a visible reason, and a run where every pick is refused now lists each pick with its reason.
+- Decorated functions, including `@frappe.whitelist()` ones, now get line-profiling hits. Before, the pick pointed at the decorator's file while the worker profiled the real function, so every line showed 0 hits.
+- Optimus's own checks on File inserts, File reads, settings reads and job queueing no longer show up as the user's queries or redundant calls, even when they run inside the user's own code. The hide is fail-safe: an Optimus frame that is not a known entry point and has a developer's code outside it (for example a new wrapper that only forwards the user's call) keeps its query in the report, and the analysis logs an error that names the count, the session and the frame so the wrapper can be registered. A normal session that hides many of its own queries logs nothing above debug. The report footer now says how many queries from Optimus's own code were excluded, so a wrongly hidden query shows.
+- A form load, permission check or File insert that only runs Frappe code is no longer hidden as Optimus's own query. One malformed stack frame in a recording is skipped instead of failing the analysis.
+- Auto-arming a line-profiling pass after analysis now does nothing, without recording a failure, when none of the recommended functions can be profiled (for example Optimus's own code). The skip is logged at debug with the session. Picking them by hand still shows the reason.
+- An app whose name or folder contains "optimus" (for example `acme_optimus` or `myapp/optimus/`) is no longer hidden from the call tree and the line-profiling picker.
+
+### Upgrade notes
+
+- Restart the web server and the workers after updating: the wrappers are installed when the app loads.
+- To refresh a report made by an older version, use Regenerate Reports: it re-renders the stored recordings with the new rule. Recording the flow again is only certain to be needed for the repeated-call findings (stored sidecar data) and for stored line-profiling runs. Reports from sessions whose recordings were stored as reduced (degraded) snapshots are not corrected.
+- An editable install that is not under the bench's `apps/optimus/` folder or a `site-packages/` or `dist-packages/` folder is not recognised by the path rule.
+
+---
+
 ## [0.12.147] - 2026-11-06
 
 ### Internal
