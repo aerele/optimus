@@ -860,6 +860,15 @@ def read_tracked_apps() -> tuple[str, ...]:
 	return safe_call.best_effort(lambda: tuple(getattr(get_config(), "tracked_apps", ()) or ()), ())
 
 
+def own_query_app_lists() -> tuple[tuple[str, ...], frozenset[str] | None]:
+	"""``(tracked apps, installed apps)`` for the own-query rule's developer-code check, resolved the
+	way the call tree does: ``read_tracked_apps()`` and ``installed_apps_allowlist()``. Never raises
+	except for a job timeout. Off a bench the result is ``((), None)``, where nothing is told apart."""
+	from optimus.analyzers.base import installed_apps_allowlist
+
+	return read_tracked_apps(), installed_apps_allowlist()
+
+
 def get_ignored_apps() -> tuple[str, ...]:
 	"""Exclusion list: apps whose findings are dropped from the report entirely
 	(both Findings and Observations sections). Empty tuple means none dropped."""

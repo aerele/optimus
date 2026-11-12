@@ -11,7 +11,7 @@ from optimus import redis_keys
 from optimus.line_profile import capture
 from optimus.tests.phase2_cache_fake import Cache
 
-pytestmark = pytest.mark.rq
+pytestmark = [pytest.mark.rq, pytest.mark.usefixtures("suite_functions_are_user_code")]
 
 
 
