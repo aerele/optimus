@@ -8,6 +8,31 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.153] - 2026-11-06
+
+### Fixed
+
+- Re-queued or retried analysis no longer gets recorded into the session you started next. Before, stopping a session and starting another could make the first one's analysis run count as part of the second.
+- A session's Python call trees now survive until it is analyzed. They were kept for only 10 minutes after each request, so a session that stopped by itself (the janitor stops one after 10 minutes without activity) was analyzed with no call trees at all. They, and the other per-request data (infrastructure readings, lock events, browser timings), are now kept for 6 hours. A report whose trees expired says so and names the 6 hour limit. One whose trees were never captured says that instead. SQL findings are never affected. Held in Redis, a session can take 10 MB to 400 MB while it waits (up to 200 requests of 50 KB to 2 MB each); if memory runs short Redis drops the oldest data first, which costs the call trees, not correctness.
+- Stop works after the 10-minute idle timeout. Before, it said "No active session" and left the session recording until the janitor stopped it, up to 16 minutes later. It now stops the session that timed out and analyzes it. That includes a bare Stop with no active session: it ends your latest timed-out recording. Stopping an old session from a stale tab never touches the session you are recording in another tab, and a finished session is never reopened.
+- The janitor and a Stop click no longer both analyze the same timed-out session.
+- Requests and background jobs dropped at the per-session recording limit no longer leave their Frappe Recorder entry in Redis forever, and no longer leave a profiler running on the worker thread. A cleanup that failed part-way keeps its index so the daily sweep can finish it, and the sweep now also removes the entries of sessions without a row and of finished sessions that a late background job left data on.
+- The start dialog now says the session stops after 10 minutes without activity, and that recording ends at the per-session request limit.
+
+### Action needed
+
+- Check the Frappe Recorder for old entries. Before this update, requests and background jobs dropped at the per-session recording limit left their full Recorder entry (SQL, form data and headers) in Redis with no expiry, and nothing removes those old entries. Check the size of the `recorder-requests` and `recorder-requests-sparse` Redis hashes by counting the rows in the Recorder page or running `frappe.cache.hlen("recorder-requests")` in `bench console`. If nobody uses the Recorder, clear them from the Recorder page or with `frappe.recorder.delete()` in `bench console`. Entries dropped after this update are removed automatically.
+
+### Upgrade note
+
+- Restart the web and worker processes after updating. Sessions still recording at the time of the update keep the old 10-minute lifetime for the data they already captured, and may lose their Python call trees.
+
+### Internal
+
+- The Redis lifetimes and stale-session limits now live in `optimus/timing.py`, with a test of how they relate.
+
+---
+
 ## [0.12.151] - 2026-11-06
 
 ### Fixed
