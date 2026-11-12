@@ -113,9 +113,7 @@ class TestSettingsEnvelopeWrite:
 		# Version pins to the current SCHEMA_VERSION (= 1 in v0.12.0
 		# baseline). If the test starts failing on a future bump, that's
 		# the migration moment bump together with redis_schema.
-		from optimus.redis_schema import SCHEMA_VERSION
-
-		assert stored["_v"] == SCHEMA_VERSION
+		assert stored["_v"] == fresh.CONFIG_CACHE_ENVELOPE_VERSION
 		# Payload is the OptimusConfig.__dict__ shape same keys the
 		# OptimusConfig dataclass exposes.
 		assert isinstance(stored["data"], dict)
@@ -193,10 +191,8 @@ class TestSettingsEnvelopeDriftHandling:
 		# is then re-written with the current envelope shape.
 		assert cfg is not None
 		stored = cache.store.get(fresh._CACHE_KEY)
-		from optimus.redis_schema import SCHEMA_VERSION
-
 		assert isinstance(stored, dict)
-		assert stored.get("_v") == SCHEMA_VERSION, (
+		assert stored.get("_v") == fresh.CONFIG_CACHE_ENVELOPE_VERSION, (
 			f"after drift detection, cache should be re-written with the "
 			f"current envelope version; got: {stored!r}"
 		)

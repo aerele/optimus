@@ -275,3 +275,14 @@ def test_widget_logs_when_the_realtime_socket_wait_gives_up():
 		src = f.read()
 	body = src[src.index("function subscribeRealtime()"):src.index("function registerRealtimeHandlers()")]
 	assert "} else {" in body and "console.warn(" in body and "giving up" in body and "_diag(" not in body
+
+
+def test_the_stop_request_names_the_session_the_pill_shows():
+	"""A tab showing an old session must stop that one, never the one active in another tab."""
+	import re
+
+	with open(WIDGET_JS, encoding="utf-8") as f:
+		src = f.read()
+	call = re.search(r'frappe\.call\(\{\s*method: "optimus\.api\.stop",(.*?)callback:', src, re.S)
+	assert call, "the stop call was not found"
+	assert re.search(r"session_uuid:\s*currentState\.session_uuid\s*\|\|\s*undefined", call.group(1))
