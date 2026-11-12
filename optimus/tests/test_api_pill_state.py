@@ -71,8 +71,8 @@ def test_active_session_reports_recording(env):
 
 
 def test_tracked_session_not_masked_by_a_new_recording(env):
-	env(sessions=[_s("OS-1", "u1", "Ready")], active="u2")
-	assert api.pill_state(session_uuid="u1")["phase"] == "ready"
+	env(sessions=[_s("OS-1", "u1", "Analyzing")], active="u2")
+	assert api.pill_state(session_uuid="u1")["phase"] == "analyzing"
 	assert api.pill_state(session_uuid="u2")["phase"] == "recording"
 
 
