@@ -76,6 +76,44 @@ def test_tracked_session_not_masked_by_a_new_recording(env):
 	assert api.pill_state(session_uuid="u2")["phase"] == "recording"
 
 
+@pytest.mark.parametrize("sessions", [[_s("OS-1", "u1", "Ready")], [_s("OS-1", "u1", "Failed")], []])
+def test_finished_tracked_session_yields_to_a_new_recording(env, sessions):
+	env(sessions=sessions, active="u2")
+	out = api.pill_state(session_uuid="u1")
+	assert (out["phase"], out["session_uuid"], out["docname"]) == ("recording", "u2", "OS-1")
+
+
+def test_another_users_tracked_session_yields_to_the_callers_recording(env):
+	env(sessions=[_s("OS-9", "u1", "Analyzing", user="bob")], active="u2")
+	out = api.pill_state(session_uuid="u1")
+	assert (out["phase"], out["session_uuid"]) == ("recording", "u2")
+
+
+@pytest.mark.parametrize("run_status", ["Ready", "Recording"])
+def test_a_tracked_line_profiling_run_yields_to_a_new_recording(env, run_status):
+	env(
+		sessions=[_s("OS-1", "u1", "Ready")],
+		runs=[{"parent": "OS-1", "parenttype": "Optimus Session", "run_uuid": "r1", "status": run_status}],
+		active="u2",
+	)
+	out = api.pill_state(session_uuid="u1", run_uuid="r1")
+	assert (out["phase"], out["session_uuid"]) == ("recording", "u2")
+
+
+def test_an_analyzing_line_profiling_run_keeps_its_pill(env):
+	env(
+		sessions=[_s("OS-1", "u1", "Ready")],
+		runs=[{"parent": "OS-1", "parenttype": "Optimus Session", "run_uuid": "r1", "status": "Analyzing"}],
+		active="u2",
+	)
+	assert api.pill_state(session_uuid="u1", run_uuid="r1")["phase"] == "analyzing"
+
+
+def test_finished_tracked_session_stays_without_a_new_recording(env):
+	env(sessions=[_s("OS-1", "u1", "Ready")])
+	assert api.pill_state(session_uuid="u1")["phase"] == "ready"
+
+
 @pytest.mark.parametrize(
 	"status,phase",
 	[
