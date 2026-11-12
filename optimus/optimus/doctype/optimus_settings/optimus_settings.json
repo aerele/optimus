@@ -434,7 +434,7 @@
   },
   {
    "default": "10",
-   "description": "Each session can hold at most this many line profiling runs. Once it has that many, new runs are refused and auto-arm stops. Set it to 0 for no limit, but keep an eye on record size for heavy users. Reference values: Strict: 0  ·  Recommended: 10  ·  Relaxed: 5.",
+   "description": "Each session can hold at most this many line profiling runs. Once it has that many runs that are recording, analyzing or finished, new runs are refused and auto-arm stops. Failed runs do not count. Set it to 0 for no limit, but keep an eye on record size for heavy users. Reference values: Strict: 0  ·  Recommended: 10  ·  Relaxed: 5.",
    "fieldname": "phase2_max_runs_per_session",
    "fieldtype": "Int",
    "label": "Line Profiling: Max Runs per Session",
@@ -685,7 +685,7 @@
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-11-12 19:10:00.000000",
+ "modified": "2026-11-13 17:09:46.000000",
  "modified_by": "Administrator",
  "module": "Optimus",
  "name": "Optimus Settings",

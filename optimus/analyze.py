@@ -732,6 +732,7 @@ def _arm_phase2(docname: str, context) -> None:
 
 	from optimus.line_profile import capture as _lp_capture
 	from optimus.line_profile import picker as _lp_picker
+	from optimus.line_profile.jobs import runs_counted_by_limit
 	from optimus.settings import get_config
 
 	doc = frappe.get_doc("Optimus Session", docname)
@@ -743,7 +744,7 @@ def _arm_phase2(docname: str, context) -> None:
 	# (Strict-as-unlimited). Pre-v0.13.x the ``or 10`` swallowed 0
 	# and silently re-applied the default cap.
 	cap = int(getattr(get_config(), "phase2_max_runs_per_session", 10))
-	if cap > 0 and len(doc.get("phase_2_runs") or []) >= cap:
+	if cap > 0 and runs_counted_by_limit(doc.get("phase_2_runs")) >= cap:
 		return
 
 	# Redis failure refuses optional arming; atomic start rechecks ownership.
@@ -796,7 +797,7 @@ def _arm_phase2(docname: str, context) -> None:
 	from optimus.line_profile.jobs import _authorized
 	_lock_phase2_for_write(docname)
 	doc = frappe.get_doc("Optimus Session", docname)
-	if cap > 0 and len(doc.get("phase_2_runs") or []) >= cap:
+	if cap > 0 and runs_counted_by_limit(doc.get("phase_2_runs")) >= cap:
 		frappe.db.rollback()
 		return
 	if (getattr(doc, "user", None) != user or getattr(doc, "session_uuid", None) != context.session_uuid
