@@ -3867,6 +3867,9 @@
       &middot;
       <span class="warn-line">Admin report - contains sensitive data, internal use only</span>
     </p>
+    {% if own_excluded_note %}
+    <p class="own-excluded-note small muted" style="margin-top: 8px;">{{ own_excluded_note }}</p>
+    {% endif %}
     <p class="small" style="margin-top: 8px; color: var(--ink-mute);">
       Do NOT email, upload, or share this file externally without redacting
       it yourself. Query literals, request headers, form data and full

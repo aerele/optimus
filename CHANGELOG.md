@@ -22,6 +22,25 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.150] - 2026-11-06
+
+### Fixed
+
+- Line profiling no longer captures Optimus's own wrapper code when a Frappe function such as `frappe.get_doc` is picked. It now profiles the Frappe function itself. A function typed from Optimus's own code is refused with a visible reason, and a run where every pick is refused now lists each pick with its reason.
+- Decorated functions, including `@frappe.whitelist()` ones, now get line-profiling hits. Before, the pick pointed at the decorator's file while the worker profiled the real function, so every line showed 0 hits.
+- Optimus's own checks on File inserts, File reads, settings reads and job queueing no longer show up as the user's queries or redundant calls, even when they run inside the user's own code. The hide is fail-safe: an Optimus frame that is not a known entry point and has a developer's code outside it (for example a new wrapper that only forwards the user's call) keeps its query in the report, and the analysis logs an error that names the count, the session and the frame so the wrapper can be registered. A normal session that hides many of its own queries logs nothing above debug. The report footer now says how many queries from Optimus's own code were excluded, so a wrongly hidden query shows.
+- A form load, permission check or File insert that only runs Frappe code is no longer hidden as Optimus's own query. One malformed stack frame in a recording is skipped instead of failing the analysis.
+- Auto-arming a line-profiling pass after analysis now does nothing, without recording a failure, when none of the recommended functions can be profiled (for example Optimus's own code). The skip is logged at debug with the session. Picking them by hand still shows the reason.
+- An app whose name or folder contains "optimus" (for example `acme_optimus` or `myapp/optimus/`) is no longer hidden from the call tree and the line-profiling picker.
+
+### Upgrade notes
+
+- Restart the web server and the workers after updating: the wrappers are installed when the app loads.
+- To refresh a report made by an older version, use Regenerate Reports: it re-renders the stored recordings with the new rule. Recording the flow again is only certain to be needed for the repeated-call findings (stored sidecar data) and for stored line-profiling runs. Reports from sessions whose recordings were stored as reduced (degraded) snapshots are not corrected.
+- An editable install that is not under the bench's `apps/optimus/` folder or a `site-packages/` or `dist-packages/` folder is not recognised by the path rule.
+
+---
+
 ## [0.12.147] - 2026-11-06
 
 ### Internal
