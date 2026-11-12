@@ -904,6 +904,7 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		from optimus.recording_bundle import SnapshotUnavailable
 		if set(recording_uuids) - {rec.get("uuid") for rec in recordings}:
 			raise SnapshotUnavailable("snapshot_recording_missing")
+		recordings = _chronological(recordings)
 
 		if not recordings:
 			if session.get_session_meta(session_uuid) is None:
@@ -1353,6 +1354,31 @@ def _bundle_entries(bundle) -> dict:
 		return {}
 	entries = bundle.get("recordings")
 	return entries if isinstance(entries, dict) else bundle
+
+
+def _recording_start(recording: dict) -> datetime | None:
+	"""Recorder start time, or None when absent or unparseable. A timezone is
+	dropped, so an aware value is compared on its wall clock."""
+	value = recording.get("time")
+	if isinstance(value, str):
+		try:
+			value = datetime.fromisoformat(value)
+		except ValueError:
+			return None
+	if not isinstance(value, datetime):
+		return None
+	return value.replace(tzinfo=None)
+
+
+def _chronological(recordings: list[dict]) -> list[dict]:
+	"""Recordings in the order they started, uuid breaking ties, untimed last.
+	Finding action_refs are positions in this list, so only ``run`` sorts."""
+
+	def key(recording: dict):
+		start = _recording_start(recording)
+		return (start is None, start or datetime.min, str(recording.get("uuid") or ""))
+
+	return sorted(recordings, key=key)
 
 
 def _recorder_start(rec: dict) -> datetime | None:

@@ -8,6 +8,14 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.168] - 2026-11-06
+
+### Fixed
+
+- The per-action table, Steps to Reproduce and the AI-drafted steps now list actions in the order they ran. Before, they followed an internal random id, so a flow could read out of order. Background jobs sit on the same timeline, at the point they started. Sessions analysed before this release keep their old order; record again to get the new order.
+
+---
+
 ## [0.12.167] - 2026-11-07
 
 ### Internal
