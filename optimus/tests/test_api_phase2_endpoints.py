@@ -51,6 +51,7 @@ def _env(monkeypatch, *, user=OWNER, roles=("Optimus User",), perms=None, run_st
 		or [{"dotted_path": "app.mod.fn", "source": "freeform", "eligible": True}],
 		stop_line_profile_pass=lambda run_uuid, u: seen.capture.append(("stop", run_uuid, u)),
 		cleanup_run=lambda run_uuid: seen.cleaned.append(run_uuid),
+		has_input=lambda run_uuid: True,
 		CaptureError=type("CaptureError", (Exception,), {}),
 	))
 	install_module(monkeypatch, "optimus.line_profile.picker", SimpleNamespace(expand_hot_chain=lambda *a, **k: []))
@@ -58,7 +59,7 @@ def _env(monkeypatch, *, user=OWNER, roles=("Optimus User",), perms=None, run_st
 	def request(docname, session_uuid, run_uuid, requested_by, **kw):
 		seen.queued.append((docname, session_uuid, run_uuid, requested_by, kw))
 		return {"run_uuid": run_uuid, "session_uuid": session_uuid, "status": "Analyzing", "ran_inline": False, "reason": None}
-	install_module(monkeypatch, "optimus.line_profile.jobs", SimpleNamespace(request=request,
+	install_module(monkeypatch, "optimus.line_profile.jobs", SimpleNamespace(request=request, is_live=lambda row: False,
 		capture_creation=lambda *args: nullcontext()))
 	scheduler = types.ModuleType("frappe.utils.scheduler")
 	scheduler.is_scheduler_disabled = lambda: False
@@ -164,7 +165,8 @@ def test_batch_isolates_a_foreign_run(monkeypatch):
 	def request(docname, session_uuid, run_uuid, requested_by):
 		queued.append(run_uuid)
 		return {"run_uuid": run_uuid, "session_uuid": session_uuid, "status": "Analyzing", "ran_inline": False}
-	install_module(monkeypatch, "optimus.line_profile.jobs", SimpleNamespace(request=request))
+	install_module(monkeypatch, "optimus.line_profile.jobs", SimpleNamespace(request=request, is_live=lambda row: False))
+	install_module(monkeypatch, "optimus.line_profile.capture", SimpleNamespace(has_input=lambda run_uuid: True))
 	out = api.retry_phase2_analyzes_batch(run_uuids='["run-1", "run-2"]')
 	assert queued == ["run-1"] and not analyzed
 	assert out["tallies"] == {"Ready": 0, "Failed": 1, "Analyzing": 1, "Skipped": 0}

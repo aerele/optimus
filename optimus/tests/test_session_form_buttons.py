@@ -20,7 +20,8 @@ vm.createContext(ctx);
 vm.runInContext(fs.readFileSync(process.argv[1], "utf8"), ctx);
 let banner;
 ctx._phase2_armed_banner = (frm, html) => { banner = html; };
-const onloads = {allowed: {optimus_can_act: true}, refused: {optimus_can_act: false}, empty: {}, missing: undefined};
+const retryable = ["run-a", "run-b"];
+const onloads = {allowed: {optimus_can_act: true, optimus_phase2_retryable: retryable}, refused: {optimus_can_act: false}, empty: {}, missing: undefined};
 const out = {};
 for (const [status, runs] of [["Ready", [{run_uuid: "run-a", status: "Failed"}, {run_uuid: "run-b", status: "Failed"}]],
                               ["Ready", [{run_uuid: "run-c", status: "Recording"}]], ["Failed", []]]) {

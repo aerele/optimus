@@ -8,6 +8,14 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.171] - 2026-11-13
+
+### Fixed
+
+- The Optimus Session form no longer offers Retry Line Profiling Analyze on runs that cannot be retried. Runs that have used all four attempts, and runs whose captured data is gone (a recording that expired and was cleaned up), no longer show the button. Before, every click on them was refused or failed again. A direct retry of a run whose captured data is gone is now refused with a message to record a new pass, instead of being queued and failing. That refusal no longer uses up the retry rate limit, and a run still being analyzed attaches to that analysis as before. The form says how many runs cannot be retried and why. If the check cannot reach Redis, the form still loads and keeps offering Retry, and the server checks again when you click.
+
+---
+
 ## [0.12.168] - 2026-11-06
 
 ### Fixed
