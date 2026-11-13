@@ -212,21 +212,22 @@ def _redact_json_string(
 		if not isinstance(parsed, dict | list):
 			return text
 		redacted = _redact(parsed, extra_keys, depth, walk)
-	except RecursionError:
-		return walk.fail(NESTED_TOO_DEEP)
 	except ValueError:
 		return _unreadable_json(text, extra_keys, walk)
 	# A repeated key collapsed in the parse: the text still holds the first value.
 	return text if redacted == parsed and not repeated else json.dumps(redacted)
 
 
-_JSON_STRING_OR_BRACKET = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"|[\[\]{}]')
+# An unterminated string runs to the end of the text (``\Z``): a pattern that can fail to end
+# one is retried from every later escaped quote, which is quadratic.
+_JSON_STRING_OR_BRACKET = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*(?:"|\Z)|[\[\]{}]', re.S)
 
 
 def _json_nests_deeper_than(text: str, limit: int) -> bool:
 	"""Whether ``text`` opens more than ``limit`` brackets at once outside its strings. The
 	depth is read off the text, so the verdict is the same on every interpreter: how deep
-	``json.loads`` gets before a ``RecursionError`` is not (3.14 bounds the C stack instead)."""
+	``json.loads`` gets before a ``RecursionError`` is not (3.14 bounds the C stack instead).
+	Linear in the length of ``text``."""
 	open_now = 0
 	for token in _JSON_STRING_OR_BRACKET.finditer(text):
 		char = token.group()

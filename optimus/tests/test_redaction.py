@@ -10,6 +10,7 @@ is provably equivalent in both call paths.
 """
 
 import json
+import time
 
 import pytest
 
@@ -137,6 +138,35 @@ class TestRedactSensitive:
 	def test_brackets_inside_json_strings_do_not_count_as_nesting(self):
 		text = json.dumps({"note": "[" * 500 + "{" * 500, "k": "a\\\"[[[["})
 		assert redaction.redact_sensitive({"doc": text})["doc"] == text
+
+	def test_nesting_scan_reads_string_escapes_like_json(self):
+		limit = redaction._MAX_REDACT_DEPTH
+		extra = "[" * (limit + 1)
+		# An escaped backslash right before the closing quote ends the string, so the
+		# brackets after it are real nesting.
+		ended = r'["a\\"' + extra + "]" * (limit + 2)
+		assert redaction.redact_sensitive({"doc": ended})["doc"] == redaction.NESTED_TOO_DEEP
+		# An escaped quote and a [ escape keep the brackets inside their string.
+		inside = r'["\"' + "[" * 200 + r'", "[["]'
+		assert json.loads(inside)
+		assert redaction.redact_sensitive({"doc": inside})["doc"] == inside
+
+	def test_nesting_scan_leaves_unterminated_text_to_the_unreadable_path_and_counts_single_quoted_brackets(self):
+		many = "[" * (redaction._MAX_REDACT_DEPTH + 50)
+		unterminated = '{"a": "' + many + "}"
+		assert redaction.redact_sensitive({"doc": unterminated})["doc"] == unterminated
+		named = '{"password": "' + many + "}"
+		assert redaction.redact_sensitive({"doc": named})["doc"] == redaction.UNREADABLE_JSON
+		# Single quotes do not make a JSON string: its brackets are nesting, and it fails closed.
+		single = "{'a': '" + many + "'}"
+		assert redaction.redact_sensitive({"doc": single})["doc"] == redaction.NESTED_TOO_DEEP
+
+	def test_nesting_scan_is_linear_on_an_unterminated_string_full_of_escaped_quotes(self):
+		text = '["' + r"\"" * 100_000 + "]"
+		started = time.perf_counter()
+		assert redaction.redact_sensitive({"doc": text})["doc"] == text
+		# The scan once retried from every escaped quote: minutes at this size.
+		assert time.perf_counter() - started < 5
 
 	def test_set_value_value_named_by_sensitive_fieldname(self):
 		out = redaction.redact_sensitive({"doctype": "User", "fieldname": "new_password", "value": "Hunter2!"})
