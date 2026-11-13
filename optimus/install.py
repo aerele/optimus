@@ -95,9 +95,7 @@ def after_install():
 			pass
 
 	# The same idempotent seed runs after model sync on existing installs.
-	from optimus.patches.v0_12_0 import initialize_ai_refresh_store
-
-	initialize_ai_refresh_store.execute()
+	_seed_ai_refresh_store()
 
 
 def after_migrate():
@@ -114,9 +112,54 @@ def after_migrate():
 	table nothing is seeded and admission keeps failing closed."""
 	if not frappe.db.table_exists("Optimus AI Refresh Control"):
 		return
-	from optimus.patches.v0_12_0 import initialize_ai_refresh_store
+	_seed_ai_refresh_store()
 
-	initialize_ai_refresh_store.execute()
+
+def _seed_ai_refresh_store():
+	"""Seed the mutex and ensure the indexes without ever failing the calling hook.
+
+	A raise here would fail ``install-app`` and skip every later app's ``after_migrate``
+	hook. The next migrate retries, and admission fails closed meanwhile. The seed insert
+	runs under a savepoint. The index step does not: PostgreSQL's ``add_index`` COMMITs
+	first, which destroys any savepoint, so the step commits before it starts and a
+	failure there rolls back only what came after that commit. Both failures are logged once."""
+	from optimus.patches.v0_12_0 import initialize_ai_refresh_store as store
+
+	_run_guarded("optimus ai refresh store seed", store.seed_control, savepoint="optimus_ai_store_seed")
+	_run_guarded("optimus ai refresh store indexes", lambda: _commit_then(store.ensure_indexes))
+
+
+def _commit_then(step):
+	"""Frappe runs every app's ``after_migrate`` hook in one transaction. Committing first
+	puts the earlier hooks' work out of reach of the rollback a failed index step needs
+	on PostgreSQL (``add_index`` commits first anyway). With nothing written in the
+	transaction there is nothing to protect, so a migrate that changes nothing commits
+	nothing."""
+	if getattr(frappe.db, "transaction_writes", 1):
+		safe_commit()
+	step()
+
+
+def _run_guarded(title, step, savepoint=None):
+	try:
+		if savepoint:
+			frappe.db.savepoint(savepoint)
+		step()
+	except Exception:
+		from optimus import safe_call
+
+		_roll_back_failed_step(savepoint)
+		safe_call.log_hook_error(title)
+
+
+def _roll_back_failed_step(savepoint):
+	try:
+		if savepoint:
+			frappe.db.rollback(save_point=savepoint)
+		else:
+			frappe.db.rollback()
+	except Exception:
+		pass
 
 
 # v0.13.x: the Frappe-organization-maintained apps seeded into Ignored

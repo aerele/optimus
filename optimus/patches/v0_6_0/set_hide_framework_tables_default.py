@@ -13,6 +13,8 @@ next request sees the new value without a bench restart.
 
 import frappe
 
+from optimus.settings import invalidate_config
+
 
 def execute():
 	if not frappe.db.exists("DocType", "Optimus Settings"):
@@ -37,7 +39,7 @@ def execute():
 		return
 
 	try:
-		frappe.cache.delete_value("optimus_settings_cached")
+		invalidate_config()
 	except Exception:
 		pass
 	frappe.db.commit()

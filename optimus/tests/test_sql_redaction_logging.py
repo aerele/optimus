@@ -6,6 +6,12 @@ mostly could not read. Counts and exception classes only, never SQL. Pure, no Fr
 
 import pytest
 
+from optimus.tests.test_recorder_redaction_patch import (  # noqa: F401
+	_FakeRecorderInstance,
+	_Recorder,
+	_stub_recorder,
+)
+
 S = "Zq9xK2vLm7Wp"
 
 
@@ -19,7 +25,6 @@ def fresh_log(monkeypatch):
 
 def test_unreadable_settings_are_logged_once_and_defaults_still_mask(monkeypatch, caplog, fresh_log):
 	from optimus import settings as _settings
-	from optimus.tests.test_recorder_redaction_patch import _FakeRecorderInstance, _Recorder
 
 	def broken():
 		raise TimeoutError("cache down")

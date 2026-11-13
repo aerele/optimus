@@ -303,11 +303,11 @@
   {
    "fieldname": "sensitivity_description",
    "fieldtype": "HTML",
-   "options": "<p class=\"text-muted small\">Pick a preset to set every tunable threshold across Optimus in one move analyzer thresholds (the original nine), capture knobs (max queries / sampler interval / background-job wait), retention, display filters, line profiling defaults and the AI auto-suggest cap. <b>Strict</b> catches more (more findings, more noise) and keeps data longer; <b>Relaxed</b> catches less and prunes faster; <b>Recommended</b> is the shipped default and automatically tracks future tuning. Choose <b>Custom</b> to edit the individual fields yourself they stay locked under the named presets.</p>"
+   "options": "<p class=\"text-muted small\">Pick a preset to set every tunable threshold across Optimus in one move analyzer thresholds, capture knobs (max queries / sampler interval / background-job wait), retention, display filters, line profiling defaults and the AI auto-suggest cap. <b>Strict</b> catches more (more findings, more noise) but keeps sessions only 1 day; <b>Relaxed</b> catches less and keeps them 7 days; <b>Recommended</b> keeps them 30 days, is the shipped default and automatically tracks future tuning. Choose <b>Custom</b> to edit the individual fields yourself they stay locked under the named presets.</p>"
   },
   {
    "default": "Recommended",
-   "description": "A preset for how sensitive the detection thresholds below should be. The named presets (Strict, Recommended, Relaxed) set those thresholds for you and keep the individual fields read-only. Recommended follows the shipped defaults across upgrades. Switch to Custom to set the thresholds by hand.",
+   "description": "A preset for the fields below that list reference values (retention, capture, display, detection thresholds, line profiling and the AI auto-suggest cap). The named presets (Strict, Recommended, Relaxed) set those fields for you and keep them read-only. Recommended follows the shipped defaults across upgrades. Switch to Custom to set them by hand.",
    "fieldname": "config_profile",
    "fieldtype": "Select",
    "label": "Sensitivity Profile",
@@ -434,7 +434,7 @@
   },
   {
    "default": "10",
-   "description": "Each session keeps at most this many line profiling runs in full. Once there are more, the oldest run's full results are moved to a private file and only its summary row stays on the record. Set it to 0 for no limit, but keep an eye on record size for heavy users. Reference values: Strict: 0  ·  Recommended: 10  ·  Relaxed: 5.",
+   "description": "Each session can hold at most this many line profiling runs. Once it has that many, new runs are refused and auto-arm stops. Set it to 0 for no limit, but keep an eye on record size for heavy users. Reference values: Strict: 0  ·  Recommended: 10  ·  Relaxed: 5.",
    "fieldname": "phase2_max_runs_per_session",
    "fieldtype": "Int",
    "label": "Line Profiling: Max Runs per Session",
@@ -483,11 +483,11 @@
   {
    "fieldname": "ai_description",
    "fieldtype": "HTML",
-   "options": "<p class=\"text-muted small\">Enable optional background AI for eligible findings and Steps to Reproduce. <b>Refresh AI suggestions</b> queues work after profiling is Ready; saved profiling results remain available if AI fails. Requests can include finding titles, metrics, file and function names, source-code windows, schema names and SQL structure. <b>Code and context are sent to your configured provider.</b> A local endpoint keeps requests within the environment you control. <a href=\"https://github.com/aerele/optimus/blob/main/docs/AI-FIXING.md\" target=\"_blank\" rel=\"noopener noreferrer\">Read the data-flow and deployment guide</a> before enabling AI.</p>"
+   "options": "<p class=\"text-muted small\"><b>Enabling AI also sends findings and Steps to Reproduce automatically.</b> When a session reaches Ready, its findings are sent to your configured provider, and so are its Steps to Reproduce while <i>Humanized Steps to Reproduce</i> is on (the default), up to the automatic-suggestion limit below. <i>Send raw values to the AI provider</i> in Privacy & Operations controls whether raw values are included. To stop automatic sending, untick <i>Run AI suggestions automatically after profiling</i>; you can still use Refresh AI suggestions by hand.</p><p class=\"text-muted small\">Enable optional background AI for eligible findings and Steps to Reproduce. <b>Refresh AI suggestions</b> queues work after profiling is Ready; saved profiling results remain available if AI fails. Requests can include finding titles, metrics, file and function names, source-code windows, schema names and SQL structure. <b>Code and context are sent to your configured provider.</b> A local endpoint keeps requests within the environment you control. <a href=\"https://github.com/aerele/optimus/blob/main/docs/AI-FIXING.md\" target=\"_blank\" rel=\"noopener noreferrer\">Read the data-flow and deployment guide</a> before enabling AI.</p>"
   },
   {
    "default": "0",
-   "description": "The master on/off switch for AI fix suggestions. Off by default.",
+   "description": "The master on/off switch for AI fix suggestions. Off by default. When on, findings and Steps to Reproduce are also sent to your AI provider automatically when a session reaches Ready; untick the automatic option below to stop that.",
    "fieldname": "ai_enabled",
    "fieldtype": "Check",
    "label": "Enable AI Fix Suggestions"
@@ -613,7 +613,7 @@
   {
    "default": "1",
    "depends_on": "eval:doc.ai_enabled",
-   "description": "After profiling is saved as Ready, queue the finding fixes and/or captured Steps selected above. This uses provider tokens and requires a background worker. Turning off stops further queued or running automatic work; an already dispatched call may still finish. If line profiling is armed, its completion can start this work. When off, request AI through Refresh AI suggestions.",
+   "description": "On by default. Untick to turn automatic sending off. After profiling is saved as Ready, the finding fixes and/or captured Steps selected above are queued and sent automatically to your AI provider (Send raw values to the AI provider, below, controls raw values). This uses provider tokens and requires a background worker. Turning off stops further queued or running automatic work; an already dispatched call may still finish. If line profiling is armed, its completion can start this work. When off, request AI through Refresh AI suggestions.",
    "fieldname": "ai_auto_suggest",
    "fieldtype": "Check",
    "label": "Run AI suggestions automatically after profiling"
@@ -685,7 +685,7 @@
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-11-06 12:00:00.000000",
+ "modified": "2026-11-12 19:10:00.000000",
  "modified_by": "Administrator",
  "module": "Optimus",
  "name": "Optimus Settings",

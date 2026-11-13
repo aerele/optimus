@@ -98,8 +98,8 @@ is a separate, deliberate commit.
 
 ## Memory + plans
 
-This repo uses a local `/Users/navin/.claude/...` memory + plan
-folder to track work across sessions. External contributors don't
+Maintainers keep a local memory + plan folder (outside this
+repo) to track work across sessions. External contributors don't
 need to interact with these; they're maintainer artifacts.
 
 ## Frozen surfaces
@@ -107,10 +107,10 @@ need to interact with these; they're maintainer artifacts.
 These areas are deliberately stable and should NOT be modified
 without a separate design discussion:
 
-- **Capture pipeline** (`capture.py`, `recorder.py`,
-  `infra_capture.py`, `analyze.py`) - was frozen at v0.3.0; bug
-  fixes only. New behaviour belongs at render time
-  (`renderer.py`, `report_context.py`).
+- **Capture pipeline** (`capture.py`,
+  `infra_capture.py`, `analyze.py`) - bug fixes only. New
+  behaviour belongs at render time (the `renderer/` package,
+  `report_context.py`).
 - **DocType field schemas** - additive only; column removals
   require a versioned patch in `optimus/patches/v_*`.
 - **Public API surface** in `api.py` - whitelisted endpoints are
@@ -124,7 +124,7 @@ The local subscription CLIs (Codex and Claude) are a transport, not a provider. 
 
 ## Areas that welcome contribution
 
-- `renderer.py` UX polish (panels, layout, accessibility).
+- `renderer/` UX polish (panels, layout, accessibility).
 - New analyzers in `analyzers/` (each is a pure function that
   consumes the analyze-context and emits findings).
 - Test coverage gaps - especially around rare data shapes.

@@ -196,6 +196,24 @@ def test_index_suggestions_skips_a_statement_masked_whole(monkeypatch, empty_con
 	assert result.findings == []
 
 
+def test_index_suggestions_reads_the_masked_key_from_redaction(monkeypatch, empty_context):
+	assert index_suggestions.LITERALS_MASKED_KEY == redaction.LITERALS_MASKED_KEY
+	monkeypatch.setattr(index_suggestions, "LITERALS_MASKED_KEY", "renamed_masked_key")
+	_install_fake_recorder_module(monkeypatch, lambda query: pytest.fail("optimizer called"))
+	query = "SELECT * FROM tabLead WHERE status = '<REDACTED>'"
+	calls = [
+		{
+			"query": query,
+			"duration": 1,
+			"renamed_masked_key": True,
+			"normalized_query": "SELECT 1",
+			"stack": [],
+		}
+	]
+	result = index_suggestions.analyze([{"uuid": "i", "calls": calls}], empty_context)
+	assert result.findings == []
+
+
 # --- AI raw-value gate -------------------------------------------------------------------------------
 
 

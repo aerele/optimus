@@ -1,9 +1,9 @@
 # `optimus.renderer`: package layout & extraction recipe
 
 `optimus.renderer` turns a fully-analyzed `Optimus Session` row into the
-self-contained safe-report HTML. v0.10.0+ it's a **package** that
+self-contained report HTML. v0.10.0+ it's a **package** that
 aggregates per-concern submodules; pre-v0.10.0 it was a single 4,958-line
-`optimus/renderer.py` file.
+module.
 
 This README is the future-author roadmap: why the package exists, the
 recipe to extract more clusters, the structural-snapshot canary that
@@ -15,8 +15,7 @@ waiting for a follow-up PR.
 The monolith was the app's biggest maintainability hazard. Touching one
 helper rippled across 15+ callers spread over 3,000+ lines of context;
 code review became "find the section" before it became "review the
-change"; new contributors faced a steep on-ramp; the safe-report layer
-is exactly where a dev shop using Optimus would want to extend and it
+change"; new contributors faced a steep on-ramp; the report layer
 was the hardest place to extend safely.
 
 The package split does **not** rewrite logic it relocates self-contained
@@ -165,7 +164,7 @@ Per the user's standing constraint
 ([[feedback_report_template_frozen]]),
 `optimus/templates/report.html` is frozen don't restyle markup, CSS,
 labels, section IDs, or class names without an explicit user request.
-Per [[feedback_safe_report_self_contained]], the rendered HTML must stay
+The rendered HTML must stay
 fully offline-safe (no `<script>` tags, no CDN / remote `src=` /
 `href=` resource loads, no `@import`, no `url(http…)` in CSS). Both
 guarantees are locked by tests:
