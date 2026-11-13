@@ -29,13 +29,9 @@ def form_key_extras() -> tuple[str, ...]:
 	return best_effort(_read_extras, (), on_error=log_extras_failed)
 
 
-def log_extras_failure(error: BaseException) -> None:
-	"""One ERROR line per error class: the operator's own sensitive names were not applied."""
-	log_extras_failed(type(error).__name__)
-
-
 def log_extras_failed(name: str) -> None:
-	"""``log_extras_failure`` from the error class name. Never raises (a job timeout excepted)."""
+	"""One ERROR line per error class name: the operator's own sensitive names were not applied.
+	Never raises (an RQ job timeout excepted)."""
 	if name in _logged:
 		return
 	_logged.add(name)

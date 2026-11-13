@@ -22,34 +22,21 @@ def log_redaction_failure(error: BaseException) -> None:
 _logged_capture: set[tuple[str, str]] = set()
 
 
-def log_capture_failure(field: str, error: BaseException | str) -> None:
+def log_capture_failure(field: str, error_name: str) -> None:
 	"""One ERROR line per (field, error class) per process: a recorded request field could not be
-	masked, so a placeholder was stored instead. The class only, never the value. ``error`` may be
-	the class name. Never raises (an RQ job timeout excepted)."""
-	name = error if isinstance(error, str) else type(error).__name__
-	key = (field, name)
+	masked, so a placeholder was stored instead. The error class name only, never the value. Never
+	raises (an RQ job timeout excepted)."""
+	key = (field, error_name)
 	if key in _logged_capture:
 		return
 	_logged_capture.add(key)
 
 	def _write() -> None:
 		logging.getLogger(__name__).error(
-			"Optimus could not redact the recorded request %s (%s); a placeholder was stored", field, name
+			"Optimus could not redact the recorded request %s (%s); a placeholder was stored", field, error_name
 		)
 
 	best_effort(_write, None)
-
-
-def log_extras_unreadable(error: BaseException) -> None:
-	"""The Optimus Settings lists could not be read, so only the default names are masked."""
-	name = "extras:" + type(error).__name__
-	if name in _logged:
-		return
-	_logged.add(name)
-	logging.getLogger(__name__).warning(
-		"Optimus could not read its sensitive-name settings, masking the default names only: %s",
-		type(error).__name__,
-	)
 
 
 # A report that omitted or masked whole at least this share of its statements is logged.

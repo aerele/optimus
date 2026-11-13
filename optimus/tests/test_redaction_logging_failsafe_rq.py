@@ -45,3 +45,43 @@ class TestJobTimeouts:
 		monkeypatch.setattr(settings, "get_config", boom)
 		with pytest.raises(JobTimeoutException):
 			redaction_extras.form_key_extras()
+
+
+class TestRecorderPathJobTimeouts:
+	def test_a_timeout_in_the_settings_read_stops_init(self, monkeypatch):
+		from rq.timeouts import JobTimeoutException
+
+		def boom():
+			raise JobTimeoutException("slow")
+
+		monkeypatch.setattr(settings, "get_config", boom)
+		with pytest.raises(JobTimeoutException):
+			_captured("/x", "x", {"a": "v"}, {"b": "v"})
+
+	def test_a_timeout_in_the_settings_read_stops_register(self, monkeypatch):
+		from rq.timeouts import JobTimeoutException
+
+		def boom():
+			raise JobTimeoutException("slow")
+
+		Recorder = _Recorder()
+		rec = Recorder.__new__(Recorder)
+		Recorder.__init__(rec)
+		monkeypatch.setattr(settings, "get_config", boom)
+		with pytest.raises(JobTimeoutException):
+			rec.register({"query": "select 1"})
+		assert rec.calls == []
+
+	def test_a_timeout_in_the_redaction_stops_init_and_leaves_no_raw_field(self, monkeypatch):
+		from rq.timeouts import JobTimeoutException
+
+		def boom(payload, **kwargs):
+			raise JobTimeoutException("slow")
+
+		monkeypatch.setattr(redaction, "redact_sensitive", boom)
+		Recorder = _Recorder()
+		rec = Recorder.__new__(Recorder)
+		rec.path, rec.cmd, rec.form_dict, rec.headers = "/x", "x", {"p": "RAWSECRET"}, {"h": "RAWSECRET"}
+		with pytest.raises(JobTimeoutException):
+			Recorder.__init__(rec)
+		assert "RAWSECRET" not in str(rec.form_dict) + str(rec.headers)

@@ -48,6 +48,19 @@ class TestReadExtras:
 		assert "OMITTED" not in query.upper()
 
 
+class TestReadExtrasLogging:
+	def test_a_failing_settings_read_is_logged_once(self, broken_settings, caplog):
+		Recorder = _Recorder()
+		with caplog.at_level("ERROR"):
+			for _ in range(2):
+				rec = Recorder.__new__(Recorder)
+				Recorder.__init__(rec)
+				rec.register({"query": "select 1"})
+		lines = [r for r in caplog.records if "sensitive_form_keys" in r.getMessage()]
+		assert len(lines) == 1 and "RuntimeError" in lines[0].getMessage()
+		assert "db gone" not in caplog.text
+
+
 class TestCaptureLogging:
 	def test_a_failing_logger_never_breaks_the_request(self, monkeypatch, broken_logger):
 		def boom(payload, **kwargs):
