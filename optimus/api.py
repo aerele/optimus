@@ -2070,6 +2070,13 @@ def start_line_profile_pass(session_uuid: str, picks: str | list, auto_expand: b
 	}
 
 
+def _run_pick_entry(resolved: dict) -> dict:
+	entry = {"dotted_path": resolved["dotted_path"], "source": resolved.get("source", "freeform")}
+	if not resolved.get("eligible"):
+		entry.update(eligible=False, ineligible_reason=str(resolved.get("ineligible_reason") or ""))
+	return entry
+
+
 def _persist_phase2_capture(parent, parent_docname, session_uuid, run_uuid, user, prepared):
 	"""Publish prepared input and save its actor under the caller's admission lock."""
 	from optimus import ai_fix as _ai_fix
@@ -2085,10 +2092,7 @@ def _persist_phase2_capture(parent, parent_docname, session_uuid, run_uuid, user
 			parent.append("phase_2_runs", {
 				"run_uuid": run_uuid, "recording_user": user,
 				"status": "Recording", "started_at": now_datetime(),
-				"picks_json": frappe.as_json([
-					{"dotted_path": r["dotted_path"], "source": r.get("source", "freeform")}
-					for r in resolved if r.get("eligible")
-				]),
+				"picks_json": frappe.as_json([_run_pick_entry(r) for r in resolved]),
 			})
 			with capture_creation(parent_docname, run_uuid, user):
 				_save_parent_bypassing_perms(parent)

@@ -8,6 +8,14 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.162] - 2026-11-07
+
+### Fixed
+
+- Automatic line profiling now skips a function it cannot read, or one longer than 5,000 lines, instead of giving up on the whole run. It also takes the 100 slowest functions when more than 100 qualify, instead of refusing, and skips a function that would push the run over the source size limits, or that comes from an app that is not installed. The skipped functions are named by their full dotted path with the reason for each: a short summary in an alert when the run starts, and the complete list in a collapsible notice on the session form, which stays after the alert is gone. A function whose code fails to load, or whose captured source does not validate, is skipped too instead of stopping the run, and the reason shown is fixed text, never the raw error. When nothing at all could be captured, no run starts: one line with the first reasons is written to the log and the form shows a notice listing every function and why. A function you pick yourself is still refused with a message naming it. The 5,000-line limit now also applies to functions you pick yourself: a longer one is refused with that reason, where before it was accepted up to the 100,000-line run limit. Nothing to run on upgrade.
+
+---
+
 ## [0.12.149] - 2026-11-06
 
 ### Fixed
