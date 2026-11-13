@@ -54,6 +54,8 @@ def _action_dotted_entry(action) -> str | None:
 	if not isinstance(action, dict):
 		return None
 	event_type = action.get("event_type")
+	if isinstance(event_type, str):
+		event_type = event_type.strip()
 	path = (action.get("path") or "").strip()
 	if not path:
 		return None

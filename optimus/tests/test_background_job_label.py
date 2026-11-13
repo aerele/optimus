@@ -272,6 +272,18 @@ def test_source_resolution_strips_the_query_from_a_job_path(event_type):
 	assert source_resolution._action_dotted_entry(action) == "pkg.mod.fn"
 
 
+@pytest.mark.parametrize(
+	("event_type", "path", "expected"),
+	[
+		(" RQ Job ", "pkg.mod.fn", "pkg.mod.fn"),
+		("RQ Job\n", "pkg.mod.fn", "pkg.mod.fn"),
+		(" HTTP Request", "/api/method/pkg.mod.fn?x=1", "pkg.mod.fn"),
+	],
+)
+def test_source_resolution_ignores_whitespace_around_the_event_type(event_type, path, expected):
+	assert source_resolution._action_dotted_entry({"event_type": event_type, "path": path}) == expected
+
+
 @pytest.mark.parametrize("path", ["?x=1", " ?x=1"])
 def test_source_resolution_returns_none_for_a_job_path_that_is_only_a_query(path):
 	assert source_resolution._action_dotted_entry({"event_type": "Background Job", "path": path}) is None
