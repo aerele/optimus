@@ -43,9 +43,9 @@ from optimus.renderer.source import (
 def _action_dotted_entry(action) -> str | None:
 	"""Derive an action's dotted entry-point path, or ``None``.
 
-	- RQ Job: ``action["path"]`` is already the job method (Frappe's
+	- Background job: ``action["path"]`` is already the job method (Frappe's
 	  recorder stores ``frappe.job.method`` there e.g.
-	  ``ugly_code.python.common.bg_recheck_users``).
+	  ``ugly_code.python.common.bg_recheck_users``), with any ``?query`` stripped.
 	- HTTP Request whose path is ``/api/method/<dotted>``: the ``<dotted>``
 	  segment, with any ``?query`` and trailing ``/...`` stripped.
 	- anything else (non-``/api/method`` HTTP, empty/missing path, non-dict
@@ -58,7 +58,7 @@ def _action_dotted_entry(action) -> str | None:
 	if not path:
 		return None
 	if is_background_job(event_type):
-		return path
+		return path.split("?", 1)[0].strip() or None
 	if event_type == "HTTP Request" and path.startswith("/api/method/"):
 		rest = path[len("/api/method/"):]
 		rest = rest.split("?", 1)[0].split("/", 1)[0].strip().strip(".")

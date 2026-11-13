@@ -183,6 +183,13 @@ def test_humanizer_actions_label_the_job(send_raw):
 	assert ai_privacy.private_action(actions[0])["label"] == JOB_LABEL
 
 
+def test_humanizer_actions_coerce_a_none_event_type_to_empty_string(monkeypatch):
+	real = ai_privacy.action_recording
+	monkeypatch.setattr(ai_privacy, "action_recording", lambda rec: {**real(rec), "event_type": None})
+	actions = analyze.actions_for_humanizer([_job_v16()], send_raw=True)
+	assert actions[0]["event_type"] == ""
+
+
 def test_steps_prompt_names_the_job_in_private_mode():
 	actions = analyze.actions_for_humanizer([_job_v16()], send_raw=False)
 	_, messages = ai_fix._build_steps_messages(actions, session_title="")
@@ -259,9 +266,15 @@ def test_source_resolution_reads_the_job_path():
 	assert source_resolution._action_dotted_entry(action) == "erpnext.x.y"
 
 
-def test_source_resolution_keeps_a_job_path_as_recorded():
-	action = {"event_type": "Background Job", "path": "erpnext.x.y?z"}
-	assert source_resolution._action_dotted_entry(action) == "erpnext.x.y?z"
+@pytest.mark.parametrize("event_type", ["Background Job", "RQ Job"])
+def test_source_resolution_strips_the_query_from_a_job_path(event_type):
+	action = {"event_type": event_type, "path": "pkg.mod.fn?x=1"}
+	assert source_resolution._action_dotted_entry(action) == "pkg.mod.fn"
+
+
+@pytest.mark.parametrize("path", ["?x=1", " ?x=1"])
+def test_source_resolution_returns_none_for_a_job_path_that_is_only_a_query(path):
+	assert source_resolution._action_dotted_entry({"event_type": "Background Job", "path": path}) is None
 
 
 def test_private_action_keeps_http_request_event_type():

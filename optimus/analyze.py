@@ -3384,7 +3384,7 @@ def actions_for_humanizer(recordings: list[dict], *, send_raw: bool | None = Non
 		doctype = doctype or fd.get("dt") or fd.get("doc_type") or ""
 		out.append({
 			"label": per_action.humanized_label(rec) or "",
-			"event_type": rec.get("event_type", ""),
+			"event_type": rec.get("event_type") or "",
 			"cmd": (rec.get("cmd") or "").strip(),
 			"path": (rec.get("path") or "").strip(),
 			"method": (rec.get("method") or "").strip(),
