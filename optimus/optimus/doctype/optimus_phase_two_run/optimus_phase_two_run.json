@@ -48,7 +48,8 @@
    "in_list_view": 1,
    "label": "Status",
    "options": "Recording\nAnalyzing\nReady\nFailed",
-   "read_only": 1
+   "read_only": 1,
+   "search_index": 1
   },
   {
    "fieldname": "started_at",
@@ -161,7 +162,7 @@
  "index_web_pages_for_search": 0,
  "istable": 1,
  "links": [],
- "modified": "2026-05-07 12:00:00.000000",
+ "modified": "2026-11-07 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Optimus",
  "name": "Optimus Phase Two Run",

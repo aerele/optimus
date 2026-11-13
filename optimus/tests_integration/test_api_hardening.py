@@ -62,5 +62,4 @@ class TestApiHardening(FrappeTestCase):
 			self.assertTrue(result['accepted'])
 			self.assertEqual(len(frappe.cache.lrange(xhr, 0, -1)), 1)
 		finally:
-			frappe.cache.delete(xhr, vitals)
-			frappe.cache.delete_value(meta)
+			frappe.cache.delete_value([xhr, vitals, meta])

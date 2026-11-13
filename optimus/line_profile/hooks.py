@@ -14,7 +14,7 @@ No SQL recording, pyinstrument or sidecar wraps: only line-level timings.
 
 import frappe
 
-from optimus import hooks_callbacks
+from optimus import hooks_callbacks, safe_call
 from optimus.line_profile import capture
 
 
@@ -93,7 +93,7 @@ def before_request_line_profile(*args, **kwargs) -> None:
 
 			_mon = getattr(_sys, "monitoring", None)
 			if _mon is not None and _mon.get_tool(_mon.PROFILER_ID) == "line_profiler":
-				frappe.logger().warning(
+				safe_call.log_error_line(
 					"optimus.line_profile.before_request: reclaiming orphan "
 					"tool 2 from a prior request that skipped teardown."
 				)
@@ -194,7 +194,7 @@ def before_job_line_profile(method=None, kwargs=None, **rest) -> None:
 
 			_mon = getattr(_sys, "monitoring", None)
 			if _mon is not None and _mon.get_tool(_mon.PROFILER_ID) == "line_profiler":
-				frappe.logger().warning(
+				safe_call.log_error_line(
 					"optimus.line_profile.before_job: reclaiming orphan "
 					"tool 2 from a prior job that skipped teardown."
 				)

@@ -6,6 +6,12 @@ mostly could not read. Counts and exception classes only, never SQL. Pure, no Fr
 
 import pytest
 
+from optimus.tests.test_recorder_redaction_patch import (  # noqa: F401
+	_FakeRecorderInstance,
+	_Recorder,
+	_stub_recorder,
+)
+
 S = "Zq9xK2vLm7Wp"
 
 
@@ -17,22 +23,24 @@ def fresh_log(monkeypatch):
 	return redaction_log
 
 
-def test_unreadable_settings_are_logged_once_and_defaults_still_mask(monkeypatch, caplog, fresh_log):
+def test_unreadable_settings_omit_the_query_and_log_only_the_exception_class(monkeypatch):
+	from optimus import safe_call
 	from optimus import settings as _settings
-	from optimus.tests.test_recorder_redaction_patch import _FakeRecorderInstance, _Recorder
+	from optimus.redaction import OMITTED_SQL
 
 	def broken():
 		raise TimeoutError("cache down")
 
+	lines = []
 	monkeypatch.setattr(_settings, "get_config", broken, raising=False)
+	monkeypatch.setattr(safe_call, "log_error_line", lines.append)
 	fake = _FakeRecorderInstance()
-	with caplog.at_level("WARNING"):
-		for _ in range(3):
-			_Recorder().register(fake, {"query": f"SELECT 1 WHERE password = '{S}'", "duration": 0.1})
-	assert all(S not in call["query"] for call in fake.calls)
-	warned = [r for r in caplog.records if "sensitive-name settings" in r.getMessage()]
-	assert len(warned) == 1 and "TimeoutError" in warned[0].getMessage()
-	assert S not in caplog.text
+	for _ in range(3):
+		_Recorder().register(fake, {"query": f"SELECT 1 WHERE password = '{S}'", "duration": 0.1})
+	# Without the customer's own sensitive names the defaults alone are not trusted: no SQL is kept.
+	assert [call["query"] for call in fake.calls] == [OMITTED_SQL] * 3
+	assert set(lines) == {"optimus: SQL redaction could not run (TimeoutError); query omitted"}
+	assert S not in str(lines) and "cache down" not in str(lines)
 
 
 def test_drift_is_logged_with_counts_only(caplog, fresh_log):

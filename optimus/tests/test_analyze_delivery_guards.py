@@ -106,6 +106,16 @@ def test_genuine_empty_capture_still_finalizes(delivery):
 	assert ("_finalize_with_empty_session",) in state.events
 
 
+def test_run_drops_own_queries_from_the_fetched_recordings_for_its_session(delivery, monkeypatch):
+	state = delivery
+	state.requested = ["rec"]
+	state.recordings = [{"uuid": "rec", "calls": []}]
+	seen = []
+	monkeypatch.setattr(analyze, "_strip_own_calls", lambda recordings, session: seen.append((recordings, session)))
+	analyze.run("s")
+	assert seen == [([{"uuid": "rec", "calls": []}], "s")]
+
+
 def test_empty_capture_publishes_ready_event_flagged_empty(delivery, monkeypatch):
 	state = delivery
 	state.requested, state.recordings = [], []
