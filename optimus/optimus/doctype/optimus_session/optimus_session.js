@@ -785,7 +785,7 @@ function show_phase2_dialog(frm, data) {
 		}
 		function meta(c) {
 			return (
-				" <span style='color:#6b7280;font-size:0.85em;'>(" +
+				" <span class='optimus-picker-meta'>(" +
 				optimus_fmt_ms(c.cumulative_ms || 0, 1) + " &middot; " +
 				(c.hit_count || 0) + "&times; hits &middot; " +
 				esc(c.app) +
@@ -839,34 +839,7 @@ function show_phase2_dialog(frm, data) {
 				"</details>"
 			);
 		}
-		// Scoped styling: hide the native <details> disclosure marker and
-		// draw our own fixed-width chevron, so leaf rows and parent rows
-		// align column-for-column at every depth. Indentation comes only
-		// from .fp-children nesting (one dashed guide per level). Idempotent
-		// if injected more than once (primary + framework trees).
-		var style = (
-			"<style>" +
-			".fp-tree summary{list-style:none;}" +
-			".fp-tree summary::-webkit-details-marker{display:none;}" +
-			".fp-tree summary::marker{content:'';}" +
-			".fp-tree .fp-row{margin:0;}" +
-			".fp-tree .fp-summary{cursor:pointer;padding:2px 0;" +
-			"display:flex;align-items:center;}" +
-			".fp-tree .fp-leaf{padding:2px 0;}" +
-			".fp-tree .fp-rowline{cursor:pointer;display:flex;" +
-			"align-items:center;flex:1;margin:0;}" +
-			".fp-tree .fp-toggle{display:inline-block;width:16px;" +
-			"min-width:16px;text-align:center;color:#9ca3af;" +
-			"font-size:0.8em;user-select:none;}" +
-			".fp-tree details>summary>.fp-toggle::before{content:'\\25B8';}" +
-			".fp-tree details[open]>summary>.fp-toggle::before{content:'\\25BE';}" +
-			".fp-tree .fp-spacer{visibility:hidden;}" +
-			".fp-tree .fp-children{padding-left:16px;" +
-			"border-left:1px dashed #d1d5db;margin-left:7px;}" +
-			"</style>"
-		);
 		return (
-			style +
 			"<div class='fp-tree' style='max-height:340px;" +
 			"overflow-y:auto;border:1px solid var(--border-color, #e5e7eb);" +
 			"border-radius:4px;padding:8px 12px;'>" +
@@ -909,14 +882,12 @@ function show_phase2_dialog(frm, data) {
 			fieldname: "empty_state_html",
 			fieldtype: "HTML",
 			options: (
-				"<div style='padding:10px 14px;background:#fef3c7;" +
-				"border:1px solid #fbbf24;border-radius:6px;" +
-				"margin-bottom:12px;'>" +
+				"<div class='optimus-picker-empty'>" +
 				"<strong>No curated functions available</strong><br>" +
-				"<span style='font-size:0.85em;color:#92400e'>" +
+				"<span class='optimus-picker-empty-hint'>" +
 				hint +
 				"</span><br><br>" +
-				"<code style='font-size:0.78em;color:#6b7280'>" +
+				"<code class='optimus-picker-empty-diag'>" +
 				"actions=" + (diag.action_count || 0) +
 				" &middot; with_tree=" + (diag.actions_with_call_tree_json || 0) +
 				" &middot; parsed=" + (diag.trees_parsed_ok || 0) +

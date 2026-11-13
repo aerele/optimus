@@ -5,11 +5,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
-from optimus import api
+from optimus import api, session
 
 
 class FakeDb:
@@ -47,22 +47,32 @@ class FakeDb:
 def env(monkeypatch):
 	from optimus.line_profile import capture
 
-	def build(sessions=(), runs=(), active=None, lp_active=None):
+	def build(sessions=(), runs=(), active=None, lp_active=None, pointer_gone=True, cap_warning=None):
 		db = FakeDb(list(sessions), list(runs))
 		monkeypatch.setattr(api.frappe, "db", db, raising=False)
 		monkeypatch.setattr(capture, "is_active", lambda user, fresh=False: lp_active)
 		monkeypatch.setattr(api, "_require_profiler_user", lambda: "alice", raising=False)
 		monkeypatch.setattr(api.frappe, "get_all", db.get_all, raising=False)
-		monkeypatch.setattr(api, "now_datetime", lambda: datetime(2026, 10, 26, 12, 0))
+		monkeypatch.setattr(api, "now_datetime", lambda: NOW)
 		monkeypatch.setattr(api.session, "get_active_session_for", lambda user: active)
-		monkeypatch.setattr(api.session, "get_session_meta", lambda u: {"docname": "OS-1", "label": "L"})
+		monkeypatch.setattr(api, "get_datetime", lambda value: value)
+		monkeypatch.setattr(api, "add_to_date", lambda d, **kw: d + timedelta(**kw))
+		monkeypatch.setattr(api.session, "active_pointer_gone", lambda user: pointer_gone)
+		meta = {"docname": "OS-1", "label": "L", "cap_warning": cap_warning}
+		monkeypatch.setattr(api.session, "get_session_meta", lambda u: meta)
 		return db
 
 	return build
 
 
-def _s(name, uuid, status, user="alice", recent=True):
-	return {"name": name, "session_uuid": uuid, "status": status, "user": user, "recent": recent}
+NOW = datetime(2026, 10, 26, 12, 0)
+
+
+def _s(name, uuid, status, user="alice", recent=True, age_minutes=20):
+	return {
+		"name": name, "session_uuid": uuid, "status": status, "user": user, "recent": recent,
+		"started_at": NOW - timedelta(minutes=age_minutes),
+	}
 
 
 def test_active_session_reports_recording(env):
@@ -84,7 +94,7 @@ def test_tracked_session_not_masked_by_a_new_recording(env):
 		("Analyzing", "analyzing"),
 		("Ready", "ready"),
 		("Failed", "failed"),
-		("Recording", "idle"),
+		("Recording", "ended"),
 	],
 )
 def test_known_session_status_maps_to_phase(env, status, phase):
@@ -178,3 +188,143 @@ def test_a_stale_line_profiling_flag_falls_back_to_the_in_flight_lookup(env):
 	assert (api.pill_state()["phase"], api.pill_state()["scope"]) == ("analyzing", "phase2")
 	env(sessions=[_s("OS-1", "u1", "Ready")], lp_active="gone")
 	assert api.pill_state() == {"phase": "idle"}
+
+
+def test_a_recording_row_without_its_pointer_has_ended(env):
+	env(sessions=[_s("OS-1", "u1", "Recording")])
+	assert api.pill_state(session_uuid="u1") == {
+		"phase": "ended", "scope": "session", "session_uuid": "u1", "docname": "OS-1", "cap_hit": False,
+	}
+
+
+def test_an_ended_recording_reports_whether_the_request_limit_was_hit(env):
+	env(sessions=[_s("OS-1", "u1", "Recording")], cap_warning="limit reached")
+	assert api.pill_state(session_uuid="u1")["cap_hit"] is True
+
+
+def test_a_recording_row_younger_than_the_pointer_lifetime_is_not_ended(env):
+	env(sessions=[_s("OS-1", "u1", "Recording", age_minutes=2)])
+	assert api.pill_state(session_uuid="u1")["phase"] == "idle"
+	assert api.pill_state()["phase"] == "idle"
+
+
+def test_a_recording_row_just_under_the_pointer_lifetime_is_not_ended(env):
+	# Pins the age gate between 2 and 10 minutes: halving it to 5 would call this row ended.
+	for minutes in (5, 9):
+		env(sessions=[_s("OS-1", "u1", "Recording", age_minutes=minutes)])
+		assert api.pill_state(session_uuid="u1")["phase"] == "idle", minutes
+
+
+def test_a_recording_row_exactly_at_the_pointer_lifetime_is_ended(env):
+	env(sessions=[_s("OS-1", "u1", "Recording", age_minutes=10)])
+	assert api.pill_state(session_uuid="u1")["phase"] == "ended"
+
+
+def test_an_unconfirmed_pointer_read_is_never_ended(env):
+	env(sessions=[_s("OS-1", "u1", "Recording")], pointer_gone=False)
+	assert api.pill_state(session_uuid="u1")["phase"] == "idle"
+	assert api.pill_state()["phase"] == "idle"
+
+
+def _cache(get):
+	return type("C", (), {"get": staticmethod(get), "make_key": staticmethod(lambda key: key)})()
+
+
+def test_the_pointer_is_gone_only_when_redis_answers_with_nothing(monkeypatch):
+	monkeypatch.setattr(session.frappe, "cache", _cache(lambda key: None), raising=False)
+	assert session.active_pointer_gone("alice") is True
+	monkeypatch.setattr(session.frappe, "cache", _cache(lambda key: b"pickled"), raising=False)
+	assert session.active_pointer_gone("alice") is False
+
+
+def test_a_redis_error_on_the_pointer_read_is_not_gone(monkeypatch):
+	def boom(key):
+		raise ConnectionError("redis down")
+
+	monkeypatch.setattr(session.frappe, "cache", _cache(boom), raising=False)
+	assert session.active_pointer_gone("alice") is False
+
+
+def test_tracking_an_expired_session_while_another_is_active_reports_the_old_one_ended(env):
+	env(sessions=[_s("OS-1", "u1", "Recording")], active="u2", pointer_gone=False)
+	assert api.pill_state(session_uuid="u1")["phase"] == "ended"
+	assert api.pill_state(session_uuid="u1")["session_uuid"] == "u1"
+
+
+def test_a_live_pointer_still_reports_recording(env):
+	env(sessions=[_s("OS-1", "u1", "Recording")], active="u1")
+	assert api.pill_state(session_uuid="u1")["phase"] == "recording"
+
+
+def test_the_in_flight_lookup_finds_an_ended_recording(env):
+	env(sessions=[_s("OS-1", "u1", "Recording")])
+	out = api.pill_state()
+	assert (out["phase"], out["session_uuid"]) == ("ended", "u1")
+
+
+def test_the_in_flight_lookup_skips_a_recent_recording_row(env):
+	env(sessions=[_s("OS-1", "u1", "Recording", age_minutes=1)])
+	assert api.pill_state() == {"phase": "idle"}
+
+
+def test_another_users_recording_row_is_idle(env):
+	env(sessions=[_s("OS-9", "u9", "Recording", user="bob")])
+	assert api.pill_state(session_uuid="u9") == {"phase": "idle"}
+	assert api.pill_state() == {"phase": "idle"}
+
+
+def test_a_recording_row_without_a_start_time_is_idle_and_never_parsed(env, monkeypatch):
+	env(sessions=[{**_s("OS-1", "u1", "Recording"), "started_at": None}])
+
+	def boom(value):
+		raise AssertionError("get_datetime must not be called for a missing start time")
+
+	monkeypatch.setattr(api, "get_datetime", boom)
+	assert api.pill_state(session_uuid="u1")["phase"] == "idle"
+	assert api.pill_state()["phase"] == "idle"
+
+
+def test_expired_row_that_is_still_the_active_session_is_not_ended(env):
+	from optimus.timing import SESSION_TTL_SECONDS
+
+	age = SESSION_TTL_SECONDS // 60 + 5
+	env(sessions=[_s("OS-1", "u1", "Recording", age_minutes=age)], active="u1", pointer_gone=False)
+	assert api.pill_state(session_uuid="u1")["phase"] == "recording"
+
+
+def test_expired_row_with_a_different_active_session_is_ended(env):
+	from optimus.timing import SESSION_TTL_SECONDS
+
+	age = SESSION_TTL_SECONDS // 60 + 5
+	env(sessions=[_s("OS-1", "u1", "Recording", age_minutes=age)], active="u2", pointer_gone=False)
+	assert api.pill_state(session_uuid="u1")["phase"] == "ended"
+
+
+def test_expired_row_with_the_pointer_gone_is_ended(env):
+	from optimus.timing import SESSION_TTL_SECONDS
+
+	age = SESSION_TTL_SECONDS // 60 + 5
+	env(sessions=[_s("OS-1", "u1", "Recording", age_minutes=age)], active=None, pointer_gone=True)
+	assert api.pill_state(session_uuid="u1")["phase"] == "ended"
+
+
+def _expired_row(env_build, uuid="u1", **kw):
+	from optimus.timing import SESSION_TTL_SECONDS
+
+	env_build(**kw)
+	return _s("OS-1", uuid, "Recording", age_minutes=SESSION_TTL_SECONDS // 60 + 5)
+
+
+def test_row_ended_false_when_active_pointer_is_this_session(env):
+	row = _expired_row(env, pointer_gone=False)
+	assert api._row_ended("alice", row, "u1") is False
+
+
+def test_row_ended_true_when_active_pointer_is_another_session(env):
+	row = _expired_row(env, pointer_gone=False)
+	assert api._row_ended("alice", row, "u2") is True
+
+
+def test_row_ended_true_when_pointer_gone(env):
+	row = _expired_row(env, pointer_gone=True)
+	assert api._row_ended("alice", row, None) is True

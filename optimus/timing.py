@@ -30,6 +30,10 @@ STALE_RECORDING_MINUTES = 11
 # budget and the RQ long-queue timeout (25 minutes) both end before it.
 STALE_ANALYZING_MINUTES = 30
 
+# How often a visible pill asks the server whether its recording ended by itself.
+# Shorter than SESSION_TTL_SECONDS so an expired session is noticed within a minute.
+PILL_RECORDING_CHECK_SECONDS = 60
+
 JANITOR_INTERVAL_MINUTES = 5
 
 # Ceiling on how long analyze waits for the flow's background jobs.

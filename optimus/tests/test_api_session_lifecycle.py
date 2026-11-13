@@ -188,6 +188,11 @@ class TestStop:
 	def test_without_active_session_reports_nothing_stopped(self, env):
 		assert api.stop() == {"stopped": False, "reason": "no active session"}
 
+	@pytest.mark.parametrize("bad", [123, ["u1"], {"a": 1}, True])
+	def test_a_session_reference_that_is_not_text_is_refused(self, env, bad):
+		with pytest.raises(api.frappe.ValidationError):
+			api.stop(session_uuid=bad)
+
 	def test_async_stop_marks_stopping_and_queues_analyze(self, env, monkeypatch):
 		_scheduler(monkeypatch, disabled=False)
 		env.store.active["alice@example.com"] = "u1"

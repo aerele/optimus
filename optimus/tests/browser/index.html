@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Optimus pill harness</title>
+<!-- Frappe v16's real Espresso tokens and toast stylesheet (light and [data-theme=dark]) -->
+<link rel="stylesheet" href="/frappe/colors.css">
+<link rel="stylesheet" href="/frappe/legacy.css">
+<link rel="stylesheet" href="/frappe/effects.css">
+<link rel="stylesheet" href="/frappe/spacing.css">
+<link rel="stylesheet" href="/frappe/radius.css">
+<link rel="stylesheet" href="/frappe/typography.css">
+<link rel="stylesheet" href="/frappe/components/toast.css">
+<!-- The branch's real widget stylesheet -->
+<link rel="stylesheet" href="/optimus/floating_widget.css">
+<style>
+	body { margin: 0; background: var(--bg-color); color: var(--text-color); font: 14px system-ui, sans-serif; }
+	main { padding: 16px; }
+	/* Bootstrap 4.6 stacking: backdrop 1040, modal 1050. */
+	.modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.4); z-index: 1040; }
+	.modal { position: fixed; left: 50%; top: 10%; transform: translateX(-50%); width: min(560px, calc(100vw - 32px)); z-index: 1050;
+		background: var(--modal-bg); color: var(--text-color); border: 1px solid var(--border-color); border-radius: 8px; padding: 16px; box-sizing: border-box; }
+	.modal .modal-footer { display: flex; justify-content: flex-end; margin-top: 12px; }
+</style>
+</head>
+<body>
+<main>
+	<a href="#" id="before-link">A Desk link before the pill</a>
+	<p><input id="before-input" placeholder="A Desk input"></p>
+	<p>Fake Desk page. Theme: <span id="theme-name"></span></p>
+	<div id="picker-host"></div>
+</main>
+<div class="es-toast-container" id="toasts"></div>
+<script src="/stub/frappe_stub.js"></script>
+<script src="/optimus/optimus_pill_state.js"></script>
+<script src="/optimus/floating_widget.js"></script>
+</body>
+</html>

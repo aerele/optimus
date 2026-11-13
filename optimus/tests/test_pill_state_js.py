@@ -23,8 +23,22 @@ def _read(path):
 
 
 def _need_node():
-	if not shutil.which("node"):
-		pytest.skip("node not installed")
+	if shutil.which("node"):
+		return
+	# CI installs node: a missing one there is a broken runner, not a reason to skip these tests.
+	if os.environ.get("CI"):
+		pytest.fail("node is required in CI for the pill tests but was not found")
+	pytest.skip("node not installed (the pill tests run in node; install it to run them locally)")
+
+
+def test_a_missing_node_fails_in_ci_and_skips_elsewhere_with_a_reason(monkeypatch):
+	monkeypatch.setattr(shutil, "which", lambda name: None)
+	monkeypatch.setenv("CI", "true")
+	with pytest.raises(pytest.fail.Exception, match="required in CI"):
+		_need_node()
+	monkeypatch.delenv("CI")
+	with pytest.raises(pytest.skip.Exception, match="install it to run them locally"):
+		_need_node()
 
 
 def test_pill_state_js_syntax():
