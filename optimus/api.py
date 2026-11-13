@@ -853,7 +853,7 @@ def _pill_state_for(user: str, session_uuid: str, run_uuid: str | None, active: 
 	row = frappe.get_all(
 		"Optimus Session",
 		filters={"session_uuid": session_uuid, "user": user},
-		fields=["name", "status", "started_at"],
+		fields=["name", "session_uuid", "status", "started_at"],
 		limit=1,
 	)
 	if not row:
@@ -916,7 +916,9 @@ def _row_ended(user: str, row: dict, active: str | None) -> bool:
 		return False
 	if get_datetime(row["started_at"]) > add_to_date(now_datetime(), seconds=-SESSION_TTL_SECONDS):
 		return False
-	return bool(active) or session.active_pointer_gone(user)
+	if active and active != row["session_uuid"]:
+		return True
+	return session.active_pointer_gone(user)
 
 
 def _pill_payload(scope: str, session_uuid, docname, status, run_uuid=None, ended=False) -> dict:
