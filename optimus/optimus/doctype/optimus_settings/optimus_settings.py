@@ -16,9 +16,9 @@ def _text(value):
 
 def _invalidate_settings_cache():
 	"""A lost post-commit callback is bounded by CONFIG_CACHE_SECONDS."""
-	from optimus import redis_keys, safe_call
+	from optimus import safe_call, settings
 	def invalidate():
-		frappe.cache.delete_value(redis_keys.settings_cache())
+		settings.invalidate_config()
 		return True
 	if not safe_call.best_effort(invalidate, False):
 		safe_call.best_effort(lambda: frappe.logger("optimus").error("Optimus settings cache invalidation failed; the bounded cache will expire."))

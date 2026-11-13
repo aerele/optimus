@@ -66,7 +66,7 @@ def test_recording_failure_is_logged_once(lock_env, monkeypatch):
 
 	logged = []
 	monkeypatch.setattr(
-		frappe, "logger", lambda *a, **k: types.SimpleNamespace(warning=logged.append), raising=False
+		frappe, "logger", lambda *a, **k: types.SimpleNamespace(error=logged.append), raising=False
 	)
 	monkeypatch.setattr(capture, "_lock_capture_warned", False)
 	monkeypatch.setattr(capture, "_lock_caller_frames", lambda: 1 / 0)
@@ -224,14 +224,14 @@ def redis_env(monkeypatch):
 
 def test_dump_stores_lock_events_with_ttl_and_clears_locals(redis_env):
 	from optimus import hooks_callbacks as hc
-	from optimus.session import SESSION_TTL_SECONDS
+	from optimus.timing import RECORDING_DATA_TTL_SECONDS
 
 	redis_env.local.optimus_lock_events = [_event(), _event("lock_wait_timeout")]
 	hc._dump_capture_state_to_redis(recording_uuid="rec-1")
 
 	key = "profiler:lock_events:rec-1"
 	assert redis_env.cache.store[key] == [_event(), _event("lock_wait_timeout")]
-	assert redis_env.cache.ttls[key] == SESSION_TTL_SECONDS
+	assert redis_env.cache.ttls[key] == RECORDING_DATA_TTL_SECONDS
 	assert not hasattr(redis_env.local, "optimus_lock_events")
 
 

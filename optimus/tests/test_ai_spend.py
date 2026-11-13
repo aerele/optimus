@@ -479,6 +479,87 @@ def test_health_window_uses_stopped_at_not_ai_modified(monkeypatch):
 	assert '"stopped_at"' in queries[0] and '"modified"' not in queries[0]
 
 
+class _Cond:
+	def __init__(self, *terms):
+		self.terms = terms
+
+	def __and__(self, other):
+		return _Cond(*self.terms, *other.terms)
+
+
+class _Column:
+	def __init__(self, name):
+		self.name = name
+
+	def __eq__(self, value):
+		return _Cond((self.name, "==", value))
+
+	def __gt__(self, value):
+		return _Cond((self.name, ">", value))
+
+	__hash__ = None
+
+
+class _Aggregate:
+	def __init__(self, column):
+		self.column = column
+
+	def as_(self, alias):
+		return self
+
+
+class _RecordingTable:
+	def __getattr__(self, name):
+		return _Column(name)
+
+
+class _RecordingQuery:
+	def __init__(self, wheres):
+		self.wheres = wheres
+
+	def from_(self, table):
+		return self
+
+	def select(self, *columns):
+		return self
+
+	def where(self, condition):
+		if self.wheres:
+			self.wheres[-1] = self.wheres[-1] + condition.terms
+		else:
+			self.wheres.append(condition.terms)
+		return self
+
+	def run(self, **kwargs):
+		return []
+
+
+def test_the_recording_query_treats_chained_wheres_like_one_anded_where():
+	chained, combined = [], []
+	a, b = _Column("status") == "Ready", _Column("stopped_at") > "x"
+	_RecordingQuery(chained).where(a).where(b)
+	_RecordingQuery(combined).where(a & b)
+	assert chained == combined == [(("status", "==", "Ready"), ("stopped_at", ">", "x"))]
+
+
+def test_health_window_uses_stopped_at_not_ai_modified_without_the_real_query_builder(monkeypatch):
+	"""The CI-stub twin of the real-builder test above: a recording query builder shows the
+	window filters on ``stopped_at`` for Ready sessions and never on ``modified``."""
+	wheres = []
+	functions = type(sys)("frappe.query_builder.functions")
+	functions.Avg = functions.Count = functions.Max = _Aggregate
+	monkeypatch.setitem(sys.modules, "frappe.query_builder", type(sys)("frappe.query_builder"))
+	monkeypatch.setitem(sys.modules, "frappe.query_builder.functions", functions)
+	query = _RecordingQuery(wheres)
+	monkeypatch.setattr(
+		api, "frappe", SimpleNamespace(qb=SimpleNamespace(DocType=lambda name: _RecordingTable(), from_=lambda t: query))
+	)
+	monkeypatch.setattr(api, "now_datetime", lambda: __import__("datetime").datetime(2026, 1, 3))
+	monkeypatch.setattr(api, "add_to_date", lambda *a, **kw: "2026-01-02")
+	api._session_perf_24h()
+	assert wheres == [(("status", "==", "Ready"), ("stopped_at", ">", "2026-01-02"))]
+
+
 # --- a session save never writes stale counters back -------------------------------------
 
 

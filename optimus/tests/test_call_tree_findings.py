@@ -329,7 +329,8 @@ def test_repeated_hot_frame_finding_aggregates_across_actions():
 	# the leaderboard.)
 	per_action_trees = []
 	for _ in range(4):
-		t = _node("<root>", "", 500, [
+		# Root time equals the self time below, so self time passes the consistency check.
+		t = _node("<root>", "", 200, [
 			_node("my_app.discounts.calc", "apps/my_app/d.py", 200, [], self_ms=200),
 		])
 		per_action_trees.append(t)
@@ -1146,7 +1147,7 @@ def test_repeated_hot_frame_keeps_user_code_finding():
 	"""
 	per_action_trees = []
 	for _ in range(5):
-		per_action_trees.append(_node("<root>", "", 1000, [
+		per_action_trees.append(_node("<root>", "", 200, [
 			_node("compute_taxes", "erpnext/accounts/tax.py", 200, [], self_ms=200),
 		]))
 

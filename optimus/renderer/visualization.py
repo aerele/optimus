@@ -37,6 +37,10 @@ def redact_frame_name(node: dict) -> str:
 def build_donut_data(breakdown: dict) -> list:
 	"""Convert session_time_breakdown_json into ordered (label, ms, color)
 	tuples. Slices under 1ms are hidden as noise.
+
+	``by_app`` is raw python self time and still includes the SQL wait, which ``sql_ms``
+	counts too. Nothing renders these slices today (the report template ignores them); a
+	renderer that does must first take the per-action SQL wait out of ``by_app``.
 	"""
 	if not breakdown:
 		return []
@@ -93,10 +97,11 @@ def build_donut_svg(slices: list) -> str:
 def build_hot_frames_table(rows: list, is_hot: bool = False) -> list:
 	"""Build the hot-frames leaderboard rows.
 
-	``is_hot`` marks user-code rows (True) for the tinted CSS variant and
-	selects the time metric: user frames display the self-sum ``total_ms``,
-	framework frames (is_hot=False) display ``total_cumulative_ms`` (their
-	self-time rounds to 0) and are re-sorted by it so the column reads by impact.
+	``is_hot`` marks user-code rows (True) for the tinted CSS variant. Both variants
+	show Total as ``total_ms``: the stored ``total_cumulative_ms``, or ``total_ms`` for
+	reports from before it existed. User rows also get ``self_ms``, the stored self-sum
+	``total_ms``, only when the row says it was measured (else None). Rows sort by Self
+	when every row has it (same key as the analyzer's cap), else by Total.
 	"""
 	out = []
 	for row in rows or []:
@@ -104,23 +109,15 @@ def build_hot_frames_table(rows: list, is_hot: bool = False) -> list:
 		# directly. Routing through redact_frame_name appended a bogus "(?:0)"
 		# (placeholder file "?" + lineno 0, since no file/line is known here).
 		display = row.get("function") or "<unknown>"
-		if is_hot:
-			display_ms = row.get("total_ms", 0)
-		else:
-			display_ms = row.get(
-				"total_cumulative_ms", row.get("total_ms", 0)
-			)
 		out.append({
 			"display_name": display,
-			"total_ms": display_ms,
+			"total_ms": row.get("total_cumulative_ms", row.get("total_ms", 0)),
+			"self_ms": row.get("total_ms", 0) if is_hot and row.get("self_time_measured") else None,
 			"occurrences": row.get("occurrences", 0),
 			"distinct_actions": row.get("distinct_actions", 0),
 			"action_refs": row.get("action_refs", []),
 			"is_hot": is_hot,
 		})
-	# Framework variant ranks by the displayed (cumulative) metric
-	# the aggregator's outer sort was by self_ms, which produces
-	# all-zero ties on framework rows.
-	if not is_hot:
-		out.sort(key=lambda r: r.get("total_ms", 0), reverse=True)
+	by_self = bool(out) and all(r["self_ms"] is not None for r in out)
+	out.sort(key=lambda r: r["self_ms"] if by_self else r.get("total_ms", 0), reverse=True)
 	return out
