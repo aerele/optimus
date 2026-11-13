@@ -934,7 +934,11 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		_publish_progress(20, "Running EXPLAIN on queries", session_uuid)
 		enrichment_warnings = _enrich_recordings(recordings)
 
-		context = AnalyzeContext(session_uuid=session_uuid, docname=docname)
+		context = AnalyzeContext(
+			session_uuid=session_uuid,
+			docname=docname,
+			deadline=analyze_start + ANALYZE_TOTAL_BUDGET_SECONDS,
+		)
 		context.warnings.extend(enrichment_warnings)
 
 		# v0.6.0: if we hit the wait cap with jobs still running, say so.
