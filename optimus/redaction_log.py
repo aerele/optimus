@@ -6,6 +6,8 @@ is logged, never the SQL, and each class once per process so a bad query cannot 
 
 import logging
 
+from optimus.safe_call import best_effort
+
 _logged: set[str] = set()
 
 
@@ -20,16 +22,22 @@ def log_redaction_failure(error: BaseException) -> None:
 _logged_capture: set[tuple[str, str]] = set()
 
 
-def log_capture_failure(field: str, error: BaseException) -> None:
+def log_capture_failure(field: str, error: BaseException | str) -> None:
 	"""One ERROR line per (field, error class) per process: a recorded request field could not be
-	masked, so a placeholder was stored instead. The class only, never the value."""
-	key = (field, type(error).__name__)
+	masked, so a placeholder was stored instead. The class only, never the value. ``error`` may be
+	the class name. Never raises (an RQ job timeout excepted)."""
+	name = error if isinstance(error, str) else type(error).__name__
+	key = (field, name)
 	if key in _logged_capture:
 		return
 	_logged_capture.add(key)
-	logging.getLogger(__name__).error(
-		"Optimus could not redact the recorded request %s (%s); a placeholder was stored", field, key[1]
-	)
+
+	def _write() -> None:
+		logging.getLogger(__name__).error(
+			"Optimus could not redact the recorded request %s (%s); a placeholder was stored", field, name
+		)
+
+	best_effort(_write, None)
 
 
 def log_extras_unreadable(error: BaseException) -> None:

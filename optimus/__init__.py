@@ -292,6 +292,26 @@ def _omit_capture_fields(recorder):
 		pass
 
 
+def _log_safely(module, function, *args):
+	"""Call ``module.function(*args)`` (a failure logger) so that it can never break the request:
+	an import or logging error is dropped. An RQ job timeout still stops the job, raised again
+	after the ``try`` so it chains nothing."""
+	try:
+		from optimus.safe_call import InterruptGuard
+	except Exception:
+		return
+	guard = InterruptGuard(base=True)
+	try:
+		with guard:
+			import importlib
+
+			getattr(importlib.import_module(module), function)(*args)
+	except Exception:
+		pass
+	if guard.pending():
+		raise guard.interrupt()
+
+
 def _patch_recorder():
 	"""Install capture-time redaction on Frappe's recorder. Idempotent via the
 	``_profiler_patched`` marker; best-effort so a patch failure never breaks
@@ -328,6 +348,7 @@ def _patch_recorder():
 		if getattr(frappe.local, "optimus_reading_extras", False):
 			return ((), ())
 		frappe.local.optimus_reading_extras = True
+		failed = ""
 		try:
 			from optimus.settings import get_config
 
@@ -337,28 +358,29 @@ def _patch_recorder():
 				tuple(cfg.sensitive_sql_columns or ()),
 			)
 		except Exception as error:
-			from optimus.redaction_extras import log_extras_failure
-
-			log_extras_failure(error)
-			return ((), ())
+			failed = type(error).__name__
 		finally:
 			frappe.local.optimus_reading_extras = False
+		# Logged after the handler, and never allowed to raise: the defaults still apply.
+		_log_safely("optimus.redaction_extras", "log_extras_failed", failed)
+		return ((), ())
 
 	def _profiler_init(self, *args, **kwargs):
 		_original_init(self, *args, **kwargs)
 		# Each field is masked in its own try: if one pass fails, the other still runs, and the
-		# failed field keeps a placeholder, never its raw value. Our scrubber never breaks the request.
+		# failed field keeps a placeholder, never its raw value. Our scrubber never breaks the request,
+		# and neither does logging a failure of it: the failures are logged after the last handler.
 		try:
 			from optimus import redaction
-			from optimus.redaction_log import log_capture_failure
 		except Exception:
 			_omit_capture_fields(self)
 			return
+		failures = []
 		path, cmd = getattr(self, "path", None), getattr(self, "cmd", None)
 		try:
 			extra_keys, _ = _read_extras()
 		except Exception as error:
-			log_capture_failure("settings", error)
+			failures.append(("settings", type(error).__name__))
 			extra_keys = ()
 		if isinstance(getattr(self, "form_dict", None), dict):
 			try:
@@ -369,14 +391,16 @@ def _patch_recorder():
 					mask_code=redaction.is_oauth_callback(path, cmd),
 				)
 			except Exception as error:
-				log_capture_failure("form_dict", error)
+				failures.append(("form_dict", type(error).__name__))
 				self.form_dict = {"_optimus": "<REDACTION FAILED: omitted>"}
 		if isinstance(getattr(self, "headers", None), dict):
 			try:
 				self.headers = redaction.redact_sensitive(self.headers, extra_keys=extra_keys, header=True)
 			except Exception as error:
-				log_capture_failure("headers", error)
+				failures.append(("headers", type(error).__name__))
 				self.headers = {"_optimus": "<REDACTION FAILED: omitted>"}
+		for field, name in failures:
+			_log_safely("optimus.redaction_log", "log_capture_failure", field, name)
 
 	def _profiler_register(self, data):
 		try:
