@@ -108,6 +108,36 @@ class TestRedactSensitive:
 		assert out["pwd"] == "<REDACTED:pwd>"
 		assert out["doc"] == redaction.NESTED_TOO_DEEP
 
+	def test_json_string_nesting_limit_is_exact_and_does_not_depend_on_the_parser(self, monkeypatch):
+		# Interpreters differ on how deep json.loads goes before a RecursionError (3.14 limits
+		# the C stack, not the call count), so the cap is measured on the text, not caught.
+		limit = redaction._MAX_REDACT_DEPTH
+		fits = "[" * limit + "]" * limit
+		over = "[" * (limit + 1) + "]" * (limit + 1)
+		assert redaction.redact_sensitive(fits) == fits
+		assert redaction.redact_sensitive(over) == redaction.NESTED_TOO_DEEP
+		# One level down already (the dict), so one fewer list fits.
+		assert redaction.redact_sensitive({"doc": fits})["doc"] == redaction.NESTED_TOO_DEEP
+		assert redaction.redact_sensitive({"doc": fits[1:-1]})["doc"] == fits[1:-1]
+
+		def parse_deep(text, **kw):
+			# A parser with room for any depth: it must not be asked to parse this at all.
+			value = []
+			for _ in range(5000):
+				value = [value]
+			return value
+
+		monkeypatch.setattr(json, "loads", parse_deep)
+		deep = "[" * 100000 + "]" * 100000
+		assert redaction.redact_sensitive({"pwd": "x", "doc": deep}) == {
+			"pwd": "<REDACTED:pwd>",
+			"doc": redaction.NESTED_TOO_DEEP,
+		}
+
+	def test_brackets_inside_json_strings_do_not_count_as_nesting(self):
+		text = json.dumps({"note": "[" * 500 + "{" * 500, "k": "a\\\"[[[["})
+		assert redaction.redact_sensitive({"doc": text})["doc"] == text
+
 	def test_set_value_value_named_by_sensitive_fieldname(self):
 		out = redaction.redact_sensitive({"doctype": "User", "fieldname": "new_password", "value": "Hunter2!"})
 		assert out["value"] == "<REDACTED:new_password>"
