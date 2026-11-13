@@ -307,9 +307,10 @@ def _omit_unredacted_query(data):
 
 def _omit_capture_fields(recorder):
 	"""The redaction module could not be imported: store no request fields rather than raw ones."""
-	for name in ("form_dict", "headers"):
-		if isinstance(getattr(recorder, name, None), dict):
-			setattr(recorder, name, {"_optimus": "<REDACTION FAILED: omitted>"})
+	if isinstance(getattr(recorder, "form_dict", None), dict):
+		recorder.form_dict = {"_optimus": "<REDACTION FAILED: omitted>"}
+	if isinstance(getattr(recorder, "headers", None), dict):
+		recorder.headers = {"_optimus": "<REDACTION FAILED: omitted>"}
 	try:
 		import logging
 
