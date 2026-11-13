@@ -21,9 +21,7 @@ import time
 
 import frappe
 
-# Match frappe.recorder.RECORDER_AUTO_DISABLE so a forgotten session
-# auto-stops at the same point as the underlying recorder would.
-SESSION_TTL_SECONDS = 10 * 60
+from optimus.timing import JOB_KEYS_TTL_SECONDS, SESSION_TTL_SECONDS
 
 # Hard cap on the number of recordings registered against a single session.
 # Prevents pathological flows from filling Redis. Configurable per site
@@ -348,9 +346,6 @@ def recording_count(session_uuid: str) -> int:
 # to finish before gathering recordings and before_job keeps recording them
 # even after Stop (see `draining_until` below) so they aren't lost.
 
-
-# A job finishing after cleanup would re-create these keys without an expiry.
-JOB_KEYS_TTL_SECONDS = 24 * 60 * 60
 
 
 def _bound_ttl(key: str) -> None:

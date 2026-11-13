@@ -99,6 +99,25 @@ def test_submit_rejects_invalid_json(mock_frappe):
     assert result["reason"] == "invalid json"
 
 
+def test_guest_is_denied_before_size_or_rate_work(mock_frappe, monkeypatch):
+    import frappe
+
+    from optimus import api
+
+    def unreachable(*a, **kw):
+        raise AssertionError("a Guest reached rate or size work")
+
+    def throw(msg, exc=None):
+        raise (exc or frappe.ValidationError)(msg)
+
+    monkeypatch.setattr(frappe, "throw", throw, raising=False)
+    monkeypatch.setattr(frappe.session, "user", "Guest", raising=False)
+    monkeypatch.setattr("optimus.ratelimit.enforce_user_rate_limit", unreachable)
+    monkeypatch.setattr(frappe, "parse_json", unreachable, raising=False)
+    with pytest.raises(frappe.ValidationError, match="You must be logged in"):
+        api.submit_frontend_metrics(payload="x" * (api.MAX_FRONTEND_PAYLOAD_BYTES + 1))
+
+
 def test_submit_rejects_missing_session_uuid(mock_frappe):
     from optimus import api
 

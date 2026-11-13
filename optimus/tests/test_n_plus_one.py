@@ -711,8 +711,7 @@ def test_user_code_routed_through_profiler_wrap_still_attributed(empty_context):
 	frappe.get_doc) must STILL be attributed to the user code, not
 	filtered as profiler noise.
 
-	The rule is 'is the deepest non-frappe frame inside optimus/?'
-	here the deepest is user code, so the finding fires."""
+	The wrap is a pass-through: the query below it is the caller's."""
 	recording = {
 		"uuid": "user-through-wrap",
 		"path": "/",
@@ -728,8 +727,8 @@ def test_user_code_routed_through_profiler_wrap_still_attributed(empty_context):
 				"stack": [
 					{"filename": "frappe/app.py", "lineno": 120, "function": "dispatch"},
 					{"filename": "apps/myapp/controller.py", "lineno": 42, "function": "bulk_update"},
-					# Simulated capture-wrap frame in the middle
-					{"filename": "optimus/capture.py", "lineno": 88, "function": "wrapped_get_doc"},
+					# The real capture-wrap frame in the middle
+					{"filename": "optimus/capture.py", "lineno": 88, "function": "wrapped"},
 					{"filename": "frappe/model/document.py", "lineno": 200, "function": "get_doc"},
 					{"filename": "frappe/database/mariadb/database.py", "lineno": 742, "function": "sql"},
 				],
@@ -786,7 +785,7 @@ def test_is_profiler_own_query_matches_bench_relative_paths():
 	]
 	assert is_profiler_own_query(abs_stack) is True
 
-	# User frame present in bench-relative stack → NOT profiler own
+	# A user frame outside a pass-through wrapper over Frappe's get_doc → NOT profiler own
 	user_bench_stack = [
 		{"filename": "apps/frappe/frappe/app.py", "lineno": 120, "function": "dispatch"},
 		{
@@ -795,8 +794,9 @@ def test_is_profiler_own_query_matches_bench_relative_paths():
 		},
 		{
 			"filename": "apps/optimus/optimus/capture.py",
-			"lineno": 88, "function": "wrap",
+			"lineno": 88, "function": "wrapped",
 		},
+		{"filename": "apps/frappe/frappe/__init__.py", "lineno": 90, "function": "get_doc"},
 		{
 			"filename": "apps/frappe/frappe/database/mariadb/database.py",
 			"lineno": 742, "function": "sql",
@@ -912,13 +912,22 @@ def test_is_profiler_own_query_unit():
 	assert is_profiler_own_query(None) is False
 	assert is_profiler_own_query([]) is False
 
-	# Mixed profiler + user frame → user wins (NOT profiler)
+	# User frame outside a pass-through wrapper over Frappe → the user's (NOT profiler)
+	stack = [
+		{"filename": "apps/myapp/bulk.py", "lineno": 10, "function": "bulk"},
+		{"filename": "optimus/capture.py", "lineno": 88, "function": "wrapped"},
+		{"filename": "frappe/__init__.py", "lineno": 90, "function": "get_doc"},
+		{"filename": "frappe/database/mariadb/database.py", "lineno": 742, "function": "sql"},
+	]
+	assert is_profiler_own_query(stack) is False
+
+	# User frame outside any other Optimus frame → profiler's own query
 	stack = [
 		{"filename": "apps/myapp/bulk.py", "lineno": 10, "function": "bulk"},
 		{"filename": "optimus/capture.py", "lineno": 88, "function": "wrap"},
 		{"filename": "frappe/database/mariadb/database.py", "lineno": 742, "function": "sql"},
 	]
-	assert is_profiler_own_query(stack) is False
+	assert is_profiler_own_query(stack) is True
 
 
 def test_walk_callsite_returns_none_for_profiler_only_stack():
@@ -1246,16 +1255,17 @@ def test_a_user_frame_inside_the_hook_is_still_the_users():
 
 
 def test_another_optimus_module_is_not_the_hook():
-	# The clause is the hook's module alone: an Optimus wrap frame between the
-	# user and the query still leaves the query the user's.
-	from optimus.analyzers.base import is_profiler_own_query, walk_callsite
+	# The hook clause is the hook's module alone: another Optimus module is own
+	# by the general rule, and a pass-through wrap over Frappe stays the user's.
+	from optimus.analyzers.base import _is_error_log_hook_frame, is_profiler_own_query, walk_callsite
 
-	stack = [
-		_IMPORTER,
-		{"filename": "optimus/optimus/capture.py", "lineno": 88, "function": "wrapped_get_doc"},
-		{"filename": "optimus/optimus/error_log_mask_helpers.py", "lineno": 1, "function": "f"},
-		*_KEY_READ,
-	]
+	assert not _is_error_log_hook_frame("optimus/optimus/error_log_mask_helpers.py")
+	helper = {"filename": "optimus/optimus/error_log_mask_helpers.py", "lineno": 1, "function": "f"}
+	assert is_profiler_own_query([_IMPORTER, helper, *_KEY_READ]) is True
+
+	wrap = {"filename": "optimus/optimus/capture.py", "lineno": 88, "function": "wrapped"}
+	get_doc = {"filename": "frappe/frappe/__init__.py", "lineno": 90, "function": "get_doc"}
+	stack = [_IMPORTER, wrap, get_doc, *_KEY_READ]
 	assert is_profiler_own_query(stack) is False
 	assert walk_callsite(stack) == _IMPORTER
 

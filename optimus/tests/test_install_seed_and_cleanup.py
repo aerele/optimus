@@ -47,7 +47,13 @@ def site(monkeypatch):
 	monkeypatch.setattr(
 		frappe,
 		"db",
-		types.SimpleNamespace(db_type="mariadb", exists=lambda dt, name=None: (dt, name) in state.exists),
+		types.SimpleNamespace(
+			db_type="mariadb",
+			exists=lambda dt, name=None: (dt, name) in state.exists,
+			table_exists=lambda doctype: False,
+			savepoint=lambda name: None,
+			rollback=lambda save_point=None: None,
+		),
 		raising=False,
 	)
 	monkeypatch.setattr(frappe, "get_single", lambda dt: state.settings, raising=False)

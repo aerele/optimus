@@ -150,6 +150,7 @@ jobs:
             test_janitor_sweeps_actually_delete
             test_managed_artifact_boundaries
             test_index_suggestions_statement_count
+            test_api_hardening
         run: |
           set -uo pipefail
           BENCH_DIR="${RUNNER_TEMP}/frappe-bench"
