@@ -21,7 +21,7 @@ import frappe
 import frappe.recorder  # imported at module top so function-local `import frappe.recorder` doesn't rebind `frappe` as a local variable (Python scope rule: any `import frappe.X` inside a function makes `frappe` a function-local for the entire scope, breaking earlier `frappe.local` reads caused by Python 3.14 stricter scope detection on a pre-existing pattern)
 
 from optimus import capture as _capture
-from optimus import safe_commit, session
+from optimus import method_path, safe_commit, session
 from optimus.timing import RECORDING_DATA_TTL_SECONDS
 
 # v0.5.1: Skip-list for instrumentation-noise endpoints. Any HTTP request
@@ -438,6 +438,48 @@ def after_request(*args, **kwargs):
 # keyword argument error.
 
 
+def _job_frame(method, kwargs):
+	"""Identity of one job run: frappe passes the same kwargs dict to before_job and after_job."""
+	return (method_path(method), id(kwargs))
+
+
+def _enter_internal_job(method, kwargs):
+	"""Flag the worker as inside an Optimus or foreign cron job, remembering the flag to restore
+	at its end and which job pushed it."""
+	local = frappe.local
+	stack = getattr(local, "optimus_internal_job_stack", None)
+	if stack is None:
+		stack = local.optimus_internal_job_stack = []
+	stack.append((_job_frame(method, kwargs), getattr(local, "optimus_internal_job", False)))
+	local.optimus_internal_job = True
+
+
+def _leave_internal_job(method, kwargs):
+	"""Undo _enter_internal_job, but only for the job whose before_job pushed it, so a job run
+	inline in a request leaves the request's own flag alone."""
+	local = frappe.local
+	stack = getattr(local, "optimus_internal_job_stack", None)
+	if stack and stack[-1][0] == _job_frame(method, kwargs):
+		local.optimus_internal_job = stack.pop()[1]
+
+
+def _enter_outside_user_flow(method, kwargs):
+	"""Flag the worker as outside the user's flow and drop the markers the method cannot take."""
+	_enter_internal_job(method, kwargs)
+	if isinstance(kwargs, dict):
+		kwargs.pop("_profiler_session_id", None)
+		kwargs.pop("_lp_session_id", None)
+
+
+def _started_from_a_session(kwargs):
+	"""True when the enqueue wrapper tagged this run from the user's request, or Frappe is
+	retrying a tagged run (the retry no longer carries the marker)."""
+	if isinstance(kwargs, dict) and kwargs.get("_profiler_session_id"):
+		return True
+	retry_state = _capture.job_retry_state(create=False)
+	return bool(retry_state and retry_state.get("session_uuid"))
+
+
 def before_job(method=None, kwargs=None, **rest):
 	"""Activate the recorder if this job belongs to an active profiler session."""
 	try:
@@ -447,6 +489,12 @@ def before_job(method=None, kwargs=None, **rest):
 		# after frappe is fully ready.
 		import optimus
 		optimus._try_install_capture_wraps()
+
+		if optimus.is_internal_job(method, kwargs):
+			# Jobs it queues must not join a session, and a job queued before the
+			# untagged rule still carries a marker its method cannot accept.
+			_enter_outside_user_flow(method, kwargs)
+			return
 
 		# v0.5.2: honor the master kill-switch here too. If the admin
 		# turned the profiler off, we still need to pop our marker
@@ -464,14 +512,13 @@ def before_job(method=None, kwargs=None, **rest):
 		if getattr(frappe.local, "optimus_analyzing", False):
 			return
 
-		if kwargs is None:
+		if optimus.is_scheduled_job(method) and not _started_from_a_session(kwargs):
+			# Another app's cron fired by the scheduler: its child jobs must not join a
+			# session either. One the user started carries the marker and is recorded.
+			_enter_outside_user_flow(method, kwargs)
 			return
-		if optimus.is_internal_job(method):
-			# analyze.run is never tagged any more, but a job queued before that fix
-			# still carries a marker, which run() cannot accept and must not record.
-			if isinstance(kwargs, dict):
-				kwargs.pop("_profiler_session_id", None)
-				kwargs.pop("_lp_session_id", None)
+
+		if kwargs is None:
 			return
 		if not isinstance(kwargs, dict):
 			# Unexpected frappe should always pass a dict. Log once so
@@ -577,6 +624,7 @@ def before_job(method=None, kwargs=None, **rest):
 
 def after_job(method=None, kwargs=None, result=None, **rest):
 	"""Register the dumped recording UUID with the active profiler session."""
+	_leave_internal_job(method, kwargs)
 	try:
 		session_uuid = getattr(frappe.local, "optimus_session_id", None)
 		if not session_uuid:

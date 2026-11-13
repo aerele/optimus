@@ -1,4 +1,4 @@
-__version__ = "0.12.153"
+__version__ = "0.12.160"
 
 
 def safe_commit() -> None:
@@ -88,16 +88,44 @@ def _is_synchronous_enqueue(args, kwargs, positions=_ENQUEUE_POSITIONS) -> bool:
 		return False
 
 
-# Jobs Optimus queues for itself. Tagging one with the user's *next* session would
-# record the analysis into that session, so they never carry a session marker.
-_INTERNAL_JOB_METHODS = frozenset({"optimus.analyze.run"})
+_OPTIMUS_PREFIX = "optimus."
+_RUN_SCHEDULED_JOB = "frappe.core.doctype.scheduled_job_type.scheduled_job_type.run_scheduled_job"
 
 
-def is_internal_job(method) -> bool:
-	"""True for a job Optimus queued for itself, given as a dotted path or a callable."""
-	if not isinstance(method, str):
-		method = f"{getattr(method, '__module__', '')}.{getattr(method, '__qualname__', '')}"
-	return method in _INTERNAL_JOB_METHODS
+def method_path(method) -> str:
+	if isinstance(method, str):
+		return method
+	return f"{getattr(method, '__module__', '')}.{getattr(method, '__qualname__', '')}"
+
+
+def is_scheduled_job(method) -> bool:
+	"""True for the scheduler's cron runner, whichever app's job it runs."""
+	return method_path(method) == _RUN_SCHEDULED_JOB
+
+
+def is_internal_job(method, kwargs=None) -> bool:
+	"""True for a job Optimus runs for itself: an ``optimus.`` method, or a cron whose
+	``job_type`` is one. Tagging one with the user's *next* session would record it there."""
+	path = method_path(method)
+	if path.startswith(_OPTIMUS_PREFIX):
+		return True
+	return path == _RUN_SCHEDULED_JOB and str((kwargs or {}).get("job_type", "")).startswith(_OPTIMUS_PREFIX)
+
+
+def _is_scheduler_enqueue(method, local) -> bool:
+	"""A cron queued with no web request and no running job is not part of the user's flow.
+	``bench execute`` and the console look the same, and are left out too."""
+	return (
+		method_path(method) == _RUN_SCHEDULED_JOB
+		and getattr(local, "request", None) is None
+		and getattr(local, "job", None) is None
+	)
+
+
+def _outside_user_flow(method, kwargs, local) -> bool:
+	if getattr(local, "optimus_internal_job", False) or getattr(local, "optimus_analyzing", False):
+		return True
+	return is_internal_job(method, kwargs) or _is_scheduler_enqueue(method, local)
 
 
 def _live_bg_session(session_uuid, user, _profiler_session):
@@ -182,13 +210,14 @@ def _patch_enqueue():
 
 	def _profiler_enqueue(method, *args, **kwargs):
 		active = None
+		tagging_error = None
 		synchronous = _is_synchronous_enqueue(args, kwargs, _positions)
 		try:
 			# Lazy import to avoid circular dependency on app init.
 			from optimus import session as _profiler_session
 
 			user = getattr(frappe.session, "user", None) if hasattr(frappe, "session") else None
-			if user and user != "Guest" and not is_internal_job(method):
+			if user and user != "Guest" and not _outside_user_flow(method, kwargs, getattr(frappe, "local", None)):
 				active = _enqueue_session_for(user, _profiler_session)
 				# Inline calls would pass the marker to the method as a kwarg.
 				if active and not synchronous:
@@ -212,9 +241,15 @@ def _patch_enqueue():
 					# phase 2 stays off for this job; phase 1 (if active)
 					# still rides along.
 					pass
-		except Exception:
+		except Exception as exc:
 			# Never break enqueue. The profiler is best-effort by design.
-			pass
+			tagging_error = type(exc).__name__
+		if tagging_error:
+			from optimus import safe_call
+
+			safe_call.log_error_line(
+				f"optimus: could not decide whether to tag an enqueued job ({tagging_error}); it runs untagged"
+			)
 
 		# enqueue_after_commit returns None, so pick the id ourselves.
 		deferred_job_id = None
