@@ -213,14 +213,15 @@ def _mismatch_reason(block: list[str], code) -> str | None:
 
 
 def _overlong_reason(fn) -> str | None:
-	"""Why a function longer than the per-pick cap is refused, decided from its code object before any parse."""
+	"""Why a function over the per-pick line cap is refused, from its code object and before any parse."""
 	try:
 		code = getattr(inspect.unwrap(fn), "__code__", None)
-	except ValueError:
+		if code is None:
+			return None
+		lines = (lineno for _start, _end, lineno in code.co_lines() if lineno)
+		last = max(lines, default=code.co_firstlineno)
+	except (OSError, TypeError, ValueError):
 		return None
-	if code is None:
-		return None
-	last = max((lineno for _start, _end, lineno in code.co_lines() if lineno), default=code.co_firstlineno)
 	if last - code.co_firstlineno + 1 > MAX_PICK_SOURCE_LINES:
 		return _("it is longer than {0} lines").format(MAX_PICK_SOURCE_LINES)
 	return None
@@ -640,14 +641,18 @@ def prepare_line_profile_picks(
 	return _finish_capture(resolved, picks_meta, source_snapshot, server_chosen=server_chosen)
 
 
-def _finish_capture(resolved: list[dict], picks_meta: list[dict], snapshot: dict, *, server_chosen: bool) -> PreparedCapture:
+def _finish_capture(
+	resolved: list[dict], picks_meta: list[dict], snapshot: dict, *, server_chosen: bool,
+) -> PreparedCapture:
 	"""Validate and size the payload exactly as it will be stored.
 
 	A user's pick that fails refuses the run with the error. A server-chosen run that fails
 	is reported as nothing capturable, so auto-arm shows why instead of stopping unseen."""
 	failure = None
 	try:
-		_validate_captured_picks([{**pick, "source_lines": snapshot[pick["dotted_path"]]} for pick in picks_meta])
+		_validate_captured_picks(
+			[{**pick, "source_lines": snapshot[pick["dotted_path"]]} for pick in picks_meta]
+		)
 	except CaptureInputError as exc:
 		failure = (_("Its captured source could not be validated."),
 			_("The selected source cannot be captured: {0}. Select fewer functions.").format(str(exc)))

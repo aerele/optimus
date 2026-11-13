@@ -671,9 +671,22 @@ function _phase2_not_armed_banner(frm, skips) {
 	const summary = __("No line profiling run was started: none of the {0} hot function(s) could be captured.", [
 		skips.length,
 	]);
-	_single_banner(frm, "optimus-phase2-notarmed", "form-message yellow", _phase2_skipped_details(summary, skips), null, {
-		role: "status",
-	});
+	const $b = _single_banner(
+		frm, "optimus-phase2-notarmed", "form-message yellow", _phase2_skipped_details(summary, skips), null,
+		{ role: "status" }
+	);
+	// Tagged with its session, like the analyze banner: Frappe reuses this wrapper across sessions.
+	if ($b) $b.attr("data-optimus-session", frm.doc.session_uuid || "");
+}
+
+// Drop a notice painted for another session; a plain re-render of the same session keeps it.
+function _drop_foreign_not_armed_banner(frm) {
+	const root = frm.$wrapper;
+	if (!root || !root.length) return;
+	const $b = root.find(".optimus-phase2-notarmed");
+	if ($b.length && $b.attr("data-optimus-session") !== (frm.doc.session_uuid || "")) {
+		_phase2_not_armed_banner(frm, null);
+	}
 }
 
 function render_phase2_button(frm) {
@@ -685,6 +698,7 @@ function render_phase2_button(frm) {
 		_phase2_not_armed_banner(frm, null);
 		return;
 	}
+	_drop_foreign_not_armed_banner(frm);
 	_phase2_skipped_banner(frm);
 
 	// If there's an in-flight Recording row, surface Stop as the primary

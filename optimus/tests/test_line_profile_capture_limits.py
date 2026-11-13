@@ -5,7 +5,7 @@ import json
 import pytest
 
 from optimus.line_profile import capture
-from optimus.tests.test_line_profile_auto_arm_skips import curated, long_function, wire
+from optimus.tests.test_line_profile_auto_arm_skips import curated, long_function, many, wire
 from optimus.tests.test_line_profile_source_capture import BLANKS, load
 
 pytestmark = pytest.mark.rq
@@ -40,14 +40,25 @@ def test_capture_source_lines_has_no_per_function_cap_of_its_own(tmp_path, monke
 	assert len(capture._capture_source_lines(fn)) == capture.MAX_PICK_SOURCE_LINES + 10
 
 
-def test_the_running_estimate_equals_the_stored_payload(tmp_path, monkeypatch):
-	one_function(tmp_path, monkeypatch)
-	size = payload_size(capture.prepare_line_profile_picks(curated("f")))
+@pytest.mark.parametrize("count", [1, 2, 5])
+def test_the_running_estimate_equals_the_stored_payload(tmp_path, monkeypatch, count):
+	picks = many(tmp_path, monkeypatch, count)
+	size = payload_size(capture.prepare_line_profile_picks(picks))
 	monkeypatch.setattr(capture, "MAX_CAPTURE_BYTES", size - 1)
 	with pytest.raises(capture.CaptureError, match="exceeds the capture limits"):
-		capture.prepare_line_profile_picks(curated("f"))
+		capture.prepare_line_profile_picks(picks)
 	monkeypatch.setattr(capture, "MAX_CAPTURE_BYTES", size)
-	assert payload_size(capture.prepare_line_profile_picks(curated("f"))) == size
+	assert payload_size(capture.prepare_line_profile_picks(picks)) == size
+
+
+def test_a_hostile_code_attribute_cannot_escape_the_overlong_check():
+	class Hostile:
+		@property
+		def __code__(self):
+			raise TypeError("hostile")
+
+	assert capture._overlong_reason(Hostile()) is None
+	assert capture._pick_source(Hostile()) == ([], "it could not be read")
 
 
 def test_the_final_payload_is_checked_exactly_against_the_size_limit(tmp_path, monkeypatch):

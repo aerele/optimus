@@ -41,3 +41,46 @@ def test_a_successful_auto_arm_removes_the_not_armed_notice():
 		pytest.skip("node not installed")
 	result = subprocess.run(["node", "-e", SCRIPT, str(FORM)], capture_output=True, text=True)
 	assert result.returncode == 0, result.stderr
+
+
+SESSION_SCRIPT = r"""
+const vm=require('node:vm'),fs=require('node:fs'),assert=require('node:assert/strict');
+const handlers={},banners={};
+function banner(name){
+ const data={};
+ return {length:1,idClass:name,data,html(h){if(h===undefined)return this.h;this.h=h;return this;},
+  attr(k,v){if(typeof k==='object'){Object.assign(data,k);return this;}
+   if(v===undefined)return data[k];data[k]=v;return this;},
+  remove(){delete banners[name];}};
+}
+const none={length:0,remove(){},attr(){}};
+const layout={length:1,first(){return this;},prepend(b){banners[b.idClass]=b;}};
+const wrapper={length:1,find(sel){
+ const name=sel.slice(1);
+ if(name==='form-layout')return layout;
+ return banners[name]||none;}};
+const ctx={__:(t,a)=>a?t.replace(/\{(\d+)\}/g,(m,i)=>a[i]):t,setTimeout:()=>{},clearTimeout:()=>{},
+ $:(h)=>banner(/class="(\S+)/.exec(h)[1]),
+ frappe:{ui:{form:{on:()=>{}}},router:{on:()=>{}},realtime:{on:(n,f)=>handlers[n]=f},
+ utils:{escape_html:s=>String(s)},show_alert:()=>{}}};
+vm.createContext(ctx);vm.runInContext(fs.readFileSync(process.argv[1],'utf8'),ctx);
+ctx._can_act=()=>true;
+const frm={$wrapper:wrapper,doc:{name:'docA',session_uuid:'sA',status:'Ready',phase_2_runs:[]},
+ is_new:()=>false,is_dirty:()=>false,reload_doc(){},add_custom_button:()=>({removeClass(){return this},addClass(){return this}})};
+ctx.subscribe_session_progress(frm);ctx.subscribe_phase2_events(frm);
+handlers.optimus_phase2_not_armed({docname:'docA',session_uuid:'sA',event_id:'n1',
+ skipped:[{function:'app_a.secret.path',reason:'why'}],skipped_count:1});
+assert.match(banners['optimus-phase2-notarmed'].h,/app_a\.secret\.path/);
+ctx.render_phase2_button(frm);
+assert.match(banners['optimus-phase2-notarmed'].h,/app_a\.secret\.path/,'the same session keeps its notice');
+frm.doc={name:'docB',session_uuid:'sB',status:'Ready',phase_2_runs:[]};
+ctx.render_phase2_button(frm);
+assert.equal(banners['optimus-phase2-notarmed'],undefined,'another Ready session does not inherit it');
+"""
+
+
+def test_the_not_armed_notice_does_not_leak_into_another_session():
+	if not shutil.which("node"):
+		pytest.skip("node not installed")
+	result = subprocess.run(["node", "-e", SESSION_SCRIPT, str(FORM)], capture_output=True, text=True)
+	assert result.returncode == 0, result.stderr
