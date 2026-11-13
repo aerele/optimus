@@ -394,6 +394,9 @@ def _check_shapes(unique_queries, optimize_query, dialect, deadline) -> tuple[di
 				"optimus index_suggestions: frappe.local.db is not available to cache the optimizer's "
 				"table reads; reading them again for every query shape"
 			)
+		# Keep the proxy we installed: the loop may replace frappe.local.db (a reconnect), and
+		# the replacement has no stats.
+		proxy = frappe.local.db if cached else None
 		with dialect.statement_time_limit(OPTIMIZER_STATEMENT_TIMEOUT_SECONDS):
 			for normalized, info in ordered:
 				if _monotonic() >= deadline:
@@ -405,7 +408,7 @@ def _check_shapes(unique_queries, optimize_query, dialect, deadline) -> tuple[di
 						"optimus index_suggestions: a syntax error (1064) from the cardinality count does not "
 						f"look like a reserved column name, this may be a bug: {outcome.message[:300]}"
 					)
-		stats = frappe.local.db.optimus_cache_stats() if cached else None
+		stats = proxy.optimus_cache_stats() if proxy is not None else None
 	_log_stopped_early(len(unique_queries) - len(outcomes), len(unique_queries), stats)
 	return outcomes, len(unique_queries) - len(outcomes)
 

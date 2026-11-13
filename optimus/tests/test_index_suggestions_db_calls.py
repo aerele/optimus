@@ -464,6 +464,29 @@ def test_the_real_db_is_put_back_after_success(env, empty_context):
 	assert env.local.db is env.db
 
 
+def test_a_db_replaced_mid_run_does_not_lose_the_results(env, empty_context):
+	"""A reconnect inside the loop swaps frappe.local.db for an object without the cache's
+	stats method; the analyzer must still return what it found."""
+
+	class Reconnected:
+		"""A fresh db object: works like the old one but has no ``optimus_cache_stats``."""
+
+		def __getattr__(self, name):
+			return getattr(env.db, name)
+
+	replacement = Reconnected()
+
+	def reconnect(kind):
+		env.local.db = replacement
+
+	env.db.on_read = reconnect
+
+	result = index_suggestions.analyze(_shapes(5), empty_context)
+
+	assert any(f["finding_type"] == "Missing Index" for f in result.findings)
+	assert env.local.db is replacement
+
+
 def test_the_real_db_is_put_back_after_an_unexpected_error(env, empty_context, monkeypatch):
 	def explode(*args, **kwargs):
 		raise KeyboardInterrupt
