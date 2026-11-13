@@ -453,6 +453,8 @@ function subscribe_session_progress(frm) {
 	// render_phase2_button → the in-form banner + Stop button appear.
 	frappe.realtime.on("optimus_phase2_armed", (p) => {
 		if (!p || p.docname !== frm.doc.name || !_new_session_event(frm, p)) return;
+		// A run is armed now: an earlier "No line profiling run was started" notice is stale.
+		_phase2_not_armed_banner(frm, null);
 		const fns = (p.functions || []).join(", ");
 		frappe.show_alert(
 			{
@@ -694,6 +696,9 @@ function render_phase2_button(frm) {
 
 	// Session actions follow the server gate; Force Stop Stuck Run only clears the caller's own captures.
 	const can_act = _can_act(frm);
+	// A live run makes an earlier "no run was started" notice stale. Without one the notice stays:
+	// the reload after the Ready event must not wipe it the moment it appears.
+	if (recording) _phase2_not_armed_banner(frm, null);
 	if (recording && !can_act) {
 		_phase2_armed_banner(frm, __("Line profiling is recording on this session. The session owner can stop it."));
 	} else if (recording) {

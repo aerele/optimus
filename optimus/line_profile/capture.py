@@ -212,11 +212,18 @@ def _mismatch_reason(block: list[str], code) -> str | None:
 	return None
 
 
-def _refuse_overlong(code) -> None:
-	"""Refuse a function longer than the per-function cap before it is parsed."""
+def _overlong_reason(fn) -> str | None:
+	"""Why a function longer than the per-pick cap is refused, decided from its code object before any parse."""
+	try:
+		code = getattr(inspect.unwrap(fn), "__code__", None)
+	except ValueError:
+		return None
+	if code is None:
+		return None
 	last = max((lineno for _start, _end, lineno in code.co_lines() if lineno), default=code.co_firstlineno)
 	if last - code.co_firstlineno + 1 > MAX_PICK_SOURCE_LINES:
-		raise SourceUnavailable(_("it is longer than {0} lines").format(MAX_PICK_SOURCE_LINES))
+		return _("it is longer than {0} lines").format(MAX_PICK_SOURCE_LINES)
+	return None
 
 
 @_interrupt_boundary
@@ -235,7 +242,6 @@ def _capture_source_lines(fn) -> list[dict]:
 		lines = source._source_lines(code.co_filename)
 		if not lines:
 			return []
-		_refuse_overlong(code)
 		return _function_block(lines, code)
 	except (OSError, TypeError, ValueError):
 		return []
@@ -447,6 +453,9 @@ def validate_picks(picks):
 
 def _pick_source(fn) -> tuple[list[dict], str | None]:
 	"""The callable's whole source rows, or no rows and the reason they are unavailable."""
+	reason = _overlong_reason(fn) if fn else None
+	if reason:
+		return [], reason
 	try:
 		lines = _capture_source_lines(fn) if fn else []
 	except SourceUnavailable as exc:
@@ -628,11 +637,32 @@ def prepare_line_profile_picks(
 	if not picks_meta:
 		raise _nothing_eligible(resolved)
 
+	return _finish_capture(resolved, picks_meta, source_snapshot, server_chosen=server_chosen)
+
+
+def _finish_capture(resolved: list[dict], picks_meta: list[dict], snapshot: dict, *, server_chosen: bool) -> PreparedCapture:
+	"""Validate and size the payload exactly as it will be stored.
+
+	A user's pick that fails refuses the run with the error. A server-chosen run that fails
+	is reported as nothing capturable, so auto-arm shows why instead of stopping unseen."""
+	failure = None
 	try:
-		_validate_captured_picks([{**pick, "source_lines": source_snapshot[pick["dotted_path"]]} for pick in picks_meta])
+		_validate_captured_picks([{**pick, "source_lines": snapshot[pick["dotted_path"]]} for pick in picks_meta])
 	except CaptureInputError as exc:
-		raise CaptureError(_("The selected source cannot be captured: {0}. Select fewer functions.").format(str(exc))) from None
-	return PreparedCapture(tuple(resolved), json.dumps(picks_meta), json.dumps(source_snapshot))
+		failure = (_("Its captured source could not be validated."),
+			_("The selected source cannot be captured: {0}. Select fewer functions.").format(str(exc)))
+	picks_json, source_json = json.dumps(picks_meta), json.dumps(snapshot)
+	if failure is None and len(picks_json.encode()) + len(source_json.encode()) > MAX_CAPTURE_BYTES:
+		failure = (_("The run's source size limit was reached."),
+			_("Selected source exceeds the capture size limit. Select fewer functions."))
+	if failure is None:
+		return PreparedCapture(tuple(resolved), picks_json, source_json)
+	if not server_chosen:
+		raise CaptureError(failure[1])
+	by_path = {r["dotted_path"]: r for r in resolved}
+	for pick in picks_meta:
+		_skip_pick(by_path[pick["dotted_path"]], failure[0])
+	raise _nothing_eligible(resolved)
 
 
 def start_line_profile_pass(
