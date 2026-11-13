@@ -12,7 +12,7 @@ versions may contain breaking changes see migration notes below).
 
 ### Fixed
 
-- Scheduled jobs from any app, and Optimus's own jobs, no longer show up in a session you record. Before, if you were recording while the scheduler queued an hourly job, that job was recorded into your session and analysis waited for it. A job you start yourself from a page (for example Execute on a scheduled job in Desk) is still recorded. Jobs queued from inside an Optimus job, or from inside another app's scheduled job, are left out as well. A scheduled job counts as started by the scheduler when it is queued with no web request and no running job, so one queued from `bench execute` or the console is left out too.
+- Scheduled jobs from any app, and Optimus's own jobs, no longer show up in a session you record. Before, if you were recording while the scheduler queued an hourly job, that job was recorded into your session and analysis waited for it. Jobs queued from inside an Optimus job, or from inside a scheduled job the scheduler started, are left out as well. A job or scheduled job you start yourself from a page (for example Execute on a scheduled job in Desk), and the jobs it starts, are still recorded. A scheduled job counts as started by the scheduler when it is queued with no web request and no running job, so one queued from `bench execute` or the console is left out too.
 - A session stuck in Stopping is analyzed again once, even when two schedulers or a manual `bench execute` run the janitor at the same time.
 - The daily Redis cleanup no longer retries the same failing sessions every run. It starts from a different place each day, skips a session that raises and carries on, and writes one log line with the number it could not clean.
 

@@ -162,6 +162,24 @@ class TestBeforeJob:
 		hc.before_job(method=RUN_SCHEDULED, kwargs={"job_type": "erpnext.x"})
 		assert not hasattr(env.fake.local, "optimus_internal_job")
 
+	def test_a_retried_cron_the_user_started_is_still_recorded(self, hc, env, monkeypatch):  # noqa: F811
+		# Frappe re-runs a deadlocked job with the marker already popped.
+		tracked = []
+		monkeypatch.setattr(hc, "_track_bg_job_started", lambda *a: tracked.append(a))
+		monkeypatch.setattr(hc._capture, "job_retry_state", lambda create=True: {"session_uuid": SESSION})
+		env.fake.local._recorder = object()
+		hc.before_job(method=RUN_SCHEDULED, kwargs={"job_type": "erpnext.x"})
+		assert tracked == [(SESSION, RUN_SCHEDULED)]
+		assert not getattr(env.fake.local, "optimus_internal_job", False)
+
+	def test_a_retried_cron_with_no_session_stays_internal(self, hc, env, monkeypatch):  # noqa: F811
+		tracked = []
+		monkeypatch.setattr(hc, "_track_bg_job_started", lambda *a: tracked.append(a))
+		monkeypatch.setattr(hc._capture, "job_retry_state", lambda create=True: {"lock_events": []})
+		hc.before_job(method=RUN_SCHEDULED, kwargs={"job_type": "erpnext.x"})
+		assert tracked == []
+		assert env.fake.local.optimus_internal_job is True
+
 	def test_a_foreign_cron_with_no_marker_is_not_recorded(self, hc, env, monkeypatch):  # noqa: F811
 		tracked = []
 		monkeypatch.setattr(hc, "_track_bg_job_started", lambda *a: tracked.append(a))
