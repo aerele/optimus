@@ -463,6 +463,23 @@ def _leave_internal_job(method, kwargs):
 		local.optimus_internal_job = stack.pop()[1]
 
 
+def _enter_outside_user_flow(method, kwargs):
+	"""Flag the worker as outside the user's flow and drop the markers the method cannot take."""
+	_enter_internal_job(method, kwargs)
+	if isinstance(kwargs, dict):
+		kwargs.pop("_profiler_session_id", None)
+		kwargs.pop("_lp_session_id", None)
+
+
+def _started_from_a_session(kwargs):
+	"""True when the enqueue wrapper tagged this run from the user's request, or Frappe is
+	retrying a tagged run (the retry no longer carries the marker)."""
+	if isinstance(kwargs, dict) and kwargs.get("_profiler_session_id"):
+		return True
+	retry_state = _capture.job_retry_state(create=False)
+	return bool(retry_state and retry_state.get("session_uuid"))
+
+
 def before_job(method=None, kwargs=None, **rest):
 	"""Activate the recorder if this job belongs to an active profiler session."""
 	try:
@@ -473,14 +490,10 @@ def before_job(method=None, kwargs=None, **rest):
 		import optimus
 		optimus._try_install_capture_wraps()
 
-		if optimus.is_internal_job(method, kwargs) or optimus.is_scheduled_job(method):
-			# Jobs it queues must not join a session (that includes the children of
-			# another app's cron), and a job queued before the untagged rule still
-			# carries a marker its method cannot accept.
-			_enter_internal_job(method, kwargs)
-			if isinstance(kwargs, dict):
-				kwargs.pop("_profiler_session_id", None)
-				kwargs.pop("_lp_session_id", None)
+		if optimus.is_internal_job(method, kwargs):
+			# Jobs it queues must not join a session, and a job queued before the
+			# untagged rule still carries a marker its method cannot accept.
+			_enter_outside_user_flow(method, kwargs)
 			return
 
 		# v0.5.2: honor the master kill-switch here too. If the admin
@@ -497,6 +510,12 @@ def before_job(method=None, kwargs=None, **rest):
 			return
 
 		if getattr(frappe.local, "optimus_analyzing", False):
+			return
+
+		if optimus.is_scheduled_job(method) and not _started_from_a_session(kwargs):
+			# Another app's cron fired by the scheduler: its child jobs must not join a
+			# session either. One the user started carries the marker and is recorded.
+			_enter_outside_user_flow(method, kwargs)
 			return
 
 		if kwargs is None:

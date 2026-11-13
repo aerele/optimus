@@ -98,18 +98,15 @@ def method_path(method) -> str:
 	return f"{getattr(method, '__module__', '')}.{getattr(method, '__qualname__', '')}"
 
 
-_method_path = method_path
-
-
 def is_scheduled_job(method) -> bool:
 	"""True for the scheduler's cron runner, whichever app's job it runs."""
-	return _method_path(method) == _RUN_SCHEDULED_JOB
+	return method_path(method) == _RUN_SCHEDULED_JOB
 
 
 def is_internal_job(method, kwargs=None) -> bool:
 	"""True for a job Optimus runs for itself: an ``optimus.`` method, or a cron whose
 	``job_type`` is one. Tagging one with the user's *next* session would record it there."""
-	path = _method_path(method)
+	path = method_path(method)
 	if path.startswith(_OPTIMUS_PREFIX):
 		return True
 	return path == _RUN_SCHEDULED_JOB and str((kwargs or {}).get("job_type", "")).startswith(_OPTIMUS_PREFIX)
@@ -119,7 +116,7 @@ def _is_scheduler_enqueue(method, local) -> bool:
 	"""A cron queued with no web request and no running job is not part of the user's flow.
 	``bench execute`` and the console look the same, and are left out too."""
 	return (
-		_method_path(method) == _RUN_SCHEDULED_JOB
+		method_path(method) == _RUN_SCHEDULED_JOB
 		and getattr(local, "request", None) is None
 		and getattr(local, "job", None) is None
 	)

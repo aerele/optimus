@@ -470,7 +470,6 @@ def _sweep_stale_stopping():
 	for row in stale:
 		if not _claim_stale_stopping(row["name"], cutoff):
 			continue
-		queued = True
 		try:
 			# The claim above is the lock. The fixed id with deduplicate only spares a
 			# second queued job when a sweep runs again; it is check-then-enqueue, not atomic.

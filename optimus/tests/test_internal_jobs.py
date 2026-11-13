@@ -130,10 +130,43 @@ class TestBeforeJob:
 		assert not _marked(env)
 		assert _pending(env) == set()
 
-	def test_a_foreign_cron_drops_a_stale_marker(self, hc, env):  # noqa: F811
-		kwargs = {"job_type": "erpnext.x", "_profiler_session_id": "s", "_lp_session_id": "l"}
+	def test_a_foreign_cron_the_user_started_is_recorded_not_internal(self, hc, env, monkeypatch):  # noqa: F811
+		# Execute on a Scheduled Job Type enqueues from the user's request, so the cron
+		# arrives carrying the marker the enqueue wrapper injected.
+		tracked = []
+		monkeypatch.setattr(hc, "_track_bg_job_started", lambda *a: tracked.append(a))
+		env.fake.local._recorder = object()  # stop at the recorder start, which needs real frappe
+		kwargs = {"job_type": "erpnext.x", "_profiler_session_id": SESSION}
+		hc.before_job(method=RUN_SCHEDULED, kwargs=kwargs)
+		assert tracked == [(SESSION, RUN_SCHEDULED)]
+		assert env.fake.local.optimus_session_id == SESSION
+		assert "_profiler_session_id" not in kwargs
+		assert not getattr(env.fake.local, "optimus_internal_job", False)
+
+	def test_a_child_of_a_cron_the_user_started_is_still_tagged(self, hc, env, monkeypatch):  # noqa: F811
+		monkeypatch.setattr(hc, "_track_bg_job_started", lambda *a: None)
+		env.fake.local._recorder = object()
+		hc.before_job(method=RUN_SCHEDULED, kwargs={"job_type": "erpnext.x", "_profiler_session_id": SESSION})
+		env.enqueue("erpnext.accounts.tasks.child")
+		assert env.calls[-1]["kwargs"]["_profiler_session_id"] == SESSION
+
+	def test_a_cron_the_user_started_is_dropped_when_the_profiler_is_off(self, hc, env, monkeypatch):  # noqa: F811
+		monkeypatch.setattr(sys.modules["optimus.settings"], "is_enabled", lambda: False)
+		kwargs = {"job_type": "erpnext.x", "_profiler_session_id": SESSION}
 		hc.before_job(method=RUN_SCHEDULED, kwargs=kwargs)
 		assert kwargs == {"job_type": "erpnext.x"}
+		assert not getattr(env.fake.local, "optimus_internal_job", False)
+
+	def test_a_scheduler_cron_is_not_flagged_when_the_profiler_is_off(self, hc, env, monkeypatch):  # noqa: F811
+		monkeypatch.setattr(sys.modules["optimus.settings"], "is_enabled", lambda: False)
+		hc.before_job(method=RUN_SCHEDULED, kwargs={"job_type": "erpnext.x"})
+		assert not hasattr(env.fake.local, "optimus_internal_job")
+
+	def test_a_foreign_cron_with_no_marker_is_not_recorded(self, hc, env, monkeypatch):  # noqa: F811
+		tracked = []
+		monkeypatch.setattr(hc, "_track_bg_job_started", lambda *a: tracked.append(a))
+		hc.before_job(method=RUN_SCHEDULED, kwargs={"job_type": "erpnext.x"})
+		assert tracked == []
 
 	def test_after_a_foreign_cron_the_next_user_job_is_tagged_again(self, hc, env):  # noqa: F811
 		kw = {"job_type": "erpnext.x"}
