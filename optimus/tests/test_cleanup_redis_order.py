@@ -48,6 +48,7 @@ def _per_recording_keys(uuid):
 		("delete", redis_keys.lock_events(uuid)),
 		("delete", redis_keys.resolved_doc(uuid)),
 		("delete", redis_keys.infra(uuid)),
+		("delete", redis_keys.sql_off(uuid)),
 	}
 
 

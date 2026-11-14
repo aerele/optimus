@@ -12,14 +12,37 @@ import re
 import frappe
 
 JOURNAL_DOCTYPES = ("Optimus AI Refresh Run", "Optimus AI Refresh Attempt")
+# The Phase Two Run table is scanned by status on every scheduler tick. Its ``status``
+# is declared with search_index like the journals' columns, so Frappe's schema sync keeps
+# the index; it shares their PostgreSQL name-collision repair below.
+INDEXED_DOCTYPES = (*JOURNAL_DOCTYPES, "Optimus Phase Two Run")
 
 
 def execute():
+	"""Never raise: a failure here would block ``bench migrate``. It is logged once and
+	the next migrate retries (``after_migrate`` runs the same steps); admission fails
+	closed meanwhile."""
+	for title, step in (
+		("optimus ai refresh store seed", seed_control),
+		("optimus ai refresh store indexes", ensure_indexes),
+	):
+		try:
+			step()
+		except Exception:
+			from optimus import safe_call
+
+			try:
+				frappe.db.rollback()
+			except Exception:
+				pass
+			safe_call.log_hook_error(title)
+
+
+def seed_control():
 	if not frappe.db.exists("Optimus AI Refresh Control", "site"):
 		frappe.get_doc({"doctype": "Optimus AI Refresh Control", "scope": "site"}).insert(
 			ignore_permissions=True
 		)
-	ensure_indexes()
 
 
 def ensure_indexes():
@@ -42,8 +65,10 @@ def ensure_indexes():
 	if frappe.db.db_type != "postgres":
 		return
 	schema = getattr(frappe.db, "db_schema", None) or frappe.conf.get("db_schema") or "public"
-	for doctype in JOURNAL_DOCTYPES:
+	for doctype in INDEXED_DOCTYPES:
 		table = "tab" + doctype
+		if not frappe.db.table_exists(doctype):
+			continue
 		columns = [
 			field.fieldname
 			for field in frappe.get_meta(doctype).fields
@@ -62,3 +87,4 @@ def ensure_indexes():
 			):
 				continue
 			frappe.db.add_index(doctype, [column], index_name=f"{table}_{column}_index")
+

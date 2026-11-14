@@ -1,0 +1,233 @@
+[
+	{
+		"dialect": "mariadb",
+		"source": "qb:get_decrypted_password",
+		"sql": "SELECT `password` FROM `__Auth` WHERE `doctype`='User' AND `name`='a@b.c' AND `fieldname`='password' AND `encrypted`=1 LIMIT 1",
+		"secrets": []
+	},
+	{
+		"dialect": "mariadb",
+		"source": "qb:set_encrypted_password",
+		"sql": "INSERT INTO `__Auth` (`doctype`,`name`,`fieldname`,`password`,`encrypted`) VALUES ('User','a@b.c','password','$pbkdf2-sha256$29000$Zq9xK2vLm7Wpabcdef',1)",
+		"secrets": [
+			"$pbkdf2-sha256$29000$Zq9xK2vLm7Wpabcdef"
+		]
+	},
+	{
+		"dialect": "mariadb",
+		"source": "qb:password_filter",
+		"sql": "SELECT `name` FROM `tabUser` WHERE `password`='Zq9xK2vLm7Wp'",
+		"secrets": [
+			"Zq9xK2vLm7Wp"
+		]
+	},
+	{
+		"dialect": "mariadb",
+		"source": "qb:api_key_in",
+		"sql": "SELECT `name` FROM `tabUser` WHERE `api_key` IN ('Zq9xK2vLm7Wp','Zq9xK2vLm7Wp2')",
+		"secrets": [
+			"Zq9xK2vLm7Wp"
+		]
+	},
+	{
+		"dialect": "mariadb",
+		"source": "qb:set_value",
+		"sql": "UPDATE `tabUser` SET `api_secret`='Zq9xK2vLm7Wp' WHERE `name`='a@b.c'",
+		"secrets": [
+			"Zq9xK2vLm7Wp"
+		]
+	},
+	{
+		"dialect": "mariadb",
+		"source": "qb:bulk_update_case",
+		"sql": "UPDATE `tabTask` SET `api_key`=CASE WHEN `name`='T-1' THEN 'Zq9xK2vLm7Wp' WHEN `name`='T-2' THEN 'Open' ELSE `api_key` END WHERE `name` IN ('T-1','T-2')",
+		"secrets": [
+			"Zq9xK2vLm7Wp"
+		]
+	},
+	{
+		"dialect": "mariadb",
+		"source": "qb:single_value",
+		"sql": "UPDATE `tabSingles` SET `value`='Zq9xK2vLm7Wp' WHERE `doctype`='Razorpay Settings' AND field='api_key'",
+		"secrets": [
+			"Zq9xK2vLm7Wp"
+		]
+	},
+	{
+		"dialect": "mariadb",
+		"source": "qb:single_insert",
+		"sql": "INSERT INTO `tabSingles` (`doctype`,`field`,`value`) VALUES ('Razorpay Settings','api_secret','Zq9xK2vLm7Wp')",
+		"secrets": [
+			"Zq9xK2vLm7Wp"
+		]
+	},
+	{
+		"dialect": "mariadb",
+		"source": "qb:email_queue_form_body",
+		"sql": "UPDATE `tabEmail Queue` SET `message`='password=Zq9xK2vLm7Wp&client_secret=Zq9xK2vLm7Wpb&user=a%40b.c' WHERE `name`='EQ-1'",
+		"secrets": [
+			"Zq9xK2vLm7Wp",
+			"Zq9xK2vLm7Wpb"
+		]
+	},
+	{
+		"dialect": "mariadb",
+		"source": "qb:email_queue_url",
+		"sql": "UPDATE `tabEmail Queue` SET `message`='https://x.example/cb?api_key=Zq9xK2vLm7Wp&state=1' WHERE `name`='EQ-1'",
+		"secrets": [
+			"Zq9xK2vLm7Wp"
+		]
+	},
+	{
+		"dialect": "mariadb",
+		"source": "qb:webhook_log_headers",
+		"sql": "UPDATE `tabWebhook Request Log` SET `headers`='{\"X-API-Key\": \"Zq9xK2vLm7Wp\", \"Authorization\": \"Bearer Zq9xK2vLm7Wp\", \"Accept\": \"text/html\"}' WHERE `name`='WRL-1'",
+		"secrets": [
+			"Zq9xK2vLm7Wp"
+		]
+	},
+	{
+		"dialect": "mariadb",
+		"source": "qb:count_with_token_filter",
+		"sql": "SELECT COUNT(*) FROM `tabUser` WHERE `reset_password_key`='Zq9xK2vLm7Wp'",
+		"secrets": [
+			"Zq9xK2vLm7Wp"
+		]
+	},
+	{
+		"dialect": "mariadb",
+		"source": "qb:hash_filter",
+		"sql": "SELECT `name` FROM `tabUser` WHERE `password` LIKE '%$pbkdf2-sha256$29000$Zq9xK2vLm7Wpabcdef'",
+		"secrets": [
+			"$pbkdf2-sha256$29000$Zq9xK2vLm7Wpabcdef"
+		]
+	},
+	{
+		"dialect": "postgres",
+		"source": "qb:get_decrypted_password",
+		"sql": "SELECT \"password\" FROM \"__Auth\" WHERE \"doctype\"='User' AND \"name\"='a@b.c' AND \"fieldname\"='password' AND \"encrypted\"=1 LIMIT 1",
+		"secrets": []
+	},
+	{
+		"dialect": "postgres",
+		"source": "qb:set_encrypted_password",
+		"sql": "INSERT INTO \"__Auth\" (\"doctype\",\"name\",\"fieldname\",\"password\",\"encrypted\") VALUES ('User','a@b.c','password','$pbkdf2-sha256$29000$Zq9xK2vLm7Wpabcdef',1)",
+		"secrets": [
+			"$pbkdf2-sha256$29000$Zq9xK2vLm7Wpabcdef"
+		]
+	},
+	{
+		"dialect": "postgres",
+		"source": "qb:password_filter",
+		"sql": "SELECT \"name\" FROM \"tabUser\" WHERE \"password\"='Zq9xK2vLm7Wp'",
+		"secrets": [
+			"Zq9xK2vLm7Wp"
+		]
+	},
+	{
+		"dialect": "postgres",
+		"source": "qb:api_key_in",
+		"sql": "SELECT \"name\" FROM \"tabUser\" WHERE \"api_key\" IN ('Zq9xK2vLm7Wp','Zq9xK2vLm7Wp2')",
+		"secrets": [
+			"Zq9xK2vLm7Wp"
+		]
+	},
+	{
+		"dialect": "postgres",
+		"source": "qb:set_value",
+		"sql": "UPDATE \"tabUser\" SET \"api_secret\"='Zq9xK2vLm7Wp' WHERE \"name\"='a@b.c'",
+		"secrets": [
+			"Zq9xK2vLm7Wp"
+		]
+	},
+	{
+		"dialect": "postgres",
+		"source": "qb:bulk_update_case",
+		"sql": "UPDATE \"tabTask\" SET \"api_key\"=CASE WHEN \"name\"='T-1' THEN 'Zq9xK2vLm7Wp' WHEN \"name\"='T-2' THEN 'Open' ELSE \"api_key\" END WHERE \"name\" IN ('T-1','T-2')",
+		"secrets": [
+			"Zq9xK2vLm7Wp"
+		]
+	},
+	{
+		"dialect": "postgres",
+		"source": "qb:single_value",
+		"sql": "UPDATE \"tabSingles\" SET \"value\"='Zq9xK2vLm7Wp' WHERE \"doctype\"='Razorpay Settings' AND field='api_key'",
+		"secrets": [
+			"Zq9xK2vLm7Wp"
+		]
+	},
+	{
+		"dialect": "postgres",
+		"source": "qb:single_insert",
+		"sql": "INSERT INTO \"tabSingles\" (\"doctype\",\"field\",\"value\") VALUES ('Razorpay Settings','api_secret','Zq9xK2vLm7Wp')",
+		"secrets": [
+			"Zq9xK2vLm7Wp"
+		]
+	},
+	{
+		"dialect": "postgres",
+		"source": "qb:email_queue_form_body",
+		"sql": "UPDATE \"tabEmail Queue\" SET \"message\"='password=Zq9xK2vLm7Wp&client_secret=Zq9xK2vLm7Wpb&user=a%40b.c' WHERE \"name\"='EQ-1'",
+		"secrets": [
+			"Zq9xK2vLm7Wp",
+			"Zq9xK2vLm7Wpb"
+		]
+	},
+	{
+		"dialect": "postgres",
+		"source": "qb:email_queue_url",
+		"sql": "UPDATE \"tabEmail Queue\" SET \"message\"='https://x.example/cb?api_key=Zq9xK2vLm7Wp&state=1' WHERE \"name\"='EQ-1'",
+		"secrets": [
+			"Zq9xK2vLm7Wp"
+		]
+	},
+	{
+		"dialect": "postgres",
+		"source": "qb:webhook_log_headers",
+		"sql": "UPDATE \"tabWebhook Request Log\" SET \"headers\"='{\"X-API-Key\": \"Zq9xK2vLm7Wp\", \"Authorization\": \"Bearer Zq9xK2vLm7Wp\", \"Accept\": \"text/html\"}' WHERE \"name\"='WRL-1'",
+		"secrets": [
+			"Zq9xK2vLm7Wp"
+		]
+	},
+	{
+		"dialect": "postgres",
+		"source": "qb:count_with_token_filter",
+		"sql": "SELECT COUNT(*) FROM \"tabUser\" WHERE \"reset_password_key\"='Zq9xK2vLm7Wp'",
+		"secrets": [
+			"Zq9xK2vLm7Wp"
+		]
+	},
+	{
+		"dialect": "postgres",
+		"source": "qb:hash_filter",
+		"sql": "SELECT \"name\" FROM \"tabUser\" WHERE \"password\" LIKE '%$pbkdf2-sha256$29000$Zq9xK2vLm7Wpabcdef'",
+		"secrets": [
+			"$pbkdf2-sha256$29000$Zq9xK2vLm7Wpabcdef"
+		]
+	},
+	{
+		"dialect": "mariadb",
+		"source": "mogrify:named",
+		"sql": "SELECT `name` FROM `tabUser` WHERE `password` = 'Zq9xK2vLm7Wp' AND `token` = 'Zq9xK2vLm7Wpt' AND `name` = 'x'",
+		"secrets": [
+			"Zq9xK2vLm7Wp",
+			"Zq9xK2vLm7Wpt"
+		]
+	},
+	{
+		"dialect": "mariadb",
+		"source": "mogrify:positional",
+		"sql": "UPDATE `tabUser` SET `api_secret` = 'Zq9xK2vLm7Wp', `last_name` = 'O\\'Brien' WHERE `name` = 'a@b.c'",
+		"secrets": [
+			"Zq9xK2vLm7Wp"
+		]
+	},
+	{
+		"dialect": "mariadb",
+		"source": "mogrify:quote_escapes",
+		"sql": "UPDATE `tabUser` SET `password` = 'p\\'a\\\"s\\\\sZq9xK2vLm7Wp' WHERE `name` = 'a'",
+		"secrets": [
+			"Zq9xK2vLm7Wp"
+		]
+	}
+]
