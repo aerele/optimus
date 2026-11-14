@@ -23,11 +23,12 @@ from markupsafe import Markup
 from optimus.ai_guardrails import render_validation_budget
 from optimus.analyzers.base import (
 	DEFAULT_DISPLAY_THRESHOLD_MS,
+	OWN_EXCLUDED_KEY,
 	SEVERITY_ORDER,
 	format_duration_markers,
 	format_durations,
 	installed_apps_allowlist,
-	strip_profiler_own_calls,
+	strip_own_calls,
 )
 
 # Sensitive-data redaction lives in ``optimus/redaction.py`` (pure
@@ -38,9 +39,11 @@ from optimus.analyzers.base import (
 # pre-patch contract, plus any code path where the patch didn't fire).
 # Settings-driven extras: ``OptimusConfig.sensitive_sql_columns`` /
 # ``sensitive_form_keys`` (additive never replaces the defaults).
+from optimus.dbdialect import redaction_dialect
 from optimus.redaction import redact_call_queries as _redact_call_queries_base
 from optimus.redaction import redact_sensitive as _redact_sensitive_base
 from optimus.redaction import redact_sql_literals as _redact_sql_literals_base
+from optimus.redaction_log import log_redaction_drift, log_redaction_failure
 
 # v0.10.0+: Pygments syntax highlighting + the diff-block helpers moved to
 # ``optimus/renderer/syntax.py``. They're imported here under the same
@@ -85,14 +88,17 @@ def _redact_sql_literals(sql_str: str) -> str:
 	``optimus.redaction.redact_sql_literals``, reading the live
 	extra-columns list from settings."""
 	_, extra_cols = _settings_extras()
-	return _redact_sql_literals_base(sql_str, extra_columns=extra_cols)
+	return _redact_sql_literals_base(sql_str, extra_columns=extra_cols, dialect=redaction_dialect())
 
 
 def _redact_call_queries(calls) -> None:
 	"""Mutate ``calls`` in place, redacting each query's SQL literals via
 	``optimus.redaction.redact_call_queries`` with the live extra columns."""
 	_, extra_cols = _settings_extras()
-	_redact_call_queries_base(calls, extra_columns=extra_cols)
+	counts = _redact_call_queries_base(
+		calls, extra_columns=extra_cols, dialect=redaction_dialect(), on_error=log_redaction_failure
+	)
+	log_redaction_drift(counts)
 
 
 # Slow Query SQL longer than this many characters renders in a collapsed <details>.
@@ -105,6 +111,7 @@ def redact_finding_sql(findings) -> None:
 	Fails closed: a finding whose SQL cannot be redacted (a regex error or a
 	non-string value) loses its SQL block instead of showing it raw.
 	"""
+	dialect = redaction_dialect()
 	for finding in findings:
 		detail = finding.get("technical_detail")
 		if finding.get("finding_type") != "Slow Query" or not isinstance(detail, dict):
@@ -116,7 +123,9 @@ def redact_finding_sql(findings) -> None:
 			sql = detail["normalized_query"]
 			if not isinstance(sql, str):
 				raise TypeError(f"query is {type(sql).__name__}, not str")
-			detail["normalized_query"] = _redact_sql_literals_base(sql, extra_columns=extra_cols, strict=True)
+			detail["normalized_query"] = _redact_sql_literals_base(
+				sql, extra_columns=extra_cols, strict=True, dialect=dialect
+			)
 		except Exception as error:
 			logging.getLogger(__name__).warning(
 				"Slow Query SQL dropped from the report, redaction failed: %s", type(error).__name__
@@ -340,6 +349,24 @@ def _has_renderable_callsite(f: dict) -> bool:
 	return bool((callsite.get("filename") or "").strip())
 
 
+def _own_excluded_of(recording: dict) -> int:
+	"""How many of a recording's calls were dropped as Optimus's own (``OWN_EXCLUDED_KEY``)."""
+	count = recording.get(OWN_EXCLUDED_KEY)
+	return count if isinstance(count, int) and not isinstance(count, bool) and count > 0 else 0
+
+
+def _own_excluded_note(count: int) -> str | None:
+	"""The informational footer line for the queries left out as Optimus's own, or None for none.
+	It is not a warning: a normal session hides many. It is there so a wrongly hidden query shows."""
+	if count <= 0:
+		return None
+	from frappe import _
+
+	if count == 1:
+		return _("1 query from Optimus's own code was excluded from this report")
+	return _("{0} queries from Optimus's own code were excluded from this report").format(count)
+
+
 @render_validation_budget()
 def render(
 	session_doc: Any,
@@ -368,7 +395,11 @@ def render(
 	# Action child row with its source recording so the template can show
 	# full SQL / headers / form_dict for that action.
 	recordings_by_uuid: dict[str, dict] = {}
+	own_excluded = 0
 	if recordings:
+		from optimus.settings import own_query_app_lists
+
+		own_tracked_apps, own_installed_apps = own_query_app_lists()
 		for r in recordings:
 			uid = r.get("uuid")
 			if not uid:
@@ -390,8 +421,9 @@ def render(
 					dict(c) if isinstance(c, dict) else c
 					for c in rec_copy["calls"]
 				]
-				strip_profiler_own_calls(rec_copy)
+				strip_own_calls(rec_copy, own_tracked_apps, own_installed_apps)
 				_redact_call_queries(rec_copy["calls"])
+			own_excluded += _own_excluded_of(rec_copy)
 			recordings_by_uuid[uid] = rec_copy
 
 	# `idx` = the action's original position matches a finding's `action_ref`
@@ -1080,6 +1112,7 @@ def render(
 		"analyzer_warnings": analyzer_warnings,
 		"ai_fix_tokens": _ai_fix_tokens,
 		"truncation_banner": truncation_banner,
+		"own_excluded_note": _own_excluded_note(own_excluded),
 		"findings_by_app": findings_by_app,
 		"observational_findings_by_app": observational_findings_by_app,
 		# v0.5.2: "findings" holds actionable items only (shown in
@@ -1276,7 +1309,9 @@ def render_raw(session_doc: Any, recordings: list[dict]) -> str:
 def _action_to_dict(child: Any) -> dict:
 	"""Flatten an Optimus Action child row to a plain dict. Normalises legacy
 	``event_type = "Background Job"`` to ``"RQ Job"`` at read time so older
-	sessions still surface the RQ-Jobs section.
+	sessions still surface the RQ-Jobs section. Readers that compare
+	``event_type == "RQ Job"`` (RQ-Jobs section, waterfall, source resolution
+	inputs) rely on this mapping.
 	"""
 	_event_type = child.event_type or ""
 	if _event_type == "Background Job":
