@@ -1,4 +1,4 @@
-__version__ = "0.12.169"
+__version__ = "0.12.173"
 
 
 def safe_commit() -> None:
@@ -305,6 +305,20 @@ def _omit_unredacted_query(data):
 	data[LITERALS_MASKED_KEY] = True
 
 
+def _omit_capture_fields(recorder):
+	"""The redaction module could not be imported: store no request fields rather than raw ones."""
+	if isinstance(getattr(recorder, "form_dict", None), dict):
+		recorder.form_dict = {"_optimus": "<REDACTION FAILED: omitted>"}
+	if isinstance(getattr(recorder, "headers", None), dict):
+		recorder.headers = {"_optimus": "<REDACTION FAILED: omitted>"}
+	try:
+		import logging
+
+		logging.getLogger("optimus").error("Optimus redaction module unavailable; request fields omitted")
+	except Exception:
+		pass
+
+
 def _patch_recorder():
 	"""Install capture-time redaction on Frappe's recorder. Idempotent via the
 	``_profiler_patched`` marker; best-effort so a patch failure never breaks
@@ -332,6 +346,22 @@ def _patch_recorder():
 	_original_init = Recorder.__init__
 	_original_register = Recorder.register
 
+	from optimus.safe_call import best_effort
+
+	def _settings_extras():
+		from optimus.settings import get_config
+
+		cfg = get_config()
+		return (
+			tuple(cfg.sensitive_form_keys or ()),
+			tuple(cfg.sensitive_sql_columns or ()),
+		)
+
+	def _log_extras_failed(name):
+		from optimus.redaction_extras import log_extras_failed
+
+		log_extras_failed(name)
+
 	def _read_extras():
 		"""Read the live sensitive-list settings. Falls back to empty extras
 		(defaults still apply) if settings can't be loaded."""
@@ -341,58 +371,84 @@ def _patch_recorder():
 		if getattr(frappe.local, "optimus_reading_extras", False):
 			return ((), ())
 		frappe.local.optimus_reading_extras = True
+		failed = []
 		try:
-			from optimus.settings import get_config
-
-			cfg = get_config()
-			return (
-				tuple(cfg.sensitive_form_keys or ()),
-				tuple(cfg.sensitive_sql_columns or ()),
-			)
-		except Exception as error:
-			try:
-				from optimus.redaction_log import log_extras_unreadable
-
-				log_extras_unreadable(error)
-			except Exception:
-				pass
-			return ((), ())
+			extras = best_effort(_settings_extras, None, on_error=failed.append)
 		finally:
 			frappe.local.optimus_reading_extras = False
+		if extras is not None:
+			return extras
+		# The defaults still apply. Logged outside the handler; a logging failure is dropped.
+		best_effort(lambda: _log_extras_failed(failed[0]), None)
+		return ((), ())
 
 	def _profiler_init(self, *args, **kwargs):
 		_original_init(self, *args, **kwargs)
+		# Each field is masked in its own pass: if one fails, the other still runs, and the failed
+		# field keeps a placeholder, never its raw value. Our scrubber never breaks the request, and
+		# neither does logging a failure of it. An RQ job timeout is the exception: best_effort raises
+		# it again (the field then still holds its placeholder), so the job stops.
 		try:
-			from optimus.redaction import redact_sensitive
-
-			extra_keys, _ = _read_extras()
-			if isinstance(getattr(self, "form_dict", None), dict):
-				self.form_dict = redact_sensitive(self.form_dict, extra_keys=extra_keys)
-			if isinstance(getattr(self, "headers", None), dict):
-				self.headers = redact_sensitive(self.headers, extra_keys=extra_keys)
+			from optimus import redaction
+			from optimus.redaction_log import log_capture_failure
 		except Exception:
-			# Never break the user's request because OUR scrubber failed.
-			# Renderer-side defense-in-depth still catches anything that
-			# slipped through.
-			pass
+			_omit_capture_fields(self)
+			return
+		failures = []
+		path, cmd = getattr(self, "path", None), getattr(self, "cmd", None)
+		# Both fields hold a placeholder until their own pass has run, so an RQ job timeout raised
+		# anywhere below leaves neither raw.
+		raw_form, raw_headers = getattr(self, "form_dict", None), getattr(self, "headers", None)
+		if isinstance(raw_form, dict):
+			self.form_dict = {"_optimus": "<REDACTION FAILED: omitted>"}
+		if isinstance(raw_headers, dict):
+			self.headers = {"_optimus": "<REDACTION FAILED: omitted>"}
+		extra_keys = best_effort(
+			lambda: _read_extras()[0], (), on_error=lambda name: failures.append(("settings", name))
+		)
+		if isinstance(raw_form, dict):
+			self.form_dict = best_effort(
+				lambda: redaction.redact_sensitive(
+					raw_form,
+					extra_keys=extra_keys,
+					mask_key=redaction.is_key_bearing_endpoint(path, cmd),
+					mask_code=redaction.is_oauth_callback(path, cmd),
+				),
+				self.form_dict,
+				on_error=lambda name: failures.append(("form_dict", name)),
+			)
+		if isinstance(raw_headers, dict):
+			self.headers = best_effort(
+				lambda: redaction.redact_sensitive(raw_headers, extra_keys=extra_keys, header=True),
+				self.headers,
+				on_error=lambda name: failures.append(("headers", name)),
+			)
+		raw_form = raw_headers = None
+		for field, name in failures:
+			best_effort(lambda: log_capture_failure(field, name), None)
+
+	def _mask_query(data):
+		"""Mask ``data["query"]`` in place; any failure raises and the caller omits the query."""
+		from optimus.dbdialect import redaction_dialect
+		from optimus.redaction import LITERALS_MASKED_KEY, redact_sql_fail_closed
+		from optimus.redaction_log import log_redaction_failure
+
+		_, extra_cols = _read_extras()
+		query = data.get("query") if isinstance(data, dict) else None
+		if isinstance(query, str):
+			data["query"], masked = redact_sql_fail_closed(
+				query, extra_columns=extra_cols, dialect=redaction_dialect(), on_error=log_redaction_failure
+			)
+			if masked:
+				data[LITERALS_MASKED_KEY] = True
+		elif query is not None:
+			_omit_unredacted_query(data)
+		return True
 
 	def _profiler_register(self, data):
-		try:
-			from optimus.dbdialect import redaction_dialect
-			from optimus.redaction import LITERALS_MASKED_KEY, redact_sql_fail_closed
-			from optimus.redaction_log import log_redaction_failure
-
-			_, extra_cols = _read_extras()
-			query = data.get("query") if isinstance(data, dict) else None
-			if isinstance(query, str):
-				data["query"], masked = redact_sql_fail_closed(
-					query, extra_columns=extra_cols, dialect=redaction_dialect(), on_error=log_redaction_failure
-				)
-				if masked:
-					data[LITERALS_MASKED_KEY] = True
-			elif query is not None:
-				_omit_unredacted_query(data)
-		except Exception:
+		# Fail closed: any ordinary failure stores no SQL. An RQ job timeout is raised again by
+		# best_effort and the query is never recorded.
+		if not best_effort(lambda: _mask_query(data), False):
 			_omit_unredacted_query(data)
 		return _original_register(self, data)
 
