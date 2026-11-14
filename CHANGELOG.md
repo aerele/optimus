@@ -8,7 +8,7 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.172] - 2026-11-07
+## [0.12.176] - 2026-11-07
 
 ### Fixed
 
@@ -27,6 +27,37 @@ versions may contain breaking changes see migration notes below).
 
 - Recordings captured before this version are not cleaned. Their form data and headers were stored as sent, so a payload that was nested too deep is still in Redis and in any saved session until it expires or is deleted. The report cuts deep nesting when it is built, but the analysis step, the doc-event view and direct reads of a stored recording still see the stored data. To remove them, delete the old Optimus Sessions and let Redis recordings expire, or clear them from Redis.
 
+---
+
+## [0.12.171] - 2026-11-07
+
+### Fixed
+
+- A Recorder setting left in cache after the Frappe Recorder was stopped (it lingers for up to 10 minutes), such as a job filter that does not match, "Record SQL" off, or "Profile" on, could fail a recorded background job, lose its queries, or fail the analysis. Optimus now records its own requests and jobs with Frappe's default settings, so that leftover setting no longer changes or breaks an Optimus recording. Your stored Recorder settings are not changed.
+- While the Frappe Recorder is actively recording at the same time, Optimus shares that recording and its settings. When that shared recording has SQL recording or call stacks turned off, or its profiler turned on, the report now says how many actions were affected and that some queries or call details are missing. A failure while saving this note no longer loses the recording.
+- A request was silently missing from a session when Frappe's Recorder was switched on with a path filter that did not match it. Optimus now starts its own recording for that request.
+- The Event Type of every recorded action is now always "HTTP Request" or "Background Job", so saving the analysis no longer fails on any other value.
+- Not covered: only verified against Frappe 16; on Frappe 15 Optimus keeps its previous behaviour for the Recorder settings.
+
+### Internal
+
+- If this and the URL/header redaction change both edit `_patch_recorder` and `_profiler_init` in `optimus/__init__.py`, this one lands after it; the two touch different functions and should merge with a small textual conflict at most.
+
+---
+
+## [0.12.170] - 2026-11-06
+
+### Fixed
+
+- A background job now shows as `RQ Job: <method>` in Steps to Reproduce, the AI-drafted steps, the summary and the Actions table in the Desk, instead of `GET <dotted.method.path>` as if it were a page request. The report's own Actions table already showed jobs correctly. A job is also labelled correctly in the text sent to the AI provider when private mode is on.
+- Job findings now read "In job <method>, ..." and no longer name the job's own method as the slow part. A job whose method is slow inside a callee now names that callee. A slow job that is mostly SQL or framework time gets a Slow Background Job finding; it can get an AI suggestion like other findings, and you can add it to Excluded finding types to keep it from the AI provider.
+- The summary no longer reads "went into In job <method>, ..." for a slow job.
+- On a narrow screen the report's per-action table now scrolls sideways inside its own box instead of making the whole page wider, and its column headers (such as Slowest query) are no longer cut off. The table was already too wide on develop.
+- Sessions analyzed before this version keep their old labels, steps and findings in the Desk. Their summary changes when the report is regenerated, and an AI Steps refresh uses the new job label. Record the flow again for fully new results.
+
+### Internal
+
+- Removed the unused `finding_inline_html` field from the report's action rows.
 
 ---
 

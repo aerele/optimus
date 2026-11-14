@@ -1,4 +1,4 @@
-__version__ = "0.12.172"
+__version__ = "0.12.176"
 
 
 def safe_commit() -> None:
@@ -329,6 +329,30 @@ def _raise_if_job_timeout(failure) -> None:
 		raise type(failure)(*failure.args) from None
 
 
+def _patch_recorder_config(_rec):
+	"""Make ``RecorderConfig.retrieve`` return Frappe's defaults while Optimus forces its own
+	recorder (``capture.record_forced`` sets ``frappe.local.optimus_forcing``). Frappe caches the
+	Recorder UI's settings for 10 minutes and reads them even for a forced recorder; the
+	stored settings are never touched. No-op when the shape is not Frappe 16's.
+	"""
+	config = getattr(_rec, "RecorderConfig", None)
+	original = config.__dict__.get("retrieve") if config is not None else None
+	if not isinstance(original, classmethod):
+		return
+	if getattr(original.__func__, "_profiler_patched", False):
+		return
+
+	def _retrieve(cls):
+		import frappe
+
+		if getattr(frappe.local, "optimus_forcing", False):
+			return cls()
+		return original.__func__(cls)
+
+	_retrieve._profiler_patched = True
+	config.retrieve = classmethod(_retrieve)
+
+
 def _omit_unredacted_query(data):
 	"""Last resort when redaction itself could not run: store no SQL instead of the raw text.
 	The constants are imported here, not at the top, so a broken redaction module cannot stop the
@@ -357,6 +381,8 @@ def _patch_recorder():
 		# Frappe isn't available running unit tests in a plain Python
 		# interpreter. Match _patch_enqueue's silent no-op.
 		return
+
+	_patch_recorder_config(_rec)
 
 	Recorder = getattr(_rec, "Recorder", None)
 	if Recorder is None:

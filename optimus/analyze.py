@@ -303,6 +303,38 @@ def _note_heartbeat_problem(session_uuid: str, problem: str) -> None:
 	safe_call.log_error_line(f"optimus: analyze {session_uuid}: {problem}")
 
 
+_RECORDER_SETTING_PHRASES = {
+	"record_sql": "SQL recording turned off",
+	"capture_stack": "call stacks turned off",
+	"profile": "its profiler turned on",
+}
+
+
+def _sql_off_warning(recordings: list[dict]) -> str | None:
+	"""One plain note when some actions shared a Frappe Recorder with SQL recording or stack capture
+	off, or its profiler on."""
+	count = 0
+	degraded: set[str] = set()
+	for rec in recordings:
+		rec_uuid = rec.get("uuid")
+		flag = frappe.cache.get_value(_redis_keys.sql_off(rec_uuid)) if rec_uuid else None
+		if not flag:
+			continue
+		count += 1
+		# An older worker stored plain True for "SQL recording was off".
+		degraded.update(flag if isinstance(flag, (list, tuple)) else ["record_sql"])
+	if not count:
+		return None
+	subject = "1 action was" if count == 1 else f"{count} actions were"
+	phrases = [text for name, text in _RECORDER_SETTING_PHRASES.items() if name in degraded]
+	if not phrases:
+		phrases = [_RECORDER_SETTING_PHRASES["record_sql"]]
+	said = phrases[0] if len(phrases) == 1 else ", ".join(phrases[:-1]) + " and " + phrases[-1]
+	sql_only = phrases == [_RECORDER_SETTING_PHRASES["record_sql"]]
+	effect = "their queries are missing" if sql_only else "some queries or call details are missing"
+	return f"{subject} recorded while Frappe's Recorder was running with {said}, so {effect}."
+
+
 def _touch_singleflight(session_uuid: str) -> bool:
 	"""Refresh the single-flight flag's TTL while this session holds it, or take it back
 	when it lapsed and nobody took it. Never writes over another session's flag (taken
@@ -955,6 +987,10 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		if meta.get("cap_warning"):
 			context.warnings.append(meta["cap_warning"])
 		_note_missing_trees(context, recordings, meta)
+
+		sql_off_warning = _sql_off_warning(recordings)
+		if sql_off_warning:
+			context.warnings.append(sql_off_warning)
 
 		# v0.5.0: load the frontend metrics posted by optimus_frontend.js
 		# for consumption by the frontend_timings analyzer. Reads from the
@@ -3442,6 +3478,7 @@ def actions_for_humanizer(recordings: list[dict], *, send_raw: bool | None = Non
 		doctype = doctype or fd.get("dt") or fd.get("doc_type") or ""
 		out.append({
 			"label": per_action.humanized_label(rec) or "",
+			"event_type": rec.get("event_type") or "",
 			"cmd": (rec.get("cmd") or "").strip(),
 			"path": (rec.get("path") or "").strip(),
 			"method": (rec.get("method") or "").strip(),
@@ -3543,6 +3580,11 @@ def _build_summary_html(
 			for a in context.actions if a.get("action_label")
 		}
 
+		# A job finding reads "In job <method>, ..." where the label reads "RQ Job: <method>".
+		slowest_title_prefixes = [f"In {slowest_label}, "]
+		if slowest_label.startswith("RQ Job: "):
+			slowest_title_prefixes.append(f"In job {slowest_label[len('RQ Job: '):]}, ")
+
 		def _finding_phrase(f: dict) -> str:
 			"""Finding title with raw action references swapped for plain labels (a
 			leading "In <slowest>, " trimmed since the sentence already names it),
@@ -3551,9 +3593,9 @@ def _build_summary_html(
 			for raw, human in label_map.items():
 				if raw and human and raw != human:
 					title = title.replace(raw, human)
-			prefix = f"In {slowest_label}, "
-			if title.startswith(prefix):
-				title = title[len(prefix):]
+			for prefix in slowest_title_prefixes:
+				if title.startswith(prefix):
+					title = title[len(prefix):]
 			pri = _PRIORITY_WORD.get(f.get("severity") or "", "")
 			impact = f.get("estimated_impact_ms") or 0
 			# No "~0ms" for a finding with no measured impact (Lock Contention).
@@ -3862,6 +3904,7 @@ def _cleanup_redis(session_uuid: str, recording_uuids: list[str]) -> None:
 			_redis_keys.lock_events(uuid),
 			_redis_keys.resolved_doc(uuid),
 			_redis_keys.infra(uuid),
+			_redis_keys.sql_off(uuid),
 		):
 			failed |= not _attempt(lambda key=key: frappe.cache.delete_value(key))
 	if failed:
