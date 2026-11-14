@@ -8,11 +8,68 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.169] - 2026-11-06
+## [0.12.172] - 2026-11-06
 
 ### Fixed
 
 - Line profiling now captures the whole function. Before, the function's source was cut at its first blank line, so any timed line after it was missing from the drill-down, a function whose timed lines were all below the cut was shown as "not invoked", and the function's total time was understated, which inflated the severity of Hot Line findings. Some functions also failed to start with a server error. A function you chose whose source cannot be read in full now refuses the run with a message naming the function and the reason; a function added automatically is skipped instead. A source line longer than 20,000 characters, or too many source lines in one run, now shows a clear message instead of a server error. Runs recorded on 0.12.72 to 0.12.141 may be incomplete, so re-record them.
+
+---
+
+## [0.12.171] - 2026-11-07
+
+### Fixed
+
+- A Recorder setting left in cache after the Frappe Recorder was stopped (it lingers for up to 10 minutes), such as a job filter that does not match, "Record SQL" off, or "Profile" on, could fail a recorded background job, lose its queries, or fail the analysis. Optimus now records its own requests and jobs with Frappe's default settings, so that leftover setting no longer changes or breaks an Optimus recording. Your stored Recorder settings are not changed.
+- While the Frappe Recorder is actively recording at the same time, Optimus shares that recording and its settings. When that shared recording has SQL recording or call stacks turned off, or its profiler turned on, the report now says how many actions were affected and that some queries or call details are missing. A failure while saving this note no longer loses the recording.
+- A request was silently missing from a session when Frappe's Recorder was switched on with a path filter that did not match it. Optimus now starts its own recording for that request.
+- The Event Type of every recorded action is now always "HTTP Request" or "Background Job", so saving the analysis no longer fails on any other value.
+- Not covered: only verified against Frappe 16; on Frappe 15 Optimus keeps its previous behaviour for the Recorder settings.
+
+### Internal
+
+- If this and the URL/header redaction change both edit `_patch_recorder` and `_profiler_init` in `optimus/__init__.py`, this one lands after it; the two touch different functions and should merge with a small textual conflict at most.
+
+---
+
+## [0.12.170] - 2026-11-06
+
+### Fixed
+
+- A background job now shows as `RQ Job: <method>` in Steps to Reproduce, the AI-drafted steps, the summary and the Actions table in the Desk, instead of `GET <dotted.method.path>` as if it were a page request. The report's own Actions table already showed jobs correctly. A job is also labelled correctly in the text sent to the AI provider when private mode is on.
+- Job findings now read "In job <method>, ..." and no longer name the job's own method as the slow part. A job whose method is slow inside a callee now names that callee. A slow job that is mostly SQL or framework time gets a Slow Background Job finding; it can get an AI suggestion like other findings, and you can add it to Excluded finding types to keep it from the AI provider.
+- The summary no longer reads "went into In job <method>, ..." for a slow job.
+- On a narrow screen the report's per-action table now scrolls sideways inside its own box instead of making the whole page wider, and its column headers (such as Slowest query) are no longer cut off. The table was already too wide on develop.
+- Sessions analyzed before this version keep their old labels, steps and findings in the Desk. Their summary changes when the report is regenerated, and an AI Steps refresh uses the new job label. Record the flow again for fully new results.
+
+### Internal
+
+- Removed the unused `finding_inline_html` field from the report's action rows.
+
+---
+
+## [0.12.169] - 2026-11-06
+
+### Security
+
+- Secrets in the SQL a report shows are now hidden in far more shapes. Before, only `column = 'value'` was caught, so a password set by `INSERT ... VALUES (...)` (including the stored password row Frappe writes), a value behind `CAST(...)`, `CASE ... END` (the shape `bulk_update` writes), a function, a hex or negative number, `!=`, `<>`, `BETWEEN`, `REGEXP`, `SIMILAR TO`, or written the other way round (`'value' = password`) appeared in the report as typed. Settings rows keyed by a field name (`api_key`, `client_secret`, webhook and SMS parameters), JSON in version and request-log rows (`"Authorization": "Bearer ..."`) and values shaped like a stored hash or encrypted secret are masked too.
+- A statement Optimus cannot read safely (an unterminated quote, a comment that hides a quote, an `INSERT` with no column list) is no longer shown as typed. Every literal in it is masked and the statement stays visible, or the statement is replaced by `[SQL omitted: could not be read safely]` when even its quotes cannot be trusted. EXPLAIN is skipped for such a statement, it is not counted as an exact duplicate of another, and it gets no index suggestion. If the redaction code itself fails, the SQL is omitted instead of stored raw, and one warning naming only the error class is logged per process.
+- The default hidden names now also cover card numbers, bank account numbers, IBAN, CVV, session ids, `sessiondata`, `authorization_code`, `salt`, `passkey`, `hmac` and credentials. The plain words `credit`, `card` and `bank` are no longer on the SQL list, so a `tabGL Entry` `credit > 100` filter is no longer masked. Names you add in Optimus Settings now match in any letter case.
+- The SQL sent to an AI provider under raw-value consent is stripped for the same names as before and for every new one, so nothing newly reaches the provider.
+- A statement longer than 256 KB, with more than 120,000 tokens, or with a long run of unclosed `$tag$` quotes is omitted without being read, so a huge bulk insert cannot slow a request. Identifiers and JSON keys are matched in camelCase too (`accessToken`, `clientSecret`, `secretKey`). Also masked now: `IDENTIFIED BY '...'`, `PASSWORD()` and `AES_*()` arguments, `ARRAY[...]`, `REPLACE(...)`, `CONCAT(...)`, `&&`, `@@`, `MEMBER OF`, `data->>'password'`, and `field IN (...)` settings rows.
+- On a statement that goes through the slower path, comments are replaced by one space. The `-- [Optimus: query truncated ...]` note at the end of a cut query is kept. A statement that was cut inside a quote is now omitted instead of shown cut. One existing test (`test_slow_query_full_sql_render`) now ends its long query with a value instead of a comment.
+- The default names are exact words and underscore compounds. Spellings such as `secrets`, `mypassword`, `accesstoken`, `pin` and `pan` are not default names: add them under Sensitive SQL Columns in Optimus Settings.
+- Text inside a string literal is masked again: `password=...&client_secret=...` form bodies, `?api_key=` and `token=` in a callback URL or an Email Queue message, in any letter case (`PassWord=`) and with hyphens (`Api-Key=`). Only the value after the `=` is replaced, so the rest of the text stays readable.
+- Hyphenated and spaced names are matched like underscore names: `X-API-Key`, `X-Auth-Token`, `X-Secret` and `api-key` as a JSON key, a settings key or a quoted column, and `PassWord` written with a capital inside the word. A name you add in Optimus Settings matches in both spellings.
+- A PostgreSQL `$$...$$` or `$tag$...$tag$` quote that a long statement cut short is omitted instead of shown as typed. A value that follows `LEFT`, `RIGHT`, `INNER`, `CROSS`, `NATURAL` or `FULL` `JOIN` no longer swallows that word, so the shown SQL and its EXPLAIN keep the join type.
+- A last pass masks a stored-hash or encrypted-secret shape (`gAAAAA...`, `$argon2...`, `$2b$...`, `$pbkdf2-...`, `pbkdf2:sha256:...`) wherever it sits in the statement, also inside a longer literal.
+- A Settings list that cannot be read now logs one warning (the error class only) and masks the default names; before, the names you added were dropped without a trace. When a report omitted or masked whole at least half of 10 or more statements, one warning with the counts is logged, so a drift to hiding most SQL is visible.
+- The stored-key check no longer stalls on a statement of many long keys: it looks at the last word run of a key and remembers each answer.
+
+### Action needed
+
+- Sessions recorded before this version keep their old SQL. Regenerate Reports rewrites only the HTML and PDF report. The Desk form and the exported session JSON keep the values stored when the session was recorded, so delete any session that profiled a login, password change or API key flow. Optimus has no purge command for them.
+- The plain words `credit`, `card` and `bank` no longer mask a value. If your sites filter on a column that holds such data, add it under Sensitive SQL Columns in Optimus Settings (for example `credit_card` or `bank_account`, which were never default names either).
 
 ---
 

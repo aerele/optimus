@@ -60,6 +60,7 @@ from optimus.analyzers.base import (
 	strip_profiler_own_calls,
 )
 from optimus.dbdialect import get_dialect
+from optimus.redaction import LITERALS_MASKED_KEY, OMITTED_SQL
 from optimus.timing import (
 	ANALYZE_TOTAL_BUDGET_SECONDS,
 	MAX_BG_JOB_WAIT_SECONDS,
@@ -300,6 +301,38 @@ def _note_heartbeat_problem(session_uuid: str, problem: str) -> None:
 	_heartbeat_noted.add(session_uuid)
 
 	safe_call.log_error_line(f"optimus: analyze {session_uuid}: {problem}")
+
+
+_RECORDER_SETTING_PHRASES = {
+	"record_sql": "SQL recording turned off",
+	"capture_stack": "call stacks turned off",
+	"profile": "its profiler turned on",
+}
+
+
+def _sql_off_warning(recordings: list[dict]) -> str | None:
+	"""One plain note when some actions shared a Frappe Recorder with SQL recording or stack capture
+	off, or its profiler on."""
+	count = 0
+	degraded: set[str] = set()
+	for rec in recordings:
+		rec_uuid = rec.get("uuid")
+		flag = frappe.cache.get_value(_redis_keys.sql_off(rec_uuid)) if rec_uuid else None
+		if not flag:
+			continue
+		count += 1
+		# An older worker stored plain True for "SQL recording was off".
+		degraded.update(flag if isinstance(flag, (list, tuple)) else ["record_sql"])
+	if not count:
+		return None
+	subject = "1 action was" if count == 1 else f"{count} actions were"
+	phrases = [text for name, text in _RECORDER_SETTING_PHRASES.items() if name in degraded]
+	if not phrases:
+		phrases = [_RECORDER_SETTING_PHRASES["record_sql"]]
+	said = phrases[0] if len(phrases) == 1 else ", ".join(phrases[:-1]) + " and " + phrases[-1]
+	sql_only = phrases == [_RECORDER_SETTING_PHRASES["record_sql"]]
+	effect = "their queries are missing" if sql_only else "some queries or call details are missing"
+	return f"{subject} recorded while Frappe's Recorder was running with {said}, so {effect}."
 
 
 def _touch_singleflight(session_uuid: str) -> bool:
@@ -951,6 +984,10 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		if meta.get("cap_warning"):
 			context.warnings.append(meta["cap_warning"])
 		_note_missing_trees(context, recordings, meta)
+
+		sql_off_warning = _sql_off_warning(recordings)
+		if sql_off_warning:
+			context.warnings.append(sql_off_warning)
 
 		# v0.5.0: load the frontend metrics posted by optimus_frontend.js
 		# for consumption by the frontend_timings analyzer. Reads from the
@@ -1741,6 +1778,13 @@ def _enrich_recordings(recordings: list[dict]) -> list[str]:
 			except Exception:
 				pass
 
+			# A statement masked whole no longer has its real values, and Frappe's own
+			# EXPLAIN may already be stored: skip before the result and shape caches.
+			if call.get(LITERALS_MASKED_KEY):
+				call["explain_result"] = []
+				call["explain_warning"] = EXPLAIN_SKIPPED_MASKED
+				continue
+
 			# Skip EXPLAIN if already populated
 			if call.get("explain_result"):
 				continue
@@ -1832,6 +1876,7 @@ def _enrich_recordings(recordings: list[dict]) -> list[str]:
 				mark_duplicates(recording)
 		except Exception:
 			pass
+		_separate_masked_calls(recording)
 
 	if truncated_queries:
 		pct = (
@@ -1927,6 +1972,21 @@ def _collapse_pg_in_lists(query):
 	return "".join(chunks)
 
 
+EXPLAIN_SKIPPED_MASKED = "EXPLAIN skipped: the statement's literals are masked"
+
+
+def _separate_masked_calls(recording):
+	"""A statement masked whole looks the same whatever its values were, so it must not be
+	reported as an exact duplicate of another one, and an omitted statement must not group."""
+	for index, call in enumerate(recording.get("calls") or []):
+		if not call.get(LITERALS_MASKED_KEY):
+			continue
+		call["exact_copies"] = 1
+		if OMITTED_SQL in (call.get("query"), call.get("normalized_query")):
+			call["normalized_query"] = f"[SQL omitted: call {index + 1}]"
+			call["normalized_copies"] = 1
+
+
 def _mark_postgres_duplicates(recording, enriched, enriched_raw, past_cap):
 	"""Keep PG schema identity, with parsing confined to the enrichment cap."""
 	calls = recording.get("calls") or []
@@ -1950,7 +2010,12 @@ def _mark_postgres_duplicates(recording, enriched, enriched_raw, past_cap):
 		call.update(index=index, exact_copies=exact[query], normalized_copies=normalized[call["normalized_query"]])
 
 
-_LITERAL_RE = re.compile(r"'(?:[^'\\]|\\.|'')*'|\"(?:[^\"\\]|\\.)*\"|\b\d+(?:\.\d+)?\b")
+# A normaliser for grouping calls by shape, deliberately not the redactor: it only has to
+# be cheap and to turn literal values into one placeholder.
+_LITERAL_RE = re.compile(
+	r"'(?:[^'\\]|\\.|'')*(?:'|\Z)|\"(?:[^\"\\]|\\.)*(?:\"|\Z)"
+	r"|\b(?:0[xX][0-9A-Fa-f]+|0[bB][01]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b"
+)
 _IN_LIST_RE = re.compile(r"\bin\s*\(\s*\?(?:\s*,\s*\?)*\s*\)")
 
 
@@ -3384,6 +3449,7 @@ def actions_for_humanizer(recordings: list[dict], *, send_raw: bool | None = Non
 		doctype = doctype or fd.get("dt") or fd.get("doc_type") or ""
 		out.append({
 			"label": per_action.humanized_label(rec) or "",
+			"event_type": rec.get("event_type") or "",
 			"cmd": (rec.get("cmd") or "").strip(),
 			"path": (rec.get("path") or "").strip(),
 			"method": (rec.get("method") or "").strip(),
@@ -3485,6 +3551,11 @@ def _build_summary_html(
 			for a in context.actions if a.get("action_label")
 		}
 
+		# A job finding reads "In job <method>, ..." where the label reads "RQ Job: <method>".
+		slowest_title_prefixes = [f"In {slowest_label}, "]
+		if slowest_label.startswith("RQ Job: "):
+			slowest_title_prefixes.append(f"In job {slowest_label[len('RQ Job: '):]}, ")
+
 		def _finding_phrase(f: dict) -> str:
 			"""Finding title with raw action references swapped for plain labels (a
 			leading "In <slowest>, " trimmed since the sentence already names it),
@@ -3493,9 +3564,9 @@ def _build_summary_html(
 			for raw, human in label_map.items():
 				if raw and human and raw != human:
 					title = title.replace(raw, human)
-			prefix = f"In {slowest_label}, "
-			if title.startswith(prefix):
-				title = title[len(prefix):]
+			for prefix in slowest_title_prefixes:
+				if title.startswith(prefix):
+					title = title[len(prefix):]
 			pri = _PRIORITY_WORD.get(f.get("severity") or "", "")
 			impact = f.get("estimated_impact_ms") or 0
 			# No "~0ms" for a finding with no measured impact (Lock Contention).
@@ -3804,6 +3875,7 @@ def _cleanup_redis(session_uuid: str, recording_uuids: list[str]) -> None:
 			_redis_keys.lock_events(uuid),
 			_redis_keys.resolved_doc(uuid),
 			_redis_keys.infra(uuid),
+			_redis_keys.sql_off(uuid),
 		):
 			failed |= not _attempt(lambda key=key: frappe.cache.delete_value(key))
 	if failed:
