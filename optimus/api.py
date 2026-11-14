@@ -814,20 +814,28 @@ def pill_state(session_uuid: str | None = None, run_uuid: str | None = None) -> 
 	if not all(isinstance(v, str) or v is None for v in (session_uuid, run_uuid)):
 		frappe.throw(_("Invalid session reference"), frappe.ValidationError)
 	active = session.get_active_session_for(user)
-	# A tracked session other than the active one is looked up exactly.
 	if active and (not session_uuid or session_uuid == active):
-		meta = session.get_session_meta(active) or {}
-		return {
-			"phase": "recording",
-			"scope": "session",
-			"session_uuid": active,
-			"docname": meta.get("docname"),
-			"label": meta.get("label"),
-			"started_at": meta.get("started_at"),
-		}
+		return _pill_state_recording(active)
+	# A tracked session other than the active one is looked up exactly while it analyzes.
+	# Anything else yields to the active one: a line profiling run cannot record alongside it.
 	if session_uuid:
-		return _pill_state_for(user, session_uuid, run_uuid)
+		tracked = _pill_state_for(user, session_uuid, run_uuid)
+		if active and tracked.get("phase") != "analyzing":
+			return _pill_state_recording(active)
+		return tracked
 	return _pill_state_lp_recording(user) or _pill_state_in_flight(user)
+
+
+def _pill_state_recording(active: str) -> dict:
+	meta = session.get_session_meta(active) or {}
+	return {
+		"phase": "recording",
+		"scope": "session",
+		"session_uuid": active,
+		"docname": meta.get("docname"),
+		"label": meta.get("label"),
+		"started_at": meta.get("started_at"),
+	}
 
 
 def _pill_state_lp_recording(user: str) -> dict | None:

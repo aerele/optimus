@@ -159,7 +159,8 @@
 		}
 		const display = state.display;
 		if (srv.phase === "recording") {
-			if (isTransient(display) || display === "ready") {
+			// A finished report only hides a stale snapshot of the same session, not a newer one.
+			if (isTransient(display) || (display === "ready" && srv.session_uuid === state.session_uuid)) {
 				return null;
 			}
 			const phase2 = srv.scope === "phase2";

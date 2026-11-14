@@ -8,6 +8,14 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.170] - 2026-11-13
+
+### Fixed
+
+- With two Desk tabs open, starting a new recording in one tab no longer leaves the other tab's pill on "Report ready" for the previous session, where a click opened the old report instead of stopping the new recording. When you return to that tab, the pill now switches to the new recording once the tracked session has finished, and Stop then stops the new one. This also covers a tab left on a line profiling run whose capture already ended. A session that is still being analyzed keeps its pill until it is done.
+
+---
+
 ## [0.12.168] - 2026-11-06
 
 ### Fixed
