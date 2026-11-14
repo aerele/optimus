@@ -446,24 +446,43 @@ def _check_shape(info: dict, optimize_query, dialect) -> _Outcome:
 	except Exception as e:
 		if dialect.is_statement_timeout(e):
 			return _Outcome("timeout", None)
-		if _is_reserved_column_error(e):
-			return _Outcome("reserved", not _looks_like_reserved_word(e), str(e))
+		if _is_reserved_column_error(e, info["raw"]):
+			return _Outcome("reserved", not _looks_like_reserved_word(e, info["raw"]), str(e))
 		return _Outcome("real", type(e).__name__, str(e))
 
 
-def _is_reserved_column_error(error: Exception) -> bool:
+def _is_reserved_column_error(error: Exception, sql: str = "") -> bool:
 	"""True for a syntax error (MariaDB/MySQL 1064) from the optimizer's COUNT(DISTINCT col)
 	statement. Frappe sends the column unquoted, so a reserved word such as `read` is
 	rejected. A 1064 from any other statement is not expected and stays a real failure."""
 	args = getattr(error, "args", None)
-	return bool(args) and args[0] == 1064 and failed_statement(error) == "cardinality"
+	if not args or args[0] != 1064:
+		return False
+	statement = failed_statement(error)
+	if statement is not None:
+		return statement == "cardinality"
+	return _untagged_column(error, sql) is not None
 
 
-def _looks_like_reserved_word(error: Exception) -> bool:
+# Without the cache the statement is unknown; the server's message still quotes where it stopped.
+_NEAR_COUNTED_COLUMN_RE = re.compile(r"near '(\w+)\) from ", re.I)
+
+
+def _untagged_column(error: Exception, sql: str) -> str | None:
+	"""The column of a cardinality count that a 1064 message points at, for an error with no
+	statement tag: the message must stop at ``<word>) from`` and the word must be in the shape's query."""
+	message = str(error.args[1]) if len(error.args) > 1 else ""
+	match = _NEAR_COUNTED_COLUMN_RE.search(message)
+	if match and re.search(rf"\b{re.escape(match.group(1))}\b", sql or "", re.I):
+		return match.group(1)
+	return None
+
+
+def _looks_like_reserved_word(error: Exception, sql: str = "") -> bool:
 	"""True when the 1064 message points at the start of the counted column, as it does for a
 	bare reserved word (``near 'read) from ...'``). Anything else is classified the same way but
 	logged once, so a parser bug does not hide behind the reserved-word case."""
-	column = failed_column(error) or ""
+	column = failed_column(error) or _untagged_column(error, sql) or ""
 	message = str(error.args[1]) if len(error.args) > 1 else ""
 	return bool(re.fullmatch(r"\w+", column)) and f"near '{column}".lower() in message.lower()
 

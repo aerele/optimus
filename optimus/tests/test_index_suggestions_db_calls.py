@@ -314,6 +314,63 @@ def test_a_syntax_error_from_an_uncached_path_is_a_real_failure(env, empty_conte
 	assert any("Could not analyze 5 of 5" in w for w in result.warnings)
 
 
+_NEAR_READ = (
+	"You have an error in your SQL syntax; check the manual that corresponds to your MariaDB server "
+	"version for the right syntax to use near 'read) from `tabSales Invoice`' at line 1"
+)
+
+
+def test_a_reserved_column_error_without_the_cache_is_skipped_quietly(env, empty_context, monkeypatch):
+	"""No proxy means no statement tag; the message and the shape's own query identify the column."""
+	monkeypatch.setattr(index_suggestions, "cached_db", _no_cache)
+	env.db.failures["cardinality"] = Exception(1064, _NEAR_READ)
+	logged, lines = [], []
+	monkeypatch.setattr(env.frappe, "log_error", lambda **kw: logged.append(kw), raising=False)
+	monkeypatch.setattr(index_suggestions, "log_error_line", lambda m, **kw: lines.append(m))
+	calls = [_call(i, where="`read` = ?") for i in range(5)]
+
+	result = index_suggestions.analyze(_session(calls), empty_context)
+
+	assert logged == []
+	assert not [m for m in lines if "reserved" in m]
+	assert any("5 query shape(s) use a column name MariaDB rejects unquoted" in w for w in result.warnings)
+	assert not any("Could not analyze" in w for w in result.warnings)
+
+
+@pytest.mark.parametrize(
+	"message",
+	[
+		"You have an error in your SQL syntax near 'FROM `tabSales Invoice`' at line 1",
+		"You have an error in your SQL syntax near 'read from `tabSales Invoice`' at line 1",
+		"You have an error in your SQL syntax near 'other) from `tabSales Invoice`' at line 1",
+		"You have an error in your SQL syntax near '@@) from `tabSales Invoice`' at line 1",
+	],
+)
+def test_another_syntax_error_without_the_cache_is_still_logged(env, empty_context, monkeypatch, message):
+	monkeypatch.setattr(index_suggestions, "cached_db", _no_cache)
+	env.db.failures["cardinality"] = Exception(1064, message)
+	logged = []
+	monkeypatch.setattr(env.frappe, "log_error", lambda **kw: logged.append(kw), raising=False)
+
+	result = index_suggestions.analyze(_session([_call(i, where="`read` = ?") for i in range(5)]), empty_context)
+
+	assert len(logged) == index_suggestions.MAX_LOGGED_FAILURES
+	assert any("Could not analyze 5 of 5" in w for w in result.warnings)
+
+
+def test_a_non_syntax_error_with_reserved_looking_text_is_logged_without_the_cache(
+	env, empty_context, monkeypatch
+):
+	monkeypatch.setattr(index_suggestions, "cached_db", _no_cache)
+	env.db.failures["cardinality"] = Exception(1054, _NEAR_READ)
+	logged = []
+	monkeypatch.setattr(env.frappe, "log_error", lambda **kw: logged.append(kw), raising=False)
+
+	index_suggestions.analyze(_session([_call(i, where="`read` = ?") for i in range(3)]), empty_context)
+
+	assert logged
+
+
 def test_a_missing_table_is_looked_up_once(env, empty_context):
 	env.db.tables.clear()
 
