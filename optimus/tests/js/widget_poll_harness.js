@@ -623,6 +623,113 @@ test("an inline stop of a live session keeps the report-ready notice, and a fail
 	assert.strictEqual(bad.alerts[0].indicator, "red");
 });
 
+// window.optimus_frontend.beginSession(): the shim drops timings from before Record.
+function spyShim(env) {
+	const log = { begins: 0, uuidAtBegin: [], opts: [], throws: false };
+	env.ctx.window.optimus_frontend = {
+		beginSession: (opts) => {
+			log.begins += 1;
+			log.opts.push(opts);
+			log.uuidAtBegin.push(env.t.widget.attrs["data-session-uuid"]);
+			if (log.throws) throw new Error("shim broke");
+		},
+	};
+	return log;
+}
+
+const startedReply = { session_uuid: "s1", docname: "OS-1", title: "t", started_at: "2026-11-07 10:00:00" };
+const recordingReply = { phase: "recording", scope: "session", session_uuid: "s1", docname: "OS-1" };
+
+function pressStart(env) {
+	env.t.openStartDialog();
+	FakeDialog.last.click();
+	return env.calls[env.calls.length - 1];
+}
+
+test("a successful start clears the shim once, before the pill shows the session", () => {
+	const env = load();
+	const shim = spyShim(env);
+	pressStart(env).callback({ message: startedReply });
+	assert.strictEqual(shim.begins, 1);
+	assert.deepStrictEqual(shim.uuidAtBegin, [undefined]);
+	assert.strictEqual(env.t.widget.attrs["data-session-uuid"], "s1");
+});
+
+test("the shim is not touched while Start is pending, after a failure, or with no session", () => {
+	const env = load();
+	const shim = spyShim(env);
+	const call = pressStart(env);
+	assert.strictEqual(shim.begins, 0, "not before the reply");
+	call.error({});
+	assert.strictEqual(shim.begins, 0, "not on a failed start");
+	FakeDialog.last.click();
+	env.calls[env.calls.length - 1].callback({ message: {} });
+	assert.strictEqual(shim.begins, 0, "not on a reply with no session");
+});
+
+test("a retry after a failed start clears the shim once", () => {
+	const env = load();
+	const shim = spyShim(env);
+	pressStart(env).error({});
+	FakeDialog.last.click();
+	env.calls[env.calls.length - 1].callback({ message: startedReply });
+	assert.strictEqual(shim.begins, 1);
+});
+
+test("a broken shim does not stop the pill from recording", () => {
+	const env = load();
+	spyShim(env).throws = true;
+	pressStart(env).callback({ message: startedReply });
+	assert.strictEqual(env.t.state.display, "recording");
+	assert.strictEqual(env.t.widget.attrs["data-session-uuid"], "s1");
+});
+
+test("a missing shim does not stop the pill from recording", () => {
+	const env = load();
+	pressStart(env).callback({ message: startedReply });
+	assert.strictEqual(env.t.state.display, "recording");
+});
+
+test("the first resync after the page loads keeps the buffered load (reload while recording)", () => {
+	const env = load();
+	const shim = spyShim(env);
+	env.t.refreshStatus();
+	env.calls[0].callback({ message: recordingReply });
+	assert.strictEqual(env.t.state.display, "recording");
+	assert.strictEqual(shim.begins, 0);
+});
+
+test("a later resync that finds a recording started elsewhere clears the shim once", () => {
+	const env = load();
+	const shim = spyShim(env);
+	env.t.refreshStatus();
+	env.calls[0].callback({ message: {} });
+	env.t.refreshStatus();
+	env.calls[1].callback({ message: recordingReply });
+	assert.strictEqual(shim.begins, 1);
+	assert.deepStrictEqual(shim.uuidAtBegin, [undefined]);
+	assert.strictEqual(JSON.stringify(shim.opts), "[{\"keepXhr\":true}]", "a resync keeps the XHR buffer");
+	env.t.refreshStatus();
+	env.calls[2].callback({ message: recordingReply });
+	assert.strictEqual(shim.begins, 1, "already recording: nothing more to clear");
+});
+
+test("a failed first resync does not spend the initial one: the reload's buffer is kept", () => {
+	const env = load();
+	const shim = spyShim(env);
+	env.t.refreshStatus();
+	env.calls[0].error({});
+	env.t.refreshStatus();
+	env.calls[1].callback({ message: recordingReply });
+	assert.strictEqual(shim.begins, 0);
+	env.t.state = Object.assign(env.t.Pill.initialState(), { display: "inactive" });
+	env.t.refreshStatus();
+	env.calls[2].callback({ message: {} });
+	env.t.refreshStatus();
+	env.calls[3].callback({ message: recordingReply });
+	assert.strictEqual(shim.begins, 1, "a later applied resync finding a recording clears");
+});
+
 let failed = 0;
 for (const [name, fn] of tests) {
 	try { fn(); console.log("ok   " + name); } catch (e) { failed++; console.log("FAIL " + name + "\n" + e.stack); }
