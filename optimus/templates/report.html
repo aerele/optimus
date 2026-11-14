@@ -280,12 +280,17 @@
   /* Per-action breakdown: narrow numeric columns on the right, the
      Action column takes the remaining width and wraps long labels /
      URL paths / callsite lines via .tbl-clip. */
+  /* The table keeps a readable width and the box around it scrolls sideways,
+     so a narrow screen scrolls the table, never the whole page. Columns are wide
+     enough for their one-line headers. */
+  .table-scroll { overflow-x: auto; max-width: 100%; }
+  table.per-action-table { min-width: 840px; }
   table.per-action-table col.col-idx      { width: 32px; }
-  table.per-action-table col.col-type     { width: 96px; }
-  table.per-action-table col.col-duration { width: 88px; }
-  table.per-action-table col.col-queries  { width: 72px; }
-  table.per-action-table col.col-dbtime   { width: 72px; }
-  table.per-action-table col.col-slowest  { width: 88px; }
+  table.per-action-table col.col-type     { width: 104px; }
+  table.per-action-table col.col-duration { width: 104px; }
+  table.per-action-table col.col-queries  { width: 92px; }
+  table.per-action-table col.col-dbtime   { width: 140px; }
+  table.per-action-table col.col-slowest  { width: 124px; }
   /* col.col-action uses the remaining width implicitly (auto) */
 
   /* C.UT1: per-table totals row in <tfoot>. Subtle separator + heavier
@@ -2418,7 +2423,7 @@
         </div>
       {% endif %}
     </td>
-    <td><span class="type-tag{% if action.event_type == 'RQ Job' %} bg{% endif %}">{{ action.event_type }}</span></td>
+    <td><span class="type-tag{% if action.is_background_job %} bg{% endif %}">{{ action.event_type }}</span></td>
     {% set _ms = action.duration_ms or 0 %}
     {% set _pct = (_ms / max_ms * 100) if max_ms else 0 %}
     <td class="num bar-cell">
@@ -3028,6 +3033,7 @@
          entries preserve the legacy action keys so action_row reads
          duration_ms / action_label / etc. unchanged. #}
       {% set _max_action_ms = (report_data.actions | map(attribute='duration_ms') | map('default', 0) | list | max) or 1 %}
+      <div class="table-scroll" tabindex="0" role="region" aria-label="Per-action table">
       <table class="tbl-clip per-action-table data">
         <colgroup>
           <col class="col-idx">
@@ -3064,6 +3070,7 @@
           </tr>
         </tfoot>
       </table>
+      </div>
       <p class="small muted" style="font-style: italic; margin-top: 6px;">
         Note: <em>Slowest query</em> values are per-row maxes don't sum them.
         Use the <em>DB time</em> column when you want a column total.
@@ -3075,6 +3082,7 @@
       {% set _max_fw_ms = (report_data.actions_framework | map(attribute='duration_ms') | map('default', 0) | list | max) or 1 %}
       <details class="subsection">
         <summary class="small muted"><strong>{{ report_data.actions_framework | length }}</strong> framework action{{ "s" if report_data.actions_framework | length != 1 else "" }} (click to expand) - entry points in <code>frappe</code>, <code>erpnext</code> and friends; the developer can't easily patch these</summary>
+        <div class="table-scroll" tabindex="0" role="region" aria-label="Framework actions table">
         <table class="tbl-clip per-action-table data">
           <colgroup>
             <col class="col-idx">
@@ -3102,6 +3110,7 @@
           {% endfor %}
           </tbody>
         </table>
+        </div>
       </details>
       {% endif %}
     {% else %}

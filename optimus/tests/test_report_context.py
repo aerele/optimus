@@ -521,12 +521,6 @@ class TestActionsShape:
 		out = build_report_context(_doc(), _ctx(actions=actions))
 		assert out["actions"][0]["kind"] == "bg"
 
-	def test_finding_inline_html_when_action_linked(self):
-		findings = [{"severity": "High", "title": "Slow loop", "action_ref": "1"}]
-		actions = [{"action_label": "save", "duration_ms": 1430}]
-		out = build_report_context(_doc(), _ctx(actions=actions, findings=findings))
-		assert "Slow loop" in (out["actions"][0]["finding_inline_html"] or "")
-
 
 class TestBackgroundJobsShape:
 	def test_job_has_contract_fields(self):

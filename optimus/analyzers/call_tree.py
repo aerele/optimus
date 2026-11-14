@@ -1170,6 +1170,7 @@ def _walk_for_findings(
 					action_label == fn_name
 					or action_label.endswith(f".{fn_name}")
 					or action_label.endswith(f":{fn_name}")
+					or action_label == f"RQ Job: {fn_name}"
 				)
 				# Time mostly in callees: report the slow callees, and own time only when hot by itself.
 				callee_ms = sum(
