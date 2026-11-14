@@ -198,7 +198,7 @@
    "fieldname": "sensitive_sql_columns",
    "fieldtype": "Small Text",
    "label": "Sensitive SQL Columns",
-   "description": "Extra database column names whose values should be hidden. When one of these appears in a query filter, its value is replaced with '<REDACTED>'. One name per line. Example: recovery_code, bank_account, otp_seed."
+   "description": "Extra database column names whose values should be hidden. When one of these is compared, assigned (UPDATE SET) or inserted in a query, its value is replaced with '<REDACTED>'. A name matches a whole column name, in any letter case. One name per line. Example: recovery_code, bank_account, otp_seed."
   },
   {
    "fieldname": "column_break_redaction",

@@ -290,6 +290,21 @@ _patch_enqueue()
 # the renderer's defense-in-depth redaction.
 
 
+def _omit_unredacted_query(data):
+	"""Last resort when redaction itself could not run: store no SQL instead of the raw text.
+	The constants are imported here, not at the top, so a broken redaction module cannot stop the
+	patch from loading; if even that import fails the query is emptied."""
+	if not isinstance(data, dict) or data.get("query") is None:
+		return
+	try:
+		from optimus.redaction import LITERALS_MASKED_KEY, OMITTED_SQL
+	except Exception:
+		data["query"] = ""
+		return
+	data["query"] = OMITTED_SQL
+	data[LITERALS_MASKED_KEY] = True
+
+
 def _patch_recorder():
 	"""Install capture-time redaction on Frappe's recorder. Idempotent via the
 	``_profiler_patched`` marker; best-effort so a patch failure never breaks
@@ -334,7 +349,13 @@ def _patch_recorder():
 				tuple(cfg.sensitive_form_keys or ()),
 				tuple(cfg.sensitive_sql_columns or ()),
 			)
-		except Exception:
+		except Exception as error:
+			try:
+				from optimus.redaction_log import log_extras_unreadable
+
+				log_extras_unreadable(error)
+			except Exception:
+				pass
 			return ((), ())
 		finally:
 			frappe.local.optimus_reading_extras = False
@@ -357,13 +378,22 @@ def _patch_recorder():
 
 	def _profiler_register(self, data):
 		try:
-			from optimus.redaction import redact_sql_literals
+			from optimus.dbdialect import redaction_dialect
+			from optimus.redaction import LITERALS_MASKED_KEY, redact_sql_fail_closed
+			from optimus.redaction_log import log_redaction_failure
 
 			_, extra_cols = _read_extras()
-			if isinstance(data, dict) and isinstance(data.get("query"), str):
-				data["query"] = redact_sql_literals(data["query"], extra_columns=extra_cols)
+			query = data.get("query") if isinstance(data, dict) else None
+			if isinstance(query, str):
+				data["query"], masked = redact_sql_fail_closed(
+					query, extra_columns=extra_cols, dialect=redaction_dialect(), on_error=log_redaction_failure
+				)
+				if masked:
+					data[LITERALS_MASKED_KEY] = True
+			elif query is not None:
+				_omit_unredacted_query(data)
 		except Exception:
-			pass
+			_omit_unredacted_query(data)
 		return _original_register(self, data)
 
 	_profiler_init._profiler_patched = True

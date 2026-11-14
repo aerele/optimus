@@ -11,6 +11,14 @@ import sqlparse
 from sqlparse import tokens as T
 
 MAX_QUERY_CHARS = 16_000
+# The SQL names that kept a query out of the raw-consent path before the redactor learned more
+# names. A name here is matched as a substring and is never removed, so a change to the
+# redactor's own list cannot let a query reach the provider that was stripped before.
+_AI_RAW_GATE_NAMES = (
+	"password", "pwd", "api_key", "apikey", "token", "secret", "csrf", "authorization", "cookie",
+	"encryption_key", "private_key", "session_id", "access_key", "salt", "hash", "otp", "ssn",
+	"recovery", "credit", "card", "bank",
+)
 _METHOD = r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+"
 _METHOD_PATH = re.compile(r"/api/(?:v\d+/)?method/[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*/?\Z", re.ASCII)
 _DOTTED = re.compile(_METHOD + r"\Z", re.ASCII)
@@ -188,7 +196,7 @@ def query_text(query, *, send_raw: bool) -> str:
 	"""
 	from optimus import safe_call
 	from optimus.ai_fix import _InterruptGuard
-	from optimus.redaction import DEFAULT_SENSITIVE_SQL_COLUMNS
+	from optimus.redaction import sql_names_hit
 	from optimus.sql_budget import within_budget
 
 	if not within_budget(query, max_chars=MAX_QUERY_CHARS) or not query.strip():
@@ -207,7 +215,11 @@ def query_text(query, *, send_raw: bool) -> str:
 				# Sensitive SQL can use ILIKE, casts, arrays or dialect expressions.
 				# Regex replacement cannot prove those private: strip all literals
 				# using the same fail-closed parser boundary as redacted mode.
-				if not any(col.lower() in query.lower() for col in (*DEFAULT_SENSITIVE_SQL_COLUMNS, *columns)):
+				lowered = query.lower()
+				if not (
+					any(col.lower() in lowered for col in (*_AI_RAW_GATE_NAMES, *columns))
+					or sql_names_hit(query, tuple(columns))
+				):
 					return query.strip()
 			# sqlparse accepts backslash escapes even when the database dialect
 			# does not. Ambiguous lexing can expose a later literal as SQL text.
