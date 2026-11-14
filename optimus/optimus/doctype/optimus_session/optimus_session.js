@@ -652,8 +652,15 @@ function render_phase2_button(frm) {
 
 	// Retrying attaches to live work or queues a bounded new generation.
 	// Analyzing with saved results (pending flag) is only waiting for its report, so Retry would discard them.
-	const stuck_runs = (frm.doc.phase_2_runs || []).filter(row =>
+	// The server lists runs with retries left whose captured data still exists.
+	// Without that list Retry stays offered, and the server rechecks the run.
+	const retryable = frm.doc.__onload && frm.doc.__onload.optimus_phase2_retryable;
+	const unfinished = (frm.doc.phase_2_runs || []).filter(row =>
 		(row.status === "Analyzing" && !row.analyze_render_pending) || row.status === "Failed");
+	const stuck_runs = unfinished.filter(row => !retryable || retryable.includes(row.run_uuid));
+	const spent = can_act ? unfinished.length - stuck_runs.length : 0;
+	_single_banner(frm, "optimus-phase2-retry-hint", "form-message orange", spent ? frappe.utils.escape_html(
+		__("{0} line profiling run(s) cannot be retried: the captured data is gone or the retry limit is reached. Record a new line-profile pass.", [spent])) : null);
 	const clean_form = () => {
 		if (!frm.is_dirty()) return true;
 		frappe.msgprint(__("Save or discard your changes before queueing line profiling analysis."));

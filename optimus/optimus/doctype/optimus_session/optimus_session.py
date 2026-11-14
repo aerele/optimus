@@ -31,6 +31,9 @@ class OptimusSession(Document):
 		from optimus.api import can_act_on_session
 
 		self.set_onload("optimus_can_act", can_act_on_session(self))
+		from optimus.line_profile.jobs import retryable_runs
+
+		self.set_onload("optimus_phase2_retryable", retryable_runs(self.phase_2_runs))
 
 	def on_trash(self):
 		from optimus.ai_jobs import delete_session_state

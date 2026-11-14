@@ -85,6 +85,24 @@ def validate_parent_journal(doc):
 		raise frappe.ValidationError(_("Line profiling analysis state is managed by the server."))
 
 
+def retryable_runs(rows) -> list[str]:
+	"""Run uuids a manual retry can still admit: retries left and captured input present."""
+	from optimus.line_profile import capture
+	candidates = [row.run_uuid for row in rows or []
+		if row.status in ("Analyzing", "Failed") and row.run_uuid and (row.analyze_attempts or 0) < MAX_ATTEMPTS]
+	try:
+		kept = capture.runs_with_input(candidates)
+	except Exception:
+		return candidates  # Fail open: the form still loads and the retry endpoint rechecks the input.
+	return [run_uuid for run_uuid in candidates if run_uuid in kept]
+
+
+def is_live(row, now=None) -> bool:
+	"""An Analyzing run whose generation still holds its lease; a retry attaches to it."""
+	return bool(row and row.get("status") == "Analyzing" and row.get("analyze_generation")
+		and (row.get("analyze_lease_until") or 0) > (_now() if now is None else now))
+
+
 class MissingInput(ValueError):
 	"""Captured line profiling data expired or is malformed; do not save empty results."""
 
@@ -211,7 +229,7 @@ def _admit(docname, session_uuid, run_uuid, requested_by, *, generation, now, fr
 		return {"status": "refused", "reason": "not_found"}
 	if not _authorized(parent, requested_by):
 		return {"status": "refused", "reason": "permission"}
-	if row["status"] == "Analyzing" and row.get("analyze_generation") and (row.get("analyze_lease_until") or 0) > now:
+	if is_live(row, now):
 		return {"status": "already_running", "run": row}
 	if row["status"] not in ({"Recording"} if from_recording else {"Analyzing", "Failed"}):
 		return {"status": "refused", "reason": "not_retryable"}

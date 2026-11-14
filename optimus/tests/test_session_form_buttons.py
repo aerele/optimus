@@ -18,21 +18,24 @@ const ctx = {__: (t, a = []) => t.replace(/\{(\d+)\}/g, (_, n) => a[n]),
   frappe: {ui: {form: {on: () => {}}}, realtime: {on: () => {}}, utils: {escape_html: (s) => s}}};
 vm.createContext(ctx);
 vm.runInContext(fs.readFileSync(process.argv[1], "utf8"), ctx);
-let banner;
+let banner, hint;
 ctx._phase2_armed_banner = (frm, html) => { banner = html; };
-const onloads = {allowed: {optimus_can_act: true}, refused: {optimus_can_act: false}, empty: {}, missing: undefined};
+ctx._single_banner = (frm, id, cls, html) => { if (id === "optimus-phase2-retry-hint") hint = html; return null; };
+const retryable = ["run-a", "run-b"];
+const onloads = {allowed: {optimus_can_act: true, optimus_phase2_retryable: retryable},
+  spent: {optimus_can_act: true, optimus_phase2_retryable: []}, unlisted: {optimus_can_act: true}, refused: {optimus_can_act: false}, empty: {}, missing: undefined};
 const out = {};
 for (const [status, runs] of [["Ready", [{run_uuid: "run-a", status: "Failed"}, {run_uuid: "run-b", status: "Failed"}]],
                               ["Ready", [{run_uuid: "run-c", status: "Recording"}]], ["Failed", []]]) {
   for (const [name, onload] of Object.entries(onloads)) {
     const labels = [];
-    banner = undefined;
+    banner = hint = undefined;
     const doc = {session_uuid: "s", status, phase_2_runs: runs};
     if (onload !== undefined) doc.__onload = onload;
     const frm = {is_new: () => false, is_dirty: () => false, doc,
       add_custom_button: (label) => { labels.push(label); return {removeClass: () => ({addClass: () => {}})}; }};
     ctx.render_retry_button(frm); ctx.render_regenerate_report_button(frm); ctx.render_phase2_button(frm);
-    out[`${status}:${runs.map((r) => r.status).join(",")}:${name}`] = {labels, banner: banner || null};
+    out[`${status}:${runs.map((r) => r.status).join(",")}:${name}`] = {labels, banner: banner || null, hint: hint || null};
   }
 }
 process.stdout.write(JSON.stringify(out));
@@ -78,3 +81,25 @@ def test_owner_keeps_every_session_action():
 	assert {"Regenerate Reports", "Run Line-Profile Pass", "Retry next 2 line profiling runs"} <= ready
 	assert "Stop Line Profiling Run" in out["Ready:Recording:allowed"]["labels"]
 	assert {"Retry Analyze", "Regenerate Reports"} <= set(out["Failed::allowed"]["labels"])
+
+
+def test_owner_gets_no_retry_for_runs_the_server_cannot_retry():
+	out = _render()
+	labels = out["Ready:Failed,Failed:spent"]["labels"]
+	assert not [label for label in labels if "line profiling" in label.lower() and label.startswith("Retry")]
+	assert "Run Line-Profile Pass" in labels
+
+
+def test_owner_is_told_why_spent_runs_have_no_retry():
+	out = _render()
+	assert out["Ready:Failed,Failed:spent"]["hint"] == (
+		"2 line profiling run(s) cannot be retried: the captured data is gone or the retry limit is reached. Record a new line-profile pass."
+	)
+	assert out["Ready:Failed,Failed:allowed"]["hint"] is None
+	assert out["Ready:Failed,Failed:refused"]["hint"] is None
+
+
+def test_retry_stays_offered_when_the_server_sent_no_retryable_list():
+	labels = _render()["Ready:Failed,Failed:unlisted"]["labels"]
+	assert "Retry next 2 line profiling runs" in labels
+	assert "Retry Line Profiling Analyze (run-a)" in labels

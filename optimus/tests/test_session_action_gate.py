@@ -337,6 +337,6 @@ def test_session_onload_sends_can_act_to_the_form(monkeypatch, allowed):
 
 	monkeypatch.setattr(api, "can_act_on_session", lambda doc: allowed if doc.name == DOCNAME else None)
 	sent = {}
-	doc = SimpleNamespace(name=DOCNAME, set_onload=lambda key, value: sent.update({key: value}))
+	doc = SimpleNamespace(name=DOCNAME, phase_2_runs=[], set_onload=lambda key, value: sent.update({key: value}))
 	OptimusSession.onload(doc)
-	assert sent == {"optimus_can_act": allowed}
+	assert sent == {"optimus_can_act": allowed, "optimus_phase2_retryable": []}

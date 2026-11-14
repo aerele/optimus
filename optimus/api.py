@@ -2211,9 +2211,16 @@ def retry_phase2_analyze(run_uuid: str) -> dict:
 	queued or running; completion arrives through the saved row/realtime event.
 	"""
 	ref, _run = _phase2_run_gate(run_uuid, action="retry_phase2_analyze", run_statuses=("Analyzing", "Failed"))
-	ratelimit.enforce_user_rate_limit("retry_phase2_analyze", **_ACTION_LIMITS["retry_phase2_analyze"])
+	from optimus.line_profile import capture as _lp_capture
 	from optimus.line_profile import jobs as _lp_jobs
 
+	# Before the rate limit, so a refusal costs no budget; a live analysis attaches without input.
+	lease = frappe.db.get_value("Optimus Phase Two Run", {"run_uuid": run_uuid},
+		["status", "analyze_generation", "analyze_lease_until"], as_dict=True)
+	if not _lp_jobs.is_live(lease) and not _lp_capture.has_input(run_uuid):
+		frappe.throw(_("This line profiling run's captured data is gone. Record a new line-profile pass."),
+			frappe.ValidationError, title=_("Optimus"))
+	ratelimit.enforce_user_rate_limit("retry_phase2_analyze", **_ACTION_LIMITS["retry_phase2_analyze"])
 	return _phase2_admission_result(_lp_jobs.request(ref.docname, ref.session_uuid, run_uuid, frappe.session.user))
 
 

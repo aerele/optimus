@@ -51,6 +51,7 @@ def _env(monkeypatch, *, user=OWNER, roles=("Optimus User",), perms=None, run_st
 		or [{"dotted_path": "app.mod.fn", "source": "freeform", "eligible": True}],
 		stop_line_profile_pass=lambda run_uuid, u: seen.capture.append(("stop", run_uuid, u)),
 		cleanup_run=lambda run_uuid: seen.cleaned.append(run_uuid),
+		has_input=lambda run_uuid: True,
 		CaptureError=type("CaptureError", (Exception,), {}),
 	))
 	install_module(monkeypatch, "optimus.line_profile.picker", SimpleNamespace(expand_hot_chain=lambda *a, **k: []))
@@ -58,7 +59,7 @@ def _env(monkeypatch, *, user=OWNER, roles=("Optimus User",), perms=None, run_st
 	def request(docname, session_uuid, run_uuid, requested_by, **kw):
 		seen.queued.append((docname, session_uuid, run_uuid, requested_by, kw))
 		return {"run_uuid": run_uuid, "session_uuid": session_uuid, "status": "Analyzing", "ran_inline": False, "reason": None}
-	install_module(monkeypatch, "optimus.line_profile.jobs", SimpleNamespace(request=request,
+	install_module(monkeypatch, "optimus.line_profile.jobs", SimpleNamespace(request=request, is_live=lambda row: False,
 		capture_creation=lambda *args: nullcontext()))
 	scheduler = types.ModuleType("frappe.utils.scheduler")
 	scheduler.is_scheduler_disabled = lambda: False
@@ -164,7 +165,8 @@ def test_batch_isolates_a_foreign_run(monkeypatch):
 	def request(docname, session_uuid, run_uuid, requested_by):
 		queued.append(run_uuid)
 		return {"run_uuid": run_uuid, "session_uuid": session_uuid, "status": "Analyzing", "ran_inline": False}
-	install_module(monkeypatch, "optimus.line_profile.jobs", SimpleNamespace(request=request))
+	install_module(monkeypatch, "optimus.line_profile.jobs", SimpleNamespace(request=request, is_live=lambda row: False))
+	install_module(monkeypatch, "optimus.line_profile.capture", SimpleNamespace(has_input=lambda run_uuid: True))
 	out = api.retry_phase2_analyzes_batch(run_uuids='["run-1", "run-2"]')
 	assert queued == ["run-1"] and not analyzed
 	assert out["tallies"] == {"Ready": 0, "Failed": 1, "Analyzing": 1, "Skipped": 0}
@@ -200,6 +202,32 @@ def test_retry_refuses_non_retryable_run_before_queue(monkeypatch, status):
 	with pytest.raises(FakeValidationError):
 		api.retry_phase2_analyze(run_uuid="run-1")
 	assert not seen.queued and not seen.analyzed
+
+
+def test_retry_refuses_a_run_whose_captured_input_is_gone(monkeypatch):
+	_, _, seen = _env(monkeypatch, run_status="Failed")
+	monkeypatch.setattr(sys.modules["optimus.line_profile.capture"], "has_input", lambda run_uuid: False)
+	with pytest.raises(FakeValidationError, match="captured data is gone"):
+		api.retry_phase2_analyze(run_uuid="run-1")
+	assert not seen.queued and not seen.analyzed
+
+
+def test_a_refused_retry_uses_no_rate_limit_budget(monkeypatch):
+	_, _, seen = _env(monkeypatch, run_status="Failed")
+	monkeypatch.setattr(sys.modules["optimus.line_profile.capture"], "has_input", lambda run_uuid: False)
+	charged = []
+	monkeypatch.setattr(api.ratelimit, "enforce_user_rate_limit", lambda action, **kw: charged.append(action))
+	with pytest.raises(FakeValidationError, match="captured data is gone"):
+		api.retry_phase2_analyze(run_uuid="run-1")
+	assert charged == []
+
+
+def test_a_live_analysis_attaches_even_without_input(monkeypatch):
+	_, _, seen = _env(monkeypatch, run_status="Analyzing")
+	monkeypatch.setattr(sys.modules["optimus.line_profile.capture"], "has_input", lambda run_uuid: False)
+	monkeypatch.setattr(sys.modules["optimus.line_profile.jobs"], "is_live", lambda row: row["status"] == "Analyzing")
+	assert api.retry_phase2_analyze(run_uuid="run-1")["status"] == "Analyzing"
+	assert [queued[2] for queued in seen.queued] == ["run-1"]
 
 
 def test_stop_never_falls_back_inline_when_scheduler_is_disabled(monkeypatch):
