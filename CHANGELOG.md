@@ -8,6 +8,16 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.172] - 2026-11-13
+
+### Fixed
+
+- Failed line profiling runs no longer count toward Line Profiling: Max Runs per Session, for manual runs and for auto-arm. Before, a few failed or expired runs could lock line profiling on a session for good, since runs cannot be deleted. A retried failed run counts again, so Retry on a failed run is refused while the session is at the limit.
+- The Max Runs per Session description and the README now say that failed runs do not count.
+- The refusal message now gives the limit and says how to continue: record a new session, or raise the limit in Optimus Settings.
+
+---
+
 ## [0.12.168] - 2026-11-06
 
 ### Fixed

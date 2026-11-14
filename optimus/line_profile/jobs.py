@@ -34,6 +34,12 @@ _RESULT_SAVE = ContextVar("optimus_phase2_result_save", default=False)
 _CAPTURE_CREATION = ContextVar("optimus_phase2_capture_creation", default=None)
 
 
+def runs_counted_by_limit(rows) -> int:
+	"""Runs that use up phase2_max_runs_per_session; Failed runs hold no results."""
+	return sum(1 for row in rows or []
+		if (row.get("status") if isinstance(row, dict) else getattr(row, "status", None)) != "Failed")
+
+
 @contextmanager
 def capture_creation(parent, run_uuid, user):
 	"""Allow only the new capture row admitted by the server under its lock."""
