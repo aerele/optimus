@@ -23,7 +23,7 @@ def _long_sql() -> str:
 	cols = ", ".join(f"`col_{i}`" for i in range(5000))
 	return (
 		f"SELECT {cols} FROM `tabUser` WHERE password ='{_SECRET}' AND `age` < 5 "
-		"AND `name` IN (?) -- END_OF_QUERY_MARKER"
+		"AND `name` IN (?) AND `note` = 'END_OF_QUERY_MARKER'"
 	)
 
 
