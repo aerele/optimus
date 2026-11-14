@@ -38,6 +38,7 @@ from optimus.analyzers.index_where import (
 )
 from optimus.analyzers.optimizer_db_cache import cached_db, failed_column, failed_statement
 from optimus.dbdialect import get_dialect
+from optimus.redaction import LITERALS_MASKED_KEY
 from optimus.safe_call import job_timeout_types, log_error_line
 
 
@@ -604,6 +605,9 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 				continue
 			# The enrichment cap bounds the DESCRIBE / SHOW INDEX lookups too.
 			if call.get("past_enrich_cap"):
+				continue
+			# Its values were masked whole, so the shape of a LIKE or a range is gone.
+			if call.get(LITERALS_MASKED_KEY):
 				continue
 
 			raw = call.get("query")

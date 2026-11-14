@@ -69,6 +69,12 @@ ALLOWED = (
 	),
 	Row(None, r"^frappe\.recorder unavailable", 0, "bench-only: no Frappe-free test is expected to skip"),
 	Row(
+		"test_forced_recorder_config.py",
+		r"^real frappe is not installed",
+		3,
+		"the RecorderConfig contract tests need Frappe 16's real recorder; they run on a bench",
+	),
+	Row(
 		"test_timing_relations.py",
 		r"^frappe is stubbed$",
 		1,
