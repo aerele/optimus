@@ -78,19 +78,9 @@ def _derive_module_path(filename: str) -> str:
 	"""
 	if not filename:
 		return ""
-	parts = [
-		p
-		for p in filename.replace("\\", "/").split("/")
-		if p and p not in (".", "..")
-	]
+	parts = _below_app_root(filename)
 	if not parts:
 		return ""
-	# Strip leading "apps" (or "/apps") Frappe convention. Subsequent
-	# duplicate (`apps/<app>/<app>/`) is the package-name double we want
-	# to collapse.
-	if "apps" in parts:
-		idx = parts.index("apps")
-		parts = parts[idx + 1 :]
 	if len(parts) >= 2 and parts[0] == parts[1]:
 		parts = parts[1:]
 	# Strip .py from the last segment (handles .pyx and __init__.py too).
@@ -101,19 +91,36 @@ def _derive_module_path(filename: str) -> str:
 	return ".".join(parts)
 
 
+_LIBRARY_ROOTS = ("site-packages", "dist-packages")
+
+
+def _below_app_root(filename: str) -> list[str]:
+	"""Path segments from the app (or installed package) down, relpath dots dropped.
+
+	The FIRST ``apps/<x>/<x>`` is the bench layout, so a bench checked out under
+	a folder named ``apps`` still resolves. Without one, an installed library
+	starts after its last ``site-packages``; else the first ``apps`` is the
+	root. A path with none of these keeps every segment.
+	"""
+	parts = [p for p in (filename or "").replace("\\", "/").split("/") if p and p not in (".", "..")]
+	for i in range(len(parts) - 2):
+		if parts[i] == "apps" and parts[i + 1] == parts[i + 2]:
+			return parts[i + 1 :]
+	for i in range(len(parts) - 1, -1, -1):
+		if parts[i] in _LIBRARY_ROOTS:
+			return parts[i + 1 :]
+	if "apps" in parts:
+		return parts[parts.index("apps") + 1 :]
+	return parts
+
+
 def _derive_app(filename: str) -> str:
 	"""Extract the Frappe app name from a filename.
 
 	``apps/erpnext/erpnext/...`` → ``erpnext``. Falls back to the first
 	non-empty segment when the path doesn't follow the bench layout.
 	"""
-	if not filename:
-		return ""
-	parts = [p for p in filename.replace("\\", "/").split("/") if p]
-	if "apps" in parts:
-		idx = parts.index("apps")
-		if idx + 1 < len(parts):
-			return parts[idx + 1]
+	parts = _below_app_root(filename)
 	return parts[0] if parts else ""
 
 

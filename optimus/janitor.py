@@ -471,8 +471,6 @@ def _sweep_stale_phase2_runs():
 	input for explicit retry; never erase samples merely because a job died.
 	"""
 	from optimus import ai_jobs
-	from optimus.line_profile import capture as _lp_capture
-	from optimus.line_profile import jobs as _lp_jobs
 
 	for status, age in (("Recording", STALE_RECORDING_MINUTES), ("Analyzing", STALE_ANALYZING_MINUTES)):
 		cutoff = add_to_date(now_datetime(), minutes=-age)
@@ -482,11 +480,33 @@ def _sweep_stale_phase2_runs():
 		)
 		ai_jobs._transaction(lambda: None)
 		for row in rows:
-			def expire():
-				changed = ai_jobs._retry_sql(lambda: _lp_jobs.expire_legacy(
-					row["parent"], row["run_uuid"], status=status, cutoff=cutoff,
-				))
-				if changed and status == "Recording":
-					_lp_capture.cleanup_run(row["run_uuid"])
 			from optimus.analyze import _run_ai_step
-			_run_ai_step(expire, title="optimus ai stale line profiling recovery", docname=row["parent"])
+			_run_ai_step(
+				lambda row=row: _expire_phase2_run(row, status, cutoff),
+				title="optimus ai stale line profiling recovery", docname=row["parent"],
+			)
+
+
+def _expire_phase2_run(row, status, cutoff):
+	"""Expire one stale run. A Recording run with samples is analyzed, never erased."""
+	from optimus import ai_jobs
+	from optimus.line_profile import capture as _lp_capture
+	from optimus.line_profile import jobs as _lp_jobs
+
+	samples, unavailable = False, None
+	if status == "Recording":
+		try:
+			samples = _lp_capture.has_samples(row["run_uuid"])
+		except Exception as exc:
+			samples, unavailable = None, type(exc).__name__  # unknown is never empty: nothing is cleaned up
+	if unavailable:
+		from optimus.safe_call import log_error_line
+
+		log_error_line(f"optimus janitor: sample count of line profiling run {row['run_uuid']} unavailable ({unavailable}); retrying next sweep")
+	outcome = ai_jobs._retry_sql(lambda: _lp_jobs.expire_legacy(
+		row["parent"], row["run_uuid"], status=status, cutoff=cutoff, samples=samples,
+	))
+	if outcome == "analyze":
+		_lp_jobs.analyze_expired(row["parent"], row["run_uuid"], cutoff=cutoff)
+	elif outcome is True and status == "Recording" and samples is False:
+		_lp_capture.cleanup_run(row["run_uuid"])
