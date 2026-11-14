@@ -74,7 +74,7 @@ def test_background_job_label(empty_context):
 	}
 	result = per_action.analyze([recording], empty_context)
 	assert result.actions[0]["action_label"] == "RQ Job: post_gl_entries"
-	assert result.actions[0]["event_type"] == "RQ Job"
+	assert result.actions[0]["event_type"] == "Background Job"
 
 
 def test_submit_cmd(empty_context):

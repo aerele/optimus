@@ -38,7 +38,7 @@ def _build_action(recording: dict) -> dict:
 	durations = [c.get("duration", 0) for c in calls]
 	return {
 		"action_label": _fit(_label(recording)),
-		"event_type": recording.get("event_type") or "HTTP Request",
+		"event_type": _event_type_option(recording),
 		"http_method": recording.get("method") or "",
 		"path": _fit(recording.get("path") or ""),
 		"recording_uuid": recording.get("uuid") or "",
@@ -63,6 +63,28 @@ def is_background_job(event_type) -> bool:
 	return isinstance(event_type, str) and event_type in _JOB_EVENT_TYPES
 
 
+def _event_type_option(recording: dict) -> str:
+	"""The Optimus Action ``event_type`` Select option for a recording of any type.
+
+	Frappe's forced recorder can also write "Function Call"; an unknown type is read from
+	the recording's shape: a request has a method, cmd or a path starting with "/".
+	"""
+	event_type = recording.get("event_type")
+	if is_background_job(event_type):
+		return "Background Job"
+	if event_type == "HTTP Request":
+		return event_type
+	path = recording.get("path")
+	if recording.get("method") or recording.get("cmd") or (isinstance(path, str) and path.startswith("/")):
+		return "HTTP Request"
+	# Best guess: nothing says it is a request, so a path-less recording is read as a job.
+	return "Background Job"
+
+
+def _is_job(recording: dict) -> bool:
+	return _event_type_option(recording) == "Background Job"
+
+
 def _label(recording: dict) -> str:
 	"""Technical label for the Per-action table / Frontend XHR panel.
 
@@ -72,7 +94,7 @@ def _label(recording: dict) -> str:
 	empty. Suffixes a disambiguating ``:<action>`` for multiplexed cmds (e.g.
 	``frappe.desk.form.save.savedocs:Submit``) so Save and Submit rows differ.
 	"""
-	if is_background_job(recording.get("event_type")):
+	if _is_job(recording):
 		path = recording.get("path")
 		if not path or not isinstance(path, str):
 			return "RQ Job"
@@ -180,7 +202,7 @@ def humanized_label(recording: dict) -> str:
 	than the technical cmd string. Falls back to ``_label`` when no humanization
 	rule matches, so the caller always gets a non-empty string.
 	"""
-	if is_background_job(recording.get("event_type")):
+	if _is_job(recording):
 		return _label(recording)
 
 	cmd = recording.get("cmd") or ""
