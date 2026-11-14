@@ -495,19 +495,24 @@ def _sweep_stale_stopping():
 
 def _claim_stale_stopping(name: str, cutoff) -> bool:
 	"""Lock the row, recheck it is still stale, and bump ``modified``; True for the one caller that wins."""
-	locked = frappe.db.get_value(
-		"Optimus Session",
-		{"name": name, "status": ["in", _STOPPING_STATUSES], "modified": ["<", cutoff]},
-		"name",
-		for_update=True,
-	)
-	failed = False
+	locked, failed = None, False
+	guard = safe_call.InterruptGuard(base=True)
 	try:
-		if locked:
-			frappe.db.set_value("Optimus Session", name, {"status": "Stopping"})
+		with guard:
+			locked = frappe.db.get_value(
+				"Optimus Session",
+				{"name": name, "status": ["in", _STOPPING_STATUSES], "modified": ["<", cutoff]},
+				"name",
+				for_update=True,
+			)
+			if locked:
+				frappe.db.set_value("Optimus Session", name, {"status": "Stopping"})
 	except Exception:
 		frappe.db.rollback()
 		locked, failed = None, True
+	if guard.pending():
+		frappe.db.rollback()  # a job timeout must still stop the job, but not hold the lock
+		raise guard.interrupt()
 	if failed:
 		safe_call.log_error_line(
 			"optimus janitor could not claim a stuck session for re-analyze; retried in a later sweep window",

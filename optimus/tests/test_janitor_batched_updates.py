@@ -411,6 +411,58 @@ class TestSweepStaleStopping:
 		assert rollbacks == [1]
 		assert any("could not claim" in m for m in lines)
 
+	@pytest.mark.parametrize("error", ["QueryTimeoutError", "QueryDeadlockError"])
+	def test_a_lock_error_on_the_locking_read_skips_only_that_row(self, monkeypatch, error):
+		stub = _install_frappe_stub(monkeypatch)
+		self._two_stale(stub)
+		lock_error = type(error, (Exception,), {})
+		setattr(stub, error, lock_error)
+		plain_get_value = stub.db.get_value
+
+		def get_value(doctype, filters=None, fieldname=None, **kw):
+			if filters["name"] == "PS-1":
+				raise lock_error("lock wait timeout")
+			return plain_get_value(doctype, filters, fieldname, **kw)
+
+		stub.db.get_value = get_value
+		rollbacks = []
+		stub.db.rollback = lambda: rollbacks.append(1)
+		janitor = _reload_janitor(monkeypatch)
+		commits = []
+		monkeypatch.setattr(janitor, "safe_commit", lambda: commits.append(1))
+		lines = []
+		monkeypatch.setattr(janitor.safe_call, "log_error_line", lambda msg, **kw: lines.append(msg))
+		janitor._sweep_stale_stopping()
+
+		assert [c[1]["session_uuid"] for c in stub._enqueue_calls] == ["u2"]
+		assert [c[1] for c in stub._set_value_calls] == ["PS-2"]
+		assert rollbacks == [1] and len(commits) == 2
+		assert sum("could not claim" in m for m in lines) == 1
+
+	def test_a_job_timeout_in_the_claim_still_stops_the_sweep(self, monkeypatch):
+		stub = _install_frappe_stub(monkeypatch)
+		self._two_stale(stub)
+
+		class JobTimeout(Exception):
+			pass
+
+		def get_value(doctype, filters=None, fieldname=None, **kw):
+			raise JobTimeout("Task exceeded maximum timeout value (60 seconds)")
+
+		stub.db.get_value = get_value
+		rollbacks = []
+		stub.db.rollback = lambda: rollbacks.append(1)
+		janitor = _reload_janitor(monkeypatch)
+		monkeypatch.setattr(janitor.safe_call, "job_timeout_types", lambda: (JobTimeout,))
+		lines = []
+		monkeypatch.setattr(janitor.safe_call, "log_error_line", lambda msg, **kw: lines.append(msg))
+		with pytest.raises(JobTimeout):
+			janitor._sweep_stale_stopping()
+
+		assert stub._enqueue_calls == [] and stub._set_value_calls == []
+		assert rollbacks == [1]
+		assert not any("could not claim" in m for m in lines)
+
 	def test_a_failed_enqueue_does_not_stop_the_other_rows(self, monkeypatch):
 		stub = _install_frappe_stub(monkeypatch)
 		self._two_stale(stub)
