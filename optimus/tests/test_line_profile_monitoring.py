@@ -143,13 +143,13 @@ def test_after_request_releases_tool_even_when_disable_fails(monkeypatch):
 
 
 class _LogCapture:
-	"""Tiny replacement for frappe.logger().warning so tests can assert
+	"""Tiny replacement for frappe.logger().error so tests can assert
 	the message without depending on Frappe's logging configuration."""
 
 	def __init__(self):
 		self.warnings: list[str] = []
 
-	def warning(self, msg: str) -> None:
+	def error(self, msg: str) -> None:
 		self.warnings.append(msg)
 
 
@@ -252,7 +252,7 @@ def test_per_request_pre_arm_logs_when_reclaiming_orphan(monkeypatch):
 	# inline check + log is sufficient for the regression invariant.
 	mon = sys.monitoring
 	if mon is not None and mon.get_tool(mon.PROFILER_ID) == "line_profiler":
-		frappe.logger().warning(
+		frappe.logger().error(
 			"optimus.line_profile.before_request: reclaiming orphan tool 2 "
 			"from a prior request that skipped teardown."
 		)

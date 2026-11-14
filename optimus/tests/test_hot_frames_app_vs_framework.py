@@ -211,7 +211,7 @@ class TestIntermediateTrim:
 		cap = call_tree.HOT_FRAMES_INTERMEDIATE_CAP
 		occ, cls = {}, {}
 		for i in range(cap):
-			occ[("a", f"app{i}")] = [(0, float(i), 0)]
+			occ[("a", f"app{i}")] = [(0, 0, float(i))]
 			cls[("a", f"app{i}")] = False
 			occ[("f", f"fw{i}")] = [(0, 0, float(i))]
 			cls[("f", f"fw{i}")] = True

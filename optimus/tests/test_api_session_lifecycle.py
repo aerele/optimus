@@ -57,14 +57,19 @@ class FakeDB:
 			if isinstance(fieldname, list):  # Frappe returns a tuple for a field list
 				return tuple(row.get(f) for f in fieldname) if row else None
 			return row.get(fieldname) if row else None
-		row = self.rows.get(filters.get("session_uuid"))
-		if row is None:
-			return None
-		if "user" in filters and filters["user"] != row["user"]:
+		matches = [
+			dict(row, session_uuid=uuid)
+			for uuid, row in self.rows.items()
+			if all(row.get(key, uuid if key == "session_uuid" else None) == value for key, value in filters.items())
+		]
+		if kw.get("order_by"):
+			column, _, direction = kw["order_by"].partition(" ")
+			matches.sort(key=lambda row: row.get(column, 0), reverse=direction.strip().lower() == "desc")
+		if not matches:
 			return None
 		if isinstance(fieldname, list):
-			return {f: row.get(f) for f in fieldname}
-		return row.get(fieldname)
+			return {f: matches[0].get(f) for f in fieldname}
+		return matches[0].get(fieldname)
 
 	def set_value(self, doctype, name, values, value=None):
 		updates = values if isinstance(values, dict) else {values: value}
@@ -122,8 +127,10 @@ def _scheduler(monkeypatch, disabled):
 	monkeypatch.setattr(sched, "is_scheduler_disabled", lambda: disabled)
 
 
-def _row(env, uuid="u1", name="OPT-1", user="alice@example.com", status="Recording"):
-	env.db.rows[uuid] = {"name": name, "user": user, "owner": user, "status": status}
+def _row(env, uuid="u1", name="OPT-1", user="alice@example.com", status="Recording", started_at=0):
+	env.db.rows[uuid] = {
+		"name": name, "user": user, "owner": user, "status": status, "started_at": started_at,
+	}
 
 
 def _bg_wait(monkeypatch, seconds):
@@ -260,6 +267,190 @@ class TestMarkStopping:
 		_row(env, user="bob@example.com")
 
 		assert api._mark_stopping("alice@example.com", "u1") is None
+		assert env.db.rows["u1"]["status"] == "Recording"
+
+	@pytest.mark.parametrize("status", ["Stopping", "Capturing Background Jobs", "Analyzing", "Ready", "Failed"])
+	def test_a_session_that_is_no_longer_recording_is_never_reopened_as_stopping(self, env, status):
+		_row(env, status=status)
+
+		assert api._mark_stopping("alice@example.com", "u1") is None
+		assert env.db.rows["u1"]["status"] == status
+
+	@pytest.mark.parametrize("status", ["Recording", "Ready"])
+	def test_the_lock_is_released_by_a_commit_whether_or_not_the_row_was_claimed(self, env, monkeypatch, status):
+		_row(env, status=status)
+		commits = []
+		monkeypatch.setattr(api, "safe_commit", lambda: commits.append(True))
+
+		api._mark_stopping("alice@example.com", "u1")
+
+		assert commits == [True]
+
+	def test_the_row_is_locked_while_its_status_is_checked(self, env, monkeypatch):
+		_row(env)
+		locks = []
+		real = env.db.get_value
+		monkeypatch.setattr(
+			env.db, "get_value", lambda *a, **kw: (locks.append(kw.get("for_update")), real(*a, **kw))[1]
+		)
+
+		assert api._mark_stopping("alice@example.com", "u1") == "OPT-1"
+		assert locks == [True]
+
+
+class TestStopAfterTheIdleExpiry:
+	"""The pointer lives 10 minutes after the last request; the row stays Recording until the janitor."""
+
+	def test_stop_without_a_pointer_stops_the_users_latest_recording_row(self, env, monkeypatch):
+		_scheduler(monkeypatch, disabled=False)
+		_row(env, "old", "OPT-OLD", started_at=1)
+		_row(env, "new", "OPT-NEW", started_at=2)
+
+		out = api.stop()
+
+		assert out["stopped"] is True and out["expired"] is True
+		assert out["session_uuid"] == "new" and out["docname"] == "OPT-NEW"
+		assert env.db.rows["new"]["status"] == "Stopping"
+		assert env.db.rows["old"]["status"] == "Recording"
+		assert [kw["session_uuid"] for _, kw in env.enqueued] == ["new"]
+
+	def test_the_latest_row_is_the_callers_own_not_a_newer_one_of_another_user(self, env, monkeypatch):
+		_scheduler(monkeypatch, disabled=False)
+		_row(env, "mine-old", "OPT-M1", started_at=1)
+		_row(env, "mine-new", "OPT-M2", started_at=2)
+		_row(env, "bobs", "OPT-B", user="bob@example.com", started_at=3)
+
+		out = api.stop()
+
+		assert out["session_uuid"] == "mine-new"
+		assert env.db.rows["bobs"]["status"] == "Recording"
+
+	def test_both_stop_paths_apply_the_stop_rate_limit_of_20_per_minute(self, env, monkeypatch):
+		_scheduler(monkeypatch, disabled=False)
+		limits = []
+		monkeypatch.setattr(api.ratelimit, "enforce_user_rate_limit", lambda *a, **kw: limits.append((a, kw)))
+		env.store.active["alice@example.com"] = "u1"
+		_row(env, "u1", "OPT-1")
+		api.stop()
+		env.store.active.clear()
+		_row(env, "u2", "OPT-2")
+		api.stop()
+
+		assert limits == [(("stop",), {"limit": 20, "seconds": 60})] * 2
+
+	def test_an_empty_session_uuid_stops_the_active_session_and_clears_its_pointer(self, env, monkeypatch):
+		_scheduler(monkeypatch, disabled=False)
+		env.store.active["alice@example.com"] = "u1"
+		_row(env)
+
+		out = api.stop(session_uuid="")
+
+		assert out["session_uuid"] == "u1" and "expired" not in out
+		assert "alice@example.com" not in env.store.active
+
+	def test_stop_with_the_session_uuid_stops_that_session(self, env, monkeypatch):
+		_scheduler(monkeypatch, disabled=False)
+		_row(env, "a", "OPT-A", started_at=1)
+		_row(env, "b", "OPT-B", started_at=2)
+
+		out = api.stop(session_uuid="a")
+
+		assert out["session_uuid"] == "a" and out["expired"] is True
+		assert env.db.rows["b"]["status"] == "Recording"
+
+	def test_a_finished_session_is_not_reopened_and_nothing_is_queued(self, env, monkeypatch):
+		_scheduler(monkeypatch, disabled=False)
+		for status in ("Ready", "Stopping", "Analyzing"):
+			_row(env, "a", "OPT-A", status=status)
+
+			out = api.stop(session_uuid="a")
+
+			assert out["stopped"] is False
+			assert env.db.rows["a"]["status"] == status
+		assert env.enqueued == []
+
+	def test_a_session_stopped_between_the_lookup_and_the_lock_is_not_queued_again(self, env, monkeypatch):
+		_scheduler(monkeypatch, disabled=False)
+		_row(env, "a", "OPT-A")
+		real = env.db.get_value
+		stopped = []
+
+		def janitor_wins_the_race(*args, **kw):
+			if kw.get("for_update") and not stopped:
+				env.db.rows["a"]["status"] = "Stopping"
+				stopped.append(True)
+			return real(*args, **kw)
+
+		monkeypatch.setattr(env.db, "get_value", janitor_wins_the_race)
+
+		out = api.stop(session_uuid="a")
+
+		assert out["stopped"] is False
+		assert env.enqueued == []
+
+	def test_another_users_session_cannot_be_stopped_by_naming_its_uuid(self, env, monkeypatch):
+		_scheduler(monkeypatch, disabled=False)
+		_row(env, "theirs", "OPT-T", user="bob@example.com")
+
+		assert api.stop(session_uuid="theirs") == {"stopped": False, "reason": "no active session"}
+		assert env.db.rows["theirs"]["status"] == "Recording"
+		assert env.enqueued == []
+
+	def test_with_no_pointer_and_no_row_nothing_is_stopped(self, env):
+		assert api.stop() == {"stopped": False, "reason": "no active session"}
+		assert api.stop(session_uuid="ghost") == {"stopped": False, "reason": "no active session"}
+
+	def test_stopping_an_expired_session_never_touches_the_session_active_in_another_tab(
+		self, env, monkeypatch
+	):
+		# Tab 1 still shows A (expired); tab 2 started B. Stopping A must leave B recording.
+		_scheduler(monkeypatch, disabled=False)
+		_row(env, "A", "OPT-A", started_at=1)
+		_row(env, "B", "OPT-B", started_at=2)
+		env.store.active["alice@example.com"] = "B"
+		live_stops = []
+		monkeypatch.setattr(api, "_clear_active", lambda user: live_stops.append(user))
+
+		out = api.stop(session_uuid="A")
+
+		assert out["session_uuid"] == "A" and out["expired"] is True
+		assert env.db.rows["A"]["status"] == "Stopping"
+		assert env.db.rows["B"]["status"] == "Recording"
+		assert env.store.active["alice@example.com"] == "B"
+		assert live_stops == []
+		assert [kw["session_uuid"] for _, kw in env.enqueued] == ["A"]
+
+	def test_the_active_session_is_stopped_the_live_way_even_when_its_uuid_is_passed(self, env, monkeypatch):
+		calls = []
+		monkeypatch.setattr(api, "_stop_session", lambda user, active: calls.append((user, active)) or ("OPT-1", False))
+		env.store.active["alice@example.com"] = "u1"
+
+		out = api.stop(session_uuid="u1")
+
+		assert calls == [("alice@example.com", "u1")]
+		assert out["stopped"] is True and "expired" not in out
+
+	def test_the_expired_path_is_rate_limited_before_any_lookup(self, env, monkeypatch):
+		order = []
+		monkeypatch.setattr(api.ratelimit, "enforce_user_rate_limit", lambda *a, **kw: order.append("limit"))
+		real = env.db.get_value
+		monkeypatch.setattr(env.db, "get_value", lambda *a, **kw: (order.append("lookup"), real(*a, **kw))[1])
+		_row(env)
+		_scheduler(monkeypatch, disabled=False)
+
+		api.stop()
+
+		assert order[0] == "limit" and "lookup" in order
+
+	def test_a_rate_limited_expired_stop_does_not_reach_the_database(self, env, monkeypatch):
+		def limited(*a, **kw):
+			raise RuntimeError("rate limited")
+
+		monkeypatch.setattr(api.ratelimit, "enforce_user_rate_limit", limited)
+		_row(env)
+
+		with pytest.raises(RuntimeError):
+			api.stop()
 		assert env.db.rows["u1"]["status"] == "Recording"
 
 

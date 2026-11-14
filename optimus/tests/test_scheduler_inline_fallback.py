@@ -159,14 +159,14 @@ def test_enqueue_analyze_swallows_inline_failure(monkeypatch):
 
 
 def test_stop_returns_final_status_when_inline(monkeypatch):
-	"""Source-inspection guard: stop() must read the final status off the Optimus
+	"""Source-inspection guard: stop() (via _stop_result) must read the final status off the Optimus
 	Session doc after inline analyze runs, so a failed inline analyze doesn't
 	report Ready to the widget."""
 	import inspect
 
 	from optimus import api
 
-	src = inspect.getsource(api.stop)
+	src = inspect.getsource(api._stop_result)
 	assert "final_status" in src or "\"status\"" in src
 	# Must read the status from the doc via frappe.db.get_value.
 	assert "get_value" in src

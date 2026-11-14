@@ -594,7 +594,10 @@ def _recover_pending():
 		if changed:
 			row["session_uuid"] = frappe.db.get_value("Optimus Session", row["parent"], "session_uuid")
 			if changed == "Ready":
-				frappe.logger().warning(f"optimus line profiling run {row['run_uuid']} completed by recovery; report update pending")
+				safe_call.log_error_line(
+					f"optimus line profiling run {row['run_uuid']} completed by recovery; report update pending",
+					dedupe_key="line profiling run completed by recovery",
+				)
 				_notify({**row, "analyze_render_pending": 1}, "phase_2_run_ready")
 			elif changed == "Failed":
 				_notify(row, "phase_2_run_failed")

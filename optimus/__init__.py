@@ -1,4 +1,4 @@
-__version__ = "0.12.163"
+__version__ = "0.12.171"
 
 
 def safe_commit() -> None:
@@ -88,6 +88,18 @@ def _is_synchronous_enqueue(args, kwargs, positions=_ENQUEUE_POSITIONS) -> bool:
 		return False
 
 
+# Jobs Optimus queues for itself. Tagging one with the user's *next* session would
+# record the analysis into that session, so they never carry a session marker.
+_INTERNAL_JOB_METHODS = frozenset({"optimus.analyze.run"})
+
+
+def is_internal_job(method) -> bool:
+	"""True for a job Optimus queued for itself, given as a dotted path or a callable."""
+	if not isinstance(method, str):
+		method = f"{getattr(method, '__module__', '')}.{getattr(method, '__qualname__', '')}"
+	return method in _INTERNAL_JOB_METHODS
+
+
 def _live_bg_session(session_uuid, user, _profiler_session):
 	"""The job's own session if still active or draining, else None (never resurrect a finished one)."""
 	if not session_uuid or not _profiler_session.get_session_meta(session_uuid):
@@ -138,6 +150,27 @@ def _track_enqueued_job(session_uuid, job_id, method) -> None:
 	_profiler_session.record_enqueued_job(session_uuid, job_id, method_str, parent)
 
 
+def _warn_untracked_job(job, deferred_job_id, session_uuid, exc) -> None:
+	"""Log a tracking failure as one deduplicated ERROR line, never into the caller's transaction.
+
+	The line names the error class only, so a failed Redis connection does not leak its host.
+	"""
+	try:
+		from optimus.safe_call import log_error_line
+
+		error_type = type(exc).__name__
+		try:
+			job_id = getattr(job, "id", None) or deferred_job_id
+		except Exception:
+			job_id = deferred_job_id
+		log_error_line(
+			f"optimus: could not track job {job_id} for session {session_uuid}: {error_type}",
+			dedupe_key=f"could not track a job ({error_type})",
+		)
+	except Exception:
+		pass
+
+
 def _patch_enqueue():
 	"""Install the enqueue wrapper. No-ops when frappe isn't installed (e.g.
 	running analyzer unit tests from a plain Python interpreter)."""
@@ -163,7 +196,7 @@ def _patch_enqueue():
 			from optimus import session as _profiler_session
 
 			user = getattr(frappe.session, "user", None) if hasattr(frappe, "session") else None
-			if user and user != "Guest":
+			if user and user != "Guest" and not is_internal_job(method):
 				active = _enqueue_session_for(user, _profiler_session)
 				# Inline calls would pass the marker to the method as a kwarg.
 				if active and not synchronous:
@@ -204,19 +237,12 @@ def _patch_enqueue():
 		# None for `now=True` inline jobs (nothing async to wait for). Never
 		# track our own analyze job (it would deadlock the wait on itself).
 		try:
-			if active and not synchronous and method != "optimus.analyze.run":
+			if active and not synchronous:
 				job_id = getattr(job, "id", None) or deferred_job_id
 				if job_id:
 					_track_enqueued_job(active, job_id, method)
 		except Exception as exc:
-			# Log instead of writing an Error Log row into the caller's transaction.
-			try:
-				frappe.logger("optimus").warning(
-					f"optimus: could not track job {getattr(job, 'id', None) or deferred_job_id} "
-					f"for session {active}: {exc!r}"
-				)
-			except Exception:
-				pass
+			_warn_untracked_job(job, deferred_job_id, active, exc)
 
 		return job
 
@@ -288,6 +314,21 @@ def _patch_recorder_config(_rec):
 	config.retrieve = classmethod(_retrieve)
 
 
+def _omit_unredacted_query(data):
+	"""Last resort when redaction itself could not run: store no SQL instead of the raw text.
+	The constants are imported here, not at the top, so a broken redaction module cannot stop the
+	patch from loading; if even that import fails the query is emptied."""
+	if not isinstance(data, dict) or data.get("query") is None:
+		return
+	try:
+		from optimus.redaction import LITERALS_MASKED_KEY, OMITTED_SQL
+	except Exception:
+		data["query"] = ""
+		return
+	data["query"] = OMITTED_SQL
+	data[LITERALS_MASKED_KEY] = True
+
+
 def _patch_recorder():
 	"""Install capture-time redaction on Frappe's recorder. Idempotent via the
 	``_profiler_patched`` marker; best-effort so a patch failure never breaks
@@ -334,7 +375,13 @@ def _patch_recorder():
 				tuple(cfg.sensitive_form_keys or ()),
 				tuple(cfg.sensitive_sql_columns or ()),
 			)
-		except Exception:
+		except Exception as error:
+			try:
+				from optimus.redaction_log import log_extras_unreadable
+
+				log_extras_unreadable(error)
+			except Exception:
+				pass
 			return ((), ())
 		finally:
 			frappe.local.optimus_reading_extras = False
@@ -357,13 +404,22 @@ def _patch_recorder():
 
 	def _profiler_register(self, data):
 		try:
-			from optimus.redaction import redact_sql_literals
+			from optimus.dbdialect import redaction_dialect
+			from optimus.redaction import LITERALS_MASKED_KEY, redact_sql_fail_closed
+			from optimus.redaction_log import log_redaction_failure
 
 			_, extra_cols = _read_extras()
-			if isinstance(data, dict) and isinstance(data.get("query"), str):
-				data["query"] = redact_sql_literals(data["query"], extra_columns=extra_cols)
+			query = data.get("query") if isinstance(data, dict) else None
+			if isinstance(query, str):
+				data["query"], masked = redact_sql_fail_closed(
+					query, extra_columns=extra_cols, dialect=redaction_dialect(), on_error=log_redaction_failure
+				)
+				if masked:
+					data[LITERALS_MASKED_KEY] = True
+			elif query is not None:
+				_omit_unredacted_query(data)
 		except Exception:
-			pass
+			_omit_unredacted_query(data)
 		return _original_register(self, data)
 
 	_profiler_init._profiler_patched = True
@@ -426,7 +482,7 @@ def _startup_probe_tool2() -> None:
 		try:
 			import frappe
 
-			log = frappe.logger().warning
+			log = frappe.logger("optimus").error
 		except Exception:
 			log = print
 

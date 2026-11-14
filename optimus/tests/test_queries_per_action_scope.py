@@ -5,6 +5,8 @@
 
 import copy
 
+import pytest
+
 from optimus.analyzers import per_action, table_breakdown, top_queries
 from optimus.analyzers.base import (
 	is_frappe_path,
@@ -93,8 +95,14 @@ def test_frappe_path_matches_on_boundary_only():
 	assert walk_callsite_str(stack) == "myfrappe/api.py:3"
 
 
-def test_user_frame_between_keeps_query():
+def test_user_frame_outside_an_optimus_frame_is_still_own():
+	# Optimus's code decides: its query inside a user's flow is not the user's.
 	stack = [_frame("apps/myapp/myapp/a.py"), *OWN_STACK]
+	assert is_profiler_own_query(stack)
+
+
+def test_user_frame_inside_an_optimus_frame_keeps_query():
+	stack = [*OWN_STACK[:1], _frame("apps/myapp/myapp/a.py"), OWN_STACK[1]]
 	assert not is_profiler_own_query(stack)
 
 
@@ -220,5 +228,11 @@ def test_rendered_report_says_no_tracked_queries_when_all_hidden(monkeypatch):
 def test_callsite_treats_myoptimus_app_as_user_code():
 	from optimus.analyzers.base import walk_callsite_str
 
-	stack = [_frame("apps/myoptimus/myoptimus/a.py", 5), *OWN_STACK]
+	stack = [_frame("apps/myoptimus/myoptimus/a.py", 5), OWN_STACK[1]]
+	assert not is_profiler_own_query(stack)
 	assert walk_callsite_str(stack) == "apps/myoptimus/myoptimus/a.py:5"
+
+
+@pytest.mark.parametrize("value", [None, "", 7, ["frappe/x.py"], b"frappe/x.py"])
+def test_a_filename_that_is_not_text_is_in_neither_app(value):
+	assert not is_frappe_path(value) and not is_optimus_path(value)

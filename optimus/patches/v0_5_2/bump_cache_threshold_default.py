@@ -12,6 +12,8 @@ cache so the change takes effect without a restart.
 
 import frappe
 
+from optimus.settings import invalidate_config
+
 OLD_DEFAULT = 10
 NEW_DEFAULT = 50
 
@@ -41,7 +43,7 @@ def execute():
 	# Blow the settings cache so analyzers pick up the new value
 	# without waiting for a bench restart.
 	try:
-		frappe.cache.delete_value("optimus_settings_cached")
+		invalidate_config()
 	except Exception:
 		pass
 	frappe.db.commit()

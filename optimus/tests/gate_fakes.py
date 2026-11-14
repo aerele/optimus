@@ -36,6 +36,11 @@ GATED_ENDPOINTS: dict[str, str] = {
 	"retry_phase2_analyze": "_phase2_run_gate",
 }
 
+# Session-scoped endpoints reviewed as owner-scoped instead: they act only on rows filtered by the
+# caller's own user, so they need no share-aware gate. test_api_gate_audit.py pins that each starts
+# with ``_require_profiler_user()`` and that every row lookup it makes filters on "user".
+OWNER_SCOPED_ENDPOINTS: frozenset[str] = frozenset({"stop"})
+
 
 class FakePermissionError(Exception):
 	pass
@@ -191,6 +196,8 @@ def make_fake_frappe(
 		if doctype == "Optimus Session":
 			if isinstance(filters, dict):
 				row = by_uuid.get(filters.get("session_uuid"))
+				if row is not None and any(row.get(k) != v for k, v in filters.items() if k in ("user", "status")):
+					row = None
 			else:
 				row = by_docname.get(filters)
 		elif doctype == "Optimus Phase Two Run" and isinstance(filters, dict):
