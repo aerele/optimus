@@ -8,7 +8,7 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.173] - 2026-11-07
+## [0.12.177] - 2026-11-07
 
 ### Fixed
 
@@ -34,6 +34,38 @@ Masking applies as data is recorded and rendered. Rows stored before this versio
 - Delete any Optimus Session that profiled a password-reset link, a print share link, an OAuth login or a request with an API key in its URL or headers. Its stored form data and headers keep the raw values (the report and the AI Steps text show them masked).
 - Old AI error rows can still hold URLs with secrets. Run `bench --site <site> execute optimus.maintenance.scrub_error_log_secrets --kwargs "{'dry_run': False}"`; to delete them instead, count with `bench --site <site> execute optimus.maintenance.purge_ai_error_logs --kwargs "{'dry_run': True}"`, then run it with `'dry_run': False`. Both lock Error Log while they run, so prefer off-peak hours.
 - Rotate any credential that appeared in a stored URL or header, and in a backup taken before this upgrade.
+
+---
+
+## [0.12.171] - 2026-11-07
+
+### Fixed
+
+- A Recorder setting left in cache after the Frappe Recorder was stopped (it lingers for up to 10 minutes), such as a job filter that does not match, "Record SQL" off, or "Profile" on, could fail a recorded background job, lose its queries, or fail the analysis. Optimus now records its own requests and jobs with Frappe's default settings, so that leftover setting no longer changes or breaks an Optimus recording. Your stored Recorder settings are not changed.
+- While the Frappe Recorder is actively recording at the same time, Optimus shares that recording and its settings. When that shared recording has SQL recording or call stacks turned off, or its profiler turned on, the report now says how many actions were affected and that some queries or call details are missing. A failure while saving this note no longer loses the recording.
+- A request was silently missing from a session when Frappe's Recorder was switched on with a path filter that did not match it. Optimus now starts its own recording for that request.
+- The Event Type of every recorded action is now always "HTTP Request" or "Background Job", so saving the analysis no longer fails on any other value.
+- Not covered: only verified against Frappe 16; on Frappe 15 Optimus keeps its previous behaviour for the Recorder settings.
+
+### Internal
+
+- If this and the URL/header redaction change both edit `_patch_recorder` and `_profiler_init` in `optimus/__init__.py`, this one lands after it; the two touch different functions and should merge with a small textual conflict at most.
+
+---
+
+## [0.12.170] - 2026-11-06
+
+### Fixed
+
+- A background job now shows as `RQ Job: <method>` in Steps to Reproduce, the AI-drafted steps, the summary and the Actions table in the Desk, instead of `GET <dotted.method.path>` as if it were a page request. The report's own Actions table already showed jobs correctly. A job is also labelled correctly in the text sent to the AI provider when private mode is on.
+- Job findings now read "In job <method>, ..." and no longer name the job's own method as the slow part. A job whose method is slow inside a callee now names that callee. A slow job that is mostly SQL or framework time gets a Slow Background Job finding; it can get an AI suggestion like other findings, and you can add it to Excluded finding types to keep it from the AI provider.
+- The summary no longer reads "went into In job <method>, ..." for a slow job.
+- On a narrow screen the report's per-action table now scrolls sideways inside its own box instead of making the whole page wider, and its column headers (such as Slowest query) are no longer cut off. The table was already too wide on develop.
+- Sessions analyzed before this version keep their old labels, steps and findings in the Desk. Their summary changes when the report is regenerated, and an AI Steps refresh uses the new job label. Record the flow again for fully new results.
+
+### Internal
+
+- Removed the unused `finding_inline_html` field from the report's action rows.
 
 ---
 
