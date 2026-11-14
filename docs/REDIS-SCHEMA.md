@@ -86,7 +86,7 @@ when you add a new key; the audit test asserts this table matches
 
 | Pattern | Value | Encoding | TTL | Notes |
 |---|---|---|---|---|
-| `profiler:lp:active:<user>` | string (run UUID) | raw | `SESSION_TTL_SECONDS` | Mutually exclusive with `profiler:active:<user>` at the API level. |
+| `profiler:lp:active:<user>` | string (run UUID) | raw | `SESSION_TTL_SECONDS` | Refreshed on every profiled request or job; the janitor clears it two hours after the run started. Mutually exclusive with `profiler:active:<user>` at the API level. |
 | `profiler:lp:<run_uuid>:picks` | hash | Frappe pickle | none (cleanup_run deletes) | Dotted function paths → metadata. |
 | `profiler:lp:<run_uuid>:source` | hash | Frappe pickle | none (cleanup_run deletes) | Dotted paths → `[{lineno, content}]`. |
 | `profiler:lp:<run_uuid>:samples` | list | Frappe pickle | none (cleanup_run deletes) | Per-line wall_ms samples. |

@@ -8,6 +8,16 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.169] - 2026-11-13
+
+### Fixed
+
+- Line profiling no longer stops capturing 10 minutes after Start while the flow is still being reproduced. The run's active flag is now refreshed on every profiled request or background job, the same way a normal recording keeps its session alive, so it only expires after 10 minutes with no profiled traffic.
+- The janitor no longer marks a live line profiling run as Failed ("recording expired") and deletes its captured samples once it is 11 minutes old. It now only expires a Recording run whose active flag has expired or moved to another run, or one that started more than two hours ago: that run is stopped even while its traffic continues, so a run nobody stopped is not profiled forever. Live runs no longer count toward the 100 runs the janitor checks in one pass.
+- Stopping a line profiling run retries, with a short pause, when a profiled request refreshes the active flag at the same moment, so Stop still ends the capture. A failed refresh is logged as a renewal failure and no longer as a failed start. If the flag keeps changing it is logged instead of being skipped silently.
+
+---
+
 ## [0.12.168] - 2026-11-06
 
 ### Fixed
