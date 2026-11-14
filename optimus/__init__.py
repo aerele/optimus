@@ -441,6 +441,10 @@ def _patch_recorder():
 					value[OMITTED_COUNT_KEY] = omitted
 					omitted = 0
 				setattr(self, name, value)
+			if omitted:
+				# Neither is a dict: keep the count in a dict that holds the redacted value.
+				name, value = stored[0]
+				setattr(self, name, {OMITTED_COUNT_KEY: omitted, "_optimus_value": value})
 		except Exception as exc:
 			# Never break the user's request because OUR scrubber failed, and never keep the
 			# raw values either: the recording stores a marker in their place.

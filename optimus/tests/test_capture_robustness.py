@@ -165,9 +165,16 @@ class TestRedundantCallsHashable:
 		deep = []
 		for _ in range(5000):
 			deep = [deep]
-		assert redundant_calls._hashable_or_none(deep) is None
-		assert redundant_calls._hashable_or_none([1, [2]]) == (1, (2,))
-		assert redundant_calls._hashable_or_none([{}]) is None
+		skip = redundant_calls._SKIP
+		assert redundant_calls._hashable_or_skip(deep) is skip
+		assert redundant_calls._hashable_or_skip([1, [2]]) == (1, (2,))
+		assert redundant_calls._hashable_or_skip([{}]) is skip
+
+	def test_a_real_none_is_a_value_not_a_skip(self):
+		from optimus.analyzers import redundant_calls
+
+		assert redundant_calls._hashable_or_skip(None) is None
+		assert redundant_calls._hashable_or_skip(None) is not redundant_calls._SKIP
 
 
 def _recorder_with_calls(recorder_class):
@@ -466,6 +473,23 @@ class TestProfilerInitCounts(_InitHarness):
 	def test_a_form_dict_that_is_not_a_dict_does_not_stay_raw(self, monkeypatch):
 		obj = self._run(monkeypatch, types.SimpleNamespace(password="S3CRET"), {})
 		assert obj.form_dict == UNSUPPORTED
+
+
+class TestProfilerInitCountsOnOtherShapes(_InitHarness):
+	def test_a_list_form_dict_keeps_the_omitted_count(self, monkeypatch):
+		from optimus.redaction import count_omitted
+
+		obj = self._run(monkeypatch, [b"S3CRET", object(), {"password": "S3CRET"}], None)
+		stored = json.dumps(obj.form_dict)
+		assert "S3CRET" not in stored
+		assert stored.count("<REDACTED:unsupported type>") == 2
+		assert count_omitted({"form_dict": obj.form_dict, "headers": obj.headers}) == 2
+
+	def test_a_string_form_dict_and_list_headers_keep_the_count(self, monkeypatch):
+		from optimus.redaction import count_omitted
+
+		obj = self._run(monkeypatch, object(), [object()])
+		assert count_omitted({"form_dict": obj.form_dict, "headers": obj.headers}) == 2
 
 
 class TestSettingsReadFailure(_InitHarness):

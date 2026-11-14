@@ -116,13 +116,17 @@ def _to_hashable(value):
 	return value
 
 
-def _hashable_or_none(value):
-	"""``_to_hashable(value)``, or None when it holds a dict or nests past the recursion limit."""
+# Returned by ``_hashable_or_skip`` for a value that cannot be a key; a real None is a value.
+_SKIP = object()
+
+
+def _hashable_or_skip(value):
+	"""``_to_hashable(value)``, or ``_SKIP`` when it holds a dict or nests past the recursion limit."""
 	try:
 		result = _to_hashable(value)
 		hash(result)
 	except (TypeError, RecursionError):
-		return None
+		return _SKIP
 	return result
 
 
@@ -227,8 +231,8 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 			if _is_optimus_own(caller_stack, tracked_apps, installed_apps):
 				# Optimus's own call (its per-query settings read), not the user's.
 				continue
-			hashable = _hashable_or_none(safe)
-			if hashable is None:
+			hashable = _hashable_or_skip(safe)
+			if hashable is _SKIP:
 				skipped_unhashable += 1
 				continue
 			buckets[(fn_name, hashable)].append((action_idx, raw, caller_stack))
