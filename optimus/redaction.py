@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import ItemsView, KeysView
 from functools import lru_cache
 from typing import NamedTuple
 
@@ -61,46 +62,193 @@ def is_sensitive_key(key, *, extra: tuple[str, ...] = ()) -> bool:
 	return any(p in lower for p in patterns)
 
 
+# Deeper containers are replaced, not walked: a payload nested past the interpreter's recursion
+# limit must never be stored or rendered unredacted, and no real form has this many levels.
+_MAX_REDACT_DEPTH = 100
+# Containers visited in one call: a payload that shares its subtrees (``x = [y, y]`` repeated)
+# is small in memory and exponential to walk.
+_MAX_REDACT_CONTAINERS = 100_000
+NESTED_TOO_DEEP = "<REDACTED:nested too deep>"
+CIRCULAR = "<REDACTED:circular>"
+TOO_LARGE = "<REDACTED:too large>"
+UNSUPPORTED_TYPE = "<REDACTED:unsupported type>"
+UNREADABLE_JSON = "<REDACTED:unreadable json>"
+# Stored in a recording's form data (or headers) with the number of fail-closed markers
+# the redaction wrote there, so the report can say values were omitted.
+OMITTED_COUNT_KEY = "_optimus_omitted"
+_FAIL_CLOSED_MARKERS = frozenset(
+	{NESTED_TOO_DEEP, CIRCULAR, TOO_LARGE, UNSUPPORTED_TYPE, UNREADABLE_JSON}
+)
+# A values view is not here: it drops the keys, so a secret under ``password`` could not be found.
+_SEQUENCE_TYPES = (list, tuple, set, frozenset, KeysView)
+_CONTAINER_TYPES = (dict, ItemsView, *_SEQUENCE_TYPES)
+_SCALAR_TYPES = (int, float, bool, type(None))
+
+
+class _Walk:
+	"""State of one ``redact_sensitive`` call: the containers left to visit, the ones
+	currently being walked (to end a cycle at once) and the fail-closed markers written."""
+
+	__slots__ = ("active", "left", "omitted")
+
+	def __init__(self):
+		self.left = _MAX_REDACT_CONTAINERS
+		self.active: set[int] = set()
+		self.omitted = 0
+
+	@property
+	def visited(self) -> int:
+		"""Containers and JSON parse attempts spent from the budget so far."""
+		return _MAX_REDACT_CONTAINERS - self.left
+
+	def fail(self, marker: str) -> str:
+		"""Count ``marker`` as one omitted value and return it."""
+		self.omitted += 1
+		return marker
+
+
 def redact_sensitive(payload, *, extra_keys: tuple[str, ...] = ()):
-	"""Walk a dict / list / tuple and return a deep copy with values
-	under sensitive keys replaced by ``"<REDACTED:keyname>"``. Non-
-	container scalars pass through unchanged.
+	"""Walk a dict / list / tuple / set / dict view and return a deep copy with values
+	under sensitive keys replaced by ``"<REDACTED:keyname>"``. Numbers, booleans and
+	None pass through unchanged. Part of a payload that nests deeper than
+	``_MAX_REDACT_DEPTH``, repeats itself, is shared past the container budget, or has a
+	type that is not known to be safe (bytes, objects) becomes a marker: it fails closed.
 
 	Pure never mutates the input.
 	"""
+	return redact_sensitive_walk(payload, extra_keys=extra_keys)[0]
+
+
+def redact_sensitive_walk(payload, *, extra_keys: tuple[str, ...] = ()):
+	"""``redact_sensitive`` plus the walk state: ``(redacted, walk)``, where ``walk.omitted``
+	counts the fail-closed markers written and ``walk.visited`` the budget spent."""
+	walk = _Walk()
+	return _redact(payload, extra_keys, 0, walk), walk
+
+
+def count_omitted(recording) -> int:
+	"""Fail-closed markers capture stored in one recording's form data and headers."""
+	total = 0
+	if not isinstance(recording, dict):
+		return 0
+	for name in ("form_dict", "headers"):
+		part = recording.get(name)
+		count = part.get(OMITTED_COUNT_KEY) if isinstance(part, dict) else None
+		if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+			total += count
+	return total
+
+
+def _redact(payload, extra_keys: tuple[str, ...], depth: int, walk: _Walk):
+	if isinstance(payload, str):
+		return _redact_json_string(payload, extra_keys, depth, walk)
+	if isinstance(payload, _SCALAR_TYPES):
+		return payload
+	if not isinstance(payload, _CONTAINER_TYPES):
+		return walk.fail(UNSUPPORTED_TYPE)
+	if depth >= _MAX_REDACT_DEPTH:
+		return walk.fail(NESTED_TOO_DEEP)
+	if id(payload) in walk.active:
+		return walk.fail(CIRCULAR)
+	if walk.left <= 0:
+		return walk.fail(TOO_LARGE)
+	walk.left -= 1
+	walk.active.add(id(payload))
+	try:
+		return _redact_container(payload, extra_keys, depth, walk)
+	finally:
+		walk.active.discard(id(payload))
+
+
+def _redact_container(payload, extra_keys: tuple[str, ...], depth: int, walk: _Walk):
+	if isinstance(payload, ItemsView):
+		payload = dict(payload)
 	if isinstance(payload, dict):
 		out = {}
 		for k, v in payload.items():
 			if is_sensitive_key(k, extra=extra_keys):
 				out[k] = f"<REDACTED:{k}>"
 			else:
-				out[k] = redact_sensitive(v, extra_keys=extra_keys)
+				out[k] = _redact(v, extra_keys, depth + 1, walk)
 		# set_value style args: the secret sits under "value", named by "fieldname".
 		field = out.get("fieldname")
 		if "value" in out and is_sensitive_key(field, extra=extra_keys):
 			out["value"] = f"<REDACTED:{field}>"
 		return out
-	if isinstance(payload, list):
-		return [redact_sensitive(item, extra_keys=extra_keys) for item in payload]
-	if isinstance(payload, tuple):
-		return tuple(redact_sensitive(item, extra_keys=extra_keys) for item in payload)
-	if isinstance(payload, str):
-		return _redact_json_string(payload, extra_keys)
-	return payload
+	items = [_redact(item, extra_keys, depth + 1, walk) for item in payload]
+	return tuple(items) if isinstance(payload, tuple) else items
 
 
-def _redact_json_string(text: str, extra_keys: tuple[str, ...]) -> str:
-	"""Redact inside a JSON-encoded object or list (savedocs ``doc``, ``args``)."""
+_JSON_OPENING = re.compile(r"""\s*[\[{]\s*["'\[{]""")
+
+
+def _redact_json_string(
+	text: str, extra_keys: tuple[str, ...], depth: int = 0, walk: _Walk | None = None
+) -> str:
+	"""Redact inside a JSON-encoded object or list (savedocs ``doc``, ``args``). Each parse
+	attempt spends the container budget; a text that cannot be JSON (it does not end in a
+	closing bracket) is not parsed, and one that mentions a sensitive key but cannot be read
+	becomes a marker instead of being kept."""
+	walk = walk or _Walk()
 	if not text.lstrip().startswith(("{", "[")):
 		return text
+	if not text.rstrip().endswith(("}", "]")):
+		return _unreadable_json(text, extra_keys, walk)
+	if walk.left <= 0:
+		return walk.fail(TOO_LARGE)
+	if _json_nests_deeper_than(text, _MAX_REDACT_DEPTH - depth):
+		return walk.fail(NESTED_TOO_DEEP)
+	walk.left -= 1
+	repeated = []
+
+	def _pairs(pairs):
+		out = dict(pairs)
+		if len(out) != len(pairs):
+			repeated.append(True)
+		return out
+
 	try:
-		parsed = json.loads(text)
+		parsed = json.loads(text, object_pairs_hook=_pairs)
 		if not isinstance(parsed, dict | list):
 			return text
-		redacted = redact_sensitive(parsed, extra_keys=extra_keys)
-	except (ValueError, RecursionError):
+		redacted = _redact(parsed, extra_keys, depth, walk)
+	except ValueError:
+		return _unreadable_json(text, extra_keys, walk)
+	# A repeated key collapsed in the parse: the text still holds the first value.
+	return text if redacted == parsed and not repeated else json.dumps(redacted)
+
+
+# An unterminated string runs to the end of the text (``\Z``): a pattern that can fail to end
+# one is retried from every later escaped quote, which is quadratic.
+_JSON_STRING_OR_BRACKET = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*(?:"|\Z)|[\[\]{}]', re.S)
+
+
+def _json_nests_deeper_than(text: str, limit: int) -> bool:
+	"""Whether ``text`` opens more than ``limit`` brackets at once outside its strings. The
+	depth is read off the text, so the verdict is the same on every interpreter: how deep
+	``json.loads`` gets before a ``RecursionError`` is not (3.14 bounds the C stack instead).
+	Linear in the length of ``text``."""
+	open_now = 0
+	for token in _JSON_STRING_OR_BRACKET.finditer(text):
+		char = token.group()
+		if char in "[{":
+			open_now += 1
+			if open_now > limit:
+				return True
+		elif char in "]}":
+			open_now -= 1
+	return False
+
+
+def _unreadable_json(text: str, extra_keys: tuple[str, ...], walk: _Walk) -> str:
+	"""JSON-looking text that does not parse (cut off, malformed): kept unless it names a
+	sensitive key, since a value after that key cannot be told from the rest."""
+	if not _JSON_OPENING.match(text):
 		return text
-	return text if redacted == parsed else json.dumps(redacted)
+	lower = text.lower()
+	if any(p and p in lower for p in DEFAULT_SENSITIVE_KEYS + tuple(extra_keys or ())):
+		return walk.fail(UNREADABLE_JSON)
+	return text
 
 
 # ---------------------------------------------------------------------------

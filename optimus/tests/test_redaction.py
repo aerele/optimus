@@ -10,6 +10,7 @@ is provably equivalent in both call paths.
 """
 
 import json
+import time
 
 import pytest
 
@@ -102,11 +103,70 @@ class TestRedactSensitive:
 		assert redaction.redact_sensitive({"doc": clean})["doc"] == clean
 		assert redaction.redact_sensitive({"doc": "{not json"})["doc"] == "{not json"
 
-	def test_deeply_nested_json_string_keeps_other_keys_redacted(self):
+	def test_deeply_nested_json_string_becomes_the_marker_and_keeps_other_keys_redacted(self):
 		deep = "[" * 100000 + "]" * 100000
 		out = redaction.redact_sensitive({"pwd": "hunter2", "doc": deep})
 		assert out["pwd"] == "<REDACTED:pwd>"
-		assert out["doc"] == deep
+		assert out["doc"] == redaction.NESTED_TOO_DEEP
+
+	def test_json_string_nesting_limit_is_exact_and_does_not_depend_on_the_parser(self, monkeypatch):
+		# Interpreters differ on how deep json.loads goes before a RecursionError (3.14 limits
+		# the C stack, not the call count), so the cap is measured on the text, not caught.
+		limit = redaction._MAX_REDACT_DEPTH
+		fits = "[" * limit + "]" * limit
+		over = "[" * (limit + 1) + "]" * (limit + 1)
+		assert redaction.redact_sensitive(fits) == fits
+		assert redaction.redact_sensitive(over) == redaction.NESTED_TOO_DEEP
+		# One level down already (the dict), so one fewer list fits.
+		assert redaction.redact_sensitive({"doc": fits})["doc"] == redaction.NESTED_TOO_DEEP
+		assert redaction.redact_sensitive({"doc": fits[1:-1]})["doc"] == fits[1:-1]
+
+		def parse_deep(text, **kw):
+			# A parser with room for any depth: it must not be asked to parse this at all.
+			value = []
+			for _ in range(5000):
+				value = [value]
+			return value
+
+		monkeypatch.setattr(json, "loads", parse_deep)
+		deep = "[" * 100000 + "]" * 100000
+		assert redaction.redact_sensitive({"pwd": "x", "doc": deep}) == {
+			"pwd": "<REDACTED:pwd>",
+			"doc": redaction.NESTED_TOO_DEEP,
+		}
+
+	def test_brackets_inside_json_strings_do_not_count_as_nesting(self):
+		text = json.dumps({"note": "[" * 500 + "{" * 500, "k": "a\\\"[[[["})
+		assert redaction.redact_sensitive({"doc": text})["doc"] == text
+
+	def test_nesting_scan_reads_string_escapes_like_json(self):
+		limit = redaction._MAX_REDACT_DEPTH
+		extra = "[" * (limit + 1)
+		# An escaped backslash right before the closing quote ends the string, so the
+		# brackets after it are real nesting.
+		ended = r'["a\\"' + extra + "]" * (limit + 2)
+		assert redaction.redact_sensitive({"doc": ended})["doc"] == redaction.NESTED_TOO_DEEP
+		# An escaped quote and a [ escape keep the brackets inside their string.
+		inside = r'["\"' + "[" * 200 + r'", "[["]'
+		assert json.loads(inside)
+		assert redaction.redact_sensitive({"doc": inside})["doc"] == inside
+
+	def test_nesting_scan_leaves_unterminated_text_to_the_unreadable_path_and_counts_single_quoted_brackets(self):
+		many = "[" * (redaction._MAX_REDACT_DEPTH + 50)
+		unterminated = '{"a": "' + many + "}"
+		assert redaction.redact_sensitive({"doc": unterminated})["doc"] == unterminated
+		named = '{"password": "' + many + "}"
+		assert redaction.redact_sensitive({"doc": named})["doc"] == redaction.UNREADABLE_JSON
+		# Single quotes do not make a JSON string: its brackets are nesting, and it fails closed.
+		single = "{'a': '" + many + "'}"
+		assert redaction.redact_sensitive({"doc": single})["doc"] == redaction.NESTED_TOO_DEEP
+
+	def test_nesting_scan_is_linear_on_an_unterminated_string_full_of_escaped_quotes(self):
+		text = '["' + r"\"" * 100_000 + "]"
+		started = time.perf_counter()
+		assert redaction.redact_sensitive({"doc": text})["doc"] == text
+		# The scan once retried from every escaped quote: minutes at this size.
+		assert time.perf_counter() - started < 5
 
 	def test_set_value_value_named_by_sensitive_fieldname(self):
 		out = redaction.redact_sensitive({"doctype": "User", "fieldname": "new_password", "value": "Hunter2!"})

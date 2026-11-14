@@ -122,6 +122,12 @@ import re as _re  # noqa: E402
 _SAFE_SUFFIX_RE = _re.compile(r"^[A-Za-z][A-Za-z0-9._\- ]{0,59}$")
 
 
+def _text(value) -> str:
+	"""A stripped string, or "" for anything else (form data is client-controlled: a JSON
+	body can send a number or a list where a name is expected)."""
+	return value.strip() if isinstance(value, str) else ""
+
+
 def _multiplex_suffix(cmd: str, form_dict: dict) -> str:
 	"""Return the disambiguating suffix for a multiplexed cmd, or "".
 
@@ -135,7 +141,7 @@ def _multiplex_suffix(cmd: str, form_dict: dict) -> str:
 	# savedocs: action is one of Save/Submit/Cancel/Update. Strict
 	# allowlist because these are the only valid values.
 	if cmd == "frappe.desk.form.save.savedocs":
-		action = (form_dict.get("action") or "").strip()
+		action = _text(form_dict.get("action"))
 		return action if action in _SAVEDOCS_ACTIONS else ""
 
 	# run_doc_method: method is the actual dotted method name, e.g.
@@ -145,7 +151,7 @@ def _multiplex_suffix(cmd: str, form_dict: dict) -> str:
 	# include literal user data (most doc-method names are plain
 	# Python identifiers, but defensively validate).
 	if cmd in _RUN_DOC_METHOD_CMDS:
-		method = (form_dict.get("method") or "").strip()
+		method = _text(form_dict.get("method"))
 		if method and _SAFE_SUFFIX_RE.match(method):
 			return method
 		return ""
@@ -156,7 +162,7 @@ def _multiplex_suffix(cmd: str, form_dict: dict) -> str:
 	# emoji or non-ASCII characters those round-trip OK through
 	# Frappe but look weird in a technical label.
 	if cmd == _APPLY_WORKFLOW_CMD:
-		action = (form_dict.get("action") or "").strip()
+		action = _text(form_dict.get("action"))
 		if action and _SAFE_SUFFIX_RE.match(action):
 			return action
 		return ""
@@ -187,7 +193,7 @@ def humanized_label(recording: dict) -> str:
 	if cmd == "frappe.desk.form.save.savedocs":
 		action = ""
 		if isinstance(form_dict, dict):
-			action = form_dict.get("action") or ""
+			action = _text(form_dict.get("action"))
 		doctype, is_new = _extract_doc_info(form_dict)
 		if doctype:
 			if action == "Submit":
@@ -229,9 +235,9 @@ def humanized_label(recording: dict) -> str:
 		doctype = ""
 		name = ""
 		if isinstance(form_dict, dict):
-			method = (form_dict.get("method") or "").strip()
-			doctype = (form_dict.get("dt") or "").strip()
-			name = (form_dict.get("dn") or "").strip()
+			method = _text(form_dict.get("method"))
+			doctype = _text(form_dict.get("dt"))
+			name = _text(form_dict.get("dn"))
 		if method and _SAFE_SUFFIX_RE.match(method):
 			# Turn "make_payment_entry" into "Make Payment Entry".
 			human_method = method.replace("_", " ").title()
@@ -244,7 +250,7 @@ def humanized_label(recording: dict) -> str:
 	if cmd == _APPLY_WORKFLOW_CMD:
 		action = ""
 		if isinstance(form_dict, dict):
-			action = (form_dict.get("action") or "").strip()
+			action = _text(form_dict.get("action"))
 		doctype, _is_new = _extract_doc_info(form_dict)
 		if action and _SAFE_SUFFIX_RE.match(action):
 			if doctype:

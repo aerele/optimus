@@ -2395,7 +2395,13 @@ def _bucket_findings_by_app(
 def _now_iso() -> str:
 	from datetime import datetime
 
-	return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+	try:
+		from frappe.utils import now_datetime
+
+		now = now_datetime()
+	except Exception:
+		now = datetime.now()
+	return now.strftime("%Y-%m-%d %H:%M:%S")
 
 
 # v0.10.0+: duration + datetime formatting moved to

@@ -937,6 +937,9 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 
 		context = AnalyzeContext(session_uuid=session_uuid, docname=docname)
 		context.warnings.extend(enrichment_warnings)
+		omitted_warning = _omitted_values_warning(recordings)
+		if omitted_warning:
+			context.warnings.append(omitted_warning)
 
 		# v0.6.0: if we hit the wait cap with jobs still running, say so.
 		if bg_jobs_unfinished:
@@ -1357,6 +1360,30 @@ def _bundle_entries(bundle) -> dict:
 	return entries if isinstance(entries, dict) else bundle
 
 
+def _omitted_values_warning(recordings) -> str | None:
+	"""The report line for request values capture could not redact and so omitted (too deep,
+	circular, too large, an unknown type, or a redaction failure), or None when there are none."""
+	from optimus.redaction import count_omitted
+
+	total = sum(count_omitted(rec) for rec in recordings or [])
+	if not total:
+		return None
+	noun = "value was" if total == 1 else "values were"
+	return (
+		f"{total} request {noun} omitted at capture because "
+		f"{'it' if total == 1 else 'they'} could not be redacted safely. "
+		"The recording shows a <REDACTED:...> marker in place."
+	)
+
+
+def _clean_cmd(recording: dict) -> None:
+	"""A recording made before capture cleaned its ``cmd`` may carry a number or a list
+	(Frappe stores ``form_dict.cmd`` as sent); every reader of ``cmd`` expects text."""
+	cmd = recording.get("cmd")
+	if cmd is not None and not isinstance(cmd, str):
+		recording["cmd"] = ""
+
+
 def _recording_start(recording: dict) -> datetime | None:
 	"""Recorder start time, or None when absent or unparseable. A timezone is
 	dropped, so an aware value is compared on its wall clock."""
@@ -1547,6 +1574,7 @@ def _fetch_recordings(recording_uuids: list[str]):
 		rec["pyi_session"] = pyi_session
 		rec["sidecar"] = sidecar
 		rec["lock_events"] = lock_events
+		_clean_cmd(rec)
 		yield rec
 
 
@@ -3238,6 +3266,7 @@ def load_recordings_light(doc, uuids=None, *, memo=None) -> list[dict]:
 			rec = memo[memo_key].get(uuid)
 		if isinstance(rec, dict) and rec:
 			light = {key: value for key, value in rec.items() if key not in {"pyi_session", "sidecar", "tree_b64"}}
+			_clean_cmd(light)
 			strip_profiler_own_calls(light, tracked_apps, installed_apps)
 			result.append(light)
 	return result

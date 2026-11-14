@@ -25,6 +25,8 @@ SITES = {
 		"excluded", "runs before any query it records; the stack is captured in record_sql"),
 	("__init__.py", "_patch_recorder", "Recorder.register"): (
 		"excluded", "Recorder.register runs after the SQL stack is captured (frappe recorder.py:61-79)"),
+	("__init__.py", "_omit_unredacted_request", "setattr(recorder, name, dict(marker))"): (
+		"excluded", "stores a marker dict on a recording's form data; it installs no callable"),
 	("capture.py", "install_wraps", "setattr(module, attr, new_wrap)"): ("table", (CAPTURE, "wrapped")),
 	("capture.py", "uninstall_wraps", "setattr(module, attr, current._profiler_original)"): (
 		"excluded", "restores the saved original; it installs no wrapper"),
