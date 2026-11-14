@@ -447,7 +447,9 @@ def _check_shape(info: dict, optimize_query, dialect) -> _Outcome:
 		if dialect.is_statement_timeout(e):
 			return _Outcome("timeout", None)
 		if _is_reserved_column_error(e, info["raw"]):
-			return _Outcome("reserved", not _looks_like_reserved_word(e, info["raw"]), str(e))
+			# Only a tagged error names the counted column, so only it can be checked against the message.
+			suspect = failed_statement(e) is not None and not _looks_like_reserved_word(e)
+			return _Outcome("reserved", suspect, str(e))
 		return _Outcome("real", type(e).__name__, str(e))
 
 
@@ -465,24 +467,44 @@ def _is_reserved_column_error(error: Exception, sql: str = "") -> bool:
 
 
 # Without the cache the statement is unknown; the server's message still quotes where it stopped.
-_NEAR_COUNTED_COLUMN_RE = re.compile(r"near '(\w+)\) from ", re.I)
+# A bare reserved word is quoted (``near 'read) from``); a keyword the parser consumes (``default``,
+# ``interval``, ``case``) leaves the quote empty (``near ') from``).
+_NEAR_COUNTED_COLUMN_RE = re.compile(r"near '(\w*)\) from ", re.I)
+_IDENTIFIER_RE = re.compile(r"`([^`]+)`|\.\s*(\w+)")
 
 
 def _untagged_column(error: Exception, sql: str) -> str | None:
 	"""The column of a cardinality count that a 1064 message points at, for an error with no
-	statement tag: the message must stop at ``<word>) from`` and the word must be in the shape's query."""
+	statement tag. The message must stop at ``<word>) from`` with the word in the shape's query, or
+	at ``) from`` with a reserved word among the query's quoted or dotted identifiers (the message
+	does not say which, but a valid query can only hold a reserved word as such an identifier)."""
 	message = str(error.args[1]) if len(error.args) > 1 else ""
 	match = _NEAR_COUNTED_COLUMN_RE.search(message)
-	if match and re.search(rf"\b{re.escape(match.group(1))}\b", sql or "", re.I):
-		return match.group(1)
+	if not match:
+		return None
+	if match.group(1):
+		word = match.group(1)
+		return word if re.search(rf"\b{re.escape(word)}\b", sql or "", re.I) else None
+	return _reserved_identifier(sql)
+
+
+def _reserved_identifier(sql: str) -> str | None:
+	"""A MariaDB reserved word used as a quoted or dotted identifier in ``sql``, or ``None``."""
+	from optimus.renderer.index_recipes import MARIADB_RESERVED_WORDS
+
+	for quoted, dotted in _IDENTIFIER_RE.findall(sql or ""):
+		name = quoted or dotted
+		if name.lower() in MARIADB_RESERVED_WORDS:
+			return name
 	return None
 
 
-def _looks_like_reserved_word(error: Exception, sql: str = "") -> bool:
+def _looks_like_reserved_word(error: Exception) -> bool:
 	"""True when the 1064 message points at the start of the counted column, as it does for a
 	bare reserved word (``near 'read) from ...'``). Anything else is classified the same way but
-	logged once, so a parser bug does not hide behind the reserved-word case."""
-	column = failed_column(error) or _untagged_column(error, sql) or ""
+	logged once, so a parser bug does not hide behind the reserved-word case. Needs the tagged
+	column, so it is only asked of an error that came out of the cache."""
+	column = failed_column(error) or ""
 	message = str(error.args[1]) if len(error.args) > 1 else ""
 	return bool(re.fullmatch(r"\w+", column)) and f"near '{column}".lower() in message.lower()
 

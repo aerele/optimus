@@ -29,7 +29,7 @@ PINNED_SHA256 = {
 	"recorder_optimizer.py.txt": "9a8628b3779e39439eb67338f4a25ae76836cd26bc05feee4f6b44b16664e438",
 }
 PINNED_FRAPPE_VERSION = "16.54.0"
-COLUMNS = ("name", "status", "customer", "territory", "owner", "read")
+COLUMNS = ("name", "status", "customer", "territory", "owner", "read", "default", "interval", "case", "mod", "not", "match")
 TIMEOUT = (1969, "Query execution was interrupted (max_statement_time exceeded)")
 
 
@@ -335,6 +335,55 @@ def test_a_reserved_column_error_without_the_cache_is_skipped_quietly(env, empty
 	assert not [m for m in lines if "reserved" in m]
 	assert any("5 query shape(s) use a column name MariaDB rejects unquoted" in w for w in result.warnings)
 	assert not any("Could not analyze" in w for w in result.warnings)
+
+
+_NEAR_EMPTY = (
+	"You have an error in your SQL syntax; check the manual that corresponds to your MariaDB server "
+	"version for the right syntax to use near ') from `tabSales Invoice`' at line 1"
+)
+
+
+@pytest.mark.parametrize("column", ["default", "interval", "case", "mod", "not", "match"])
+def test_a_keyword_column_error_without_the_cache_is_skipped_quietly(env, empty_context, monkeypatch, column):
+	"""MariaDB reports ``near ') from`` with no word when the column is a keyword it consumed."""
+	monkeypatch.setattr(index_suggestions, "cached_db", _no_cache)
+	env.db.failures["cardinality"] = Exception(1064, _NEAR_EMPTY)
+	logged, lines = [], []
+	monkeypatch.setattr(env.frappe, "log_error", lambda **kw: logged.append(kw), raising=False)
+	monkeypatch.setattr(index_suggestions, "log_error_line", lambda m, **kw: lines.append(m))
+	calls = [_call(i, where=f"`{column}` = ?") for i in range(4)]
+
+	result = index_suggestions.analyze(_session(calls), empty_context)
+
+	assert logged == []
+	assert not [m for m in lines if "reserved" in m]
+	assert any("4 query shape(s) use a column name MariaDB rejects unquoted" in w for w in result.warnings)
+	assert not any("Could not analyze" in w for w in result.warnings)
+
+
+def test_a_dotted_keyword_column_is_found_without_the_cache(env, empty_context, monkeypatch):
+	monkeypatch.setattr(index_suggestions, "cached_db", _no_cache)
+	env.db.failures["cardinality"] = Exception(1064, _NEAR_EMPTY)
+	logged = []
+	monkeypatch.setattr(env.frappe, "log_error", lambda **kw: logged.append(kw), raising=False)
+
+	calls = [_call(i, where="`tabSales Invoice`.default = ?") for i in range(2)]
+	index_suggestions.analyze(_session(calls), empty_context)
+
+	assert logged == []
+
+
+def test_an_empty_near_error_without_a_keyword_column_is_still_logged(env, empty_context, monkeypatch):
+	"""Nothing in the query could be the rejected column, so this is not the reserved-word case."""
+	monkeypatch.setattr(index_suggestions, "cached_db", _no_cache)
+	env.db.failures["cardinality"] = Exception(1064, _NEAR_EMPTY)
+	logged = []
+	monkeypatch.setattr(env.frappe, "log_error", lambda **kw: logged.append(kw), raising=False)
+
+	result = index_suggestions.analyze(_shapes(5), empty_context)
+
+	assert len(logged) == index_suggestions.MAX_LOGGED_FAILURES
+	assert any("Could not analyze 5 of 5" in w for w in result.warnings)
 
 
 @pytest.mark.parametrize(
