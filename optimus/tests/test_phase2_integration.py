@@ -17,6 +17,8 @@ import pytest
 
 from optimus.tests.phase2_cache_fake import Cache as _FakeCache
 
+pytestmark = pytest.mark.usefixtures("suite_functions_are_user_code")
+
 
 def _install_fake_frappe(monkeypatch):
 	"""Inject a minimal frappe stub into sys.modules via monkeypatch.setitem

@@ -1,13 +1,13 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Hot-frames aggregation uses self_ms, not cumulative_ms.
+"""Hot-frames aggregation: ``total_ms`` is the self-sum, Total counts recursion once.
 
 A recursive (or decorator-wrapped) function appears at multiple call-tree
 depths; each node's ``cumulative_ms`` includes its descendants, so summing
-cumulative across occurrences double-counts nested self-times. Summing
-``self_ms`` (exclusive per-frame) gives the true time in the function's own
-body. These tests guard against a regression back to cumulative_ms.
+cumulative across every occurrence double-counts nested time. ``total_ms`` sums
+``self_ms`` (exclusive per-frame); ``total_cumulative_ms`` (Total) sums the
+cumulative of the outermost occurrence only.
 """
 
 from optimus.analyzers import call_tree
@@ -66,11 +66,9 @@ def test_recursive_frame_uses_self_ms_not_cumulative():
 		"aggregator must sum self_ms, not cumulative_ms got "
 		f"{rec_row['total_ms']} (cumulative-bug would be 190)"
 	)
-	# v0.7.x: the framework variant uses total_cumulative_ms.
-	# It IS the sum-cumulative 100 + 60 + 30 = 190 and that's
-	# intentional. The framework table accepts the overlap risk in
-	# exchange for non-zero, meaningful display values.
-	assert rec_row["total_cumulative_ms"] == 190
+	# Total (total_cumulative_ms) counts only the outermost call: the depth-0 frame's 100ms
+	# already includes the nested ones (summing every depth would give 190).
+	assert rec_row["total_cumulative_ms"] == 100
 	assert rec_row["occurrences"] == 3
 
 
@@ -136,19 +134,21 @@ def test_framework_variant_displays_cumulative_time():
 	assert out[0]["is_hot"] is False
 
 
-def test_user_app_variant_keeps_self_time_total():
-	"""``build_hot_frames_table(is_hot=True)``: the user-app variant displays
-	``total_ms`` (self-sum), immune to recursion double-count."""
+def test_user_app_variant_shows_total_and_self_time():
+	"""``build_hot_frames_table(is_hot=True)``: Total comes from ``total_cumulative_ms``
+	and Self from the stored self-sum ``total_ms``, only when the row was measured."""
 	raw = [{
 		"function": "my_app/work.py::do",
-		"total_ms": 450,             # self-sum (the A.AE1 invariant)
-		"total_cumulative_ms": 800,  # cumulative ignored on this variant
+		"total_ms": 450,             # self-sum
+		"total_cumulative_ms": 800,  # Total (outermost occurrences)
+		"self_time_measured": True,
 		"occurrences": 3,
 		"distinct_actions": 3,
 		"action_refs": [0, 1, 2],
 	}]
 	out = renderer.build_hot_frames_table(raw, is_hot=True)
-	assert out[0]["total_ms"] == 450
+	assert out[0]["total_ms"] == 800
+	assert out[0]["self_ms"] == 450
 	assert out[0]["is_hot"] is True
 
 

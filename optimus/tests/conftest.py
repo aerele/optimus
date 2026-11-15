@@ -23,6 +23,17 @@ FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
 
 @pytest.fixture
+def suite_functions_are_user_code(monkeypatch):
+	"""Treat functions defined in the test files as a user app's for the line-profiling pick rule.
+
+	The suite lives inside the Optimus package, whose own code a pick refuses.
+	"""
+	from optimus.line_profile import picker
+
+	monkeypatch.setattr(picker, "_OPTIMUS_PACKAGE_DIR", "/nonexistent/optimus-package")
+
+
+@pytest.fixture
 def bound_provider_credentials(monkeypatch):
 	"""Transport fixtures model a stable saved config with their existing fake key.
 
@@ -49,6 +60,7 @@ def pytest_configure(config):
 	# without the tool they skip locally.
 	config.addinivalue_line("markers", "rq: needs the rq package (installed by the ai-quality workflow)")
 	config.addinivalue_line("markers", "semgrep: needs the semgrep CLI and OPTIMUS_SEMGREP_RULES_DIR")
+	config.pluginmanager.import_plugin("optimus.tests.ci_skip_guard")
 
 
 # --- CI-friendly baseline frappe stub ---------------------------------------

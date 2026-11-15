@@ -106,6 +106,16 @@ def test_genuine_empty_capture_still_finalizes(delivery):
 	assert ("_finalize_with_empty_session",) in state.events
 
 
+def test_run_drops_own_queries_from_the_fetched_recordings_for_its_session(delivery, monkeypatch):
+	state = delivery
+	state.requested = ["rec"]
+	state.recordings = [{"uuid": "rec", "calls": []}]
+	seen = []
+	monkeypatch.setattr(analyze, "_strip_own_calls", lambda recordings, session: seen.append((recordings, session)))
+	analyze.run("s")
+	assert seen == [([{"uuid": "rec", "calls": []}], "s")]
+
+
 def test_empty_capture_publishes_ready_event_flagged_empty(delivery, monkeypatch):
 	state = delivery
 	state.requested, state.recordings = [], []
@@ -232,3 +242,22 @@ def test_snapshot_failure_keeps_its_own_warning(delivery):
 		analyze.run("s")
 	writes = [e[2] for e in delivery.events if e[:2] == ("write", "analyzer_warnings")]
 	assert writes == [recording_bundle.SNAPSHOT_FAILURE_WARNING]
+
+
+def test_the_analyzers_get_the_overall_deadline_in_their_context(delivery, monkeypatch):
+	import time
+
+	seen = []
+
+	def spy(recordings, context):
+		seen.append(context.deadline)
+		from optimus.analyzers.base import AnalyzerResult
+
+		return AnalyzerResult()
+
+	monkeypatch.setattr(analyze, "_get_analyzers", lambda: [spy])
+	before = time.monotonic()
+	analyze.run("s")
+
+	assert len(seen) == 1
+	assert seen[0] - before == pytest.approx(analyze.ANALYZE_TOTAL_BUDGET_SECONDS, abs=30)

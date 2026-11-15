@@ -100,16 +100,18 @@ def _require_session_permission(session_uuid: str, permission_type: str = "read"
 			frappe.DoesNotExistError,
 			title=_("Optimus"),
 		)
+	check_failed = False
+	allowed = False
 	try:
 		allowed = frappe.has_permission("Optimus Session", permission_type, docname)
 	except Exception:
-		try:
-			frappe.logger().warning(
-				"optimus._require_session_permission: has_permission raised "
-				f"for {docname} / {permission_type}; denying (fail-closed)"
-			)
-		except Exception:
-			pass
+		check_failed = True
+	if check_failed:
+		safe_call.log_error_line(
+			"optimus._require_session_permission: has_permission raised "
+			f"for {docname} / {permission_type}; denying (fail-closed)",
+			dedupe_key=f"has_permission raised for {permission_type}",
+		)
 		frappe.throw(
 			_("You do not have permission to access this Optimus Session."),
 			frappe.PermissionError,
@@ -743,10 +745,11 @@ def _enqueue_analyze(session_uuid: str, docname: str | None = None) -> bool:
 				# the caller treats it like any other inline result.
 				return True
 
-		frappe.logger().warning(
+		safe_call.log_error_line(
 			f"optimus: scheduler disabled; running analyze "
 			f"inline for session {session_uuid}. Caller will block "
-			f"until analyze completes."
+			f"until analyze completes.",
+			dedupe_key="scheduler disabled; running analyze inline",
 		)
 		try:
 			frappe.enqueue(
@@ -853,7 +856,7 @@ def _pill_state_for(user: str, session_uuid: str, run_uuid: str | None, active: 
 	row = frappe.get_all(
 		"Optimus Session",
 		filters={"session_uuid": session_uuid, "user": user},
-		fields=["name", "status", "started_at"],
+		fields=["name", "session_uuid", "status", "started_at"],
 		limit=1,
 	)
 	if not row:
@@ -916,7 +919,9 @@ def _row_ended(user: str, row: dict, active: str | None) -> bool:
 		return False
 	if get_datetime(row["started_at"]) > add_to_date(now_datetime(), seconds=-SESSION_TTL_SECONDS):
 		return False
-	return bool(active) or session.active_pointer_gone(user)
+	if active and active != row["session_uuid"]:
+		return True
+	return session.active_pointer_gone(user)
 
 
 def _pill_payload(scope: str, session_uuid, docname, status, run_uuid=None, ended=False) -> dict:
@@ -1009,7 +1014,21 @@ def _frontend_vitals_key(session_uuid: str) -> str:
 
 
 MAX_FRONTEND_PAYLOAD_BYTES = 512 * 1024
+MAX_FRONTEND_ENTRY_BYTES = 4 * 1024
 MAX_FRONTEND_PAYLOAD_NODES = 32_000
+
+
+def _encode_frontend_rows(rows, soft_cap):
+	"""JSON-encode the newest ``soft_cap`` dict rows that fit one Redis entry; count the rest as dropped."""
+	import json
+
+	rows = rows or []
+	encoded = []
+	for row in rows[-soft_cap:]:
+		text = json.dumps(row, default=str) if isinstance(row, dict) else None
+		if text is not None and len(text.encode("utf-8")) <= MAX_FRONTEND_ENTRY_BYTES:
+			encoded.append(text)
+	return encoded, min(len(rows), soft_cap) - len(encoded)
 
 
 def _frontend_payload_bounded(value):
@@ -1045,6 +1064,15 @@ def _frontend_payload_bounded(value):
 	return True
 
 
+def _mask_frontend_urls(rows: list[dict], field: str) -> list[dict]:
+	"""``rows`` with each row's URL ``field`` masked, so no secret query value reaches Redis."""
+	from optimus.redaction import redact_url_field
+	from optimus.redaction_extras import form_key_extras
+
+	extra_keys = form_key_extras()
+	return [redact_url_field(row, field, extra_keys) for row in rows]
+
+
 @frappe.whitelist(methods=["POST"])
 def submit_frontend_metrics(payload: str) -> dict:
 	"""Receive a batch of frontend metrics (XHR timings + Web Vitals) as a
@@ -1073,7 +1101,7 @@ def submit_frontend_metrics(payload: str) -> dict:
 
 	if not isinstance(data, dict) or not _frontend_payload_bounded(data):
 		return {"accepted": False, "reason": "invalid payload"}
-	if any(not isinstance(data.get(key) or [], list) or any(not isinstance(row, dict) for row in (data.get(key) or [])) for key in ("xhr", "vitals")):
+	if any(not isinstance(data.get(key) or [], list) for key in ("xhr", "vitals")):
 		return {"accepted": False, "reason": "invalid payload"}
 
 	session_uuid = data.get("session_uuid")
@@ -1092,8 +1120,15 @@ def submit_frontend_metrics(payload: str) -> dict:
 	# doesn't push MAX entries through Redis only to have them trimmed.
 	import json as _json
 
-	xhr = (data.get("xhr") or [])[-SOFT_CAP_FRONTEND_XHR:]
-	vitals = (data.get("vitals") or [])[-SOFT_CAP_FRONTEND_VITALS:]
+	# Mask secret URL query values first; then one bad row is dropped (and counted) without
+	# costing the rest of the batch.
+	xhr_rows, vitals_rows = data.get("xhr"), data.get("vitals")
+	if isinstance(xhr_rows, list):
+		xhr_rows = _mask_frontend_urls(xhr_rows[-SOFT_CAP_FRONTEND_XHR:], "url")
+	if isinstance(vitals_rows, list):
+		vitals_rows = _mask_frontend_urls(vitals_rows[-SOFT_CAP_FRONTEND_VITALS:], "page_url")
+	xhr, xhr_dropped = _encode_frontend_rows(xhr_rows, SOFT_CAP_FRONTEND_XHR)
+	vitals, vitals_dropped = _encode_frontend_rows(vitals_rows, SOFT_CAP_FRONTEND_VITALS)
 
 	xhr_key = _frontend_xhr_key(session_uuid)
 	vitals_key = _frontend_vitals_key(session_uuid)
@@ -1105,7 +1140,7 @@ def submit_frontend_metrics(payload: str) -> dict:
 	if xhr:
 		for entry in xhr:
 			try:
-				frappe.cache.rpush(xhr_key, _json.dumps(entry, default=str))
+				frappe.cache.rpush(xhr_key, entry)
 			except Exception:
 				frappe.log_error(title="optimus frontend rpush (xhr)")
 		# Tail-preferring trim: keep the last N entries.
@@ -1118,7 +1153,7 @@ def submit_frontend_metrics(payload: str) -> dict:
 	if vitals:
 		for entry in vitals:
 			try:
-				frappe.cache.rpush(vitals_key, _json.dumps(entry, default=str))
+				frappe.cache.rpush(vitals_key, entry)
 			except Exception:
 				frappe.log_error(title="optimus frontend rpush (vitals)")
 		try:
@@ -1141,6 +1176,7 @@ def submit_frontend_metrics(payload: str) -> dict:
 		"accepted": True,
 		"xhr_count": xhr_count,
 		"vitals_count": vitals_count,
+		"dropped": xhr_dropped + vitals_dropped,
 	}
 
 

@@ -8,7 +8,7 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.166] - 2026-11-07
+## [0.12.179] - 2026-11-07
 
 ### Fixed
 
@@ -26,7 +26,80 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.154] - 2026-11-07
+## [0.12.178] - 2026-11-07
+
+### Fixed
+
+- Page-load timings are no longer lost. First Contentful Paint, the early Largest Contentful Paint and navigation timing were dropped because the browser ignored our request for timings recorded before the script loaded. Each page load now reports once, under the page's own address, instead of being split across two rows when Desk changes the URL during load.
+- A malformed frontend timing (text or an oversized number where a number belongs) is now ignored. Before, it could hide the whole Frontend section or make the report fail to render.
+- A timing that is negative or absurdly large (over ten minutes, or a size over 2 GB) is now ignored instead of becoming a false slow-page finding, and a bad row can no longer blank a good value from the same page. The report counts the ignored rows and says when no page-load timings were captured. One bad row in a batch no longer rejects the other rows, and a single oversized entry is dropped.
+- On a phone the Frontend tiles stack and its two tables scroll inside their own box instead of widening the page. A burst of layout shifts can no longer push out the page's first paint, and finding a recording already running no longer discards buffered request timings.
+- Timings from a page that was loaded before you pressed Record are no longer added to the session, and neither are request timings left over from earlier. The Frontend section now says so: to include a page's load, reload it while recording.
+
+### Not covered
+
+- Page-load timings are only captured for the load of the page itself; moving between Desk pages afterwards adds none. Largest Contentful Paint needs Firefox 122 or Safari 26.2 and newer, and Cumulative Layout Shift is Chromium-only; those cells stay empty elsewhere.
+- Timings are still sent when you press Stop or the page closes. A session that ends by itself does not send them.
+
+---
+
+## [0.12.177] - 2026-11-07
+
+### Fixed
+
+- Secrets in URL query strings and fragments are now masked. A password-reset link, an `api_key`, `token`, `sid` or signed-link `_signature` in the URL no longer shows in a recorded header (the `Referer`), in the browser timing URLs of a report (XHR and page URLs), or in a report's request details. Only the secret value is replaced; the rest of the URL stays readable (`?api_key=<REDACTED>&doctype=User`). The browser URLs are also masked before they are stored. A URL inside a longer text value is masked too, and `user:password@` in a URL becomes `<REDACTED>@`.
+- In a URL, these parameter names are always masked: `key`, `signature`, `sig`, `code`, `auth`, `jwt`, `bearer`, `session`, `pin`, `refresh`, `reset_key`, anything ending in `_signature` or `_sig` (`X-Amz-Signature`, `oauth_signature`), `X-Amz-Credential` and `X-Amz-Security-Token`, plus every name that is sensitive as a field (`token`, `password`, `sid`, ...). Names that only contain these words (`item_code`, `code_name`, `session_user`) stay visible. `code`, `session` and the other short names are masked in URLs only, never as form fields or header names.
+- Header and field names such as `X-Api-Key`, `api-key`, `X-Session-Id`, `X-Session`, `accessKey`, `privateKey`, `sid`, `Cf-Access-Jwt-Assertion`, `jwt`, `X-Signature`, `X-Hub-Signature-256`, `Stripe-Signature`, `WWW-Authenticate`, `Proxy-Authenticate`, `Authentication` and `Sec-WebSocket-Key` are now treated as sensitive. `Content-Type`, `Accept`, `Origin`, `Referer`, `Host`, `Keep-Alive`, `Sec-Fetch-Site` and `X-Frappe-CMD` stay visible, and the CSRF token stays masked.
+- A bare `key` is always masked inside a URL string. In the recorded form data it is masked only on a password reset (`/update-password?key=...`) or a print share link (`/printview?...&key=...`), where it is a credential; on any other request `key` is usually an ordinary field such as a setting name and stays visible.
+- The Error Log scrub for AI errors also masks secret query values in any URL it finds in a record.
+- A secret in a list filter is masked too: a row such as `["User", "password", "=", "..."]` in the filters of a request or of a URL has its value replaced when the field name is sensitive. Punctuation after a URL in running text (`).,;`, a closing quote or bracket) is kept.
+- Not covered: a secret inside a URL path (for example `/reset/<token>`), a name written with look-alike characters (homoglyphs), and a `key=value` pair in free text that is not inside a URL cannot be detected and are shown as is. OAuth `state` is not masked (`code` now is, in URLs). Sessions recorded before this version keep their raw URLs in the stored session data (the Desk form and the exported JSON); their reports and the AI Steps text show them masked, so delete a session that profiled a reset or API-key link. A URL longer than 8 KiB loses its whole query part (`?<query omitted>`).
+- Masking a URL is now linear in its length. A guest could send a long run of text ending in `@` (a form value, the `Referer` header or a browser timing URL) and keep a worker busy for many seconds. A URL over 8 KiB is no longer scanned past its first 8 KiB, and user info (`user:pass@`) stops at a space.
+- A secret inside a URL that is itself the value of a parameter is masked too, whether it is percent-encoded or not: `/login?redirect-to=%2Fupdate-password%3Fkey%3D...`, `?next=/a?token=...` and a second `?`. The rest of the URL stays readable. A value nested more than four levels deep is masked whole.
+- Header names that end in `-Key` (`Ocp-Apim-Subscription-Key`, `X-Master-Key`, `X-Key`) and names with an `auth` or `bearer` part (`X-Auth`, `Auth`, `X-Bearer`) are masked. `Idempotency-Key` stays visible. This applies to header names only, so a form field called `sort_key` or `auth` is not changed.
+- The `code` of an OAuth login callback is masked in the recorded form data.
+- If masking the form data or the headers of a recorded request fails, that field is stored as `{"_optimus": "<REDACTION FAILED: omitted>"}` (the other field is still masked) and one ERROR line naming the error class is written to the log. Before, a failure left both fields raw and silent.
+- Your own `sensitive_form_keys` are now applied in every place a URL or header is masked (capture, the browser timing store, report context, the frontend analyzer, AI Steps and the AI error scrub). If Optimus Settings cannot be read, one ERROR line is logged and only the built-in names are applied; before, the failure was silent.
+- A list is treated as a filter row only when its operator is a real one (`=`, `like`, `in`, ...), and JSON text that is cut short or nested too deeply to parse has the values after secret names masked instead of being kept as it was.
+
+### Action needed
+
+Masking applies as data is recorded and rendered. Rows stored before this version are not rewritten:
+
+- Delete any Optimus Session that profiled a password-reset link, a print share link, an OAuth login or a request with an API key in its URL or headers. Its stored form data and headers keep the raw values (the report and the AI Steps text show them masked).
+- Old AI error rows can still hold URLs with secrets. Run `bench --site <site> execute optimus.maintenance.scrub_error_log_secrets --kwargs "{'dry_run': False}"`; to delete them instead, count with `bench --site <site> execute optimus.maintenance.purge_ai_error_logs --kwargs "{'dry_run': True}"`, then run it with `'dry_run': False`. Both lock Error Log while they run, so prefer off-peak hours.
+- Rotate any credential that appeared in a stored URL or header, and in a backup taken before this upgrade.
+
+---
+
+## [0.12.175] - 2026-11-07
+
+### Fixed
+
+- Scheduled jobs from any app, and Optimus's own jobs, no longer show up in a session you record. Before, if you were recording while the scheduler queued an hourly job, that job was recorded into your session and analysis waited for it. Jobs queued from inside an Optimus job, or from inside a scheduled job the scheduler started, are left out as well. A job or scheduled job you start yourself from a page (for example Execute on a scheduled job in Desk), and the jobs it starts, are still recorded. A scheduled job counts as started by the scheduler when it is queued with no web request and no running job, so one queued from `bench execute` or the console is left out too.
+- A session stuck in Stopping is analyzed again once, even when two schedulers or a manual `bench execute` run the janitor at the same time. A lock wait or deadlock on one stuck session no longer stops the sweep for the others.
+- The daily Redis cleanup no longer retries the same failing sessions every run. It starts from a different place each day, skips a session that raises and carries on, and writes one log line with the number it could not clean.
+
+### Not covered
+
+- Two workers can still receive the same analyze job twice if the queue itself delivers it twice; that is a separate follow-up.
+
+---
+
+## [0.12.174] - 2026-11-07
+
+### Fixed
+
+- Missing-index suggestions now read each table's structure and row count once per analysis instead of once per query. A session with 200 query shapes on one table used to send about 1,800 statements to the database for this; it now sends about 10 (rough figures; they depend on the queries).
+- A column whose distinct-value count times out is no longer tried again for every query on that table, which could add minutes to an analysis. Only errors that would repeat are remembered; a lost connection or lock wait is tried again.
+- Index suggestions no longer write an "optimizer failure" Error Log entry for a column named after an SQL reserved word (such as `read`), including when the table reads are not cached. The report now says "N query shape(s) use a column name MariaDB rejects unquoted, such as `read`; their cardinality was not checked", instead of blaming the SQL parser.
+- Index suggestions now stop after 2 minutes (or sooner if the whole analysis is near its 20-minute limit), check the slowest queries first, and say in the report how many queries were not checked. The Error Log also gets a line when this limit stops the check.
+- A one-off statement timeout while reading a table's structure is no longer remembered for the rest of the analysis; only the distinct-value count remembers a timeout.
+- A syntax error from the distinct-value count that does not look like a reserved word is now written to the log once, so a parser bug does not go unseen.
+
+---
+
+## [0.12.173] - 2026-11-07
 
 ### Fixed
 
@@ -46,6 +119,144 @@ versions may contain breaking changes see migration notes below).
 
 - Line profiling recordings are not checked by the pill; they are still stopped from the session form.
 - A session that reaches the request limit keeps showing "Recording" on the pill until it ends; the limit is explained when the session ends.
+
+---
+
+## [0.12.172] - 2026-11-06
+
+### Fixed
+
+- Line profiling now captures the whole function. Before, the function's source was cut at its first blank line, so any timed line after it was missing from the drill-down, a function whose timed lines were all below the cut was shown as "not invoked", and the function's total time was understated, which inflated the severity of Hot Line findings. Some functions also failed to start with a server error. A function you chose whose source cannot be read in full now refuses the run with a message naming the function and the reason; a function added automatically is skipped instead. A source line longer than 20,000 characters, or too many source lines in one run, now shows a clear message instead of a server error. Runs recorded on 0.12.72 to 0.12.141 may be incomplete, so re-record them.
+
+---
+
+## [0.12.171] - 2026-11-07
+
+### Fixed
+
+- A Recorder setting left in cache after the Frappe Recorder was stopped (it lingers for up to 10 minutes), such as a job filter that does not match, "Record SQL" off, or "Profile" on, could fail a recorded background job, lose its queries, or fail the analysis. Optimus now records its own requests and jobs with Frappe's default settings, so that leftover setting no longer changes or breaks an Optimus recording. Your stored Recorder settings are not changed.
+- While the Frappe Recorder is actively recording at the same time, Optimus shares that recording and its settings. When that shared recording has SQL recording or call stacks turned off, or its profiler turned on, the report now says how many actions were affected and that some queries or call details are missing. A failure while saving this note no longer loses the recording.
+- A request was silently missing from a session when Frappe's Recorder was switched on with a path filter that did not match it. Optimus now starts its own recording for that request.
+- The Event Type of every recorded action is now always "HTTP Request" or "Background Job", so saving the analysis no longer fails on any other value.
+- Not covered: only verified against Frappe 16; on Frappe 15 Optimus keeps its previous behaviour for the Recorder settings.
+
+### Internal
+
+- If this and the URL/header redaction change both edit `_patch_recorder` and `_profiler_init` in `optimus/__init__.py`, this one lands after it; the two touch different functions and should merge with a small textual conflict at most.
+
+---
+
+## [0.12.170] - 2026-11-06
+
+### Fixed
+
+- A background job now shows as `RQ Job: <method>` in Steps to Reproduce, the AI-drafted steps, the summary and the Actions table in the Desk, instead of `GET <dotted.method.path>` as if it were a page request. The report's own Actions table already showed jobs correctly. A job is also labelled correctly in the text sent to the AI provider when private mode is on.
+- Job findings now read "In job <method>, ..." and no longer name the job's own method as the slow part. A job whose method is slow inside a callee now names that callee. A slow job that is mostly SQL or framework time gets a Slow Background Job finding; it can get an AI suggestion like other findings, and you can add it to Excluded finding types to keep it from the AI provider.
+- The summary no longer reads "went into In job <method>, ..." for a slow job.
+- On a narrow screen the report's per-action table now scrolls sideways inside its own box instead of making the whole page wider, and its column headers (such as Slowest query) are no longer cut off. The table was already too wide on develop.
+- Sessions analyzed before this version keep their old labels, steps and findings in the Desk. Their summary changes when the report is regenerated, and an AI Steps refresh uses the new job label. Record the flow again for fully new results.
+
+### Internal
+
+- Removed the unused `finding_inline_html` field from the report's action rows.
+
+---
+
+## [0.12.169] - 2026-11-06
+
+### Security
+
+- Secrets in the SQL a report shows are now hidden in far more shapes. Before, only `column = 'value'` was caught, so a password set by `INSERT ... VALUES (...)` (including the stored password row Frappe writes), a value behind `CAST(...)`, `CASE ... END` (the shape `bulk_update` writes), a function, a hex or negative number, `!=`, `<>`, `BETWEEN`, `REGEXP`, `SIMILAR TO`, or written the other way round (`'value' = password`) appeared in the report as typed. Settings rows keyed by a field name (`api_key`, `client_secret`, webhook and SMS parameters), JSON in version and request-log rows (`"Authorization": "Bearer ..."`) and values shaped like a stored hash or encrypted secret are masked too.
+- A statement Optimus cannot read safely (an unterminated quote, a comment that hides a quote, an `INSERT` with no column list) is no longer shown as typed. Every literal in it is masked and the statement stays visible, or the statement is replaced by `[SQL omitted: could not be read safely]` when even its quotes cannot be trusted. EXPLAIN is skipped for such a statement, it is not counted as an exact duplicate of another, and it gets no index suggestion. If the redaction code itself fails, the SQL is omitted instead of stored raw, and one warning naming only the error class is logged per process.
+- The default hidden names now also cover card numbers, bank account numbers, IBAN, CVV, session ids, `sessiondata`, `authorization_code`, `salt`, `passkey`, `hmac` and credentials. The plain words `credit`, `card` and `bank` are no longer on the SQL list, so a `tabGL Entry` `credit > 100` filter is no longer masked. Names you add in Optimus Settings now match in any letter case.
+- The SQL sent to an AI provider under raw-value consent is stripped for the same names as before and for every new one, so nothing newly reaches the provider.
+- A statement longer than 256 KB, with more than 120,000 tokens, or with a long run of unclosed `$tag$` quotes is omitted without being read, so a huge bulk insert cannot slow a request. Identifiers and JSON keys are matched in camelCase too (`accessToken`, `clientSecret`, `secretKey`). Also masked now: `IDENTIFIED BY '...'`, `PASSWORD()` and `AES_*()` arguments, `ARRAY[...]`, `REPLACE(...)`, `CONCAT(...)`, `&&`, `@@`, `MEMBER OF`, `data->>'password'`, and `field IN (...)` settings rows.
+- On a statement that goes through the slower path, comments are replaced by one space. The `-- [Optimus: query truncated ...]` note at the end of a cut query is kept. A statement that was cut inside a quote is now omitted instead of shown cut. One existing test (`test_slow_query_full_sql_render`) now ends its long query with a value instead of a comment.
+- The default names are exact words and underscore compounds. Spellings such as `secrets`, `mypassword`, `accesstoken`, `pin` and `pan` are not default names: add them under Sensitive SQL Columns in Optimus Settings.
+- Text inside a string literal is masked again: `password=...&client_secret=...` form bodies, `?api_key=` and `token=` in a callback URL or an Email Queue message, in any letter case (`PassWord=`) and with hyphens (`Api-Key=`). Only the value after the `=` is replaced, so the rest of the text stays readable.
+- Hyphenated and spaced names are matched like underscore names: `X-API-Key`, `X-Auth-Token`, `X-Secret` and `api-key` as a JSON key, a settings key or a quoted column, and `PassWord` written with a capital inside the word. A name you add in Optimus Settings matches in both spellings.
+- A PostgreSQL `$$...$$` or `$tag$...$tag$` quote that a long statement cut short is omitted instead of shown as typed. A value that follows `LEFT`, `RIGHT`, `INNER`, `CROSS`, `NATURAL` or `FULL` `JOIN` no longer swallows that word, so the shown SQL and its EXPLAIN keep the join type.
+- A last pass masks a stored-hash or encrypted-secret shape (`gAAAAA...`, `$argon2...`, `$2b$...`, `$pbkdf2-...`, `pbkdf2:sha256:...`) wherever it sits in the statement, also inside a longer literal.
+- A Settings list that cannot be read now logs one warning (the error class only) and masks the default names; before, the names you added were dropped without a trace. When a report omitted or masked whole at least half of 10 or more statements, one warning with the counts is logged, so a drift to hiding most SQL is visible.
+- The stored-key check no longer stalls on a statement of many long keys: it looks at the last word run of a key and remembers each answer.
+
+### Action needed
+
+- Sessions recorded before this version keep their old SQL. Regenerate Reports rewrites only the HTML and PDF report. The Desk form and the exported session JSON keep the values stored when the session was recorded, so delete any session that profiled a login, password change or API key flow. Optimus has no purge command for them.
+- The plain words `credit`, `card` and `bank` no longer mask a value. If your sites filter on a column that holds such data, add it under Sensitive SQL Columns in Optimus Settings (for example `credit_card` or `bank_account`, which were never default names either).
+
+---
+
+## [0.12.168] - 2026-11-06
+
+### Fixed
+
+- The per-action table, Steps to Reproduce and the AI-drafted steps now list actions in the order they ran. Before, they followed an internal random id, so a flow could read out of order. Background jobs sit on the same timeline, at the point they started. Sessions analysed before this release keep their old order; record again to get the new order.
+
+---
+
+## [0.12.167] - 2026-11-07
+
+### Internal
+
+- Tests that needed a real Frappe now also run in the Frappe-free CI against small stand-ins: the single-flight flag against a copy of Frappe v16's Redis value API (including its swallowing of connection errors), the health-window query, and the Guest denial of the frontend metrics endpoint. `download_pdf` is now checked to be POST-only.
+- CI now fails when a test is skipped without a listed reason (`optimus/tests/ci_skips.py`), so a test can no longer stop running unnoticed. It applies only where Frappe is not installed; bench runs are unchanged. Every integration test module must be in `integration.yml` or on a manual-only list with a reason. The bench-only tests still run manually. No product code changed.
+
+---
+
+## [0.12.164] - 2026-11-07
+
+### Fixed
+
+- Problems that used to be logged below error level (a recording dropped at the session limit, a background job that could not be tracked, an unreadable permission check, line profiling recovery, the retention backlog) now reach the log on production sites, which drop warnings.
+- A capture problem that repeats on every request or job now writes one Error Log entry a minute per title and exception type, shared across web and worker processes, instead of one per request. A failing logger can no longer break the request or job it was reporting on. The one-minute window needs Redis; without it each process still limits itself.
+- Clearing the cache or migrating no longer resets Optimus's analysis lock, rate limits and error-log windows. `bench clear-cache` also no longer clears `optimus:*` keys (the analyze-inflight lock, AI refresh entries, the schema version). The lock and the other timed keys expire by their own TTL; `optimus:schema_version` has none and is rewritten at every app start. If an analysis is stuck behind a lock that does not expire, delete the key as described in `docs/REDIS-SCHEMA.md`.
+- A failed AI store setup no longer fails `install-app`, the patch run or other apps' migrate hooks. It is logged once, and the next migrate retries it. A migrate that changes nothing no longer commits.
+- The line profiling status scan, which runs every minute, now has an index on `status`, declared on the DocType so a migrate keeps it. On PostgreSQL, if another table already owns the index name `status`, a table-qualified index is added instead.
+- During a rolling update, a web worker and a background worker on different releases no longer crash or overwrite each other's cached settings.
+- The retention backlog marker now lasts 25 hours, so it is still there when the daily sweep next runs.
+
+Not covered: index suggestions still log an "optimizer failure" for tables with reserved column names, and Error Log rows written outside request and job hooks (the janitor, install and API calls) are not deduplicated.
+
+### Upgrade note
+
+- Run `bench migrate` after updating: it adds the scan index. Restart the web and worker processes.
+
+---
+
+## [0.12.159] - 2026-11-07
+
+### Fixed
+
+- The README and the Settings help now match the shipped Sensitivity Profiles. Strict keeps sessions for only 1 day (not 90), has no limit on queries per recording or line profiling runs per session, and hides actions under 1 ms; the README rows for those fields, and the note that the profile covers only nine thresholds, were wrong. The Settings intro no longer says Strict "keeps data longer" or Relaxed "prunes faster". The Settings help for "Line Profiling: Max Runs per Session" no longer says old runs are moved to a private file: once a session has that many runs, new runs are refused.
+- Setting `optimus_singleflight_max_wait_seconds` to `0` now turns single-flight off, as the README says. Before, `0` was read as "not set" and the 600 second default applied.
+- The README, CONTRIBUTING and the renderer notes no longer describe things that were removed or never existed: the Safe report, the PDF button, baseline comparison, the customer-to-partner handoff, `renderer.py` and `recorder.py`. A short "Sharing a report" note says the report holds sensitive data, so redact it yourself before sharing it. The README now says 23 finding types and 11 analyzers, lists the four types it missed, and shows redacted values as `<REDACTED:keyname>`. Not covered: other open pull requests still own some README and Redis schema wording.
+
+### Internal
+
+- New guard tests fail when a README preset row differs from the code, or when the docs mention a removed feature again.
+- The API hardening integration checks (`test_api_hardening`) now run in the Integration workflow, and their cleanup now removes the metrics lists they write.
+
+### Upgrade notes
+
+- Run `bench migrate` once so the Optimus Settings form shows the corrected help text.
+
+---
+
+## [0.12.157] - 2026-11-07
+
+### Fixed
+
+- Long requests no longer flood Redis with their Python call tree. Sizes depend on how deep the call stacks are. Examples measured on generated profiles: a 3-second busy request went from 366 KB to 21 KB, a 3-second request recursing 500 deep from 28.6 MB to 249 KB, and one 400 deep from 167 MB to 264 KB. Nothing is lost while a tree is small. A tree larger than 1 MB, or with more than 300,000 stack frames in total, is first shrunk by merging identical neighbouring samples, which loses nothing, and only then thinned to fit (a long wait, such as a slow query, keeps its own place in it); thinning picks a random sample from each stretch of time, so a repeating call pattern keeps its share, and the report says which requests were thinned. This work runs once at the end of a recorded request. It takes about 0.2 seconds for up to 60,000 samples and grows in step with the sample count beyond that (a million samples took 1.6 seconds); analyze rebuilds a stored tree in about 0.2 seconds or less. SQL findings are never affected, though SQL can appear under a parent function in a thinned tree. A tree that cannot fit even thinned is not stored, and the report says it was too large to keep. Trees stored before this version are read as before.
+- Optimus reads its settings once per request or job instead of once per recorded database query, and no longer reads them for requests that have no recording session or for background jobs that are not part of one. Recorded timings are no longer inflated by Optimus's own settings reads. The hook's own Redis reads for a request without a session drop from three to one; other Optimus hooks (for example line profiling) still make their own. A settings change still takes effect on the next request; a long-running console session keeps the settings it first read until it is restarted. Nothing changes for users.
+
+---
+
+## [0.12.156] - 2026-11-07
+
+### Fixed
+
+- Optimus Settings now says plainly that turning on AI Fix Suggestions also sends findings, and Steps to Reproduce while the humanized-steps option is on (the default), to your AI provider automatically when a session reaches Ready, up to the automatic-suggestion limit. The text also says that "Send raw values to the AI provider" controls whether raw values are included, and that unticking "Run AI suggestions automatically after profiling" turns automatic sending off. Behaviour is unchanged: automatic sending is still on by default once AI is enabled, and nothing is migrated.
 
 ---
 
@@ -71,6 +282,39 @@ versions may contain breaking changes see migration notes below).
 ### Internal
 
 - The Redis lifetimes and stale-session limits now live in `optimus/timing.py`, with a test of how they relate.
+
+---
+
+## [0.12.151] - 2026-11-06
+
+### Fixed
+
+- Hot frames under "Your app's code" no longer show 0ms. The table now has a Total time column (the function and the functions it calls, with a recursive function counted once) and a Self time column (the function's own lines), and it is ordered by Self time. Since May 2026 the row time was the self time, which was never recorded, so every row read 0ms.
+- Self time is shown only when it adds up to the sampled time of the session. If it is missing or does not add up, the table shows Total only and is ordered by Total.
+- The hot-frames tables scroll inside their own box on a phone instead of widening the page. The box keeps a visible scrollbar and shows a "Swipe the table sideways" hint on phones.
+- A report that has no Self time recorded shows Total and a "-" for Self, with a note to record the flow again. This applies to every report analyzed before 0.12.151, because their self time was never recorded and cannot be recovered. Their list is ordered by Total, so it may not be the true top 20, and their Total may count a recursive function more than once.
+- Total Python Time on the session is now filled in: it is the Python time without the SQL time, taken off action by action and never below zero for an action, so one SQL-heavy action cannot erase the Python time of the others.
+- The call tree no longer shows "[self]" rows, and a function that spends time in its own lines shows "self ..." beside its time.
+- Repeated Hot Frame findings and the self-time hot path findings can appear again. They are raised only when Self time is recorded and adds up to the sampled time. Some Slow Hot Path findings are now titled as a self-time hot path. Self time is wall-clock, so a function that waits on I/O inside its own lines can still be flagged; the finding says so.
+
+---
+
+## [0.12.150] - 2026-11-06
+
+### Fixed
+
+- Line profiling no longer captures Optimus's own wrapper code when a Frappe function such as `frappe.get_doc` is picked. It now profiles the Frappe function itself. A function typed from Optimus's own code is refused with a visible reason, and a run where every pick is refused now lists each pick with its reason.
+- Decorated functions, including `@frappe.whitelist()` ones, now get line-profiling hits. Before, the pick pointed at the decorator's file while the worker profiled the real function, so every line showed 0 hits.
+- Optimus's own checks on File inserts, File reads, settings reads and job queueing no longer show up as the user's queries or redundant calls, even when they run inside the user's own code. The hide is fail-safe: an Optimus frame that is not a known entry point and has a developer's code outside it (for example a new wrapper that only forwards the user's call) keeps its query in the report, and the analysis logs an error that names the count, the session and the frame so the wrapper can be registered. A normal session that hides many of its own queries logs nothing above debug. The report footer now says how many queries from Optimus's own code were excluded, so a wrongly hidden query shows.
+- A form load, permission check or File insert that only runs Frappe code is no longer hidden as Optimus's own query. One malformed stack frame in a recording is skipped instead of failing the analysis.
+- Auto-arming a line-profiling pass after analysis now does nothing, without recording a failure, when none of the recommended functions can be profiled (for example Optimus's own code). The skip is logged at debug with the session. Picking them by hand still shows the reason.
+- An app whose name or folder contains "optimus" (for example `acme_optimus` or `myapp/optimus/`) is no longer hidden from the call tree and the line-profiling picker.
+
+### Upgrade notes
+
+- Restart the web server and the workers after updating: the wrappers are installed when the app loads.
+- To refresh a report made by an older version, use Regenerate Reports: it re-renders the stored recordings with the new rule. Recording the flow again is only certain to be needed for the repeated-call findings (stored sidecar data) and for stored line-profiling runs. Reports from sessions whose recordings were stored as reduced (degraded) snapshots are not corrected.
+- An editable install that is not under the bench's `apps/optimus/` folder or a `site-packages/` or `dist-packages/` folder is not recognised by the path rule.
 
 ---
 

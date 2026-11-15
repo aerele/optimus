@@ -280,12 +280,17 @@
   /* Per-action breakdown: narrow numeric columns on the right, the
      Action column takes the remaining width and wraps long labels /
      URL paths / callsite lines via .tbl-clip. */
+  /* The table keeps a readable width and the box around it scrolls sideways,
+     so a narrow screen scrolls the table, never the whole page. Columns are wide
+     enough for their one-line headers. */
+  .table-scroll { overflow-x: auto; max-width: 100%; }
+  table.per-action-table { min-width: 840px; }
   table.per-action-table col.col-idx      { width: 32px; }
-  table.per-action-table col.col-type     { width: 96px; }
-  table.per-action-table col.col-duration { width: 88px; }
-  table.per-action-table col.col-queries  { width: 72px; }
-  table.per-action-table col.col-dbtime   { width: 72px; }
-  table.per-action-table col.col-slowest  { width: 88px; }
+  table.per-action-table col.col-type     { width: 104px; }
+  table.per-action-table col.col-duration { width: 104px; }
+  table.per-action-table col.col-queries  { width: 92px; }
+  table.per-action-table col.col-dbtime   { width: 140px; }
+  table.per-action-table col.col-slowest  { width: 124px; }
   /* col.col-action uses the remaining width implicitly (auto) */
 
   /* C.UT1: per-table totals row in <tfoot>. Subtle separator + heavier
@@ -1567,11 +1572,28 @@
   }
   .row-finding strong { font-weight: 600; }
 
+  /* Text for screen readers only (the dash in a Self time cell). */
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+    overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+  }
+
   /* HOT-FRAMES - user-code rows get a yellow-tinted background to
      stand out from the framework rows the developer can't patch. */
   .hot-frames-table tr.is-hot td {
     background: rgba(254, 243, 199, 0.4);
   }
+  /* The hot-frames tables keep their single-line headers, so on a phone they are wider
+     than the card. Scroll the table inside this box so the page never scrolls sideways.
+     Same pattern as .phase2-func; paper cannot scroll, so print shows it in full. */
+  .hot-frames-scroll { max-width: 100%; overflow-x: auto; scrollbar-width: thin; }
+  /* Phones draw overlay scrollbars that vanish, so the box keeps a visible bar and a hint. */
+  .hot-frames-scroll::-webkit-scrollbar { height: 8px; }
+  .hot-frames-scroll::-webkit-scrollbar-track { background: var(--bg-tint); }
+  .hot-frames-scroll::-webkit-scrollbar-thumb { background: var(--ink-mute); border-radius: 4px; }
+  .hot-frames-swipe-hint { display: none; margin: 4px 0 0; font-size: 12px; color: var(--ink-mute); }
+  @media (max-width: 600px) { .hot-frames-swipe-hint { display: block; } }
+  @media print { .hot-frames-scroll { overflow-x: visible; } .hot-frames-swipe-hint { display: none; } }
 
   /* EMPTY-STATE - green "✓ Clear" card shown when slowest-queries
      (or any future section) has no rows. */
@@ -1851,6 +1873,18 @@
   }
   @media (max-width: 760px) {
     .resource-grid { grid-template-columns: repeat(2, 1fr); }
+  }
+  /* Frontend: on a phone the tiles stack one per row, and the two wide tables scroll inside
+     their own box instead of widening the page. */
+  #frontend .resource-grid > .resource-card { min-width: 0; }
+  #frontend .rc-value { overflow-wrap: anywhere; }
+  #frontend .tscroll { overflow-x: auto; max-width: 100%; }
+  #frontend .tscroll > table { margin: 12px 0; }
+  #frontend .tscroll > table.xhr-timing-table { min-width: 640px; }
+  #frontend .tscroll > table.vitals-table { min-width: 640px; }
+  #frontend .vitals-table td:first-child { min-width: 150px; overflow-wrap: anywhere; }
+  @media (max-width: 480px) {
+    #frontend .resource-grid { grid-template-columns: minmax(0, 1fr); }
   }
 
   /* INDEX-REC CARDS - Phase I. One card per database table that has
@@ -2401,7 +2435,7 @@
         </div>
       {% endif %}
     </td>
-    <td><span class="type-tag{% if action.event_type == 'RQ Job' %} bg{% endif %}">{{ action.event_type }}</span></td>
+    <td><span class="type-tag{% if action.is_background_job %} bg{% endif %}">{{ action.event_type }}</span></td>
     {% set _ms = action.duration_ms or 0 %}
     {% set _pct = (_ms / max_ms * 100) if max_ms else 0 %}
     <td class="num bar-cell">
@@ -2533,15 +2567,24 @@
   </tr>
 {% endmacro %}
 
-{% macro hot_frame_row(row) %}
+{% macro hot_frame_row(row, show_self=false) %}
   {# v0.7.x Phase E: user-code rows get `is-hot` class so the
      `.hot-frames-table tr.is-hot td` CSS rule applies the
      yellow-tinted background. The flag is precomputed by
      renderer.build_hot_frames_table; defensive .get() in case the
-     dict was hand-built by an older test fixture. #}
+     dict was hand-built by an older test fixture.
+     show_self adds the Self time cell (user table only): the value when the row
+     recorded it (a measured 0 reads "0ms"), else a dash. #}
   <tr{% if row.is_hot %} class="is-hot"{% endif %}>
     <td class="fn-cell"><code>{{ row.display_name }}</code></td>
     <td class="num">{{ fmt_ms(row.total_ms) }}</td>
+    {% if show_self %}
+    {% if row.self_ms is number %}
+    <td class="num">{{ fmt_ms(row.self_ms) }}</td>
+    {% else %}
+    <td class="num"><span title="Self time not recorded for this report">-<span class="sr-only"> not recorded</span></span></td>
+    {% endif %}
+    {% endif %}
     <td class="num">{{ row.occurrences }}</td>
     <td class="num">{{ row.distinct_actions }}</td>
   </tr>
@@ -3002,6 +3045,7 @@
          entries preserve the legacy action keys so action_row reads
          duration_ms / action_label / etc. unchanged. #}
       {% set _max_action_ms = (report_data.actions | map(attribute='duration_ms') | map('default', 0) | list | max) or 1 %}
+      <div class="table-scroll" tabindex="0" role="region" aria-label="Per-action table">
       <table class="tbl-clip per-action-table data">
         <colgroup>
           <col class="col-idx">
@@ -3038,6 +3082,7 @@
           </tr>
         </tfoot>
       </table>
+      </div>
       <p class="small muted" style="font-style: italic; margin-top: 6px;">
         Note: <em>Slowest query</em> values are per-row maxes don't sum them.
         Use the <em>DB time</em> column when you want a column total.
@@ -3049,6 +3094,7 @@
       {% set _max_fw_ms = (report_data.actions_framework | map(attribute='duration_ms') | map('default', 0) | list | max) or 1 %}
       <details class="subsection">
         <summary class="small muted"><strong>{{ report_data.actions_framework | length }}</strong> framework action{{ "s" if report_data.actions_framework | length != 1 else "" }} (click to expand) - entry points in <code>frappe</code>, <code>erpnext</code> and friends; the developer can't easily patch these</summary>
+        <div class="table-scroll" tabindex="0" role="region" aria-label="Framework actions table">
         <table class="tbl-clip per-action-table data">
           <colgroup>
             <col class="col-idx">
@@ -3076,6 +3122,7 @@
           {% endfor %}
           </tbody>
         </table>
+        </div>
       </details>
       {% endif %}
     {% else %}
@@ -3349,6 +3396,8 @@
       Per-XHR timings from the browser joined to the matching server recording,
       plus Web Vitals (FCP, LCP, CLS) per page. Shows what the user actually
       felt - network overhead and page paint time that the server alone can't see.
+      Page-load timings (FCP, LCP, CLS, TTFB, DCL) are captured only for pages loaded after you press Record.
+      To include a page's load, reload it while recording.
     </p>
     {% set _fs = report_data.frontend.summary %}
     <div class="resource-grid">
@@ -3372,6 +3421,7 @@
 
     {% if report_data.frontend.xhr_matched %}
     <h3 style="margin-bottom: 8px;">Per-action XHR timing</h3>
+    <div class="tscroll">
     <table class="data tbl-clip xhr-timing-table">
       <colgroup>
         <col class="col-action">
@@ -3407,6 +3457,7 @@
         {% endfor %}
       </tbody>
     </table>
+    </div>
     {% endif %}
 
     {% if report_data.frontend.web_vitals %}
@@ -3416,6 +3467,7 @@
        classes (vital-good / vital-meh / vital-poor / vital-none) per
        web.dev thresholds. Closes the Phase I.5 partial-vitals loop:
        missing keys → vital-none + em-dash, computed in Python. #}
+    <div class="tscroll">
     <table class="data vitals-table">
       <thead>
         <tr>
@@ -3440,6 +3492,12 @@
         {% endfor %}
       </tbody>
     </table>
+    </div>
+    {% else %}
+    <p class="small muted frontend-empty">No page-load timings were captured in this session.</p>
+    {% endif %}
+    {% if _fs.dropped_rows %}
+    <p class="small muted frontend-dropped">{{ _fs.dropped_rows }} malformed browser timing row{{ "s were" if _fs.dropped_rows != 1 else " was" }} ignored.</p>
     {% endif %}
 
     {% if report_data.frontend.orphans %}
@@ -3499,22 +3557,32 @@
     </div>
     {% endif %}
     {% if report_data.hot_frames %}
+    {% set self_missing = report_data.hot_frames | rejectattr("self_ms", "number") | list %}
     <h3 class="hot-frames-group-title" id="hot-frames-app">Your app's code ({{ report_data.hot_frames | length }})</h3>
+    <p class="hot-frames-swipe-hint">Swipe the table sideways to see every column.</p>
+    <div class="hot-frames-scroll">
     <table class="data hot-frames-table">
       <thead>
         <tr>
           <th>Function</th>
-          <th class="num">Total time <small class="scope-tag">consolidated</small></th>
+          <th class="num" title="Time in the function including the functions it calls{% if not self_missing %}; recursion counted once{% endif %}.">Total time <small class="scope-tag">consolidated</small></th>
+          <th class="num" title="Time in the function's own lines, not in the functions it calls.{% if not self_missing %} The table is ordered by this column.{% endif %}">Self time</th>
           <th class="num" title="Sampler hits: proportional to call count but not exact. Use Line-Level Drilldown for a true call count.">Samples</th>
           <th class="num">Distinct actions</th>
         </tr>
       </thead>
       <tbody>
         {% for row in report_data.hot_frames %}
-          {{ hot_frame_row(row) }}
+          {{ hot_frame_row(row, true) }}
         {% endfor %}
       </tbody>
     </table>
+    </div>
+    {% if self_missing %}
+    <p class="small muted" id="hot-frames-self-note" style="margin: 6px 0 8px;">
+      Self time was not recorded for this report. Record the flow again with the current version to see it. The list is ordered by Total time, so it may not be the true top 20.
+    </p>
+    {% endif %}
     {% else %}
       <p class="small muted">No hot frames in your own app's code - all frames ran in framework code. Expand the block below to see what.</p>
     {% endif %}
@@ -3524,9 +3592,10 @@
       <summary class="small muted"><strong>{{ report_data.hot_frames_framework | length }}</strong> framework frame{{ "s" if report_data.hot_frames_framework | length != 1 else "" }} (click to expand) - <code>frappe</code>, <code>erpnext</code> and friends; the developer can't easily patch these</summary>
       <p class="small muted" style="margin: 6px 0 8px; font-style: italic;">
         Framework rows show <em>cumulative</em> time (includes nested
-        calls) wrapper self-time is sub-sampler-interval and
-        would round to 0ms otherwise.
+        calls), because a wrapper's own time is usually a small part of it.
       </p>
+      <p class="hot-frames-swipe-hint">Swipe the table sideways to see every column.</p>
+      <div class="hot-frames-scroll">
       <table class="data hot-frames-table">
         <thead>
           <tr>
@@ -3542,6 +3611,7 @@
           {% endfor %}
         </tbody>
       </table>
+      </div>
     </details>
     {% endif %}
   </section>
@@ -3829,6 +3899,9 @@
       &middot;
       <span class="warn-line">Admin report - contains sensitive data, internal use only</span>
     </p>
+    {% if own_excluded_note %}
+    <p class="own-excluded-note small muted" style="margin-top: 8px;">{{ own_excluded_note }}</p>
+    {% endif %}
     <p class="small" style="margin-top: 8px; color: var(--ink-mute);">
       Do NOT email, upload, or share this file externally without redacting
       it yourself. Query literals, request headers, form data and full

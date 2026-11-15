@@ -144,13 +144,13 @@ class TestEnqueueRegistersPendingJob:
 
 		assert "_profiler_session_id" not in calls[-1]["kwargs"]
 
-	def test_a_method_that_only_starts_like_the_analyze_job_is_still_tagged(self, fake_frappe):
+	def test_an_app_named_like_optimus_is_still_tagged(self, fake_frappe):
 		fake, fake_bg, calls = fake_frappe
 		fake.cache.set_value("profiler:active:alice@example.com", "sess-B")
 		_reset_profiler_modules()
 		import optimus  # noqa: F401
 
-		fake_bg.enqueue("optimus.analyze.run_other", session_uuid="sess-A")
+		fake_bg.enqueue("optimus_extras.analyze.run", session_uuid="sess-A")
 
 		assert calls[-1]["kwargs"]["_profiler_session_id"] == "sess-B"
 

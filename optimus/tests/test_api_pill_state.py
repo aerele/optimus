@@ -282,3 +282,49 @@ def test_a_recording_row_without_a_start_time_is_idle_and_never_parsed(env, monk
 	monkeypatch.setattr(api, "get_datetime", boom)
 	assert api.pill_state(session_uuid="u1")["phase"] == "idle"
 	assert api.pill_state()["phase"] == "idle"
+
+
+def test_expired_row_that_is_still_the_active_session_is_not_ended(env):
+	from optimus.timing import SESSION_TTL_SECONDS
+
+	age = SESSION_TTL_SECONDS // 60 + 5
+	env(sessions=[_s("OS-1", "u1", "Recording", age_minutes=age)], active="u1", pointer_gone=False)
+	assert api.pill_state(session_uuid="u1")["phase"] == "recording"
+
+
+def test_expired_row_with_a_different_active_session_is_ended(env):
+	from optimus.timing import SESSION_TTL_SECONDS
+
+	age = SESSION_TTL_SECONDS // 60 + 5
+	env(sessions=[_s("OS-1", "u1", "Recording", age_minutes=age)], active="u2", pointer_gone=False)
+	assert api.pill_state(session_uuid="u1")["phase"] == "ended"
+
+
+def test_expired_row_with_the_pointer_gone_is_ended(env):
+	from optimus.timing import SESSION_TTL_SECONDS
+
+	age = SESSION_TTL_SECONDS // 60 + 5
+	env(sessions=[_s("OS-1", "u1", "Recording", age_minutes=age)], active=None, pointer_gone=True)
+	assert api.pill_state(session_uuid="u1")["phase"] == "ended"
+
+
+def _expired_row(env_build, uuid="u1", **kw):
+	from optimus.timing import SESSION_TTL_SECONDS
+
+	env_build(**kw)
+	return _s("OS-1", uuid, "Recording", age_minutes=SESSION_TTL_SECONDS // 60 + 5)
+
+
+def test_row_ended_false_when_active_pointer_is_this_session(env):
+	row = _expired_row(env, pointer_gone=False)
+	assert api._row_ended("alice", row, "u1") is False
+
+
+def test_row_ended_true_when_active_pointer_is_another_session(env):
+	row = _expired_row(env, pointer_gone=False)
+	assert api._row_ended("alice", row, "u2") is True
+
+
+def test_row_ended_true_when_pointer_gone(env):
+	row = _expired_row(env, pointer_gone=True)
+	assert api._row_ended("alice", row, None) is True

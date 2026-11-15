@@ -56,8 +56,13 @@ def test_fresh_install_calls_the_same_seed_as_upgrade(monkeypatch):
 
 	patch = import_module("optimus.patches.v0_12_0.initialize_ai_refresh_store")
 	seen = []
-	monkeypatch.setattr(patch, "execute", lambda: seen.append(True))
-	monkeypatch.setattr(install, "frappe", SimpleNamespace(db=SimpleNamespace(exists=lambda *a: True)))
+	monkeypatch.setattr(patch, "seed_control", lambda: seen.append(True))
+	monkeypatch.setattr(patch, "ensure_indexes", lambda: None)
+	monkeypatch.setattr(
+		install,
+		"frappe",
+		SimpleNamespace(db=SimpleNamespace(exists=lambda *a: True, savepoint=lambda name: None)),
+	)
 	for name in (
 		"_refuse_legacy_install",
 		"_assign_profiler_user_to_system_managers",
@@ -86,7 +91,10 @@ def test_admission_seed_is_idempotent(monkeypatch):
 	monkeypatch.setattr(
 		patch,
 		"frappe",
-		SimpleNamespace(db=SimpleNamespace(exists=lambda *a: bool(rows), db_type="mariadb"), get_doc=doc),
+		SimpleNamespace(
+			db=SimpleNamespace(exists=lambda *a: bool(rows), db_type="mariadb", table_exists=lambda d: False),
+			get_doc=doc,
+		),
 	)
 	patch.execute()
 	patch.execute()
@@ -105,9 +113,14 @@ def test_every_migrate_seeds_the_admission_mutex_again(monkeypatch):
 	patch = import_module("optimus.patches.v0_12_0.initialize_ai_refresh_store")
 	assert "optimus.install.after_migrate" in hooks.after_migrate
 	seen, tables = [], {"Optimus AI Refresh Control"}
-	monkeypatch.setattr(patch, "execute", lambda: seen.append(True))
+	monkeypatch.setattr(patch, "seed_control", lambda: seen.append(True))
+	monkeypatch.setattr(patch, "ensure_indexes", lambda: None)
 	monkeypatch.setattr(
-		install, "frappe", SimpleNamespace(db=SimpleNamespace(table_exists=lambda doctype: doctype in tables))
+		install,
+		"frappe",
+		SimpleNamespace(
+			db=SimpleNamespace(table_exists=lambda doctype: doctype in tables, savepoint=lambda name: None)
+		),
 	)
 	install.after_migrate()
 	assert seen == [True]
@@ -160,6 +173,7 @@ def _index_patch(monkeypatch, *, db_type, indexes, schema="public"):
 		db_type=db_type,
 		db_schema="public",
 		sql=sql,
+		table_exists=lambda doctype: True,
 		add_index=lambda doctype, columns, index_name: created.append((doctype, columns, index_name)),
 	)
 	monkeypatch.setattr(
@@ -188,7 +202,8 @@ def test_the_attempt_table_gets_the_session_index_frappe_skipped(monkeypatch):
 			"Optimus AI Refresh Attempt",
 			["session_name"],
 			"tabOptimus AI Refresh Attempt_session_name_index",
-		)
+		),
+		("Optimus Phase Two Run", ["status"], "tabOptimus Phase Two Run_status_index"),
 	]
 
 
@@ -203,7 +218,10 @@ def test_the_run_table_gets_it_when_frappe_gave_the_name_to_the_attempt_table(mo
 		},
 	)
 	patch.ensure_indexes()
-	assert [(c[0], c[1]) for c in created] == [("Optimus AI Refresh Run", ["session_name"])]
+	assert [(c[0], c[1]) for c in created] == [
+		("Optimus AI Refresh Run", ["session_name"]),
+		("Optimus Phase Two Run", ["status"]),
+	]
 
 
 def test_the_indexes_are_created_once_and_a_rerun_does_nothing(monkeypatch):
@@ -217,6 +235,7 @@ def test_the_indexes_are_created_once_and_a_rerun_does_nothing(monkeypatch):
 		("Optimus AI Refresh Run", "resume_from"),
 		("Optimus AI Refresh Attempt", "run_id"),
 		("Optimus AI Refresh Attempt", "session_name"),
+		("Optimus Phase Two Run", "status"),
 	}
 	# every name is the table's own, so two tables can never claim one name
 	assert len({c[2] for c in created}) == len(created) and all(c[2].startswith("tab") for c in created)
@@ -232,13 +251,21 @@ def test_on_frappe_v15_the_schema_comes_from_the_site_config(monkeypatch, conf, 
 	del patch.frappe.db.db_schema
 	patch.frappe.conf = conf
 	patch.ensure_indexes()
-	assert len(created) == 6 and all(c[2].startswith("tab") for c in created)
+	assert len(created) == 7 and all(c[2].startswith("tab") for c in created)
 
 
 def test_mariadb_is_left_alone(monkeypatch):
 	patch, created = _index_patch(monkeypatch, db_type="mariadb", indexes={})
 	patch.ensure_indexes()
 	assert created == []
+
+
+def test_the_phase_two_status_index_is_declared_so_the_schema_sync_keeps_it():
+	"""Frappe drops an index its DocType does not declare (on PostgreSQL by the bare
+	column name, which can hit another table's index): ``status`` must be declared."""
+	path = ROOT / "optimus" / "doctype" / "optimus_phase_two_run" / "optimus_phase_two_run.json"
+	status = next(f for f in json.loads(path.read_text())["fields"] if f["fieldname"] == "status")
+	assert status.get("search_index") == 1
 
 
 def test_the_seed_runs_after_the_model_sync():
