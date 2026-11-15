@@ -54,16 +54,23 @@ from optimus.analyzers.base import (
 	AnalyzeContext,
 	dur,
 	is_error_log_hook_query,
+	own_query_frame,
 	row_get,
+	strip_own_calls,
 	strip_profiler_own_calls,
 )
 from optimus.dbdialect import get_dialect
+from optimus.redaction import LITERALS_MASKED_KEY, OMITTED_SQL
+from optimus.timing import (
+	ANALYZE_TOTAL_BUDGET_SECONDS,
+	MAX_BG_JOB_WAIT_SECONDS,
+	RECORDING_DATA_TTL_SECONDS,
+	SINGLEFLIGHT_MAX_WAIT_SECONDS,
+)
 
-# v0.3.0: per-analyzer wall-clock budget. If the cumulative analyze
-# elapsed time crosses this threshold, remaining analyzers are skipped
-# and the session is finalized as Ready with a partial-completion
-# warning. 5 minutes of headroom under the RQ long-queue 25-min timeout.
-ANALYZE_TOTAL_BUDGET_SECONDS = 20 * 60
+# ANALYZE_TOTAL_BUDGET_SECONDS: once the cumulative analyze elapsed time crosses it,
+# remaining analyzers are skipped and the session is finalized as Ready with a
+# partial-completion warning.
 
 # Per-individual-analyzer soft cap: an analyzer that exceeds this is
 # logged as a warning but doesn't halt the pipeline.
@@ -185,7 +192,7 @@ def _publish_session_event(
 
 # v0.6.0: hard ceiling on how long analyze waits for the flow's background
 # jobs, regardless of the configured `background_job_wait_seconds`.
-_MAX_BG_JOB_WAIT_SECONDS = 300
+_MAX_BG_JOB_WAIT_SECONDS = MAX_BG_JOB_WAIT_SECONDS
 # Throttle between re-enqueue cycles while waiting keeps a wedged ("deferred"
 # forever) job from busy-looping our re-enqueues.
 _BG_WAIT_THROTTLE_SECONDS = 2.0
@@ -209,7 +216,7 @@ _SINGLEFLIGHT_TTL_SECONDS = 300
 _SINGLEFLIGHT_THROTTLE_SECONDS = 5.0
 # Hard ceiling on how long a session waits for the flag before degrading to the
 # pre-M2 behavior (proceed anyway) rather than waiting forever.
-_SINGLEFLIGHT_MAX_WAIT_SECONDS = 600
+_SINGLEFLIGHT_MAX_WAIT_SECONDS = SINGLEFLIGHT_MAX_WAIT_SECONDS
 # The flag is written with a raw SET NX EX, pickled the way RedisWrapper.get_value
 # reads it back. 5 is frappe v16's DEFAULT_PICKLE_PROTOCOL; v15's get_value loads any protocol.
 _SINGLEFLIGHT_PICKLE_PROTOCOL = 5
@@ -296,6 +303,38 @@ def _note_heartbeat_problem(session_uuid: str, problem: str) -> None:
 	safe_call.log_error_line(f"optimus: analyze {session_uuid}: {problem}")
 
 
+_RECORDER_SETTING_PHRASES = {
+	"record_sql": "SQL recording turned off",
+	"capture_stack": "call stacks turned off",
+	"profile": "its profiler turned on",
+}
+
+
+def _sql_off_warning(recordings: list[dict]) -> str | None:
+	"""One plain note when some actions shared a Frappe Recorder with SQL recording or stack capture
+	off, or its profiler on."""
+	count = 0
+	degraded: set[str] = set()
+	for rec in recordings:
+		rec_uuid = rec.get("uuid")
+		flag = frappe.cache.get_value(_redis_keys.sql_off(rec_uuid)) if rec_uuid else None
+		if not flag:
+			continue
+		count += 1
+		# An older worker stored plain True for "SQL recording was off".
+		degraded.update(flag if isinstance(flag, (list, tuple)) else ["record_sql"])
+	if not count:
+		return None
+	subject = "1 action was" if count == 1 else f"{count} actions were"
+	phrases = [text for name, text in _RECORDER_SETTING_PHRASES.items() if name in degraded]
+	if not phrases:
+		phrases = [_RECORDER_SETTING_PHRASES["record_sql"]]
+	said = phrases[0] if len(phrases) == 1 else ", ".join(phrases[:-1]) + " and " + phrases[-1]
+	sql_only = phrases == [_RECORDER_SETTING_PHRASES["record_sql"]]
+	effect = "their queries are missing" if sql_only else "some queries or call details are missing"
+	return f"{subject} recorded while Frappe's Recorder was running with {said}, so {effect}."
+
+
 def _touch_singleflight(session_uuid: str) -> bool:
 	"""Refresh the single-flight flag's TTL while this session holds it, or take it back
 	when it lapsed and nobody took it. Never writes over another session's flag (taken
@@ -371,8 +410,8 @@ def _acquire_singleflight(session_uuid: str, docname: str, deadline) -> bool:
 		return True
 
 	try:
-		max_wait = int(frappe.conf.get("optimus_singleflight_max_wait_seconds")
-			or _SINGLEFLIGHT_MAX_WAIT_SECONDS)
+		configured = frappe.conf.get("optimus_singleflight_max_wait_seconds")
+		max_wait = _SINGLEFLIGHT_MAX_WAIT_SECONDS if configured is None else int(configured)
 	except Exception:
 		max_wait = _SINGLEFLIGHT_MAX_WAIT_SECONDS
 	if max_wait <= 0:
@@ -722,6 +761,13 @@ _SKIP_SUMMARY_LIMIT = 5
 _SKIP_LOGGED_REASONS = 3
 
 
+def _only_own_code_skipped(skipped: list[dict]) -> bool:
+	"""True when there is no skip reason other than "Optimus's own code" (also when none is given)."""
+	from optimus.line_profile.picker import OWN_CODE_REASON
+
+	return all(item.get("reason") == OWN_CODE_REASON for item in skipped)
+
+
 def _report_nothing_armed(docname: str, context, picked: int, skipped: list[dict]) -> None:
 	"""Say why auto-arm started no run: one log line with the first reasons (never a path or
 	function name) and an event that shows the full reason list on the open form."""
@@ -801,10 +847,21 @@ def _arm_phase2(docname: str, context) -> None:
 	nothing_capturable = None
 	try:
 		prepared = _lp_capture.prepare_line_profile_picks(picks, server_chosen=True)
-	except _lp_capture.NoEligibleSource as exc:
+	except _lp_capture.NoEligiblePickError as exc:
 		nothing_capturable = exc
 	if nothing_capturable is not None:
-		_report_nothing_armed(docname, context, len(picks), nothing_capturable.skipped)
+		skipped = getattr(nothing_capturable, "skipped", [])
+		if _only_own_code_skipped(skipped):
+			# Every recommended function is Optimus's own code: nothing to arm, and nothing to report.
+			try:
+				frappe.logger("optimus").debug(
+					f"optimus: auto-arm skipped for session {context.session_uuid}: every recommended function"
+					" was ineligible for line profiling (for example Optimus's own code)"
+				)
+			except Exception:
+				pass  # a log line never fails the analysis
+		else:
+			_report_nothing_armed(docname, context, len(picks), skipped)
 		return
 	run_uuid = _uuid.uuid4().hex
 	from optimus.api import _lock_phase2_for_write, _persist_phase2_capture
@@ -845,6 +902,14 @@ def _arm_phase2(docname: str, context) -> None:
 	)
 
 
+ANALYZE_FAILURE_WARNING = "Analysis failed ({0}). Details are in the Error Log under 'optimus ai analyze'."
+
+
+def analyze_failure_warning(exc):
+	"""English text stored for the session form, which translates it; names the error type only."""
+	return ANALYZE_FAILURE_WARNING.format(type(exc).__name__[:80])
+
+
 _ANALYZE_PENDING = frozenset({"Stopping", "Capturing Background Jobs", "Analyzing"})
 
 
@@ -854,11 +919,8 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 
 	``_bg_wait_until`` / ``_singleflight_deadline`` are set only when ``run``
 	re-enqueues itself while waiting; external callers never pass them."""
-	# Round 2 fix #6: mark this request-context as "analyzing" so our
-	# before_request / before_job hooks don't recursively activate the
-	# recorder on the DocType writes we're about to do. Without this,
-	# if the recording user also has an active profiler session (e.g.
-	# multiple sessions started in sequence) we could recurse.
+	# Keeps before_request from recording the DocType writes below. before_job has
+	# already run by now, so analyze.run is kept out of recording by never being tagged.
 	frappe.local.optimus_analyzing = True
 
 	# v0.7.x (M5): de-prioritize this analyze on the async (worker) path so it
@@ -926,9 +988,11 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		# each recording's pyi_session is dropped after call_tree finishes
 		# with it (handled in the analyzer itself).
 		recordings = list(_fetch_recordings(recording_uuids))
+		_strip_own_calls(recordings, session_uuid)
 		from optimus.recording_bundle import SnapshotUnavailable
 		if set(recording_uuids) - {rec.get("uuid") for rec in recordings}:
 			raise SnapshotUnavailable("snapshot_recording_missing")
+		recordings = _chronological(recordings)
 
 		if not recordings:
 			if session.get_session_meta(session_uuid) is None:
@@ -958,7 +1022,11 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		_publish_progress(20, "Running EXPLAIN on queries", session_uuid)
 		enrichment_warnings = _enrich_recordings(recordings)
 
-		context = AnalyzeContext(session_uuid=session_uuid, docname=docname)
+		context = AnalyzeContext(
+			session_uuid=session_uuid,
+			docname=docname,
+			deadline=analyze_start + ANALYZE_TOTAL_BUDGET_SECONDS,
+		)
 		context.warnings.extend(enrichment_warnings)
 
 		# v0.6.0: if we hit the wait cap with jobs still running, say so.
@@ -974,6 +1042,11 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		meta = session.get_session_meta(session_uuid) or {}
 		if meta.get("cap_warning"):
 			context.warnings.append(meta["cap_warning"])
+		_note_missing_trees(context, recordings, meta)
+
+		sql_off_warning = _sql_off_warning(recordings)
+		if sql_off_warning:
+			context.warnings.append(sql_off_warning)
 
 		# v0.5.0: load the frontend metrics posted by optimus_frontend.js
 		# for consumption by the frontend_timings analyzer. Reads from the
@@ -1101,11 +1174,10 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		changed = None
 		try:
 			from optimus.recording_bundle import SNAPSHOT_FAILURE_WARNING, SnapshotUnavailable
-			snapshot_missing = isinstance(exc, SnapshotUnavailable)
+			warning = SNAPSHOT_FAILURE_WARNING if isinstance(exc, SnapshotUnavailable) else analyze_failure_warning(exc)
 			def fail():
 				frappe.db.set_value("Optimus Session", docname, "status", "Failed")
-				if snapshot_missing:
-					frappe.db.set_value("Optimus Session", docname, "analyzer_warnings", SNAPSHOT_FAILURE_WARNING)
+				frappe.db.set_value("Optimus Session", docname, "analyzer_warnings", warning)
 			changed = _with_active_analysis(docname, fail, statuses=_ANALYZE_PENDING)
 		except Exception:
 			pass
@@ -1379,6 +1451,124 @@ def _bundle_entries(bundle) -> dict:
 	return entries if isinstance(entries, dict) else bundle
 
 
+def _recording_start(recording: dict) -> datetime | None:
+	"""Recorder start time, or None when absent or unparseable. A timezone is
+	dropped, so an aware value is compared on its wall clock."""
+	value = recording.get("time")
+	if isinstance(value, str):
+		try:
+			value = datetime.fromisoformat(value)
+		except ValueError:
+			return None
+	if not isinstance(value, datetime):
+		return None
+	return value.replace(tzinfo=None)
+
+
+def _chronological(recordings: list[dict]) -> list[dict]:
+	"""Recordings in the order they started, uuid breaking ties, untimed last.
+	Finding action_refs are positions in this list, so only ``run`` sorts."""
+
+	def key(recording: dict):
+		start = _recording_start(recording)
+		return (start is None, start or datetime.min, str(recording.get("uuid") or ""))
+
+	return sorted(recordings, key=key)
+
+
+def _recorder_start(rec: dict) -> datetime | None:
+	"""When Frappe's Recorder started this recording, as a naive datetime (the recorder's
+	own, in the system time zone; an offset is dropped), or None when unknown."""
+	start = rec.get("time")
+	if isinstance(start, str):
+		try:
+			start = datetime.fromisoformat(start)
+		except ValueError:
+			return None
+	return start.replace(tzinfo=None) if isinstance(start, datetime) else None
+
+
+def _outlived_data_ttl(rec: dict, now: datetime) -> bool:
+	start = _recorder_start(rec)
+	return start is not None and (now - start).total_seconds() > RECORDING_DATA_TTL_SECONDS
+
+
+def _report_missing_trees(context, recordings: list[dict], meta: dict, now: datetime) -> None:
+	"""Warn when recordings lack their Python call tree. Trees older than
+	RECORDING_DATA_TTL_SECONDS expired from Redis before analysis (an error: a
+	session that long, or an Analyze delayed that long); the others were never
+	captured (pyinstrument unavailable or failed, or Frappe's Recorder was on)."""
+	if not meta.get("capture_python_tree", True):
+		return
+	missing = [rec for rec in recordings if rec.get("pyi_session") is None]
+	too_large = [rec for rec in missing if rec.get("tree_dropped")]
+	missing = [rec for rec in missing if not rec.get("tree_dropped")]
+	expired = [rec for rec in missing if _outlived_data_ttl(rec, now)]
+	total, hours = len(recordings), RECORDING_DATA_TTL_SECONDS // 3600
+	if too_large:
+		context.warnings.append(
+			f"Python call trees were too large to keep for {len(too_large)} of {total} requests, so "
+			"they are missing from the call tree. SQL findings are complete."
+		)
+		safe_call.log_error_line(
+			f"optimus: {len(too_large)} of {total} Python call trees were too large to keep "
+			f"(session {context.session_uuid})"
+		)
+	if expired:
+		context.warnings.append(
+			f"Python call trees were missing for {len(expired)} of {total} requests: Optimus keeps them "
+			f"for {hours} hours and these were recorded earlier, so they expired before analysis. "
+			"SQL findings are complete."
+		)
+		safe_call.log_error_line(
+			f"optimus: {len(expired)} of {total} Python call trees expired before analyze "
+			f"(session {context.session_uuid}, kept {hours} hours)"
+		)
+	never_captured = len(missing) - len(expired)
+	if never_captured:
+		context.warnings.append(
+			f"Python call trees were not captured for {never_captured} of {total} requests "
+			"(pyinstrument was unavailable or failed, Frappe's Recorder was already running, Redis "
+			"evicted them when it ran short of memory, or they could not be read after an encryption "
+			"key change). SQL findings are complete."
+		)
+
+
+def _report_thinned_trees(context, recordings: list[dict]) -> None:
+	"""Warn when call trees were thinned to fit the stored size cap (see capture.TREE_MAX_BYTES)."""
+	steps = []
+	for rec in recordings:
+		if not isinstance(rec, dict):
+			continue
+		thinned = getattr(rec.get("pyi_session"), "optimus_thinned", None)
+		if isinstance(thinned, dict) and isinstance(thinned.get("every"), int):
+			steps.append(thinned["every"])
+	if not steps:
+		return
+	context.warnings.append(
+		f"Python call trees for {len(steps)} of {len(recordings)} requests were too long to keep in "
+		f"full, so Optimus kept about 1 in every {max(steps)} samples of them. The slowest paths are "
+		"kept; shares can be off by a few points and paths under 1% of a request may be missing. "
+		"SQL findings are complete, but SQL may appear under a parent function in those call trees."
+	)
+
+
+def _note_missing_trees(context, recordings: list[dict], meta: dict) -> None:
+	"""``_report_missing_trees`` as a diagnostic: a failure in it must never fail analyze."""
+	from frappe.utils import now_datetime
+
+	safe_call.best_effort(
+		lambda: _report_missing_trees(context, recordings, meta, now_datetime()),
+		None,
+		on_error=lambda kind: safe_call.log_error_line(f"optimus: missing-tree check failed ({kind})"),
+	)
+	safe_call.best_effort(
+		lambda: _report_thinned_trees(context, recordings),
+		None,
+		on_error=lambda kind: safe_call.log_error_line(f"optimus: thinned-tree check failed ({kind})"),
+	)
+
+
 def _fetch_recordings(recording_uuids: list[str]):
 	"""Stream recording dicts from Redis one at a time (a generator, so the
 	pipeline can free each pyi_session between recordings instead of holding all
@@ -1396,6 +1586,7 @@ def _fetch_recordings(recording_uuids: list[str]):
 
 		# Load the pyinstrument tree pickle (best-effort) via the shared,
 		# HMAC-verified loader (see _deserialize_tree).
+		from optimus import capture as _capture
 		from optimus.ai_fix import _InterruptGuard, log_ai_failure
 		guard = _InterruptGuard(base=True)
 		pyi_session = None
@@ -1444,11 +1635,66 @@ def _fetch_recordings(recording_uuids: list[str]):
 		if failed:
 			log_ai_failure("optimus ai recording lock events read", reason="lock_events_read_failed")
 
+		if isinstance(pyi_session, dict) and _capture.TREE_DROPPED_KEY in pyi_session:
+			rec["tree_dropped"] = True  # stored as a marker: the tree was too large to keep
+			pyi_session = None
 		rec["pyi_session"] = pyi_session
 		rec["sidecar"] = sidecar
 		rec["lock_events"] = lock_events
-		strip_profiler_own_calls(rec)
 		yield rec
+
+
+def _frame_source(frame) -> str:
+	"""``file:function`` of an Optimus frame, or "unknown" without one."""
+	if not isinstance(frame, dict):
+		return "unknown"
+	function = frame.get("function")
+	return f"{frame.get('filename')}:{function if isinstance(function, str) else '?'}"
+
+
+def _own_source(stack) -> str:
+	"""``file:function`` of the Optimus frame that made a dropped call's stack Optimus's own."""
+	return _frame_source(own_query_frame(stack))
+
+
+def _top_sources(frames: list, limit: int = 2) -> str:
+	return ", ".join(f"{source} x{n}" for source, n in Counter(_frame_source(f) for f in frames).most_common(limit))
+
+
+def _strip_own_calls(recordings: list, session_uuid: str) -> None:
+	"""Drop Optimus's own SQL calls from every recording and log the count at debug. A call that looks
+	like a user's query forwarded by an Optimus frame that is not registered (``own_query_verdict``) is
+	kept, and logged at ERROR (Frappe's logger keeps ERROR and above by default, so production sees it)
+	with its count and source, so the wrapper gets registered. This is the one analysis-time log: renders
+	repeat the rule on every refresh and stay silent."""
+	from optimus.settings import own_query_app_lists
+
+	tracked_apps, installed_apps = own_query_app_lists()
+	total = 0
+	dropped, suspicious = [], []  # the deciding frame of each
+	for rec in recordings:
+		if not isinstance(rec, dict):
+			continue
+		total += len(rec.get("calls") if isinstance(rec.get("calls"), list) else [])
+		result = strip_own_calls(rec, tracked_apps, installed_apps)
+		dropped += result.dropped_frames
+		suspicious += result.suspicious_frames
+	try:
+		logger = frappe.logger("optimus")
+		if suspicious:
+			logger.error(
+				f"optimus: kept {len(suspicious)} suspicious queries in session {session_uuid}: an Optimus frame"
+				f" with a developer's code outside it ran them (top sources: {_top_sources(suspicious)})."
+				" Register the wrapper in _OPTIMUS_PASS_THROUGH or the hook in _OPTIMUS_HOOK_ENTRY_POINTS"
+				" (optimus/analyzers/base.py) if it only forwards the user's call."
+			)
+		if dropped:
+			logger.debug(
+				f"optimus: dropped {len(dropped)} of {total} queries as Optimus's own from session {session_uuid}"
+				f" (top sources: {_top_sources(dropped)})"
+			)
+	except Exception:
+		pass  # a log line never fails the analysis
 
 
 # Per-recording enrichment caps. On a session that hit the 200-recording
@@ -1590,6 +1836,13 @@ def _enrich_recordings(recordings: list[dict]) -> list[str]:
 			except Exception:
 				pass
 
+			# A statement masked whole no longer has its real values, and Frappe's own
+			# EXPLAIN may already be stored: skip before the result and shape caches.
+			if call.get(LITERALS_MASKED_KEY):
+				call["explain_result"] = []
+				call["explain_warning"] = EXPLAIN_SKIPPED_MASKED
+				continue
+
 			# Skip EXPLAIN if already populated
 			if call.get("explain_result"):
 				continue
@@ -1681,6 +1934,7 @@ def _enrich_recordings(recordings: list[dict]) -> list[str]:
 				mark_duplicates(recording)
 		except Exception:
 			pass
+		_separate_masked_calls(recording)
 
 	if truncated_queries:
 		pct = (
@@ -1776,6 +2030,21 @@ def _collapse_pg_in_lists(query):
 	return "".join(chunks)
 
 
+EXPLAIN_SKIPPED_MASKED = "EXPLAIN skipped: the statement's literals are masked"
+
+
+def _separate_masked_calls(recording):
+	"""A statement masked whole looks the same whatever its values were, so it must not be
+	reported as an exact duplicate of another one, and an omitted statement must not group."""
+	for index, call in enumerate(recording.get("calls") or []):
+		if not call.get(LITERALS_MASKED_KEY):
+			continue
+		call["exact_copies"] = 1
+		if OMITTED_SQL in (call.get("query"), call.get("normalized_query")):
+			call["normalized_query"] = f"[SQL omitted: call {index + 1}]"
+			call["normalized_copies"] = 1
+
+
 def _mark_postgres_duplicates(recording, enriched, enriched_raw, past_cap):
 	"""Keep PG schema identity, with parsing confined to the enrichment cap."""
 	calls = recording.get("calls") or []
@@ -1799,7 +2068,12 @@ def _mark_postgres_duplicates(recording, enriched, enriched_raw, past_cap):
 		call.update(index=index, exact_copies=exact[query], normalized_copies=normalized[call["normalized_query"]])
 
 
-_LITERAL_RE = re.compile(r"'(?:[^'\\]|\\.|'')*'|\"(?:[^\"\\]|\\.)*\"|\b\d+(?:\.\d+)?\b")
+# A normaliser for grouping calls by shape, deliberately not the redactor: it only has to
+# be cheap and to turn literal values into one placeholder.
+_LITERAL_RE = re.compile(
+	r"'(?:[^'\\]|\\.|'')*(?:'|\Z)|\"(?:[^\"\\]|\\.)*(?:\"|\Z)"
+	r"|\b(?:0[xX][0-9A-Fa-f]+|0[bB][01]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b"
+)
 _IN_LIST_RE = re.compile(r"\bin\s*\(\s*\?(?:\s*,\s*\?)*\s*\)")
 
 
@@ -3041,6 +3315,9 @@ def load_recordings_light(doc, uuids=None, *, memo=None) -> list[dict]:
 	result = []
 	redis_failed = False
 	session_uuid = row_get(doc, "session_uuid")
+	from optimus.settings import own_query_app_lists
+
+	tracked_apps, installed_apps = own_query_app_lists()
 	for uuid in uuids:
 		rec = None
 		if not redis_failed:
@@ -3055,7 +3332,7 @@ def load_recordings_light(doc, uuids=None, *, memo=None) -> list[dict]:
 			rec = memo[memo_key].get(uuid)
 		if isinstance(rec, dict) and rec:
 			light = {key: value for key, value in rec.items() if key not in {"pyi_session", "sidecar", "tree_b64"}}
-			strip_profiler_own_calls(light)
+			strip_profiler_own_calls(light, tracked_apps, installed_apps)
 			result.append(light)
 	return result
 
@@ -3230,6 +3507,7 @@ def actions_for_humanizer(recordings: list[dict], *, send_raw: bool | None = Non
 		doctype = doctype or fd.get("dt") or fd.get("doc_type") or ""
 		out.append({
 			"label": per_action.humanized_label(rec) or "",
+			"event_type": rec.get("event_type") or "",
 			"cmd": (rec.get("cmd") or "").strip(),
 			"path": (rec.get("path") or "").strip(),
 			"method": (rec.get("method") or "").strip(),
@@ -3331,6 +3609,11 @@ def _build_summary_html(
 			for a in context.actions if a.get("action_label")
 		}
 
+		# A job finding reads "In job <method>, ..." where the label reads "RQ Job: <method>".
+		slowest_title_prefixes = [f"In {slowest_label}, "]
+		if slowest_label.startswith("RQ Job: "):
+			slowest_title_prefixes.append(f"In job {slowest_label[len('RQ Job: '):]}, ")
+
 		def _finding_phrase(f: dict) -> str:
 			"""Finding title with raw action references swapped for plain labels (a
 			leading "In <slowest>, " trimmed since the sentence already names it),
@@ -3339,9 +3622,9 @@ def _build_summary_html(
 			for raw, human in label_map.items():
 				if raw and human and raw != human:
 					title = title.replace(raw, human)
-			prefix = f"In {slowest_label}, "
-			if title.startswith(prefix):
-				title = title[len(prefix):]
+			for prefix in slowest_title_prefixes:
+				if title.startswith(prefix):
+					title = title[len(prefix):]
 			pri = _PRIORITY_WORD.get(f.get("severity") or "", "")
 			impact = f.get("estimated_impact_ms") or 0
 			# No "~0ms" for a finding with no measured impact (Lock Contention).
@@ -3628,35 +3911,48 @@ def _load_recordings_bundle(session_doc):
 
 def _cleanup_redis(session_uuid: str, recording_uuids: list[str]) -> None:
 	"""Delete Redis state for this finalized session (the Optimus Session row is
-	now the durable record). Best-effort: a failure does not abort analyze."""
+	now the durable record). Best-effort: a failure does not abort analyze.
+
+	Recordings are removed before the set that indexes them, and the set is read
+	again first: one registered after analyze took its snapshot (a late job, a
+	request crossing Stop) is still listed there. When a delete fails the set
+	stays, so the janitor's sweep can finish the job.
+	"""
+	try:
+		recording_uuids = sorted(set(recording_uuids) | set(session.get_recordings(session_uuid)))
+	except Exception:
+		pass
+
+	failed = False
+	for uuid in recording_uuids:
+		for name in (RECORDER_REQUEST_HASH, RECORDER_REQUEST_SPARSE_HASH):
+			failed |= not _attempt(lambda name=name: frappe.cache.hdel(name, uuid))
+		for key in (
+			_redis_keys.tree(uuid),
+			_redis_keys.sidecar(uuid),
+			_redis_keys.lock_events(uuid),
+			_redis_keys.resolved_doc(uuid),
+			_redis_keys.infra(uuid),
+			_redis_keys.sql_off(uuid),
+		):
+			failed |= not _attempt(lambda key=key: frappe.cache.delete_value(key))
+	if failed:
+		safe_call.log_error_line(
+			f"optimus: a Redis delete failed cleaning session {session_uuid}; its recordings set was "
+			"kept for the janitor sweep",
+			dedupe_seconds=3600,
+		)
+		return
+
 	try:
 		session.delete_session_state(session_uuid)
 	except Exception:
 		frappe.log_error(title="optimus cleanup session_state")
 
-	for uuid in recording_uuids:
-		try:
-			frappe.cache.hdel(RECORDER_REQUEST_HASH, uuid)
-		except Exception:
-			pass
-		try:
-			frappe.cache.hdel(RECORDER_REQUEST_SPARSE_HASH, uuid)
-		except Exception:
-			pass
-		# v0.3.0: also delete the per-recording tree and sidecar keys.
-		try:
-			frappe.cache.delete_value(_redis_keys.tree(uuid))
-		except Exception:
-			pass
-		try:
-			frappe.cache.delete_value(_redis_keys.sidecar(uuid))
-		except Exception:
-			pass
-		try:
-			frappe.cache.delete_value(_redis_keys.lock_events(uuid))
-		except Exception:
-			pass  # best-effort cleanup
-		try:
-			frappe.cache.delete_value(_redis_keys.resolved_doc(uuid))
-		except Exception:
-			pass
+
+def _attempt(delete) -> bool:
+	try:
+		delete()
+	except Exception:
+		return False
+	return True

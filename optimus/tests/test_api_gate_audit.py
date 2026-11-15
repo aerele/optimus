@@ -27,7 +27,7 @@ from pathlib import Path
 
 import pytest
 
-from optimus.tests.gate_fakes import GATED_ENDPOINTS
+from optimus.tests.gate_fakes import GATED_ENDPOINTS, OWNER_SCOPED_ENDPOINTS
 
 APP_DIR = Path(__file__).resolve().parent.parent
 API_PATH = APP_DIR / "api.py"
@@ -105,6 +105,18 @@ def _sinks(fn: ast.FunctionDef, endpoint_names: frozenset) -> set[str]:
 	return found
 
 
+def _sinks_with_helpers(fn: ast.FunctionDef, funcs: dict, endpoint_names: frozenset) -> set[str]:
+	"""``fn``'s sinks plus those of the module-level helpers it calls directly, so moving a write
+	into a helper cannot hide it from the audit. Follows exactly one level: helpers called by bare
+	name (a write two helpers deep, or via ``module.func``, is not followed). Gates are skipped: they are checked not to write."""
+	found = _sinks(fn, endpoint_names)
+	for call in _calls(fn):
+		helper = funcs.get(call.func.id) if isinstance(call.func, ast.Name) else None
+		if helper is not None and helper is not fn and helper.name not in GATE_FUNCTIONS:
+			found |= _sinks(helper, endpoint_names)
+	return found
+
+
 def _first_effective_stmt(fn: ast.FunctionDef):
 	for i, stmt in enumerate(fn.body):
 		if i == 0 and isinstance(stmt, ast.Expr) and isinstance(getattr(stmt, "value", None), ast.Constant) and isinstance(stmt.value.value, str):
@@ -133,10 +145,10 @@ def audit(tree: ast.Module) -> list[str]:
 		for arg in params:
 			if arg.annotation is None:
 				problems.append(f"{name}: parameter {arg.arg!r} has no type annotation")
-		sinks = _sinks(fn, endpoint_names - {name})
+		sinks = _sinks_with_helpers(fn, funcs, endpoint_names - {name})
 		if sinks and not _is_post_only(_whitelist_decorator(fn)):
 			problems.append(f"{name}: writes or spends ({', '.join(sorted(sinks))}) but is not methods=['POST']")
-		if SESSION_PARAMS & {a.arg for a in params} and sinks and name not in GATED_ENDPOINTS:
+		if SESSION_PARAMS & {a.arg for a in params} and sinks and name not in GATED_ENDPOINTS and name not in OWNER_SCOPED_ENDPOINTS:
 			problems.append(f"{name}: session-scoped endpoint writes ({', '.join(sorted(sinks))}) without a registered gate")
 		for call in _calls(fn):
 			callee = call.func.id if isinstance(call.func, ast.Name) else None
@@ -325,3 +337,33 @@ def test_an_ungated_endpoint_that_only_bumps_a_session_counter_is_caught(stateme
 		"\treturn {}\n"
 	).body)
 	assert [p for p in audit(tree) if p.startswith("bump_it")]
+
+
+def _dict_literal_keys(fn: ast.FunctionDef) -> list[set[str]]:
+	return [
+		{k.value for k in node.keys if isinstance(k, ast.Constant)}
+		for node in ast.walk(fn)
+		if isinstance(node, ast.Dict)
+	]
+
+
+@pytest.mark.parametrize("name", sorted(OWNER_SCOPED_ENDPOINTS))
+def test_owner_scoped_endpoints_check_the_profiler_user_first(name):
+	stmt = _first_effective_stmt(_fn(_tree(), name))
+	call = stmt.value if isinstance(stmt, ast.Assign) else None
+	assert isinstance(call, ast.Call) and _dotted(call.func) == "_require_profiler_user"
+
+
+@pytest.mark.parametrize("helper", ["_mark_stopping", "_latest_recording_uuid"])
+def test_stops_row_lookups_filter_on_the_callers_user(helper):
+	filters = [keys for keys in _dict_literal_keys(_fn(_tree(), helper)) if keys & {"session_uuid", "status"}]
+	assert filters and all("user" in keys for keys in filters)
+
+
+def test_the_audit_sees_a_write_hidden_in_a_helper():
+	tree = ast.parse(
+		"@frappe.whitelist(methods=['POST'])\n"
+		"def endpoint(session_uuid: str):\n\treturn _helper(session_uuid)\n"
+		"def _helper(uuid):\n\tframe = frappe.db.set_value('x', uuid, 'y', 1)\n"
+	)
+	assert any("without a registered gate" in problem for problem in audit(tree))

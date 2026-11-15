@@ -1,6 +1,7 @@
 """Upgrade defaults preserve deliberate unlimited refresh caps."""
 
 import json
+import sys
 from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
@@ -42,6 +43,7 @@ def test_upgrade_seeds_only_a_saved_single_without_the_field(monkeypatch, stored
 	fake = SimpleNamespace(db=SimpleNamespace(get_singles_dict=lambda *a: dict(stored), set_single_value=write),
 		cache=SimpleNamespace(delete_value=cleared.append), clear_document_cache=lambda *a: None)
 	monkeypatch.setattr(patch, "frappe", fake)
+	monkeypatch.setattr(sys.modules["frappe"], "cache", fake.cache, raising=False)
 	patch.execute()
 	patch.execute()
 	assert writes == expected
@@ -67,6 +69,7 @@ def test_seed_patch_propagates_fresh_interrupt_at_every_boundary(monkeypatch, st
 	), cache=SimpleNamespace(delete_value=fail if stage == "cache" else lambda *a: None),
 		clear_document_cache=fail if stage == "document_cache" else lambda *a: None)
 	monkeypatch.setattr(patch, "frappe", fake)
+	monkeypatch.setattr(sys.modules["frappe"], "cache", fake.cache, raising=False)
 	with pytest.raises(JobTimeoutException) as caught:
 		patch.execute()
 	assert caught.value is not original and caught.value.__context__ is None
@@ -81,6 +84,7 @@ def test_seed_cache_failure_reports_fixed_recovery_without_losing_saved_cap(monk
 	fake = SimpleNamespace(db=SimpleNamespace(get_singles_dict=lambda *a: {"ai_enabled": "1"},
 		set_single_value=lambda *a: written.append(a)), cache=SimpleNamespace(delete_value=fail))
 	monkeypatch.setattr(patch, "frappe", fake)
+	monkeypatch.setattr(sys.modules["frappe"], "cache", fake.cache, raising=False)
 	patch.execute()
 	assert written == [("Optimus Settings", "ai_refresh_max_findings", 20)]
 	output = capsys.readouterr().out

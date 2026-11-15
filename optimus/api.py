@@ -14,10 +14,11 @@ from dataclasses import dataclass
 
 import frappe
 from frappe import _
-from frappe.utils import add_to_date, now_datetime
+from frappe.utils import add_to_date, get_datetime, now_datetime
 
 from optimus import ratelimit, safe_call, safe_commit, session
 from optimus.permissions import may_act_on_session
+from optimus.timing import RECORDING_DATA_TTL_SECONDS, SESSION_TTL_SECONDS
 
 # Roles allowed to call the profiler API. System Manager is always allowed
 # (Frappe's superuser role); Optimus User is our dedicated role created
@@ -99,16 +100,18 @@ def _require_session_permission(session_uuid: str, permission_type: str = "read"
 			frappe.DoesNotExistError,
 			title=_("Optimus"),
 		)
+	check_failed = False
+	allowed = False
 	try:
 		allowed = frappe.has_permission("Optimus Session", permission_type, docname)
 	except Exception:
-		try:
-			frappe.logger().warning(
-				"optimus._require_session_permission: has_permission raised "
-				f"for {docname} / {permission_type}; denying (fail-closed)"
-			)
-		except Exception:
-			pass
+		check_failed = True
+	if check_failed:
+		safe_call.log_error_line(
+			"optimus._require_session_permission: has_permission raised "
+			f"for {docname} / {permission_type}; denying (fail-closed)",
+			dedupe_key=f"has_permission raised for {permission_type}",
+		)
 		frappe.throw(
 			_("You do not have permission to access this Optimus Session."),
 			frappe.PermissionError,
@@ -449,28 +452,64 @@ def start(
 
 
 @frappe.whitelist(methods=["POST"])
-def stop() -> dict:
-	"""End the calling user's active profiling session.
+def stop(session_uuid: str | None = None) -> dict:
+	"""End the calling user's profiling session.
 
 	Clears the Redis active pointer, marks the row ``Stopping`` and either
 	enqueues the analyze job or runs it inline (scheduler-aware fallback, see
 	``_enqueue_analyze``).
 
+	The active session is stopped when ``session_uuid`` is omitted or names it.
+	Any other session (its pointer expired after 10 minutes without activity, or
+	the user started a new one in another tab) is stopped by its own Recording
+	row; the active session and its pointer are never touched on that path.
+
 	Returns a dict with ``stopped``, ``session_uuid``, ``docname``,
-	``ran_inline`` and, only when ran_inline is True, the final ``status``
+	``ran_inline``, ``expired`` (True only when a session whose pointer had
+	expired was stopped), and, only when ran_inline is True, the final ``status``
 	(``Ready`` or ``Failed``) and ``empty`` (a Ready session with no recorded
 	requests). The widget uses ran_inline + status + empty to pick its
 	terminal state (Analyzing / Report ready / No data / Analyze failed).
 	"""
 	user = _require_profiler_user()
+	if not (isinstance(session_uuid, str) or session_uuid is None):
+		frappe.throw(_("Invalid session reference"), frappe.ValidationError)
+	session_uuid = session_uuid or None
 	active = session.get_active_session_for(user)
-	if not active:
-		return {"stopped": False, "reason": "no active session"}
+	if active and session_uuid in (None, active):
+		return _stop_active(user, active)
+	return _stop_expired(user, session_uuid)
 
+
+# Both paths act only on the caller's own rows (``_mark_stopping`` and
+# ``_latest_recording_uuid`` filter on the user), so Stop needs no share-aware gate.
+def _stop_active(user: str, active: str) -> dict:
 	ratelimit.enforce_user_rate_limit("stop", **_ACTION_LIMITS["stop"])
 
 	docname, ran_inline = _stop_session(user, active)
+	return _stop_result(active, docname, ran_inline)
 
+
+def _stop_expired(user: str, session_uuid: str | None) -> dict:
+	"""Stop the user's Recording row whose pointer is gone, naming it or taking the latest."""
+	ratelimit.enforce_user_rate_limit("stop", **_ACTION_LIMITS["stop"])
+	session_uuid = session_uuid or _latest_recording_uuid(user)
+	docname, ran_inline = _stop_session(user, session_uuid, pointer=False) if session_uuid else (None, False)
+	if not docname:
+		return {"stopped": False, "reason": "no active session"}
+	return {**_stop_result(session_uuid, docname, ran_inline), "expired": True}
+
+
+def _latest_recording_uuid(user: str) -> str | None:
+	return frappe.db.get_value(
+		"Optimus Session",
+		{"user": user, "status": "Recording"},
+		"session_uuid",
+		order_by="started_at desc",
+	)
+
+
+def _stop_result(session_uuid: str, docname: str | None, ran_inline: bool) -> dict:
 	# v0.5.0: when analyze runs inline, the session is already finalized
 	# by the time we return. Read the actual status so the widget can
 	# transition to the right terminal state otherwise a failed
@@ -489,7 +528,7 @@ def stop() -> dict:
 
 	return {
 		"stopped": True,
-		"session_uuid": active,
+		"session_uuid": session_uuid,
 		"docname": docname,
 		"ran_inline": ran_inline,
 		"status": final_status,
@@ -497,8 +536,9 @@ def stop() -> dict:
 	}
 
 
-def _stop_session(user: str, session_uuid: str) -> tuple[str | None, bool]:
-	"""Clear the active pointer, mark the row Stopping and enqueue (or
+def _stop_session(user: str, session_uuid: str, pointer: bool = True) -> tuple[str | None, bool]:
+	"""Clear the active pointer (unless ``pointer`` is False: it then names a
+	different session or none), mark the row Stopping and enqueue (or
 	inline-run) the analyze job.
 
 	Returns ``(docname, ran_inline)``: docname is None if no row matched;
@@ -520,7 +560,8 @@ def _stop_session(user: str, session_uuid: str) -> tuple[str | None, bool]:
 
 	infra_capture._force_stop_inflight(frappe.local)
 
-	_clear_active(user)
+	if pointer:
+		_clear_active(user)
 	docname = _mark_stopping(user, session_uuid)
 	if not docname:
 		return None, False
@@ -608,25 +649,33 @@ def _clear_active(user: str) -> None:
 
 
 def _mark_stopping(user: str, session_uuid: str) -> str | None:
-	"""Transition the Optimus Session row to the Stopping state.
+	"""Move the user's session row from Recording to Stopping.
 
-	Returns the docname on success or None if no matching row exists.
+	Returns the docname, or None when there is no such row or it already left
+	Recording (the janitor or another tab got there first, or it is finished): a
+	finished session must never be flipped back and analyzed again.
 	"""
-	docname = frappe.db.get_value(
-		"Optimus Session",
-		{"session_uuid": session_uuid, "user": user},
-		"name",
-	)
-	if not docname:
+	return claim_for_stop({"session_uuid": session_uuid, "user": user})
+
+
+def claim_for_stop(filters: str | dict) -> str | None:
+	"""Atomically move one Optimus Session row from Recording to Stopping.
+
+	The row is locked while its status is checked, so of several callers (a Stop
+	click, the janitor) exactly one gets the docname and goes on to queue analyze.
+	"""
+	row = frappe.db.get_value("Optimus Session", filters, ["name", "status"], for_update=True, as_dict=True)
+	if not row or row.get("status") != "Recording":
+		safe_commit()  # release the lock
 		return None
 
 	frappe.db.set_value(
 		"Optimus Session",
-		docname,
+		row["name"],
 		{"status": "Stopping", "stopped_at": now_datetime()},
 	)
 	safe_commit()
-	return docname
+	return row["name"]
 
 
 def _enqueue_analyze(session_uuid: str, docname: str | None = None) -> bool:
@@ -696,10 +745,11 @@ def _enqueue_analyze(session_uuid: str, docname: str | None = None) -> bool:
 				# the caller treats it like any other inline result.
 				return True
 
-		frappe.logger().warning(
+		safe_call.log_error_line(
 			f"optimus: scheduler disabled; running analyze "
 			f"inline for session {session_uuid}. Caller will block "
-			f"until analyze completes."
+			f"until analyze completes.",
+			dedupe_key="scheduler disabled; running analyze inline",
 		)
 		try:
 			frappe.enqueue(
@@ -778,8 +828,8 @@ def pill_state(session_uuid: str | None = None, run_uuid: str | None = None) -> 
 			"started_at": meta.get("started_at"),
 		}
 	if session_uuid:
-		return _pill_state_for(user, session_uuid, run_uuid)
-	return _pill_state_lp_recording(user) or _pill_state_in_flight(user)
+		return _pill_state_for(user, session_uuid, run_uuid, active)
+	return _pill_state_lp_recording(user) or _pill_state_in_flight(user, active)
 
 
 def _pill_state_lp_recording(user: str) -> dict | None:
@@ -802,18 +852,18 @@ def _pill_state_lp_recording(user: str) -> dict | None:
 	return _pill_payload("phase2", session_uuid, docname, "Recording", run_uuid)
 
 
-def _pill_state_for(user: str, session_uuid: str, run_uuid: str | None) -> dict:
+def _pill_state_for(user: str, session_uuid: str, run_uuid: str | None, active: str | None) -> dict:
 	row = frappe.get_all(
 		"Optimus Session",
 		filters={"session_uuid": session_uuid, "user": user},
-		fields=["name", "status"],
+		fields=["name", "session_uuid", "status", "started_at"],
 		limit=1,
 	)
 	if not row:
 		return {"phase": "idle"}
 	docname, status = row[0]["name"], row[0]["status"]
 	if not run_uuid:
-		return _pill_payload("session", session_uuid, docname, status)
+		return _pill_payload("session", session_uuid, docname, status, ended=_row_ended(user, row[0], active))
 	run = frappe.get_all(
 		"Optimus Phase Two Run",
 		filters={"parent": docname, "parenttype": "Optimus Session", "run_uuid": run_uuid},
@@ -825,21 +875,22 @@ def _pill_state_for(user: str, session_uuid: str, run_uuid: str | None) -> dict:
 	return _pill_payload("phase2", session_uuid, docname, run[0]["status"], run_uuid)
 
 
-def _pill_state_in_flight(user: str) -> dict:
+def _pill_state_in_flight(user: str, active: str | None) -> dict:
 	"""Latest own session still analyzing, else an own phase-2 run still analyzing."""
 	cutoff = add_to_date(now_datetime(), minutes=-_PILL_RESYNC_WINDOW_MINUTES)
 	rows = frappe.get_all(
 		"Optimus Session",
 		filters={"user": user, "modified": [">", cutoff]},
-		fields=["name", "session_uuid", "status"],
+		fields=["name", "session_uuid", "status", "started_at"],
 		order_by="modified desc",
 		limit=20,
 	)
 	if not rows:
 		return {"phase": "idle"}
 	for row in rows:
-		if row["status"] in _PILL_TRANSIENT_STATUSES:
-			return _pill_payload("session", row["session_uuid"], row["name"], row["status"])
+		ended = _row_ended(user, row, active)
+		if row["status"] in _PILL_TRANSIENT_STATUSES or ended:
+			return _pill_payload("session", row["session_uuid"], row["name"], row["status"], ended=ended)
 	runs = frappe.get_all(
 		"Optimus Phase Two Run",
 		filters={
@@ -858,19 +909,36 @@ def _pill_state_in_flight(user: str) -> dict:
 	)
 
 
-def _pill_payload(scope: str, session_uuid, docname, status, run_uuid=None) -> dict:
+def _row_ended(user: str, row: dict, active: str | None) -> bool:
+	"""A Recording row whose pointer has expired: older than the pointer's lifetime and confirmed gone.
+
+	The pointer read that backs ``active`` swallows Redis errors, so a missing pointer alone
+	never proves the session ended; an unreadable Redis answers "not ended".
+	"""
+	if row["status"] != "Recording" or not row.get("started_at"):
+		return False
+	if get_datetime(row["started_at"]) > add_to_date(now_datetime(), seconds=-SESSION_TTL_SECONDS):
+		return False
+	if active and active != row["session_uuid"]:
+		return True
+	return session.active_pointer_gone(user)
+
+
+def _pill_payload(scope: str, session_uuid, docname, status, run_uuid=None, ended=False) -> dict:
 	if status == "Ready":
 		phase = "ready"
 	elif status == "Failed":
 		phase = "failed"
 	elif status == "Recording":
 		# A line profiling run records; a session row alone is not proof of a live recording.
-		phase = "recording" if run_uuid else "idle"
+		phase = "recording" if run_uuid else ("ended" if ended else "idle")
 	else:
 		phase = "analyzing"
 	out = {"phase": phase, "scope": scope, "session_uuid": session_uuid, "docname": docname}
 	if run_uuid:
 		out["run_uuid"] = run_uuid
+	if phase == "ended":
+		out["cap_hit"] = bool((session.get_session_meta(session_uuid) or {}).get("cap_warning"))
 	return out
 
 
@@ -946,7 +1014,21 @@ def _frontend_vitals_key(session_uuid: str) -> str:
 
 
 MAX_FRONTEND_PAYLOAD_BYTES = 512 * 1024
+MAX_FRONTEND_ENTRY_BYTES = 4 * 1024
 MAX_FRONTEND_PAYLOAD_NODES = 32_000
+
+
+def _encode_frontend_rows(rows, soft_cap):
+	"""JSON-encode the newest ``soft_cap`` dict rows that fit one Redis entry; count the rest as dropped."""
+	import json
+
+	rows = rows or []
+	encoded = []
+	for row in rows[-soft_cap:]:
+		text = json.dumps(row, default=str) if isinstance(row, dict) else None
+		if text is not None and len(text.encode("utf-8")) <= MAX_FRONTEND_ENTRY_BYTES:
+			encoded.append(text)
+	return encoded, min(len(rows), soft_cap) - len(encoded)
 
 
 def _frontend_payload_bounded(value):
@@ -982,6 +1064,15 @@ def _frontend_payload_bounded(value):
 	return True
 
 
+def _mask_frontend_urls(rows: list[dict], field: str) -> list[dict]:
+	"""``rows`` with each row's URL ``field`` masked, so no secret query value reaches Redis."""
+	from optimus.redaction import redact_url_field
+	from optimus.redaction_extras import form_key_extras
+
+	extra_keys = form_key_extras()
+	return [redact_url_field(row, field, extra_keys) for row in rows]
+
+
 @frappe.whitelist(methods=["POST"])
 def submit_frontend_metrics(payload: str) -> dict:
 	"""Receive a batch of frontend metrics (XHR timings + Web Vitals) as a
@@ -1010,7 +1101,7 @@ def submit_frontend_metrics(payload: str) -> dict:
 
 	if not isinstance(data, dict) or not _frontend_payload_bounded(data):
 		return {"accepted": False, "reason": "invalid payload"}
-	if any(not isinstance(data.get(key) or [], list) or any(not isinstance(row, dict) for row in (data.get(key) or [])) for key in ("xhr", "vitals")):
+	if any(not isinstance(data.get(key) or [], list) for key in ("xhr", "vitals")):
 		return {"accepted": False, "reason": "invalid payload"}
 
 	session_uuid = data.get("session_uuid")
@@ -1029,8 +1120,15 @@ def submit_frontend_metrics(payload: str) -> dict:
 	# doesn't push MAX entries through Redis only to have them trimmed.
 	import json as _json
 
-	xhr = (data.get("xhr") or [])[-SOFT_CAP_FRONTEND_XHR:]
-	vitals = (data.get("vitals") or [])[-SOFT_CAP_FRONTEND_VITALS:]
+	# Mask secret URL query values first; then one bad row is dropped (and counted) without
+	# costing the rest of the batch.
+	xhr_rows, vitals_rows = data.get("xhr"), data.get("vitals")
+	if isinstance(xhr_rows, list):
+		xhr_rows = _mask_frontend_urls(xhr_rows[-SOFT_CAP_FRONTEND_XHR:], "url")
+	if isinstance(vitals_rows, list):
+		vitals_rows = _mask_frontend_urls(vitals_rows[-SOFT_CAP_FRONTEND_VITALS:], "page_url")
+	xhr, xhr_dropped = _encode_frontend_rows(xhr_rows, SOFT_CAP_FRONTEND_XHR)
+	vitals, vitals_dropped = _encode_frontend_rows(vitals_rows, SOFT_CAP_FRONTEND_VITALS)
 
 	xhr_key = _frontend_xhr_key(session_uuid)
 	vitals_key = _frontend_vitals_key(session_uuid)
@@ -1042,25 +1140,25 @@ def submit_frontend_metrics(payload: str) -> dict:
 	if xhr:
 		for entry in xhr:
 			try:
-				frappe.cache.rpush(xhr_key, _json.dumps(entry, default=str))
+				frappe.cache.rpush(xhr_key, entry)
 			except Exception:
 				frappe.log_error(title="optimus frontend rpush (xhr)")
 		# Tail-preferring trim: keep the last N entries.
 		try:
 			frappe.cache.ltrim(xhr_key, -SOFT_CAP_FRONTEND_XHR, -1)
-			session.expire_key(xhr_key, session.SESSION_TTL_SECONDS)
+			session.expire_key(xhr_key, RECORDING_DATA_TTL_SECONDS)
 		except Exception:
 			frappe.log_error(title="optimus frontend ltrim (xhr)")
 
 	if vitals:
 		for entry in vitals:
 			try:
-				frappe.cache.rpush(vitals_key, _json.dumps(entry, default=str))
+				frappe.cache.rpush(vitals_key, entry)
 			except Exception:
 				frappe.log_error(title="optimus frontend rpush (vitals)")
 		try:
 			frappe.cache.ltrim(vitals_key, -SOFT_CAP_FRONTEND_VITALS, -1)
-			session.expire_key(vitals_key, session.SESSION_TTL_SECONDS)
+			session.expire_key(vitals_key, RECORDING_DATA_TTL_SECONDS)
 		except Exception:
 			frappe.log_error(title="optimus frontend ltrim (vitals)")
 
@@ -1078,6 +1176,7 @@ def submit_frontend_metrics(payload: str) -> dict:
 		"accepted": True,
 		"xhr_count": xhr_count,
 		"vitals_count": vitals_count,
+		"dropped": xhr_dropped + vitals_dropped,
 	}
 
 

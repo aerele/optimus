@@ -213,7 +213,7 @@ def test_auto_expanded_pick_with_unavailable_source_is_skipped(tmp_path, monkeyp
 			"dotted_path": dotted,
 			"eligible": True,
 			"qualname": "f",
-			"file": "x.py",
+			"file": f"{dotted}.py",  # two different functions: the picker de-duplicates by (file, lineno)
 			"lineno": 1,
 		},
 	)
@@ -290,7 +290,8 @@ def test_only_auto_expanded_unreadable_picks_leave_nothing_to_run(tmp_path, monk
 		},
 	)
 	monkeypatch.setattr(capture, "_resolve_attr", lambda dotted: fn)
-	with pytest.raises(capture.CaptureError, match="No selected function has eligible source"):
+	# Auto-arm treats NoEligiblePickError as "nothing to arm" (analyze._arm_phase2).
+	with pytest.raises(capture.NoEligiblePickError, match="No selected function can be line-profiled: optimus.mod.f"):
 		capture.prepare_line_profile_picks(
 			[{"dotted_path": "optimus.mod.f", "source": "auto_expand"}],
 			server_expanded=frozenset({"optimus.mod.f"}),

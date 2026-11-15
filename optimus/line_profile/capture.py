@@ -22,6 +22,7 @@ import importlib
 import inspect
 import json
 import pickle
+import re
 import sys
 import threading
 import tokenize
@@ -30,6 +31,7 @@ from functools import wraps
 
 from optimus import redis_keys as _redis_keys
 from optimus.line_profile import diff
+from optimus.timing import SESSION_TTL_SECONDS
 
 # ---------------------------------------------------------------------------
 # Optional dependencies guarded so the pure layer loads everywhere
@@ -90,7 +92,6 @@ def _require_line_profiler() -> None:
 # byte-identical to the pre-v0.12.20 local helpers, so on-disk Redis
 # values from older bench versions resolve unchanged.
 
-SESSION_TTL_SECONDS = 10 * 60  # match phase-1's session TTL
 DATA_TTL_SECONDS = 24 * 60 * 60  # orphaned inputs must not survive indefinitely
 
 
@@ -410,7 +411,12 @@ class CaptureError(Exception):
 	should communicate to the customer (e.g. all picks ineligible)."""
 
 
-class NoEligibleSource(CaptureError):
+class NoEligiblePickError(CaptureError):
+	"""Raised when none of the selected functions can be line-profiled. The manual path shows it to
+	the user; auto-arm treats it as "nothing to arm" (``analyze._arm_phase2``)."""
+
+
+class NoEligibleSource(NoEligiblePickError):
 	"""No selected function could be captured; ``skipped`` lists each with its reason."""
 
 	def __init__(self, message, skipped=()):
@@ -452,6 +458,21 @@ def validate_picks(picks):
 			raise CaptureError(_("Each selected function needs a known source label."))
 
 
+_PATH_IN_REASON_RE = re.compile(r"(?:[A-Za-z]:)?[/\\][^\s)'\"]*")
+
+
+def _no_eligible_pick_message(resolved: list[dict]) -> str:
+	"""The error for a run where no pick is eligible: up to five picks with their reasons, paths removed."""
+	reasons = [
+		f"{r['dotted_path']}: {_PATH_IN_REASON_RE.sub('...', str(r['ineligible_reason']))[:200]}"
+		for r in resolved[:5]
+		if r.get("ineligible_reason")
+	]
+	if not reasons:
+		return _("No selected function has eligible source. Check the selected paths.")
+	return _("No selected function can be line-profiled: {0}").format("; ".join(reasons))
+
+
 def _pick_source(fn) -> tuple[list[dict], str | None]:
 	"""The callable's whole source rows, or no rows and the reason they are unavailable."""
 	reason = _overlong_reason(fn) if fn else None
@@ -479,9 +500,11 @@ def skipped_functions(resolved, limit=None) -> list[dict]:
 	return skipped if limit is None else skipped[:limit]
 
 
-def _nothing_eligible(resolved) -> NoEligibleSource:
+def _nothing_eligible(resolved, message: str | None = None) -> NoEligibleSource:
+	"""``message`` defaults to the plain text; the resolve-time error passes the per-pick reasons."""
 	return NoEligibleSource(
-		_("No selected function has eligible source. Check the selected paths."), skipped_functions(resolved)
+		message or _("No selected function has eligible source. Check the selected paths."),
+		skipped_functions(resolved),
 	)
 
 
@@ -605,6 +628,7 @@ def prepare_line_profile_picks(
 		raise CaptureError(_("Select a function from an installed app."))
 	resolved: list[dict] = []
 	seen = set()
+	targets = set()
 	for entry in picks:
 		dotted = entry["dotted_path"]
 		if dotted in seen:
@@ -625,18 +649,25 @@ def prepare_line_profile_picks(
 				"ineligible_reason": reason,
 			})
 			continue
+		if meta.get("eligible"):
+			# Two spellings of one function (an alias, a doubled app prefix) profile it once.
+			target = (meta["file"], meta["lineno"])
+			if target in targets:
+				continue
+			targets.add(target)
 		meta["source"] = entry.get("source", "freeform")
 		resolved.append(meta)
 
 	eligible = [r for r in resolved if r.get("eligible")]
 	if not eligible:
-		raise _nothing_eligible(resolved)
+		raise _nothing_eligible(resolved, _no_eligible_pick_message(resolved))
 
 	picks_meta, source_snapshot = _snapshot_picks(eligible, server_chosen=server_chosen)
 	if server_chosen:
 		picks_meta = _drop_invalid_picks(eligible, picks_meta, source_snapshot)
 	if not picks_meta:
-		raise _nothing_eligible(resolved)
+		# A server-chosen run reports each reason through ``skipped``; a user sees them in the message.
+		raise _nothing_eligible(resolved, None if server_chosen else _no_eligible_pick_message(resolved))
 
 	return _finish_capture(resolved, picks_meta, source_snapshot, server_chosen=server_chosen)
 
@@ -1132,6 +1163,13 @@ def read_all_samples(run_uuid: str) -> list[list[dict]]:
 			raise CaptureInputError("Line profiling sample byte accounting is incomplete")
 	_validate_samples(batches)
 	return batches
+
+
+@_interrupt_boundary
+def has_samples(run_uuid: str) -> bool:
+	"""Whether a run captured any sample batch; a Redis failure raises (unknown)."""
+	_require_frappe()
+	return bool(frappe.cache.llen(_redis_keys.lp_samples(run_uuid)))
 
 
 @_interrupt_boundary

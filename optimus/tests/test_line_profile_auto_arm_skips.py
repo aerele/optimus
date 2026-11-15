@@ -26,7 +26,7 @@ def wire(monkeypatch, by_dotted):
 			"dotted_path": dotted,
 			"eligible": True,
 			"qualname": "f",
-			"file": "x.py",
+			"file": f"{dotted}.py",  # distinct functions: the picker de-duplicates by (file, lineno)
 			"lineno": 1,
 		},
 	)
@@ -304,7 +304,7 @@ def test_a_failed_import_reason_is_fixed_text_without_the_raw_error(tmp_path, mo
 	def resolve(dotted):
 		if dotted.endswith("broken"):
 			raise picker.PickerError(f"could not import any prefix of '{dotted}' (last error: {secret})")
-		return {"dotted_path": dotted, "eligible": True, "qualname": "f", "file": "x.py", "lineno": 1}
+		return {"dotted_path": dotted, "eligible": True, "qualname": "f", "file": f"{dotted}.py", "lineno": 1}
 
 	monkeypatch.setattr(picker, "resolve_freeform", resolve)
 	prepared = capture.prepare_line_profile_picks(curated("broken", "good"), server_chosen=True)
