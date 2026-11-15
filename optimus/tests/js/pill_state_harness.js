@@ -192,6 +192,55 @@ test("reducers never mutate their input", () => {
 	assert.strictEqual(JSON.stringify(s), frozen);
 });
 
+const recording = (extra) => Object.assign({}, Pill.initialState(), { display: "recording", active: true, session_uuid: "s1", docname: "OS-1" }, extra);
+const ended = (extra) => Object.assign({ phase: "ended", scope: "session", session_uuid: "s1", docname: "OS-1", cap_hit: false }, extra);
+
+test("an ended recording turns into a stop of that session, with no alert", () => {
+	const r = Pill.reduceServer(recording(), ended(), T0);
+	assert.strictEqual(r.state.display, "stopping");
+	assert.strictEqual(r.state.active, false);
+	assert.strictEqual(r.ui.label, "Stopping…");
+	assert.strictEqual(r.alert, null);
+	assert.deepStrictEqual(r.effect, { stop: "s1", capHit: false });
+});
+
+test("an ended session found on page load is stopped too, and its uuid comes from the server", () => {
+	const r = Pill.reduceServer(Pill.initialState(), ended({ session_uuid: "s9", cap_hit: true }), T0);
+	assert.strictEqual(r.state.session_uuid, "s9");
+	assert.deepStrictEqual(r.effect, { stop: "s9", capHit: true });
+});
+
+test("ended is ignored while stopping, analyzing, ready or line profiling", () => {
+	for (const extra of [{ display: "stopping" }, { display: "analyzing" }, { display: "ready" }, { phase2: true }]) {
+		assert.strictEqual(Pill.reduceServer(recording(extra), ended(), T0), null, JSON.stringify(extra));
+	}
+});
+
+test("ended for another session than the tracked one is ignored", () => {
+	assert.strictEqual(Pill.reduceServer(recording(), ended({ session_uuid: "s2" }), T0), null);
+});
+
+test("an ended session is auto-stopped at most once", () => {
+	const first = Pill.reduceServer(recording(), ended(), T0);
+	const reverted = Object.assign({}, first.state, { display: "recording" });
+	const again = Pill.reduceServer(reverted, ended(), T0);
+	assert.strictEqual(again.effect, undefined);
+	assert.strictEqual(again.state.display, "inactive");
+	assert.strictEqual(again.alert, null);
+	assert.strictEqual(Pill.reduceServer(Pill.initialState(), ended(), T0).effect.stop, "s1");
+	assert.strictEqual(Pill.reduceServer(Pill.resetState(first.state), ended(), T0), null);
+});
+
+test("recordingCheckAction: fetch only for a visible phase 1 recording", () => {
+	assert.strictEqual(Pill.recordingCheckAction("recording", false, false), "fetch");
+	assert.strictEqual(Pill.recordingCheckAction("recording", false, true), "wait");
+	assert.strictEqual(Pill.recordingCheckAction("recording", true, false), "stop");
+	for (const d of ["inactive", "stopping", "analyzing", "ready"]) {
+		assert.strictEqual(Pill.recordingCheckAction(d, false, false), "stop", d);
+	}
+	assert.strictEqual(Pill.RECORDING_CHECK_MS, 60000);
+});
+
 let failed = 0;
 for (const [name, fn] of tests) {
 	try { fn(); console.log("ok   " + name); } catch (e) { failed++; console.log("FAIL " + name + "\n" + e.stack); }

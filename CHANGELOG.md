@@ -37,6 +37,64 @@ Masking applies as data is recorded and rendered. Rows stored before this versio
 
 ---
 
+## [0.12.175] - 2026-11-07
+
+### Fixed
+
+- Scheduled jobs from any app, and Optimus's own jobs, no longer show up in a session you record. Before, if you were recording while the scheduler queued an hourly job, that job was recorded into your session and analysis waited for it. Jobs queued from inside an Optimus job, or from inside a scheduled job the scheduler started, are left out as well. A job or scheduled job you start yourself from a page (for example Execute on a scheduled job in Desk), and the jobs it starts, are still recorded. A scheduled job counts as started by the scheduler when it is queued with no web request and no running job, so one queued from `bench execute` or the console is left out too.
+- A session stuck in Stopping is analyzed again once, even when two schedulers or a manual `bench execute` run the janitor at the same time. A lock wait or deadlock on one stuck session no longer stops the sweep for the others.
+- The daily Redis cleanup no longer retries the same failing sessions every run. It starts from a different place each day, skips a session that raises and carries on, and writes one log line with the number it could not clean.
+
+### Not covered
+
+- Two workers can still receive the same analyze job twice if the queue itself delivers it twice; that is a separate follow-up.
+
+---
+
+## [0.12.174] - 2026-11-07
+
+### Fixed
+
+- Missing-index suggestions now read each table's structure and row count once per analysis instead of once per query. A session with 200 query shapes on one table used to send about 1,800 statements to the database for this; it now sends about 10 (rough figures; they depend on the queries).
+- A column whose distinct-value count times out is no longer tried again for every query on that table, which could add minutes to an analysis. Only errors that would repeat are remembered; a lost connection or lock wait is tried again.
+- Index suggestions no longer write an "optimizer failure" Error Log entry for a column named after an SQL reserved word (such as `read`), including when the table reads are not cached. The report now says "N query shape(s) use a column name MariaDB rejects unquoted, such as `read`; their cardinality was not checked", instead of blaming the SQL parser.
+- Index suggestions now stop after 2 minutes (or sooner if the whole analysis is near its 20-minute limit), check the slowest queries first, and say in the report how many queries were not checked. The Error Log also gets a line when this limit stops the check.
+- A one-off statement timeout while reading a table's structure is no longer remembered for the rest of the analysis; only the distinct-value count remembers a timeout.
+- A syntax error from the distinct-value count that does not look like a reserved word is now written to the log once, so a parser bug does not go unseen.
+
+---
+
+## [0.12.173] - 2026-11-07
+
+### Fixed
+
+- The Profiler pill now notices within a minute when a session ended by itself (10 minutes without activity, or the per-session request limit). It says so once, in plain words, and analyzes what was captured. Before, the pill kept saying "Recording" until you clicked it. This only applies while the Desk tab is visible; a background tab catches up when you return to it.
+- Opening Desk while one of your sessions has already ended by itself now analyzes that session right away, and the pill shows "Analyzing" until it is done, so a new session cannot be started from the pill meanwhile. With the scheduler disabled that analysis runs inside the page-load request.
+- The pill is now a real button: you can reach it with Tab, open and stop with Enter or Space, it shows a focus ring, and its tooltip says what a click does ("Start a profiling session", "Stop recording and analyze") instead of a build number. The running timer is no longer read out every second by screen readers.
+- A failed start keeps the dialog open with your label, so you can fix the problem and press Start again. Pressing Enter or Ctrl+S twice no longer starts two sessions. Closing the dialog with Escape keeps what you typed for the next time you open it on the same page (kept in this tab only, gone on reload).
+- Clicking Stop after another tab has already stopped that session now says what happened, instead of leaving the pill stuck on "Stopping".
+- The pill, the start dialog note, the first-visit notice and the line profiling picker now follow the Desk dark theme, Windows high-contrast mode and the reduced-motion setting, and their text meets the contrast minimums. The pill now stays below Desk's pop-up notices, so they are never covered, and below an open dialog's backdrop.
+- The "recording stopped after 10 minutes" and "request limit" notices, and the pill's "taking unusually long" notices, can now be translated. Before, they always showed in English.
+- The pill now keeps its 12px corner offset on narrow screens, and the first-visit notice keeps a margin from both screen edges at 320px wide.
+- Screen readers now hear the pill's state changes (Recording, Stopping, Analyzing, Report ready) once each, without the running timer.
+- If the pill cannot stop a session that ended by itself, it now says so and points you to the session, instead of saying it already stopped. If a Stop is not confirmed and the status check fails, the pill no longer waits up to 15 minutes on "Stopping".
+- Pressing Escape in a dialog or input no longer dismisses the first-visit notice.
+
+### Not covered
+
+- Line profiling recordings are not checked by the pill; they are still stopped from the session form.
+- A session that reaches the request limit keeps showing "Recording" on the pill until it ends; the limit is explained when the session ends.
+
+---
+
+## [0.12.172] - 2026-11-06
+
+### Fixed
+
+- Line profiling now captures the whole function. Before, the function's source was cut at its first blank line, so any timed line after it was missing from the drill-down, a function whose timed lines were all below the cut was shown as "not invoked", and the function's total time was understated, which inflated the severity of Hot Line findings. Some functions also failed to start with a server error. A function you chose whose source cannot be read in full now refuses the run with a message naming the function and the reason; a function added automatically is skipped instead. A source line longer than 20,000 characters, or too many source lines in one run, now shows a clear message instead of a server error. Runs recorded on 0.12.72 to 0.12.141 may be incomplete, so re-record them.
+
+---
+
 ## [0.12.171] - 2026-11-07
 
 ### Fixed
