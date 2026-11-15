@@ -103,7 +103,7 @@ class TestBeforeJobOrder:
 	def test_an_internal_job_pops_both_markers_before_any_settings_read(self, env, reads, monkeypatch):  # noqa: F811
 		import optimus
 
-		monkeypatch.setattr(optimus, "is_internal_job", lambda method: True)
+		monkeypatch.setattr(optimus, "is_internal_job", lambda method, kwargs=None: True)
 		kwargs = {"_profiler_session_id": "s1", "_lp_session_id": "s2", "a": 1}
 
 		hc.before_job(method="optimus.analyze.run", kwargs=kwargs)
