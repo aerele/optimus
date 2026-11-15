@@ -390,12 +390,12 @@ def _json_nests_deeper_than(text: str, limit: int) -> bool:
 
 def _unreadable_json(text: str, extra_keys: tuple[str, ...], walk: _Walk) -> str:
 	"""JSON-looking text that does not parse (cut off, malformed): kept unless it names a
-	sensitive key, since a value after that key cannot be told from the rest."""
-	if not _JSON_OPENING.match(text):
-		return text
+	sensitive key, since a value after that key cannot be told from the rest. A quoted key is
+	found whatever the text opens with; the plain substring check is for text that opens like JSON,
+	so prose such as ``[INFO] token refreshed`` stays."""
 	lower = text.lower()
 	extra = tuple(p for p in extra_keys or () if p)
-	if any(p in lower for p in DEFAULT_SENSITIVE_KEYS + extra) or any(
+	if (_JSON_OPENING.match(text) and any(p in lower for p in DEFAULT_SENSITIVE_KEYS + extra)) or any(
 		is_sensitive_key(pair.group(1)[1:-1], extra=extra) for pair in _JSON_PAIR.finditer(text)
 	):
 		return walk.fail(UNREADABLE_JSON)

@@ -13,7 +13,12 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 import optimus  # noqa: F401 triggers _patch_recorder at import-time
-from optimus.redaction import _MAX_REDACT_CONTAINERS, redact_sensitive, redact_sensitive_walk
+from optimus.redaction import (
+	_MAX_REDACT_CONTAINERS,
+	DEFAULT_SENSITIVE_KEYS,
+	redact_sensitive,
+	redact_sensitive_walk,
+)
 
 MARKER = "<REDACTED:nested too deep>"
 CIRCULAR = "<REDACTED:circular>"
@@ -438,6 +443,39 @@ class TestUnreadableJson:
 
 	def test_text_without_a_secret_key_is_kept(self):
 		assert redact_sensitive({"doc": '{"a":1,'})["doc"] == '{"a":1,'
+
+	# Unreadable text that does not open like a JSON object or list of objects still names its keys.
+	UNREADABLE_SHAPES = [
+		('[1, {"password":"S3CRET"} trailing', "S3CRET"),
+		('{a:1, "password":"S3CRET"', "S3CRET"),
+		('[null, {"x-api-key":"S3CRET"}', "S3CRET"),
+		('[true, {"Cookie": "sid=S3CRET"}', "S3CRET"),
+		('[ 1 ,{"token":"S3CRET"}', "S3CRET"),
+	]
+
+	@pytest.mark.parametrize(("text", "secret"), UNREADABLE_SHAPES)
+	def test_unreadable_text_of_any_shape_naming_a_secret_key_is_omitted(self, text, secret):
+		out = redact_sensitive({"args": text})["args"]
+		assert out == UNREADABLE
+		assert secret not in out
+
+	@pytest.mark.parametrize(("text", "secret"), UNREADABLE_SHAPES)
+	def test_such_text_in_a_url_json_parameter_is_masked(self, text, secret):
+		from urllib.parse import quote
+
+		out = redact_sensitive({"u": "/app/x?filters=" + quote(text, safe="")})["u"]
+		assert secret not in out and quote(UNREADABLE, safe="") in out
+
+	@pytest.mark.parametrize("name", ["x-api-key", "sid", "X-Amz-Signature", "accessKey"])
+	def test_a_name_only_the_pair_check_knows_is_omitted(self, name):
+		# None of these holds a default substring name, so only the key-by-key check finds them.
+		text = '[1, {"' + name + '":"S3CRET"} trailing'
+		assert not any(default in text.lower() for default in DEFAULT_SENSITIVE_KEYS)
+		assert redact_sensitive({"args": text})["args"] == UNREADABLE
+
+	def test_prose_in_brackets_is_kept(self):
+		for text in ("[INFO] token refreshed", "[WARN] password policy updated", "{note} cookie jar"):
+			assert redact_sensitive({"msg": text}) == {"msg": text}
 		assert redact_sensitive({"doc": "[Draft] password reset"})["doc"] == "[Draft] password reset"
 
 	def test_an_empty_extra_key_does_not_omit_everything(self):
@@ -475,6 +513,12 @@ class TestProfilerInitCounts(_InitHarness):
 	def test_a_form_dict_that_is_not_a_dict_does_not_stay_raw(self, monkeypatch):
 		obj = self._run(monkeypatch, types.SimpleNamespace(password="S3CRET"), {})
 		assert obj.form_dict == UNSUPPORTED
+
+	@pytest.mark.parametrize(("text", "secret"), TestUnreadableJson.UNREADABLE_SHAPES)
+	def test_unreadable_text_naming_a_secret_never_reaches_the_form_dict(self, text, secret, monkeypatch):
+		obj = self._run(monkeypatch, {"args": text}, {})
+		assert obj.form_dict["args"] == UNREADABLE
+		assert secret not in json.dumps(obj.form_dict)
 
 
 class TestProfilerInitCountsOnOtherShapes(_InitHarness):
