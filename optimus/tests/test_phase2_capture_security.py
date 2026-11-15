@@ -196,6 +196,47 @@ def sample_target():
 	return 1
 
 
+alias_target = sample_target
+
+
+def test_two_spellings_of_one_function_are_captured_once(env):
+	prepared = capture.prepare_line_profile_picks([
+		{"dotted_path": __name__ + ".sample_target", "source": "curated"},
+		{"dotted_path": __name__ + ".alias_target", "source": "freeform"},
+	])
+	assert [p["dotted_path"] for p in prepared.resolved] == [__name__ + ".sample_target"]
+	assert [p["dotted_path"] for p in json.loads(prepared.picks_json)] == [__name__ + ".sample_target"]
+	assert list(json.loads(prepared.source_json)) == [__name__ + ".sample_target"]
+
+
+def test_distinct_ineligible_picks_keep_their_own_reasons(env):
+	prepared = capture.prepare_line_profile_picks([
+		{"dotted_path": __name__ + ".sample_target"},
+		{"dotted_path": __name__ + ".missing_one"},
+		{"dotted_path": __name__ + ".missing_two"},
+	])
+	skipped = [p for p in prepared.resolved if not p["eligible"]]
+	assert [p["dotted_path"] for p in skipped] == [__name__ + ".missing_one", __name__ + ".missing_two"]
+	assert all(p["ineligible_reason"] for p in skipped)
+
+
+@pytest.mark.parametrize(("batches", "expected"), [([], False), (["[]"], True), (["[]", "[]"], True)])
+def test_has_samples_reads_the_sample_list_length(env, monkeypatch, batches, expected):
+	cache, _local = env
+	cache.data[cache.make_key(redis_keys.lp_samples("fake-run"))] = list(batches)
+	monkeypatch.setattr(cache, "llen", lambda key: len(cache.data.get(cache.make_key(key), [])), raising=False)
+	assert capture.has_samples("fake-run") is expected
+
+
+def test_has_samples_raises_when_redis_cannot_answer(env, monkeypatch):
+	cache, _local = env
+	def down(key):
+		raise ConnectionError("redis down")
+	monkeypatch.setattr(cache, "llen", down, raising=False)
+	with pytest.raises(ConnectionError):
+		capture.has_samples("fake-run")
+
+
 def test_server_expanded_library_pick_is_skipped_before_import(env, monkeypatch):
 	from optimus.line_profile import picker
 	resolve = picker.resolve_freeform
@@ -289,7 +330,7 @@ def test_preparation_stops_reading_when_cumulative_source_exceeds_budget(env, mo
 	from optimus.line_profile import picker
 	monkeypatch.setattr(capture, "MAX_CAPTURE_BYTES", 2000)
 	monkeypatch.setattr(picker, "resolve_freeform", lambda dotted: {
-		"dotted_path": dotted, "eligible": True, "qualname": "example", "file": "fake.py", "lineno": 1})
+		"dotted_path": dotted, "eligible": True, "qualname": "example", "file": "fake.py", "lineno": int(dotted.removeprefix("optimus.fn"))})
 	monkeypatch.setattr(capture, "_resolve_attr", lambda dotted: sample_target)
 	read = []
 	monkeypatch.setattr(capture, "_capture_source_lines", lambda fn: read.append(True) or [{"lineno": 1, "content": "x" * 800}])

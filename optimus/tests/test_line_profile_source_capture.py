@@ -213,7 +213,7 @@ def test_auto_expanded_pick_with_unavailable_source_is_skipped(tmp_path, monkeyp
 			"dotted_path": dotted,
 			"eligible": True,
 			"qualname": "f",
-			"file": "x.py",
+			"file": f"{dotted}.py",  # two different functions: the picker de-duplicates by (file, lineno)
 			"lineno": 1,
 		},
 	)

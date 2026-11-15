@@ -224,6 +224,26 @@ def test_persistence_conflict_is_not_replayed_with_mutated_trees(delivery, monke
 	assert delivery.recordings and not [e for e in delivery.events if e[0] == "cleanup"]
 
 
+def test_generic_failure_stores_its_type_for_the_session_form(delivery, monkeypatch):
+	def boom(*a, **kw):
+		raise KeyError("secret-detail")
+	monkeypatch.setattr(analyze, "_persist", boom)
+	with pytest.raises(KeyError):
+		analyze.run("s")
+	writes = [e[2] for e in delivery.events if e[:2] == ("write", "analyzer_warnings")]
+	assert writes == [analyze.ANALYZE_FAILURE_WARNING.format("KeyError")]
+	assert "secret-detail" not in writes[0] and "optimus ai analyze" in writes[0]
+	assert delivery.status == "Failed"
+
+
+def test_snapshot_failure_keeps_its_own_warning(delivery):
+	delivery.requested.append("missing")
+	with pytest.raises(recording_bundle.SnapshotUnavailable):
+		analyze.run("s")
+	writes = [e[2] for e in delivery.events if e[:2] == ("write", "analyzer_warnings")]
+	assert writes == [recording_bundle.SNAPSHOT_FAILURE_WARNING]
+
+
 def test_the_analyzers_get_the_overall_deadline_in_their_context(delivery, monkeypatch):
 	import time
 

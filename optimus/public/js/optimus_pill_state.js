@@ -129,10 +129,10 @@
 			ui: { display: "ready", label: terminalLabel(kind, phase2, pending, !!data.empty), elapsed: __("click to view"), tone: failed ? "failed" : null },
 			alert: already ? null : {
 				message: failed
-					? (phase2 ? (data.error ? "Line profiling analyze failed: {0}" : "Line profiling analyze failed, open the session for details") : "Profiler analyze failed, check Error Log")
-					: (pending ? "Line profiling results saved. Use Regenerate Reports to update the report."
-						: (data.empty ? "Profiling finished, but no requests were recorded"
-							: (phase2 ? "Line profiling report ready" : "Profiler report ready"))),
+					? (phase2 ? (data.error ? __("Line profiling analyze failed: {0}") : __("Line profiling analyze failed, open the session for details")) : __("Profiler analyze failed, check Error Log"))
+					: (pending ? __("Line profiling results saved. Use Regenerate Reports to update the report.")
+						: (data.empty ? __("Profiling finished, but no requests were recorded")
+							: (phase2 ? __("Line profiling report ready") : __("Profiler report ready")))),
 				args: failed && phase2 && data.error ? [data.error] : undefined,
 				indicator: failed ? "red" : (pending || data.empty ? "orange" : "blue"),
 			},
