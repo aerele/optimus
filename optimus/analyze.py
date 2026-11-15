@@ -855,6 +855,14 @@ def _arm_phase2(docname: str, context) -> None:
 	)
 
 
+ANALYZE_FAILURE_WARNING = "Analysis failed ({0}). Details are in the Error Log under 'optimus ai analyze'."
+
+
+def analyze_failure_warning(exc):
+	"""English text stored for the session form, which translates it; names the error type only."""
+	return ANALYZE_FAILURE_WARNING.format(type(exc).__name__[:80])
+
+
 _ANALYZE_PENDING = frozenset({"Stopping", "Capturing Background Jobs", "Analyzing"})
 
 
@@ -967,7 +975,11 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		_publish_progress(20, "Running EXPLAIN on queries", session_uuid)
 		enrichment_warnings = _enrich_recordings(recordings)
 
-		context = AnalyzeContext(session_uuid=session_uuid, docname=docname)
+		context = AnalyzeContext(
+			session_uuid=session_uuid,
+			docname=docname,
+			deadline=analyze_start + ANALYZE_TOTAL_BUDGET_SECONDS,
+		)
 		context.warnings.extend(enrichment_warnings)
 		omitted_warning = _omitted_values_warning(recordings)
 		if omitted_warning:
@@ -1118,11 +1130,10 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		changed = None
 		try:
 			from optimus.recording_bundle import SNAPSHOT_FAILURE_WARNING, SnapshotUnavailable
-			snapshot_missing = isinstance(exc, SnapshotUnavailable)
+			warning = SNAPSHOT_FAILURE_WARNING if isinstance(exc, SnapshotUnavailable) else analyze_failure_warning(exc)
 			def fail():
 				frappe.db.set_value("Optimus Session", docname, "status", "Failed")
-				if snapshot_missing:
-					frappe.db.set_value("Optimus Session", docname, "analyzer_warnings", SNAPSHOT_FAILURE_WARNING)
+				frappe.db.set_value("Optimus Session", docname, "analyzer_warnings", warning)
 			changed = _with_active_analysis(docname, fail, statuses=_ANALYZE_PENDING)
 		except Exception:
 			pass

@@ -32,8 +32,8 @@ ALLOWED = (
 	Row(
 		None,
 		r"^could not import 'rq(\.timeouts)?': No module named 'rq'",
-		114,
-		"rq tests run in ai-quality.yml, which installs rq; ci.yml has no rq (114 on 3.10 and 3.14)",
+		115,
+		"rq tests run in ai-quality.yml, which installs rq; ci.yml has no rq (115 on 3.10 and 3.14)",
 	),
 	Row(
 		None,
@@ -143,6 +143,13 @@ ALLOWED = (
 		r"real Frappe is not installed",
 		1,
 		"a fact about Frappe's error_log schema",
+	),
+	Row(
+		"test_index_suggestions_db_calls.py",
+		r"^no Frappe checkout found next to this app",
+		1,
+		"compares the pinned optimizer copies with a Frappe checkout's files; CI has no Frappe, "
+		"the sha256 pin test and the copies themselves run here",
 	),
 	Row(
 		"test_permissions_download_boundary.py",

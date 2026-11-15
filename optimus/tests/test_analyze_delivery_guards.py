@@ -238,3 +238,42 @@ def test_no_omitted_values_warning_for_a_clean_capture(delivery, monkeypatch):
 	monkeypatch.setattr(analyze, "_persist", lambda docname, context, *a: persisted.append(list(context.warnings)))
 	analyze.run("s")
 	assert not any("omitted" in w for w in persisted[0])
+
+
+def test_generic_failure_stores_its_type_for_the_session_form(delivery, monkeypatch):
+	def boom(*a, **kw):
+		raise KeyError("secret-detail")
+	monkeypatch.setattr(analyze, "_persist", boom)
+	with pytest.raises(KeyError):
+		analyze.run("s")
+	writes = [e[2] for e in delivery.events if e[:2] == ("write", "analyzer_warnings")]
+	assert writes == [analyze.ANALYZE_FAILURE_WARNING.format("KeyError")]
+	assert "secret-detail" not in writes[0] and "optimus ai analyze" in writes[0]
+	assert delivery.status == "Failed"
+
+
+def test_snapshot_failure_keeps_its_own_warning(delivery):
+	delivery.requested.append("missing")
+	with pytest.raises(recording_bundle.SnapshotUnavailable):
+		analyze.run("s")
+	writes = [e[2] for e in delivery.events if e[:2] == ("write", "analyzer_warnings")]
+	assert writes == [recording_bundle.SNAPSHOT_FAILURE_WARNING]
+
+
+def test_the_analyzers_get_the_overall_deadline_in_their_context(delivery, monkeypatch):
+	import time
+
+	seen = []
+
+	def spy(recordings, context):
+		seen.append(context.deadline)
+		from optimus.analyzers.base import AnalyzerResult
+
+		return AnalyzerResult()
+
+	monkeypatch.setattr(analyze, "_get_analyzers", lambda: [spy])
+	before = time.monotonic()
+	analyze.run("s")
+
+	assert len(seen) == 1
+	assert seen[0] - before == pytest.approx(analyze.ANALYZE_TOTAL_BUDGET_SECONDS, abs=30)

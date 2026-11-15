@@ -1,5 +1,6 @@
 """Line profiling delivery uses SQL ownership, never an HTTP inline fallback."""
 
+import json
 from copy import deepcopy
 from importlib import import_module
 from types import SimpleNamespace
@@ -917,3 +918,170 @@ def test_recovery_scan_publishes_the_matching_event(worker, monkeypatch, saved, 
 	worker.mod._recover_pending()
 	assert worker.calls.events[-1][0] == event
 	assert worker.calls.events[-1][1]["render_pending"] is pending
+
+
+def _expired_recording(phase2, **values):
+	import datetime
+	phase2.row().update(status="Recording", modified=datetime.datetime(2026, 1, 1), **values)
+	return datetime.datetime(2026, 1, 1, 0, 11)
+
+
+@pytest.mark.parametrize(("samples", "outcome", "status"), [
+	(True, "analyze", "Recording"), (False, True, "Failed"), (None, "retry", "Recording")])
+def test_expired_recording_is_analyzed_only_when_it_captured_samples(phase2, samples, outcome, status):
+	cutoff = _expired_recording(phase2)
+	with phase2.db.transaction():
+		got = phase2.mod.expire_legacy("fake-session-doc", "fake-phase2", status="Recording", cutoff=cutoff, samples=samples)
+	assert got == outcome and phase2.row()["status"] == status
+
+
+@pytest.mark.parametrize("samples", [True, None])
+def test_expired_recording_with_samples_is_failed_once_past_the_retry_bound(phase2, samples):
+	import datetime
+	_expired_recording(phase2)
+	late = datetime.datetime(2026, 1, 1) + datetime.timedelta(minutes=phase2.mod.EXPIRED_RETRY_MINUTES + 1)
+	with phase2.db.transaction():
+		got = phase2.mod.expire_legacy("fake-session-doc", "fake-phase2", status="Recording", cutoff=late, samples=samples)
+	assert got is True and phase2.row()["status"] == "Failed"
+
+
+def test_expired_recording_is_still_retried_just_inside_the_bound(phase2):
+	import datetime
+	_expired_recording(phase2)
+	inside = datetime.datetime(2026, 1, 1) + datetime.timedelta(minutes=phase2.mod.EXPIRED_RETRY_MINUTES - 1)
+	with phase2.db.transaction():
+		assert phase2.mod.expire_legacy("fake-session-doc", "fake-phase2", status="Recording", cutoff=inside, samples=True) == "analyze"
+
+
+@pytest.fixture
+def expired(phase2, monkeypatch):
+	"""analyze_expired with Redis and admission replaced by recorders."""
+	from optimus.line_profile import capture
+	calls = []
+	phase2.calls = calls
+	phase2.db.rows["Optimus Session"]["fake-session-doc"]["user"] = "parent-user"
+	import datetime
+	phase2.row().update(status="Recording", recording_user="recorder", modified=datetime.datetime(2026, 1, 1))
+	phase2.cutoff = datetime.datetime(2026, 1, 1, 0, 11)
+	phase2.reply = {"status": "Analyzing"}
+	def stop(run_uuid, user):
+		calls.append(("stop", run_uuid, user))
+	def request(docname, session_uuid, run_uuid, user, **kw):
+		calls.append(("request", docname, session_uuid, run_uuid, user, kw))
+		if isinstance(phase2.reply, Exception):
+			raise phase2.reply
+		return phase2.reply
+	def retry(operation, **kw):
+		with phase2.db.transaction():
+			return operation()
+	monkeypatch.setattr(capture, "stop_line_profile_pass", stop)
+	monkeypatch.setattr(capture, "cleanup_run", lambda run_uuid: pytest.fail("a refused run must keep its samples"))
+	monkeypatch.setattr(phase2.mod, "request", request)
+	monkeypatch.setattr(phase2.mod, "_retry_sql", retry)
+	return phase2
+
+
+def test_expired_recording_stops_capture_then_requests_analysis_as_the_recorder(expired):
+	expired.mod.analyze_expired("fake-session-doc", "fake-phase2", cutoff=expired.cutoff)
+	assert expired.calls == [
+		("stop", "fake-phase2", "recorder"),
+		("request", "fake-session-doc", "fake-session", "fake-phase2", "recorder", {"from_recording": True}),
+	]
+	assert expired.row()["status"] == "Recording"
+
+
+def test_expired_legacy_row_without_recording_user_uses_the_session_user(expired):
+	expired.row()["recording_user"] = ""
+	expired.mod.analyze_expired("fake-session-doc", "fake-phase2", cutoff=expired.cutoff)
+	assert [c[:3] for c in expired.calls if c[0] == "stop"] == [("stop", "fake-phase2", "parent-user")]
+	assert expired.calls[1][4] == "parent-user"
+
+
+@pytest.mark.parametrize("reason", ["permission", "retry_limit", "not_found", "not_retryable", "something_new"])
+def test_refusal_that_will_not_clear_fails_the_run_and_keeps_its_samples(expired, reason):
+	expired.reply = {"status": "Refused", "reason": reason}
+	expired.mod.analyze_expired("fake-session-doc", "fake-phase2", cutoff=expired.cutoff)
+	assert expired.row()["status"] == "Failed"
+	assert expired.mod.EXPIRED_NOT_ANALYZED in expired.row()["warnings_json"]
+
+
+@pytest.mark.parametrize("reason", ["not_ready", "ai_refresh", "busy"])
+def test_refusal_that_clears_by_itself_leaves_the_run_for_the_next_sweep(expired, reason):
+	expired.reply = {"status": "Refused", "reason": reason}
+	expired.mod.analyze_expired("fake-session-doc", "fake-phase2", cutoff=expired.cutoff)
+	assert expired.row()["status"] == "Recording"
+
+
+@pytest.mark.parametrize("reason", ["not_ready", "ai_refresh", "busy"])
+def test_passing_refusal_fails_the_run_once_past_the_retry_bound(expired, reason):
+	import datetime
+	expired.reply = {"status": "Refused", "reason": reason}
+	late = datetime.datetime(2026, 1, 1) + datetime.timedelta(minutes=expired.mod.EXPIRED_RETRY_MINUTES + 1)
+	expired.mod.analyze_expired("fake-session-doc", "fake-phase2", cutoff=late)
+	assert expired.row()["status"] == "Failed"
+	assert expired.mod.EXPIRED_NOT_ANALYZED in expired.row()["warnings_json"]
+
+
+def test_refusal_that_already_failed_the_run_keeps_its_own_reason(expired, monkeypatch):
+	def refused(*a, **kw):
+		expired.row().update(status="Failed", warnings_json='["needs a worker"]')
+		return {"status": "Refused", "reason": "no_worker"}
+	monkeypatch.setattr(expired.mod, "request", refused)
+	expired.mod.analyze_expired("fake-session-doc", "fake-phase2", cutoff=expired.cutoff)
+	assert expired.row()["warnings_json"] == '["needs a worker"]'
+
+
+def test_request_error_fails_the_run_and_still_raises(expired):
+	expired.reply = RuntimeError("boom")
+	with pytest.raises(RuntimeError):
+		expired.mod.analyze_expired("fake-session-doc", "fake-phase2", cutoff=expired.cutoff)
+	assert expired.row()["status"] == "Failed"
+
+
+def test_expired_run_with_no_identity_fails_without_requesting(expired):
+	expired.row()["recording_user"] = ""
+	expired.db.rows["Optimus Session"]["fake-session-doc"]["user"] = ""
+	expired.mod.analyze_expired("fake-session-doc", "fake-phase2", cutoff=expired.cutoff)
+	assert expired.row()["status"] == "Failed"
+	assert expired.calls == []
+
+
+def test_retry_bound_is_pinned(phase2):
+	assert phase2.mod.EXPIRED_RETRY_MINUTES == 60
+
+
+@pytest.mark.parametrize(("samples", "specific"), [(True, True), (None, True), (False, False)])
+def test_failed_after_the_bound_says_what_actually_happened(phase2, samples, specific):
+	import datetime
+	_expired_recording(phase2)
+	late = datetime.datetime(2026, 1, 1) + datetime.timedelta(minutes=phase2.mod.EXPIRED_RETRY_MINUTES + 1)
+	with phase2.db.transaction():
+		phase2.mod.expire_legacy("fake-session-doc", "fake-phase2", status="Recording", cutoff=late, samples=samples)
+	warnings = json.loads(phase2.row()["warnings_json"])
+	expected = phase2.mod.EXPIRED_NOT_ANALYZED if specific else "Line profiling recording expired."
+	assert len(warnings) == 1 and warnings[0].startswith(expected[:30])
+	assert (warnings[0] == phase2.mod.EXPIRED_NOT_ANALYZED) is specific
+
+
+def test_the_retry_clock_runs_from_the_start_not_from_a_parent_save(phase2):
+	"""A parent save moves the child's modified; the give-up time must not follow it."""
+	import datetime
+	started = datetime.datetime(2026, 1, 1)
+	cutoff = started + datetime.timedelta(minutes=phase2.mod.EXPIRED_RETRY_MINUTES + 5)
+	phase2.row().update(status="Recording", started_at=started, modified=cutoff - datetime.timedelta(minutes=1))
+	with phase2.db.transaction():
+		got = phase2.mod.expire_legacy("fake-session-doc", "fake-phase2", status="Recording", cutoff=cutoff, samples=True)
+	assert got is True and phase2.row()["status"] == "Failed"
+
+
+def test_giving_up_is_logged_once(phase2, monkeypatch):
+	import datetime
+
+	from optimus import safe_call
+	lines = []
+	monkeypatch.setattr(safe_call, "log_error_line", lines.append)
+	_expired_recording(phase2)
+	late = datetime.datetime(2026, 1, 1) + datetime.timedelta(minutes=phase2.mod.EXPIRED_RETRY_MINUTES + 1)
+	with phase2.db.transaction():
+		phase2.mod.expire_legacy("fake-session-doc", "fake-phase2", status="Recording", cutoff=late, samples=True)
+	assert len(lines) == 1 and "fake-phase2" in lines[0] and "samples are kept" in lines[0]

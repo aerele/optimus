@@ -8,15 +8,14 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.176] - 2026-11-07
+## [0.12.181] - 2026-11-07
 
 ### Fixed
 
 - A request whose form data is nested thousands of levels deep (or whose JSON text field is) is now redacted: the over-deep part is replaced by `<REDACTED:nested too deep>`, so the secret inside is never stored, and the report no longer fails to render. Before, the nesting crashed the redaction, the form data was kept as sent, and the report broke on it. Normal requests, nested up to 100 levels, are unchanged. The report shows how many values were omitted this way ("N request values were omitted at capture...").
-- If redaction of a request's form data or headers fails for any other reason, the recording now holds `<REDACTED:redaction failed>` in their place instead of the raw values, and one line naming only the error class is logged at error level, at most once a minute.
+- If redaction of a request's form data or headers fails for any other reason, the recording now holds `<REDACTED:redaction failed>` in their place instead of the raw values, and one line naming only the field and the error class is logged at error level, once per process.
 - Request data that refers to itself, or shares the same sub-part so many times that walking it would take forever, no longer hangs the request: the repeated part is replaced by `<REDACTED:circular>` or, past 100,000 containers, `<REDACTED:too large>`. Sets, `dict.keys()` and `dict.items()` are redacted like lists and dicts; bytes, `dict.values()` and any other object are replaced by `<REDACTED:unsupported type>` instead of being kept as is.
 - A text field that looks like JSON but cannot be read (cut off or malformed) and names a sensitive key such as `password` is now replaced by `<REDACTED:unreadable json>` instead of being kept. A JSON text with a repeated key no longer comes back unchanged when the last copy was already masked. Each attempt to read a JSON text now counts against the same 100,000 budget, and text that cannot be JSON is not parsed, so a form full of tiny `{x` strings no longer holds the request.
-- If Optimus cannot read its own settings while a request is recorded, the request's form data and headers are replaced by `<REDACTED:redaction failed>` and an SQL statement by the omitted-SQL note, with one error line in the log, instead of being redacted with the default key list alone. An RQ job timeout hit while redacting now stops the job.
 - A request whose `action` or `method` is not text (for example `{"action": 5}`) no longer breaks the actions table or the step labels.
 - A request whose `cmd` is not text (for example `{"cmd": 5}` in a JSON body) no longer writes an Error Log entry for every request, is no longer skipped from profiling, and no longer breaks the actions table. Recordings already stored with such a value are read as having no `cmd`.
 - The "Generated" time of a report and the time on an AI fix now show in the site's time zone instead of UTC or the server's own zone. Times already stored are unchanged and are converted when shown.
@@ -26,6 +25,128 @@ versions may contain breaking changes see migration notes below).
 ### Action needed
 
 - Recordings captured before this version are not cleaned. Their form data and headers were stored as sent, so a payload that was nested too deep is still in Redis and in any saved session until it expires or is deleted. The report cuts deep nesting when it is built, but the analysis step, the doc-event view and direct reads of a stored recording still see the stored data. To remove them, delete the old Optimus Sessions and let Redis recordings expire, or clear them from Redis.
+
+---
+
+## [0.12.179] - 2026-11-07
+
+### Fixed
+
+- A session whose analysis failed now says why on its form: the error type and where the details are logged (the Error Log entry titled "optimus ai analyze"). Users who can retry also see to use Retry Analyze; others are told to ask the session owner, and only a System Manager is pointed to the Error Log. A long error type wraps inside the notice on a narrow screen. Before, the form only said Failed.
+- A line profiling pass left recording past its time window is now analyzed with the lines it captured, as if you had pressed Stop, instead of being failed with its samples deleted. If that cannot be done right away (the session is busy, an AI refresh is running, or the sample count cannot be read), it is tried again on each check for up to an hour; after that (counted from when the run started), or at once when the user lost access or the retry limit is reached, the run is marked Failed with a message that its analysis could not start, and its samples stay so that Retry can use them while they are kept (up to 24 hours). Each give-up and each unreadable sample count is written once to the optimus log. A run that captured nothing still fails as before.
+- Picking the same function twice (an alias, or a doubled app prefix) now profiles it once. Different functions that cannot be profiled each keep their own reason.
+- Line profiling picker paths are now read correctly when a bench is installed under a folder named `apps`, or when a library is loaded from `site-packages`.
+- More of the pill, the start dialog, the first-visit notice and the session form can now be translated: messages built from pieces (framework frame count, auto-expanded functions, runs in progress, pop-up errors) are whole sentences with placeholders, and the session list shows translated status labels.
+
+### Not covered
+
+- Failure texts written by older versions are shown as stored (English). The stale-analysis, unsaved-snapshot and inline-cap texts are translated on the form.
+- The picker's "nothing to pick" hints, written by the server, and the default session titles (for example "Profiling session") are still English.
+- A failed analysis on a session that predates this version shows no reason until it is retried and fails again.
+
+---
+
+## [0.12.178] - 2026-11-07
+
+### Fixed
+
+- Page-load timings are no longer lost. First Contentful Paint, the early Largest Contentful Paint and navigation timing were dropped because the browser ignored our request for timings recorded before the script loaded. Each page load now reports once, under the page's own address, instead of being split across two rows when Desk changes the URL during load.
+- A malformed frontend timing (text or an oversized number where a number belongs) is now ignored. Before, it could hide the whole Frontend section or make the report fail to render.
+- A timing that is negative or absurdly large (over ten minutes, or a size over 2 GB) is now ignored instead of becoming a false slow-page finding, and a bad row can no longer blank a good value from the same page. The report counts the ignored rows and says when no page-load timings were captured. One bad row in a batch no longer rejects the other rows, and a single oversized entry is dropped.
+- On a phone the Frontend tiles stack and its two tables scroll inside their own box instead of widening the page. A burst of layout shifts can no longer push out the page's first paint, and finding a recording already running no longer discards buffered request timings.
+- Timings from a page that was loaded before you pressed Record are no longer added to the session, and neither are request timings left over from earlier. The Frontend section now says so: to include a page's load, reload it while recording.
+
+### Not covered
+
+- Page-load timings are only captured for the load of the page itself; moving between Desk pages afterwards adds none. Largest Contentful Paint needs Firefox 122 or Safari 26.2 and newer, and Cumulative Layout Shift is Chromium-only; those cells stay empty elsewhere.
+- Timings are still sent when you press Stop or the page closes. A session that ends by itself does not send them.
+
+---
+
+## [0.12.177] - 2026-11-07
+
+### Fixed
+
+- Secrets in URL query strings and fragments are now masked. A password-reset link, an `api_key`, `token`, `sid` or signed-link `_signature` in the URL no longer shows in a recorded header (the `Referer`), in the browser timing URLs of a report (XHR and page URLs), or in a report's request details. Only the secret value is replaced; the rest of the URL stays readable (`?api_key=<REDACTED>&doctype=User`). The browser URLs are also masked before they are stored. A URL inside a longer text value is masked too, and `user:password@` in a URL becomes `<REDACTED>@`.
+- In a URL, these parameter names are always masked: `key`, `signature`, `sig`, `code`, `auth`, `jwt`, `bearer`, `session`, `pin`, `refresh`, `reset_key`, anything ending in `_signature` or `_sig` (`X-Amz-Signature`, `oauth_signature`), `X-Amz-Credential` and `X-Amz-Security-Token`, plus every name that is sensitive as a field (`token`, `password`, `sid`, ...). Names that only contain these words (`item_code`, `code_name`, `session_user`) stay visible. `code`, `session` and the other short names are masked in URLs only, never as form fields or header names.
+- Header and field names such as `X-Api-Key`, `api-key`, `X-Session-Id`, `X-Session`, `accessKey`, `privateKey`, `sid`, `Cf-Access-Jwt-Assertion`, `jwt`, `X-Signature`, `X-Hub-Signature-256`, `Stripe-Signature`, `WWW-Authenticate`, `Proxy-Authenticate`, `Authentication` and `Sec-WebSocket-Key` are now treated as sensitive. `Content-Type`, `Accept`, `Origin`, `Referer`, `Host`, `Keep-Alive`, `Sec-Fetch-Site` and `X-Frappe-CMD` stay visible, and the CSRF token stays masked.
+- A bare `key` is always masked inside a URL string. In the recorded form data it is masked only on a password reset (`/update-password?key=...`) or a print share link (`/printview?...&key=...`), where it is a credential; on any other request `key` is usually an ordinary field such as a setting name and stays visible.
+- The Error Log scrub for AI errors also masks secret query values in any URL it finds in a record.
+- A secret in a list filter is masked too: a row such as `["User", "password", "=", "..."]` in the filters of a request or of a URL has its value replaced when the field name is sensitive. Punctuation after a URL in running text (`).,;`, a closing quote or bracket) is kept.
+- Not covered: a secret inside a URL path (for example `/reset/<token>`), a name written with look-alike characters (homoglyphs), and a `key=value` pair in free text that is not inside a URL cannot be detected and are shown as is. OAuth `state` is not masked (`code` now is, in URLs). Sessions recorded before this version keep their raw URLs in the stored session data (the Desk form and the exported JSON); their reports and the AI Steps text show them masked, so delete a session that profiled a reset or API-key link. A URL longer than 8 KiB loses its whole query part (`?<query omitted>`).
+- Masking a URL is now linear in its length. A guest could send a long run of text ending in `@` (a form value, the `Referer` header or a browser timing URL) and keep a worker busy for many seconds. A URL over 8 KiB is no longer scanned past its first 8 KiB, and user info (`user:pass@`) stops at a space.
+- A secret inside a URL that is itself the value of a parameter is masked too, whether it is percent-encoded or not: `/login?redirect-to=%2Fupdate-password%3Fkey%3D...`, `?next=/a?token=...` and a second `?`. The rest of the URL stays readable. A value nested more than four levels deep is masked whole.
+- Header names that end in `-Key` (`Ocp-Apim-Subscription-Key`, `X-Master-Key`, `X-Key`) and names with an `auth` or `bearer` part (`X-Auth`, `Auth`, `X-Bearer`) are masked. `Idempotency-Key` stays visible. This applies to header names only, so a form field called `sort_key` or `auth` is not changed.
+- The `code` of an OAuth login callback is masked in the recorded form data.
+- If masking the form data or the headers of a recorded request fails, that field is stored as `{"_optimus": "<REDACTION FAILED: omitted>"}` (the other field is still masked) and one ERROR line naming the error class is written to the log. Before, a failure left both fields raw and silent.
+- Your own `sensitive_form_keys` are now applied in every place a URL or header is masked (capture, the browser timing store, report context, the frontend analyzer, AI Steps and the AI error scrub). If Optimus Settings cannot be read, one ERROR line is logged and only the built-in names are applied; before, the failure was silent.
+- A list is treated as a filter row only when its operator is a real one (`=`, `like`, `in`, ...), and JSON text that is cut short or nested too deeply to parse has the values after secret names masked instead of being kept as it was.
+
+### Action needed
+
+Masking applies as data is recorded and rendered. Rows stored before this version are not rewritten:
+
+- Delete any Optimus Session that profiled a password-reset link, a print share link, an OAuth login or a request with an API key in its URL or headers. Its stored form data and headers keep the raw values (the report and the AI Steps text show them masked).
+- Old AI error rows can still hold URLs with secrets. Run `bench --site <site> execute optimus.maintenance.scrub_error_log_secrets --kwargs "{'dry_run': False}"`; to delete them instead, count with `bench --site <site> execute optimus.maintenance.purge_ai_error_logs --kwargs "{'dry_run': True}"`, then run it with `'dry_run': False`. Both lock Error Log while they run, so prefer off-peak hours.
+- Rotate any credential that appeared in a stored URL or header, and in a backup taken before this upgrade.
+
+---
+
+## [0.12.175] - 2026-11-07
+
+### Fixed
+
+- Scheduled jobs from any app, and Optimus's own jobs, no longer show up in a session you record. Before, if you were recording while the scheduler queued an hourly job, that job was recorded into your session and analysis waited for it. Jobs queued from inside an Optimus job, or from inside a scheduled job the scheduler started, are left out as well. A job or scheduled job you start yourself from a page (for example Execute on a scheduled job in Desk), and the jobs it starts, are still recorded. A scheduled job counts as started by the scheduler when it is queued with no web request and no running job, so one queued from `bench execute` or the console is left out too.
+- A session stuck in Stopping is analyzed again once, even when two schedulers or a manual `bench execute` run the janitor at the same time. A lock wait or deadlock on one stuck session no longer stops the sweep for the others.
+- The daily Redis cleanup no longer retries the same failing sessions every run. It starts from a different place each day, skips a session that raises and carries on, and writes one log line with the number it could not clean.
+
+### Not covered
+
+- Two workers can still receive the same analyze job twice if the queue itself delivers it twice; that is a separate follow-up.
+
+---
+
+## [0.12.174] - 2026-11-07
+
+### Fixed
+
+- Missing-index suggestions now read each table's structure and row count once per analysis instead of once per query. A session with 200 query shapes on one table used to send about 1,800 statements to the database for this; it now sends about 10 (rough figures; they depend on the queries).
+- A column whose distinct-value count times out is no longer tried again for every query on that table, which could add minutes to an analysis. Only errors that would repeat are remembered; a lost connection or lock wait is tried again.
+- Index suggestions no longer write an "optimizer failure" Error Log entry for a column named after an SQL reserved word (such as `read`), including when the table reads are not cached. The report now says "N query shape(s) use a column name MariaDB rejects unquoted, such as `read`; their cardinality was not checked", instead of blaming the SQL parser.
+- Index suggestions now stop after 2 minutes (or sooner if the whole analysis is near its 20-minute limit), check the slowest queries first, and say in the report how many queries were not checked. The Error Log also gets a line when this limit stops the check.
+- A one-off statement timeout while reading a table's structure is no longer remembered for the rest of the analysis; only the distinct-value count remembers a timeout.
+- A syntax error from the distinct-value count that does not look like a reserved word is now written to the log once, so a parser bug does not go unseen.
+
+---
+
+## [0.12.173] - 2026-11-07
+
+### Fixed
+
+- The Profiler pill now notices within a minute when a session ended by itself (10 minutes without activity, or the per-session request limit). It says so once, in plain words, and analyzes what was captured. Before, the pill kept saying "Recording" until you clicked it. This only applies while the Desk tab is visible; a background tab catches up when you return to it.
+- Opening Desk while one of your sessions has already ended by itself now analyzes that session right away, and the pill shows "Analyzing" until it is done, so a new session cannot be started from the pill meanwhile. With the scheduler disabled that analysis runs inside the page-load request.
+- The pill is now a real button: you can reach it with Tab, open and stop with Enter or Space, it shows a focus ring, and its tooltip says what a click does ("Start a profiling session", "Stop recording and analyze") instead of a build number. The running timer is no longer read out every second by screen readers.
+- A failed start keeps the dialog open with your label, so you can fix the problem and press Start again. Pressing Enter or Ctrl+S twice no longer starts two sessions. Closing the dialog with Escape keeps what you typed for the next time you open it on the same page (kept in this tab only, gone on reload).
+- Clicking Stop after another tab has already stopped that session now says what happened, instead of leaving the pill stuck on "Stopping".
+- The pill, the start dialog note, the first-visit notice and the line profiling picker now follow the Desk dark theme, Windows high-contrast mode and the reduced-motion setting, and their text meets the contrast minimums. The pill now stays below Desk's pop-up notices, so they are never covered, and below an open dialog's backdrop.
+- The "recording stopped after 10 minutes" and "request limit" notices, and the pill's "taking unusually long" notices, can now be translated. Before, they always showed in English.
+- The pill now keeps its 12px corner offset on narrow screens, and the first-visit notice keeps a margin from both screen edges at 320px wide.
+- Screen readers now hear the pill's state changes (Recording, Stopping, Analyzing, Report ready) once each, without the running timer.
+- If the pill cannot stop a session that ended by itself, it now says so and points you to the session, instead of saying it already stopped. If a Stop is not confirmed and the status check fails, the pill no longer waits up to 15 minutes on "Stopping".
+- Pressing Escape in a dialog or input no longer dismisses the first-visit notice.
+
+### Not covered
+
+- Line profiling recordings are not checked by the pill; they are still stopped from the session form.
+- A session that reaches the request limit keeps showing "Recording" on the pill until it ends; the limit is explained when the session ends.
+
+---
+
+## [0.12.172] - 2026-11-06
+
+### Fixed
+
+- Line profiling now captures the whole function. Before, the function's source was cut at its first blank line, so any timed line after it was missing from the drill-down, a function whose timed lines were all below the cut was shown as "not invoked", and the function's total time was understated, which inflated the severity of Hot Line findings. Some functions also failed to start with a server error. A function you chose whose source cannot be read in full now refuses the run with a message naming the function and the reason; a function added automatically is skipped instead. A source line longer than 20,000 characters, or too many source lines in one run, now shows a clear message instead of a server error. Runs recorded on 0.12.72 to 0.12.141 may be incomplete, so re-record them.
 
 ---
 

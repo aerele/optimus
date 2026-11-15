@@ -14,6 +14,8 @@ import importlib
 import sys
 import types
 
+import pytest
+
 
 def _install_frappe_stub(monkeypatch):
 	"""Build a minimal ``frappe`` stub the janitor module can import. All
@@ -28,6 +30,8 @@ def _install_frappe_stub(monkeypatch):
 	stub._logger = types.SimpleNamespace(info=lambda msg: None)
 	stub._get_all_return = {}  # keyed by doctype → list of rows
 	stub._enqueue_calls = []
+	stub._get_value_calls = []
+	stub._bumped = set()  # rows another sweep already claimed or touched
 
 	class _DB:
 		def get_all(self, doctype, filters=None, fields=None, **kwargs):
@@ -35,6 +39,8 @@ def _install_frappe_stub(monkeypatch):
 			return list(stub._get_all_return.get(doctype, []))
 
 		def set_value(self, doctype, name_or_filters, fieldname_or_dict, *args, **kwargs):
+			if isinstance(name_or_filters, str):
+				stub._bumped.add(name_or_filters)  # a write bumps modified past any cutoff
 			stub._set_value_calls.append((doctype, name_or_filters, fieldname_or_dict))
 			return True
 
@@ -44,7 +50,10 @@ def _install_frappe_stub(monkeypatch):
 		def rollback(self):
 			pass
 
-		def get_value(self, *args, **kwargs):
+		def get_value(self, doctype, filters=None, fieldname=None, **kwargs):
+			stub._get_value_calls.append((doctype, filters, fieldname, kwargs))
+			if kwargs.get("for_update") and isinstance(filters, dict) and filters["name"] not in stub._bumped:
+				return filters["name"]
 			return None
 
 		def sql(self, *args, **kwargs):
@@ -286,26 +295,188 @@ class TestSweepStuckAnalyzing:
 # --------------------------------------------------------------------------
 
 class TestSweepStaleStopping:
-	def test_reenqueues_each_stale_stopping_row(self, monkeypatch):
-		stub = _install_frappe_stub(monkeypatch)
+	STATUSES = ["Stopping", "Capturing Background Jobs"]
+
+	def _two_stale(self, stub):
 		stub._get_all_return["Optimus Session"] = [
 			{"name": "PS-1", "session_uuid": "u1"},
 			{"name": "PS-2", "session_uuid": "u2"},
 		]
+
+	def test_reenqueues_each_stale_stopping_row(self, monkeypatch):
+		stub = _install_frappe_stub(monkeypatch)
+		self._two_stale(stub)
 		janitor = _reload_janitor(monkeypatch)
 		janitor._sweep_stale_stopping()
 
-		# One batched set_value re-affirming Stopping (bumps modified → backoff).
-		set_value_calls = [c for c in stub._set_value_calls if c[0] == "Optimus Session"]
-		assert len(set_value_calls) == 1
-		_, filters, fields = set_value_calls[0]
-		assert filters["name"] == ("in", ["PS-1", "PS-2"])
-		assert filters["status"] == ["in", ["Stopping", "Capturing Background Jobs"]]
-		assert fields["status"] == "Stopping"
-		# Analyze re-enqueued once per stranded row.
-		assert len(stub._enqueue_calls) == 2
+		# Each row is re-affirmed as Stopping on its own (bumps modified, so a
+		# still-stuck row backs off one window) and analyze is queued once per row.
+		set_values = [c for c in stub._set_value_calls if c[0] == "Optimus Session"]
+		assert [(c[1], c[2]) for c in set_values] == [("PS-1", {"status": "Stopping"}), ("PS-2", {"status": "Stopping"})]
 		methods = [c[0][0] for c in stub._enqueue_calls]
 		assert methods == ["optimus.analyze.run", "optimus.analyze.run"]
+
+	def test_the_claim_locks_the_row_and_rechecks_status_and_age(self, monkeypatch):
+		stub = _install_frappe_stub(monkeypatch)
+		self._two_stale(stub)
+		janitor = _reload_janitor(monkeypatch)
+		janitor._sweep_stale_stopping()
+
+		_, filters, _, kwargs = stub._get_value_calls[0]
+		assert kwargs["for_update"] is True
+		assert filters["name"] == "PS-1"
+		assert filters["status"] == ["in", self.STATUSES]
+		assert filters["modified"][0] == "<"
+
+	@pytest.mark.parametrize("bumped", [False, True])
+	def test_every_claim_commits_to_release_the_lock(self, monkeypatch, bumped):
+		stub = _install_frappe_stub(monkeypatch)
+		stub._get_all_return["Optimus Session"] = [{"name": "PS-1", "session_uuid": "u1"}]
+		if bumped:
+			stub._bumped.add("PS-1")
+		janitor = _reload_janitor(monkeypatch)
+		commits = []
+		monkeypatch.setattr(janitor, "safe_commit", lambda: commits.append(1))
+		janitor._sweep_stale_stopping()
+		assert len(commits) == 1
+
+	def test_two_sweeps_over_one_stale_row_enqueue_once(self, monkeypatch):
+		stub = _install_frappe_stub(monkeypatch)
+		stub._get_all_return["Optimus Session"] = [{"name": "PS-1", "session_uuid": "u1"}]
+		janitor = _reload_janitor(monkeypatch)
+		janitor._sweep_stale_stopping()
+		janitor._sweep_stale_stopping()  # both listed the row before either claimed it
+		assert len(stub._enqueue_calls) == 1
+
+	def test_a_row_touched_between_listing_and_claim_is_skipped(self, monkeypatch):
+		stub = _install_frappe_stub(monkeypatch)
+		self._two_stale(stub)
+		stub._bumped.add("PS-1")
+		janitor = _reload_janitor(monkeypatch)
+		janitor._sweep_stale_stopping()
+
+		assert [c[1]["session_uuid"] for c in stub._enqueue_calls] == ["u2"]
+		assert [c[1] for c in stub._set_value_calls] == ["PS-2"]
+
+	def test_the_enqueue_carries_a_fixed_job_id_and_deduplicates(self, monkeypatch):
+		stub = _install_frappe_stub(monkeypatch)
+		stub._get_all_return["Optimus Session"] = [{"name": "PS-1", "session_uuid": "u1"}]
+		janitor = _reload_janitor(monkeypatch)
+		janitor._sweep_stale_stopping()
+
+		kwargs = stub._enqueue_calls[0][1]
+		assert kwargs["job_id"] == "optimus-analyze-u1"
+		assert kwargs["deduplicate"] is True
+		assert kwargs["session_uuid"] == "u1" and kwargs["queue"] == "long"
+
+	def test_a_deduplicated_enqueue_is_logged(self, monkeypatch):
+		stub = _install_frappe_stub(monkeypatch)
+		stub._get_all_return["Optimus Session"] = [{"name": "PS-1", "session_uuid": "u1"}]
+		janitor = _reload_janitor(monkeypatch)
+		lines = []
+		monkeypatch.setattr(janitor.safe_call, "log_error_line", lambda msg, **kw: lines.append(msg))
+		janitor._sweep_stale_stopping()  # the stub enqueue returns None, as a deduplicated job does
+		assert len(lines) == 1 and "already queued or running" in lines[0]
+
+	def test_a_queued_job_is_not_logged_as_deduplicated(self, monkeypatch):
+		stub = _install_frappe_stub(monkeypatch)
+		stub._get_all_return["Optimus Session"] = [{"name": "PS-1", "session_uuid": "u1"}]
+		stub.enqueue = lambda *a, **kw: object()
+		janitor = _reload_janitor(monkeypatch)
+		lines = []
+		monkeypatch.setattr(janitor.safe_call, "log_error_line", lambda msg, **kw: lines.append(msg))
+		janitor._sweep_stale_stopping()
+		assert lines == []
+
+	def test_a_failing_claim_write_skips_the_row_and_releases_the_lock(self, monkeypatch):
+		stub = _install_frappe_stub(monkeypatch)
+		self._two_stale(stub)
+		calls = []
+
+		def set_value(doctype, name, fields, *a, **kw):
+			calls.append(name)
+			if name == "PS-1":
+				raise RuntimeError("lock wait timeout")
+			return True
+
+		stub.db.set_value = set_value
+		rollbacks = []
+		stub.db.rollback = lambda: rollbacks.append(1)
+		janitor = _reload_janitor(monkeypatch)
+		lines = []
+		monkeypatch.setattr(janitor.safe_call, "log_error_line", lambda msg, **kw: lines.append(msg))
+		janitor._sweep_stale_stopping()
+
+		assert [c[1]["session_uuid"] for c in stub._enqueue_calls] == ["u2"]
+		assert rollbacks == [1]
+		assert any("could not claim" in m for m in lines)
+
+	@pytest.mark.parametrize("error", ["QueryTimeoutError", "QueryDeadlockError"])
+	def test_a_lock_error_on_the_locking_read_skips_only_that_row(self, monkeypatch, error):
+		stub = _install_frappe_stub(monkeypatch)
+		self._two_stale(stub)
+		lock_error = type(error, (Exception,), {})
+		setattr(stub, error, lock_error)
+		plain_get_value = stub.db.get_value
+
+		def get_value(doctype, filters=None, fieldname=None, **kw):
+			if filters["name"] == "PS-1":
+				raise lock_error("lock wait timeout")
+			return plain_get_value(doctype, filters, fieldname, **kw)
+
+		stub.db.get_value = get_value
+		rollbacks = []
+		stub.db.rollback = lambda: rollbacks.append(1)
+		janitor = _reload_janitor(monkeypatch)
+		commits = []
+		monkeypatch.setattr(janitor, "safe_commit", lambda: commits.append(1))
+		lines = []
+		monkeypatch.setattr(janitor.safe_call, "log_error_line", lambda msg, **kw: lines.append(msg))
+		janitor._sweep_stale_stopping()
+
+		assert [c[1]["session_uuid"] for c in stub._enqueue_calls] == ["u2"]
+		assert [c[1] for c in stub._set_value_calls] == ["PS-2"]
+		assert rollbacks == [1] and len(commits) == 2
+		assert sum("could not claim" in m for m in lines) == 1
+
+	def test_a_job_timeout_in_the_claim_still_stops_the_sweep(self, monkeypatch):
+		stub = _install_frappe_stub(monkeypatch)
+		self._two_stale(stub)
+
+		class JobTimeout(Exception):
+			pass
+
+		def get_value(doctype, filters=None, fieldname=None, **kw):
+			raise JobTimeout("Task exceeded maximum timeout value (60 seconds)")
+
+		stub.db.get_value = get_value
+		rollbacks = []
+		stub.db.rollback = lambda: rollbacks.append(1)
+		janitor = _reload_janitor(monkeypatch)
+		monkeypatch.setattr(janitor.safe_call, "job_timeout_types", lambda: (JobTimeout,))
+		lines = []
+		monkeypatch.setattr(janitor.safe_call, "log_error_line", lambda msg, **kw: lines.append(msg))
+		with pytest.raises(JobTimeout):
+			janitor._sweep_stale_stopping()
+
+		assert stub._enqueue_calls == [] and stub._set_value_calls == []
+		assert rollbacks == [1]
+		assert not any("could not claim" in m for m in lines)
+
+	def test_a_failed_enqueue_does_not_stop_the_other_rows(self, monkeypatch):
+		stub = _install_frappe_stub(monkeypatch)
+		self._two_stale(stub)
+		seen = []
+
+		def flaky(*a, **kw):
+			seen.append(kw["session_uuid"])
+			if kw["session_uuid"] == "u1":
+				raise RuntimeError("redis down")
+
+		stub.enqueue = flaky
+		janitor = _reload_janitor(monkeypatch)
+		janitor._sweep_stale_stopping()
+		assert seen == ["u1", "u2"]
 
 	def test_filters_on_stopping_status(self, monkeypatch):
 		stub = _install_frappe_stub(monkeypatch)
@@ -344,6 +515,7 @@ class TestSweepStalePhase2Runs:
 			calls.append((run_uuid, kw["status"]))
 			return run_uuid != "newer-generation"
 		monkeypatch.setattr(jobs, "expire_legacy", expire)
+		monkeypatch.setattr(capture, "has_samples", lambda run_uuid: False)
 		monkeypatch.setattr(capture, "cleanup_run", cleanups.append)
 		monkeypatch.setattr(ai_jobs, "_transaction", lambda fn: fn())
 		monkeypatch.setattr(ai_jobs, "_retry_sql", lambda fn: fn())
@@ -365,11 +537,76 @@ class TestSweepStalePhase2Runs:
 			if run_uuid == "bad":
 				raise ConnectionError("synthetic Redis failure")
 		monkeypatch.setattr(jobs, "expire_legacy", lambda *a, **kw: True)
+		monkeypatch.setattr(capture, "has_samples", lambda run_uuid: False)
 		monkeypatch.setattr(capture, "cleanup_run", cleanup)
 		monkeypatch.setattr(ai_jobs, "_transaction", lambda fn: fn())
 		monkeypatch.setattr(ai_jobs, "_retry_sql", lambda fn: fn())
 		_reload_janitor(monkeypatch)._sweep_stale_phase2_runs()
 		assert seen == ["bad", "good"]
+
+	def _expiry(self, monkeypatch, has_samples, expired):
+		from optimus import ai_jobs
+		from optimus.line_profile import capture, jobs
+		stub = _install_frappe_stub(monkeypatch)
+		stub.db.get_all = lambda doctype, **kw: (
+			[{"parent": "p", "run_uuid": "run-1"}] if kw["filters"]["status"] == "Recording" else [])
+		seen = types.SimpleNamespace(expire=[], analyzed=[], cleaned=[])
+		def expire(parent, run_uuid, **kw):
+			seen.expire.append(kw["samples"])
+			return expired(kw["samples"])
+		monkeypatch.setattr(jobs, "expire_legacy", expire)
+		monkeypatch.setattr(jobs, "analyze_expired", lambda *a, **kw: seen.analyzed.append((*a, sorted(kw))))
+		monkeypatch.setattr(capture, "has_samples", has_samples)
+		monkeypatch.setattr(capture, "cleanup_run", seen.cleaned.append)
+		monkeypatch.setattr(ai_jobs, "_transaction", lambda fn: fn())
+		monkeypatch.setattr(ai_jobs, "_retry_sql", lambda fn: fn())
+		_reload_janitor(monkeypatch)._sweep_stale_phase2_runs()
+		return seen
+
+	def test_expired_recording_with_samples_is_analyzed_and_keeps_its_input(self, monkeypatch):
+		seen = self._expiry(monkeypatch, lambda run_uuid: True, lambda samples: "analyze" if samples else True)
+		assert seen.expire == [True]
+		assert seen.analyzed == [("p", "run-1", ["cutoff"])]
+		assert seen.cleaned == []
+
+	def test_expired_recording_without_samples_fails_and_cleans(self, monkeypatch):
+		seen = self._expiry(monkeypatch, lambda run_uuid: False, lambda samples: True)
+		assert seen.analyzed == [] and seen.cleaned == ["run-1"]
+
+	def test_unknown_sample_count_retries_next_sweep_and_never_deletes_input(self, monkeypatch):
+		def broken(run_uuid):
+			raise ConnectionError("redis down")
+		seen = self._expiry(monkeypatch, broken, lambda samples: "retry" if samples is None else True)
+		assert seen.expire == [None]
+		assert seen.analyzed == [] and seen.cleaned == []
+
+	@pytest.mark.parametrize("known", [True, None])
+	def test_run_failed_after_the_retry_bound_keeps_its_samples_for_retry(self, monkeypatch, known):
+		"""expire_legacy fails the run (True) but samples exist or are unknown: nothing is cleaned."""
+		def has_samples(run_uuid):
+			if known is None:
+				raise ConnectionError("redis down")
+			return known
+		seen = self._expiry(monkeypatch, has_samples, lambda samples: True)
+		assert seen.expire == [known]
+		assert seen.analyzed == [] and seen.cleaned == []
+
+	def test_unavailable_sample_count_is_logged_with_the_error_type_only(self, monkeypatch):
+		from optimus import safe_call
+		lines = []
+		monkeypatch.setattr(safe_call, "log_error_line", lines.append)
+		def broken(run_uuid):
+			raise ConnectionError("secret redis host")
+		self._expiry(monkeypatch, broken, lambda samples: "retry")
+		assert len(lines) == 1 and "run-1" in lines[0] and "ConnectionError" in lines[0]
+		assert "secret redis host" not in lines[0]
+
+	def test_known_sample_count_logs_nothing(self, monkeypatch):
+		from optimus import safe_call
+		lines = []
+		monkeypatch.setattr(safe_call, "log_error_line", lines.append)
+		self._expiry(monkeypatch, lambda run_uuid: True, lambda samples: "analyze")
+		assert lines == []
 
 	def test_no_set_value_when_no_phase2_rows(self, monkeypatch):
 		from optimus import ai_jobs

@@ -220,23 +220,25 @@ class TestProfilerInit(_InitHarness):
 		assert obj.form_dict == FAILED
 		assert obj.headers == FAILED
 
-	def test_failure_is_logged_at_error_level_without_values(self, monkeypatch):
+	def test_failure_is_logged_at_error_level_without_values(self, monkeypatch, caplog):
 		import optimus.redaction as red
-		from optimus import safe_call
+		from optimus import redaction_log
 
-		lines = []
-		monkeypatch.setattr(safe_call, "log_error_line", lambda message, **k: lines.append(message))
+		monkeypatch.setattr(redaction_log, "_logged_capture", set())
 		monkeypatch.setattr(red, "redact_sensitive_walk", _raise(ValueError("hunter2")))
-		self._run(monkeypatch, {"password": "hunter2"}, {})
-		assert len(lines) == 1
-		assert "ValueError" in lines[0]
-		assert "hunter2" not in lines[0]
+		with caplog.at_level("ERROR"):
+			self._run(monkeypatch, {"password": "hunter2"}, {})
+		lines = [r.getMessage() for r in caplog.records]
+		# one line per field that failed
+		assert len(lines) == 2
+		assert all("ValueError" in line and "hunter2" not in line for line in lines)
 
 	def test_a_failing_logger_never_breaks_the_request(self, monkeypatch):
 		import optimus.redaction as red
-		from optimus import safe_call
+		from optimus import redaction_log
 
-		monkeypatch.setattr(safe_call, "log_error_line", _raise(OSError()))
+		monkeypatch.setattr(redaction_log, "_logged_capture", set())
+		monkeypatch.setattr(redaction_log.logging.Logger, "error", _raise(OSError()))
 		monkeypatch.setattr(red, "redact_sensitive_walk", _raise(ValueError("x")))
 		obj = self._run(monkeypatch, {"password": "hunter2"}, {})
 		assert obj.form_dict == FAILED
@@ -504,32 +506,29 @@ class TestSettingsReadFailure(_InitHarness):
 			monkeypatch.setattr(frappe, "local", types.SimpleNamespace(), raising=False)
 		monkeypatch.setattr(frappe.local, "optimus_reading_extras", False, raising=False)
 
-	def test_unreadable_settings_omit_the_request_values_and_log(self, monkeypatch):
-		from optimus import safe_call
+	def test_unreadable_settings_still_mask_the_request_with_the_built_in_names(self, monkeypatch, caplog):
+		from optimus import redaction_extras
 
-		lines = []
-		monkeypatch.setattr(safe_call, "log_error_line", lambda message, **k: lines.append(message))
-		obj = self._run(monkeypatch, {"nickname": "S3CRET"}, {"A": "b"})
-		assert obj.form_dict == FAILED
-		assert obj.headers == FAILED
+		monkeypatch.setattr(redaction_extras, "_logged", set())
+		with caplog.at_level("ERROR"):
+			obj = self._run(monkeypatch, {"nickname": "S3CRET", "password": "P4SS"}, {"Authorization": "x"})
+		assert obj.form_dict == {"nickname": "S3CRET", "password": "<REDACTED:password>"}
+		assert obj.headers == {"Authorization": "<REDACTED:Authorization>"}
+		lines = [r.getMessage() for r in caplog.records if "sensitive_form_keys" in r.getMessage()]
 		assert len(lines) == 1
 		assert "RuntimeError" in lines[0]
+		assert "S3CRET" not in caplog.text
 
-	def test_unreadable_settings_omit_the_query_and_log(self, monkeypatch):
+	def test_unreadable_settings_keep_the_query_masked_with_the_built_in_names(self, monkeypatch):
 		from frappe.recorder import Recorder
 
-		from optimus import safe_call
 		from optimus.redaction import OMITTED_SQL
 
-		lines = []
-		monkeypatch.setattr(safe_call, "log_error_line", lambda message, **k: lines.append(message))
 		monkeypatch.setattr(Recorder.register, "__wrapped__", lambda self, data: None, raising=False)
-		data = {"query": "select 1 where nickname = 'S3CRET'"}
+		data = {"query": "select 1 where password = 'S3CRET'"}
 		Recorder.register(_recorder_with_calls(Recorder), data)
-		assert data["query"] == OMITTED_SQL
-		assert len(lines) == 1
-		assert "RuntimeError" in lines[0]
-		assert "S3CRET" not in lines[0]
+		assert data["query"] != OMITTED_SQL
+		assert "select 1" in data["query"] and "S3CRET" not in data["query"]
 
 
 class TestJobTimeoutIsNotSwallowed(_InitHarness):
@@ -558,17 +557,6 @@ class TestJobTimeoutIsNotSwallowed(_InitHarness):
 		monkeypatch.setattr(Recorder.register, "__wrapped__", lambda self, data: None, raising=False)
 		with pytest.raises(self._Timeout):
 			Recorder.register(_recorder_with_calls(Recorder), {"query": "select 1"})
-
-	def test_the_raised_timeout_is_a_fresh_instance_without_a_traceback(self):
-		original = self._Timeout("t")
-		with pytest.raises(self._Timeout) as caught:
-			optimus._raise_if_job_timeout(original)
-		assert caught.value is not original
-		assert caught.value.__cause__ is None
-		assert caught.value.__suppress_context__
-
-	def test_other_errors_are_not_raised(self):
-		optimus._raise_if_job_timeout(ValueError("x"))
 
 
 class TestPerActionNonTextFields:

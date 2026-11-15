@@ -101,6 +101,30 @@ class TestDeriveModulePath:
 		assert dotted == "acme.acme.report.sales_register.sales_register.execute"
 
 
+BENCH_PATHS = [
+	# (filename, module, app): string cases only, no filesystem or symlink involved.
+	("/srv/apps/frappe-bench/apps/erpnext/erpnext/accounts/utils.py", "erpnext.accounts.utils", "erpnext"),
+	("apps/myapp/myapp/apps/foo/foo/x.py", "myapp.apps.foo.foo.x", "myapp"),
+	("/home/u/apps/bench/apps/my_app/my_app/api/__init__.py", "my_app.api", "my_app"),
+	("C:\\apps\\bench\\apps\\erpnext\\erpnext\\utils.py", "erpnext.utils", "erpnext"),
+	("/srv/bench/env/lib/python3.12/site-packages/pkg/mod.py", "pkg.mod", "pkg"),
+	("/usr/lib/python3/dist-packages/pkg/sub/mod.py", "pkg.sub.mod", "pkg"),
+	("../apps/erpnext/erpnext/selling/x.py", "erpnext.selling.x", "erpnext"),
+	("/v/lib/python3.12/site-packages/x/site-packages/y/mod.py", "y.mod", "y"),
+]
+
+
+class TestBenchUnderAppsFolder:
+	@pytest.mark.parametrize(("filename", "module", "app"), BENCH_PATHS)
+	def test_module_and_app_come_from_the_first_app_package(self, filename, module, app):
+		assert picker._derive_module_path(filename) == module
+		assert picker._derive_app(filename) == app
+
+	def test_build_dotted_path_for_a_bench_under_apps(self):
+		dotted = picker._build_dotted_path("/srv/apps/frappe-bench/apps/erpnext/erpnext/accounts/utils.py", "get_balance")
+		assert dotted == "erpnext.accounts.utils.get_balance"
+
+
 class TestDeriveApp:
 	def test_extracts_app_from_apps_prefix(self):
 		assert picker._derive_app("apps/erpnext/erpnext/foo.py") == "erpnext"
