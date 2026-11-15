@@ -28,6 +28,6 @@ const frappe = new Proxy({ session: { user: "u@example.com" }, boot: JSON.parse(
 	get: (t, k) => (k in t ? t[k] : sink()),
 });
 
-const ctx = { document, frappe, window: sink(), console, setTimeout: () => 0, setInterval: () => 0, clearInterval: () => {} };
+const ctx = { document, frappe, __: (text) => text, window: sink(), console, setTimeout: () => 0, setInterval: () => 0, clearInterval: () => {} };
 vm.runInNewContext(fs.readFileSync(jsPath, "utf8"), ctx);
 process.stdout.write(mounted ? "mounted" : "hidden");
