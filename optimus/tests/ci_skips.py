@@ -32,8 +32,8 @@ ALLOWED = (
 	Row(
 		None,
 		r"^could not import 'rq(\.timeouts)?': No module named 'rq'",
-		114,
-		"rq tests run in ai-quality.yml, which installs rq; ci.yml has no rq (114 on 3.10 and 3.14)",
+		115,
+		"rq tests run in ai-quality.yml, which installs rq; ci.yml has no rq (115 on 3.10 and 3.14)",
 	),
 	Row(
 		None,

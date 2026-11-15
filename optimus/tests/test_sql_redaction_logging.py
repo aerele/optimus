@@ -17,9 +17,10 @@ S = "Zq9xK2vLm7Wp"
 
 @pytest.fixture
 def fresh_log(monkeypatch):
-	from optimus import redaction_log
+	from optimus import redaction_extras, redaction_log
 
 	monkeypatch.setattr(redaction_log, "_logged", set())
+	monkeypatch.setattr(redaction_extras, "_logged", set())
 	return redaction_log
 
 
@@ -31,11 +32,11 @@ def test_unreadable_settings_are_logged_once_and_defaults_still_mask(monkeypatch
 
 	monkeypatch.setattr(_settings, "get_config", broken, raising=False)
 	fake = _FakeRecorderInstance()
-	with caplog.at_level("WARNING"):
+	with caplog.at_level("ERROR"):
 		for _ in range(3):
 			_Recorder().register(fake, {"query": f"SELECT 1 WHERE password = '{S}'", "duration": 0.1})
 	assert all(S not in call["query"] for call in fake.calls)
-	warned = [r for r in caplog.records if "sensitive-name settings" in r.getMessage()]
+	warned = [r for r in caplog.records if "sensitive_form_keys" in r.getMessage()]
 	assert len(warned) == 1 and "TimeoutError" in warned[0].getMessage()
 	assert S not in caplog.text
 
