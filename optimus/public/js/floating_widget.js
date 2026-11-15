@@ -83,6 +83,8 @@
 	let pollActive = false;
 	// Bumped by user actions so an older in-flight resync reply is dropped.
 	let resyncEpoch = 0;
+	// The first resync after this page loaded may find a session that was already recording when it reloaded.
+	let initialResyncPending = true;
 
 	function init() {
 		// v0.5.2 round 4: hide widget entirely when Optimus Settings ▸
@@ -384,6 +386,15 @@
 		});
 	}
 
+	// Timings buffered before Record belong to no session.
+	function beginFrontendSession(opts) {
+		try {
+			if (window.optimus_frontend && window.optimus_frontend.beginSession) {
+				window.optimus_frontend.beginSession(opts);
+			}
+		} catch (e) { /* the pill must still record */ }
+	}
+
 	function refreshStatus(done) {
 		// Resync the pill from api.pill_state.
 		const epoch = resyncEpoch;
@@ -401,6 +412,8 @@
 					if (done) done(false);
 					return;
 				}
+				const isInitialResync = initialResyncPending;
+				initialResyncPending = false;
 				const prev = currentState.display;
 				applyResult(Pill.reduceServer(currentState, (r && r.message) || {}, Date.now()));
 				if (currentState.display === "recording" && prev !== "recording") {
@@ -410,6 +423,8 @@
 						startElapsedTimer();
 						setDisplay("recording", __("Recording"), computeElapsed());
 					}
+					// A resync that finds a line-profiling or other-tab recording drops the pre-session load's vitals but keeps buffered XHRs.
+					if (!isInitialResync) beginFrontendSession({ keepXhr: true });
 					if (widget) widget.setAttribute("data-session-uuid", currentState.session_uuid || "");
 				}
 				if (done) done(true);
@@ -630,6 +645,7 @@
 			});
 			return;
 		}
+		beginFrontendSession();
 		resyncEpoch += 1;
 		currentState.active = true;
 		currentState.session_uuid = data.session_uuid;
