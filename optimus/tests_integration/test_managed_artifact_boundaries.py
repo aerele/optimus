@@ -420,17 +420,17 @@ class TestManagedArtifactBoundaries(FrappeTestCase):
 			self.assertEqual(frappe.db.get_value('File', bound.name, 'is_private'), 1)
 
 	def test_settings_invalidation_follows_the_real_transaction(self):
-		from optimus import redis_keys, settings
+		from optimus import settings
 		doc = frappe.get_doc('Optimus Settings')
 		original = doc.enabled
 		try:
-			frappe.cache.delete_value(redis_keys.settings_cache())
+			settings.invalidate_config()
 			before = settings.get_config().enabled
 			doc.enabled = not before
 			doc.save(ignore_permissions=True)
 			self.assertEqual(settings.get_config().enabled, before)
 			# An eviction during this pending save must not cache dirty settings.
-			frappe.cache.delete_value(redis_keys.settings_cache())
+			settings.invalidate_config()
 			self.assertEqual(settings.get_config().enabled, not before)
 			frappe.db.rollback()
 			self.assertEqual(settings.get_config().enabled, before)

@@ -7,7 +7,7 @@ Produces one Optimus Action row per recording, with a label derived best-effort
 from the recording's path/cmd/form_dict (the unit the customer sorts/filters by).
 
 Label detection strategy:
-    1. RQ Jobs: "Job: <last component of method name>"
+    1. Background jobs: "RQ Job: <last component of method name>"
     2. frappe.client.{save,insert,submit,cancel,delete}: "<Verb> <DocType>"
     3. frappe.client.get_list: "List <DocType>"
     4. Other cmd: use the cmd verbatim
@@ -38,7 +38,7 @@ def _build_action(recording: dict) -> dict:
 	durations = [c.get("duration", 0) for c in calls]
 	return {
 		"action_label": _fit(_label(recording)),
-		"event_type": recording.get("event_type") or "HTTP Request",
+		"event_type": _event_type_option(recording),
 		"http_method": recording.get("method") or "",
 		"path": _fit(recording.get("path") or ""),
 		"recording_uuid": recording.get("uuid") or "",
@@ -55,6 +55,36 @@ def _fit(value: str) -> str:
 	return value[: _DATA_MAX_CHARS - len(_ELLIPSIS)] + _ELLIPSIS
 
 
+_JOB_EVENT_TYPES = frozenset({"Background Job", "RQ Job"})
+
+
+def is_background_job(event_type) -> bool:
+	"""Frappe's recorder writes "Background Job"; older Optimus code and fixtures say "RQ Job"."""
+	return isinstance(event_type, str) and event_type in _JOB_EVENT_TYPES
+
+
+def _event_type_option(recording: dict) -> str:
+	"""The Optimus Action ``event_type`` Select option for a recording of any type.
+
+	Frappe's forced recorder can also write "Function Call"; an unknown type is read from
+	the recording's shape: a request has a method, cmd or a path starting with "/".
+	"""
+	event_type = recording.get("event_type")
+	if is_background_job(event_type):
+		return "Background Job"
+	if event_type == "HTTP Request":
+		return event_type
+	path = recording.get("path")
+	if recording.get("method") or recording.get("cmd") or (isinstance(path, str) and path.startswith("/")):
+		return "HTTP Request"
+	# Best guess: nothing says it is a request, so a path-less recording is read as a job.
+	return "Background Job"
+
+
+def _is_job(recording: dict) -> bool:
+	return _event_type_option(recording) == "Background Job"
+
+
 def _label(recording: dict) -> str:
 	"""Technical label for the Per-action table / Frontend XHR panel.
 
@@ -64,11 +94,12 @@ def _label(recording: dict) -> str:
 	empty. Suffixes a disambiguating ``:<action>`` for multiplexed cmds (e.g.
 	``frappe.desk.form.save.savedocs:Submit``) so Save and Submit rows differ.
 	"""
-	if recording.get("event_type") == "RQ Job":
-		path = recording.get("path") or "RQ Job"
+	if _is_job(recording):
+		path = recording.get("path")
+		if not path or not isinstance(path, str):
+			return "RQ Job"
 		# Trim long module paths to the last component for readability
-		short = path.split(".")[-1] if "." in path else path
-		return f"RQ Job: {short}"
+		return f"RQ Job: {path.split('.')[-1] or path}"
 
 	cmd = recording.get("cmd") or ""
 	if not cmd:
@@ -171,9 +202,7 @@ def humanized_label(recording: dict) -> str:
 	than the technical cmd string. Falls back to ``_label`` when no humanization
 	rule matches, so the caller always gets a non-empty string.
 	"""
-	if recording.get("event_type") == "RQ Job":
-		# RQ Jobs use the same label in both views the
-		# "Job: <method>" form is already readable.
+	if _is_job(recording):
 		return _label(recording)
 
 	cmd = recording.get("cmd") or ""

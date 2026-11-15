@@ -31,6 +31,7 @@ __all__ = [
 	"to_float",
 	"get_dialect",
 	"active_db_type",
+	"redaction_dialect",
 ]
 
 _cache: dict = {}
@@ -39,6 +40,18 @@ _cache: dict = {}
 def active_db_type() -> str:
 	"""The active database type, lowercased: 'mariadb' | 'postgres'. Defaults
 	to 'mariadb' when it can't be determined (matches Frappe's own default)."""
+	return _configured_db_type() or "mariadb"
+
+
+def redaction_dialect() -> str | None:
+	"""'mariadb' or 'postgres' when the site says so, else None. Unlike
+	``active_db_type`` it never guesses: SQL redaction reads an unknown dialect
+	both ways instead of trusting a default."""
+	db_type = _configured_db_type()
+	return db_type if db_type in ("mariadb", "postgres") else None
+
+
+def _configured_db_type() -> str | None:
 	import frappe
 
 	# frappe.db is a Werkzeug Local proxy: reading .db_type when no DB is bound
@@ -54,7 +67,7 @@ def active_db_type() -> str:
 			dbt = frappe.conf.get("db_type")
 		except Exception:
 			dbt = None
-	return (dbt or "mariadb").lower()
+	return dbt.lower() if dbt else None
 
 
 def get_dialect() -> Dialect:

@@ -19,9 +19,12 @@ from optimus.analyzers.base import (
 	CALLSITE_WALK_FIXED,
 	CALLSITE_WALK_KEY,
 	AnalyzerResult,
+	KeptStack,
 	cut_at_bench_apps,
 	installed_apps_allowlist,
 	is_framework_callsite,
+	own_query_innermost_first,
+	own_query_verdict_innermost_first,
 	walk_callsite,
 )
 
@@ -146,29 +149,17 @@ def _apps_relative_stack(stack: list) -> list:
 	return list(_relative_frames(stack))
 
 
-def _app_root(filename: str) -> str:
-	"""First segment of an apps-relative filename (``apps/<app>/...`` or ``<app>/...``)."""
-	if filename.startswith("apps/"):
-		filename = filename[len("apps/"):]
-	return filename.split("/", 1)[0]
-
-
-def _is_optimus_own(stack: list) -> bool:
-	"""True when the innermost frame outside ``frappe/`` (``stack`` is innermost-first, as
-	capture records it) is Optimus's own code. Optimus reads its settings from the cache
-	on every recorded query (``_profiler_register`` -> ``_read_extras`` ->
-	``settings.get_config``), so the sidecar logs a cache lookup per query; the walk skips
-	Optimus's frames and would blame that lookup on the user's query line. Matched on the
-	app root after the bench cut, so an app merely named like Optimus is not skipped."""
-	for frame in _relative_frames(stack):
-		filename = str(frame.get("filename") or "").replace("\\", "/")
-		if not filename:
-			continue
-		root = _app_root(filename)
-		if root == "frappe":
-			continue
-		return root == "optimus"
-	return False
+def _is_optimus_own(caller_stack: list, tracked_apps=None, installed_apps=None) -> bool:
+	"""True when a sidecar entry's stack (innermost-first, as capture records it) is Optimus's
+	own work, by the rule shared with the SQL calls, fail-safe the same way (a suspicious entry is
+	kept). Optimus reads its settings from the cache on every recorded query, so the sidecar logs
+	a lookup per query that is not the user's."""
+	if not (tracked_apps or installed_apps):
+		return own_query_innermost_first(_relative_frames(caller_stack))  # stops at the deciding frame
+	frame, suspicious = own_query_verdict_innermost_first(
+		list(_relative_frames(caller_stack)), tracked_apps, installed_apps
+	)
+	return frame is not None and not suspicious
 
 
 def _callsite_key(callsite: dict | None) -> tuple | None:
@@ -223,7 +214,7 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 			caller_stack = entry.get("caller_stack") or []
 			if fn_name is None or safe is None:
 				continue
-			if _is_optimus_own(caller_stack):
+			if _is_optimus_own(caller_stack, tracked_apps, installed_apps):
 				# Optimus's own call (its per-query settings read), not the user's.
 				continue
 			try:
@@ -281,9 +272,10 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 		# with the action and the identifier of the occurrences there. The first
 		# occurrence alone could point at a non-loop line, the wrong action, or a
 		# framework frame. Cache sidecars store innermost-first stacks; the walker
-		# expects outermost-first, so the selected frame is the caller of the lookup.
+		# expects outermost-first, so the selected frame is the caller of the lookup. Own entries were
+		# dropped above, so a ``KeptStack`` only skips the own-query rule for a suspicious one kept there.
 		walked = [
-			(action_idx, raw, walk_callsite(list(reversed(_apps_relative_stack(stack)))))
+			(action_idx, raw, walk_callsite(KeptStack(reversed(_apps_relative_stack(stack)))))
 			for action_idx, raw, stack in occurrences
 			if stack
 		]

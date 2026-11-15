@@ -9,7 +9,7 @@ that request only (per-user isolation: other users' concurrent traffic is NOT
 recorded). After the request, the new recording UUID is registered with the
 session so the analyze pipeline can find every recording in a flow.
 
-Activation uses ``frappe.recorder.record(force=True)`` rather than
+Activation uses ``frappe.recorder.record(force=True)`` (via ``capture.record_forced``) rather than
 ``frappe.recorder.start()`` (which would record every request from every
 user). Frappe's own ``after_request`` runs before ours, so the recording is
 already dumped to Redis by the time we register its UUID.
@@ -21,7 +21,7 @@ import frappe
 import frappe.recorder  # imported at module top so function-local `import frappe.recorder` doesn't rebind `frappe` as a local variable (Python scope rule: any `import frappe.X` inside a function makes `frappe` a function-local for the entire scope, breaking earlier `frappe.local` reads caused by Python 3.14 stricter scope detection on a pre-existing pattern)
 
 from optimus import capture as _capture
-from optimus import safe_commit, session
+from optimus import method_path, safe_call, safe_commit, session
 from optimus.timing import RECORDING_DATA_TTL_SECONDS
 
 # v0.5.1: Skip-list for instrumentation-noise endpoints. Any HTTP request
@@ -56,6 +56,40 @@ _IGNORED_CMD_PREFIXES = (
 	# plumbing, not user code.
 	"frappe.core.doctype.recorder.recorder.",
 )
+
+
+def _has_live_recorder() -> bool:
+	"""True when Frappe's own Recorder is already recording this request or job."""
+	recorder = getattr(frappe.local, "_recorder", None)
+	return recorder is not None and _capture.is_recording(recorder)
+
+
+# Settings of a shared Frappe Recorder that degrade an Optimus recording, with the value Optimus needs.
+_RECORDER_SETTINGS_WANTED = (("record_sql", 1), ("capture_stack", 1), ("profile", 0))
+
+
+def _flag_sql_recording_off(recorder, recording_uuid) -> None:
+	"""Remember a recording whose shared Frappe Recorder had SQL recording or stack capture off, or its
+	profiler on (queries or call details are missing). Never raises: this is a footnote, so a Redis
+	error must not lose the recording."""
+	try:
+		config = getattr(recorder, "config", None)
+		if config is None:
+			return
+		degraded = [
+			name
+			for name, wanted in _RECORDER_SETTINGS_WANTED
+			if bool(getattr(config, name, wanted)) != bool(wanted)
+		]
+		if not degraded:
+			return
+		from optimus import redis_keys
+
+		frappe.cache.set_value(
+			redis_keys.sql_off(recording_uuid), degraded, expires_in_sec=RECORDING_DATA_TTL_SECONDS
+		)
+	except Exception:
+		frappe.log_error(title="optimus recorder settings note")
 
 
 def _extract_cmd_from_request() -> str:
@@ -178,7 +212,8 @@ def before_request(*args, **kwargs):
 	"""Activate the recorder if the current user has an active profiler session.
 
 	Runs on every HTTP request; the hot path (no active session) is a single
-	Redis GET plus an early return.
+	Redis GET (the active-session pointer) plus an early return, with no settings
+	read. Other hooks may still read their own keys.
 	"""
 	try:
 		# v0.5.3: deferred sidecar-wrap install. The module-level
@@ -190,16 +225,6 @@ def before_request(*args, **kwargs):
 		# wrap's own `_profiler_original` marker.
 		import optimus
 		optimus._try_install_capture_wraps()
-
-		# v0.5.2: master kill-switch. When an admin turns off
-		# Optimus Settings ▸ Enabled, we short-circuit before even
-		# the active-session lookup. `is_enabled()` is a cached
-		# read (same Redis value reused across all requests until a
-		# setting change invalidates it), so the hot-path cost is a
-		# single Redis GET regardless of state.
-		from optimus.settings import is_enabled
-		if not is_enabled():
-			return
 
 		# Round 2 fix #6: if the analyze pipeline itself is running (it
 		# does DB writes to the Optimus Session doctype, which may
@@ -213,15 +238,24 @@ def before_request(*args, **kwargs):
 		if not user or user == "Guest":
 			return
 
-		# v0.6.0 Round 6: admin-configured user skip list. Checked early
-		# so a system bot user with an active session (rare but possible
-		# via API token) doesn't get profiled.
-		if _should_skip_user(user):
-			return
-
+		# The active-session pointer is the one Redis GET every request needs,
+		# so it gates the settings reads below: a request without a session
+		# reads no settings at all.
 		session_uuid = session.get_active_session_for(user)
 		if not session_uuid:
 			return  # 99.9% of requests exit here
+
+		# v0.5.2: master kill-switch. When an admin turns off Optimus Settings
+		# Enabled nothing is recorded, even for a user whose pointer is still set.
+		from optimus.settings import is_enabled
+		if not is_enabled():
+			return
+
+		# v0.6.0 Round 6: admin-configured user skip list. A system bot user
+		# with an active session (rare but possible via API token) doesn't get
+		# profiled.
+		if _should_skip_user(user):
+			return
 
 		# v0.5.1: Skip profiler / Frappe-recorder instrumentation noise.
 		# Checked AFTER the active-session lookup (two Redis GETs gating a
@@ -238,7 +272,7 @@ def before_request(*args, **kwargs):
 		# instance do NOT create a second Recorder because that would
 		# overwrite frappe.local._recorder and orphan the first one's
 		# SQL patch, corrupting both recordings.
-		if getattr(frappe.local, "_recorder", None) is not None:
+		if _has_live_recorder():
 			return
 
 		# Force-activate the existing recorder for THIS request only.
@@ -246,7 +280,7 @@ def before_request(*args, **kwargs):
 		# global RECORDER_INTERCEPT_FLAG, leaving the standalone
 		# Recorder UI's flag untouched.
 		# (frappe.recorder is imported at module top see comment there.)
-		frappe.recorder.record(force=True)
+		_capture.record_forced()
 		frappe.local.optimus_owns_recorder = True
 
 		# v0.5.1: snapshot infra metrics FIRST, BEFORE pyinstrument starts.
@@ -267,7 +301,7 @@ def before_request(*args, **kwargs):
 			from optimus import infra_capture
 			frappe.local.optimus_infra_start = infra_capture.snapshot()
 		except Exception:
-			frappe.log_error(title="optimus infra start snapshot")
+			safe_call.log_hook_error("optimus infra start snapshot")
 
 		# v0.3.0: gate the new pyinstrument + sidecar capture on the
 		# session's capture_python_tree flag. Setting
@@ -283,7 +317,7 @@ def before_request(*args, **kwargs):
 			)
 	except Exception:
 		# Never let a profiler bug break a customer request. Log and move on.
-		frappe.log_error(title="optimus before_request")
+		safe_call.log_hook_error("optimus before_request")
 
 
 def after_request(*args, **kwargs):
@@ -312,18 +346,19 @@ def after_request(*args, **kwargs):
 		registered = session.register_recording(
 			session_uuid, recording_uuid, user=user
 		)
+		_flag_sql_recording_off(recorder, recording_uuid)
 		if not registered:
 			# Cap hit the recording is in RECORDER_REQUEST_HASH but not
 			# registered against our session. The cap_warning is already
 			# written to session meta; log here so the drop is visible
 			# in the error log / journalctl for debugging.
-			frappe.logger().warning(
-				f"optimus: recording cap hit for session "
-				f"{session_uuid}, dropped {recording_uuid}"
+			safe_call.log_error_line(
+				f"optimus: recording cap hit for session {session_uuid}, dropped {recording_uuid}",
+				dedupe_key="recording cap hit",
 			)
 			_discard_dropped_recording(recorder, purge_stored=False)
 	except Exception:
-		frappe.log_error(title="optimus after_request")
+		safe_call.log_hook_error("optimus after_request")
 	finally:
 		dropped = getattr(frappe.local, "optimus_capture_dropped", False)
 		# v0.3.0: dump pyinstrument session and sidecar log to Redis under
@@ -348,7 +383,7 @@ def after_request(*args, **kwargs):
 					expires_in_sec=RECORDING_DATA_TTL_SECONDS,
 				)
 		except Exception:
-			frappe.log_error(title="optimus infra end snapshot")
+			safe_call.log_hook_error("optimus infra end snapshot")
 
 		# Stash a new doc's save-assigned name (vs the browser's "new-…" placeholder) on an Optimus sidecar key, not an RMW of the recorder hash (unwritten at after_request time for HTTP); analyze merges it back as resolved_target_doc. Best-effort.
 		try:
@@ -368,7 +403,7 @@ def after_request(*args, **kwargs):
 						expires_in_sec=RECORDING_DATA_TTL_SECONDS,
 					)
 		except Exception:
-			frappe.log_error(title="optimus resolve target doc")
+			safe_call.log_hook_error("optimus resolve target doc")
 
 		# v0.5.0: correlation header for optimus_frontend.js. Must set
 		# Access-Control-Expose-Headers or browsers will refuse to surface
@@ -399,7 +434,7 @@ def after_request(*args, **kwargs):
 					response=kwargs.get("response"),
 				)
 		except Exception:
-			frappe.log_error(title="optimus header injection")
+			safe_call.log_hook_error("optimus header injection")
 
 		# Clear the per-request markers so they don't leak across requests
 		# (frappe.local is per-request anyway, but explicit is good).
@@ -438,6 +473,48 @@ def after_request(*args, **kwargs):
 # keyword argument error.
 
 
+def _job_frame(method, kwargs):
+	"""Identity of one job run: frappe passes the same kwargs dict to before_job and after_job."""
+	return (method_path(method), id(kwargs))
+
+
+def _enter_internal_job(method, kwargs):
+	"""Flag the worker as inside an Optimus or foreign cron job, remembering the flag to restore
+	at its end and which job pushed it."""
+	local = frappe.local
+	stack = getattr(local, "optimus_internal_job_stack", None)
+	if stack is None:
+		stack = local.optimus_internal_job_stack = []
+	stack.append((_job_frame(method, kwargs), getattr(local, "optimus_internal_job", False)))
+	local.optimus_internal_job = True
+
+
+def _leave_internal_job(method, kwargs):
+	"""Undo _enter_internal_job, but only for the job whose before_job pushed it, so a job run
+	inline in a request leaves the request's own flag alone."""
+	local = frappe.local
+	stack = getattr(local, "optimus_internal_job_stack", None)
+	if stack and stack[-1][0] == _job_frame(method, kwargs):
+		local.optimus_internal_job = stack.pop()[1]
+
+
+def _enter_outside_user_flow(method, kwargs):
+	"""Flag the worker as outside the user's flow and drop the markers the method cannot take."""
+	_enter_internal_job(method, kwargs)
+	if isinstance(kwargs, dict):
+		kwargs.pop("_profiler_session_id", None)
+		kwargs.pop("_lp_session_id", None)
+
+
+def _started_from_a_session(kwargs):
+	"""True when the enqueue wrapper tagged this run from the user's request, or Frappe is
+	retrying a tagged run (the retry no longer carries the marker)."""
+	if isinstance(kwargs, dict) and kwargs.get("_profiler_session_id"):
+		return True
+	retry_state = _capture.job_retry_state(create=False)
+	return bool(retry_state and retry_state.get("session_uuid"))
+
+
 def before_job(method=None, kwargs=None, **rest):
 	"""Activate the recorder if this job belongs to an active profiler session."""
 	try:
@@ -448,51 +525,53 @@ def before_job(method=None, kwargs=None, **rest):
 		import optimus
 		optimus._try_install_capture_wraps()
 
-		# v0.5.2: honor the master kill-switch here too. If the admin
-		# turned the profiler off, we still need to pop our marker
-		# from kwargs so the user's method doesn't see an unexpected
-		# keyword argument that happens below after the kill-switch
-		# check short-circuits the recorder activation path.
-		from optimus.settings import is_enabled
-		if not is_enabled():
-			# Still pop the marker so the downstream method signature
-			# stays clean (see the pop comment below for why).
-			if isinstance(kwargs, dict):
-				kwargs.pop("_profiler_session_id", None)
-			return
-
-		if getattr(frappe.local, "optimus_analyzing", False):
+		if optimus.is_internal_job(method, kwargs):
+			# Jobs it queues must not join a session, and a job queued before the
+			# untagged rule still carries a marker its method cannot accept.
+			_enter_outside_user_flow(method, kwargs)
 			return
 
 		if kwargs is None:
 			return
-		if optimus.is_internal_job(method):
-			# analyze.run is never tagged any more, but a job queued before that fix
-			# still carries a marker, which run() cannot accept and must not record.
-			if isinstance(kwargs, dict):
-				kwargs.pop("_profiler_session_id", None)
-				kwargs.pop("_lp_session_id", None)
-			return
 		if not isinstance(kwargs, dict):
 			# Unexpected frappe should always pass a dict. Log once so
 			# we can debug if it ever happens in practice.
-			frappe.log_error(
-				title="optimus before_job unexpected kwargs",
+			safe_call.log_hook_error(
+				"optimus before_job unexpected kwargs",
 				message=f"kwargs type: {type(kwargs).__name__}, method: {method}",
 			)
 			return
 
+		if optimus.is_scheduled_job(method) and not _started_from_a_session(kwargs):
+			# Another app's cron fired by the scheduler: its child jobs must not join a
+			# session either. One the user started carries the marker and is recorded.
+			from optimus.settings import is_enabled
+			if is_enabled() and not getattr(frappe.local, "optimus_analyzing", False):
+				_enter_outside_user_flow(method, kwargs)
+			return
+
 		# Pop our marker so the user's method doesn't see it. This MUST
 		# happen regardless of whether we proceed to activate recording
-		# if we leave the marker in kwargs, the user's method will be
-		# called with an unexpected keyword argument and crash.
+		# (kill-switch included): if we leave the marker in kwargs, the user's
+		# method will be called with an unexpected keyword argument and crash.
 		session_uuid = kwargs.pop("_profiler_session_id", None)
-		retry_state = _capture.job_retry_state(create=bool(session_uuid))
+		retry_state = _capture.job_retry_state(create=False)
 		if not session_uuid and retry_state:
 			# Frappe re-runs a deadlocked job with the marker already popped.
 			session_uuid = retry_state.get("session_uuid")
 		if not session_uuid:
+			return  # an untagged job reads no settings
+
+		# v0.5.2: honor the master kill-switch (after the pop above).
+		from optimus.settings import is_enabled
+		if not is_enabled():
 			return
+
+		if getattr(frappe.local, "optimus_analyzing", False):
+			return
+		# Created only now: a job that records nothing leaves no state behind.
+		if retry_state is None:
+			retry_state = _capture.job_retry_state(create=True)
 		if retry_state is not None:
 			retry_state["session_uuid"] = session_uuid
 
@@ -547,11 +626,11 @@ def before_job(method=None, kwargs=None, **rest):
 		# Same clobber protection as before_request: if the standalone
 		# recorder already activated (global flag + frappe's own
 		# before_job hook), piggyback on its instance.
-		if getattr(frappe.local, "_recorder", None) is not None:
+		if _has_live_recorder():
 			return
 
 		# (frappe.recorder is imported at module top see comment there.)
-		frappe.recorder.record(force=True)
+		_capture.record_forced()
 		frappe.local.optimus_owns_recorder = True
 
 		# v0.5.1: snapshot BEFORE _start_pyi_session mirrors the order
@@ -560,7 +639,7 @@ def before_job(method=None, kwargs=None, **rest):
 			from optimus import infra_capture
 			frappe.local.optimus_infra_start = infra_capture.snapshot()
 		except Exception:
-			frappe.log_error(title="optimus infra start snapshot (job)")
+			safe_call.log_hook_error("optimus infra start snapshot (job)")
 
 		# v0.3.0: gate the new pyinstrument + sidecar capture on the
 		# session's capture_python_tree flag. Mirrors before_request.
@@ -572,11 +651,12 @@ def before_job(method=None, kwargs=None, **rest):
 				interval_ms=_resolve_sampler_interval_ms(),
 			)
 	except Exception:
-		frappe.log_error(title="optimus before_job")
+		safe_call.log_hook_error("optimus before_job")
 
 
 def after_job(method=None, kwargs=None, result=None, **rest):
 	"""Register the dumped recording UUID with the active profiler session."""
+	_leave_internal_job(method, kwargs)
 	try:
 		session_uuid = getattr(frappe.local, "optimus_session_id", None)
 		if not session_uuid:
@@ -594,14 +674,15 @@ def after_job(method=None, kwargs=None, result=None, **rest):
 		registered = session.register_recording(
 			session_uuid, recording_uuid, user=user
 		)
+		_flag_sql_recording_off(recorder, recording_uuid)
 		if not registered:
-			frappe.logger().warning(
-				f"optimus: recording cap hit for session "
-				f"{session_uuid}, dropped job {recording_uuid}"
+			safe_call.log_error_line(
+				f"optimus: recording cap hit for session {session_uuid}, dropped job {recording_uuid}",
+				dedupe_key="recording cap hit",
 			)
 			_discard_dropped_recording(recorder, purge_stored=True)
 	except Exception:
-		frappe.log_error(title="optimus after_job")
+		safe_call.log_hook_error("optimus after_job")
 	finally:
 		dropped = getattr(frappe.local, "optimus_capture_dropped", False)
 		recording_uuid_for_dump = getattr(
@@ -624,7 +705,7 @@ def after_job(method=None, kwargs=None, result=None, **rest):
 					expires_in_sec=RECORDING_DATA_TTL_SECONDS,
 				)
 		except Exception:
-			frappe.log_error(title="optimus infra end snapshot (job)")
+			safe_call.log_hook_error("optimus infra end snapshot (job)")
 
 		# v0.6.0: this job ran drop its RQ id from the session's
 		# pending-jobs set so analyze.run's wait can end early. Best-effort.
@@ -674,6 +755,38 @@ def after_job(method=None, kwargs=None, result=None, **rest):
 				pass
 
 
+def _signed_tree_blob(last_session, recording_uuid: str):
+	"""The signed, size-capped pickle of the pyinstrument session, or None to store nothing.
+
+	Sessions of an unknown shape are pickled as they are and stored only if they fit.
+	A tree that cannot fit even thinned is replaced by a small marker, so analyze can
+	report it as too large to keep, and logs one line per hour.
+	"""
+	from optimus import safe_call
+	from optimus.session import _has_stable_hmac_secret, sign_blob
+
+	if last_session is None:
+		return None
+	blob, info = _capture.pickle_pyi_session(last_session)
+	if blob is None:
+		# No uuid in the text: the line is the same for every request, so it logs once per hour.
+		safe_call.log_error_line(
+			f"optimus: a Python call tree did not fit {_capture.TREE_MAX_BYTES} bytes even thinned; not stored",
+			dedupe_seconds=3600,
+		)
+		return sign_blob(_capture.dropped_tree_blob())
+	signed = sign_blob(blob)
+	try:
+		frappe.logger().debug(
+			f"optimus pyi dump: {recording_uuid} "
+			f"({'signed' if _has_stable_hmac_secret() else 'unsigned'}, {len(signed)} bytes, "
+			f"{(info or {}).get('samples')} samples, 1 in {(info or {}).get('every', 1)})"
+		)
+	except Exception:
+		pass
+	return signed
+
+
 def _dump_capture_state_to_redis(recording_uuid: str | None) -> None:
 	"""Serialize the in-flight pyinstrument session and sidecar list to Redis.
 
@@ -686,10 +799,6 @@ def _dump_capture_state_to_redis(recording_uuid: str | None) -> None:
 	so analyze refuses to unpickle a poisoned blob (Redis-poisoning RCE guard).
 	Best-effort: failures log but never break the request.
 	"""
-	import pickle
-
-	from optimus.session import sign_blob
-
 	if not recording_uuid:
 		# No recorder ran on this request nothing to dump.
 		_clear_capture_locals()
@@ -706,30 +815,16 @@ def _dump_capture_state_to_redis(recording_uuid: str | None) -> None:
 	if prof is not None:
 		try:
 			prof.stop()
-			tree_blob = sign_blob(pickle.dumps(prof.last_session))
-			# Visibility for the picker-diagnostic path: log whether
-			# this write was signed or unsigned, plus byte size.
-			# Helps operators correlate a "with_tree=0" picker
-			# diagnostic with the actual write mode (signed blobs
-			# need a stable encryption_key; unsigned blobs round-
-			# trip via the fallback).
-			try:
-				from optimus.session import _has_stable_hmac_secret
-				frappe.logger().debug(
-					f"optimus pyi dump: {recording_uuid} "
-					f"({'signed' if _has_stable_hmac_secret() else 'unsigned'}, "
-					f"{len(tree_blob)} bytes)"
+			tree_blob = _signed_tree_blob(prof.last_session, recording_uuid)
+			if tree_blob is not None:
+				from optimus import redis_keys
+				frappe.cache.set_value(
+					redis_keys.tree(recording_uuid),
+					tree_blob,
+					expires_in_sec=RECORDING_DATA_TTL_SECONDS,
 				)
-			except Exception:
-				pass
-			from optimus import redis_keys
-			frappe.cache.set_value(
-				redis_keys.tree(recording_uuid),
-				tree_blob,
-				expires_in_sec=RECORDING_DATA_TTL_SECONDS,
-			)
 		except Exception:
-			frappe.log_error(title="optimus pyi dump")
+			safe_call.log_hook_error("optimus pyi dump")
 
 	sidecar = getattr(frappe.local, "optimus_sidecar", None)
 	if sidecar:
@@ -747,7 +842,7 @@ def _dump_capture_state_to_redis(recording_uuid: str | None) -> None:
 				expires_in_sec=RECORDING_DATA_TTL_SECONDS,
 			)
 		except Exception:
-			frappe.log_error(title="optimus sidecar dump")
+			safe_call.log_hook_error("optimus sidecar dump")
 
 	lock_events = getattr(frappe.local, "optimus_lock_events", None)
 	if lock_events:
@@ -763,7 +858,7 @@ def _dump_capture_state_to_redis(recording_uuid: str | None) -> None:
 				expires_in_sec=RECORDING_DATA_TTL_SECONDS,
 			)
 		except Exception:
-			frappe.log_error(title="optimus lock events dump")
+			safe_call.log_hook_error("optimus lock events dump")
 
 	_clear_capture_locals()
 

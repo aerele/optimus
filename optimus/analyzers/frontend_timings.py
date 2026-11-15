@@ -15,7 +15,9 @@ recording_id and dedupes multi-fire LCP per page. Emits three finding types:
 import json
 import math
 
+from optimus import redaction_extras
 from optimus.analyzers.base import SEVERITY_ORDER, AnalyzerResult, dur
+from optimus.redaction import redact_url_field
 
 LCP_MEDIUM_MS = 2500
 LCP_HIGH_MS = 4000
@@ -33,8 +35,9 @@ MAX_TIMESTAMP = 1e15
 
 def analyze(recordings: list[dict], context) -> AnalyzerResult:
     frontend_data = getattr(context, "frontend_data", None) or {"xhr": [], "vitals": []}
-    xhr_entries = _dict_rows(frontend_data.get("xhr"))
-    vitals_entries = _dict_rows(frontend_data.get("vitals"))
+    extra_keys = redaction_extras.form_key_extras()
+    xhr_entries = [redact_url_field(x, "url", extra_keys) for x in _dict_rows(frontend_data.get("xhr"))]
+    vitals_entries = [redact_url_field(v, "page_url", extra_keys) for v in _dict_rows(frontend_data.get("vitals"))]
     dropped = _count_rows(frontend_data.get("xhr")) - len(xhr_entries)
     dropped += _count_rows(frontend_data.get("vitals")) - len(vitals_entries)
 
