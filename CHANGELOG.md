@@ -8,13 +8,21 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.180] - 2026-11-16
+## [0.12.184] - 2026-11-16
 
 ### Fixed
 
 - Line profiling no longer stops capturing 10 minutes after Start while the flow is still being reproduced. The run's active flag is now refreshed on every profiled request or background job, the same way a normal recording keeps its session alive, so it only expires after 10 minutes with no profiled traffic.
 - The janitor no longer ends a live line profiling run once it is 11 minutes old, which stopped its capture mid-flow and analyzed only the lines captured so far. It now only expires a Recording run whose active flag has expired or moved to another run, or one that started more than two hours ago: that run is stopped even while its traffic continues, so a run nobody stopped is not profiled forever. Live runs no longer count toward the 100 runs the janitor checks in one pass.
 - Stopping a line profiling run retries, with a short pause, when a profiled request refreshes the active flag at the same moment, so Stop still ends the capture. A failed refresh is logged as a renewal failure and no longer as a failed start. If the flag keeps changing it is logged instead of being skipped silently.
+
+---
+
+## [0.12.180] - 2026-11-07
+
+### Fixed
+
+- Automatic line profiling now skips a function it cannot read, or one longer than 5,000 lines, instead of giving up on the whole run. It also takes the 100 slowest functions when more than 100 qualify, instead of refusing, and skips a function that would push the run over the source size limits, or that comes from an app that is not installed. The skipped functions are named by their full dotted path with the reason for each: a short summary in an alert when the run starts, and the complete list in a collapsible notice on the session form, which stays after the alert is gone. A function whose code fails to load, or whose captured source does not validate, is skipped too instead of stopping the run, and the reason shown is fixed text, never the raw error. When nothing at all could be captured, no run starts: one line with the first reasons is written to the log and the form shows a notice listing every function and why. A function you pick yourself is still refused with a message naming it. The 5,000-line limit now also applies to functions you pick yourself: a longer one is refused with that reason, where before it was accepted up to the 100,000-line run limit. Nothing to run on upgrade.
 
 ---
 
