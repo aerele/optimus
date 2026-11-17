@@ -219,20 +219,26 @@ def _release_shared_slot(kind: str, text: str) -> None:
 
 
 def log_error_line(message: str, *, dedupe_seconds: float = 60.0, dedupe_key: str | None = None) -> None:
-	"""One ``frappe.logger("optimus")`` line at ERROR (Frappe drops lower levels on a
-	production site), skipped when the same line was logged on the same site in the last
-	``dedupe_seconds`` (per process, and across processes through Redis) so a failure
-	that repeats per finding or per request writes one line. ``dedupe_key`` is the
-	stable text to dedupe on when ``message`` carries an id that changes per event. It
-	never raises (an RQ job timeout excepted) and should be called outside any
-	``except``."""
+	"""``log_line`` at ERROR (Frappe drops lower levels on a production site)."""
+	log_line(message, level="error", dedupe_seconds=dedupe_seconds, dedupe_key=dedupe_key)
+
+
+def log_line(
+	message: str, *, level: str = "error", dedupe_seconds: float = 60.0, dedupe_key: str | None = None
+) -> None:
+	"""One ``frappe.logger("optimus")`` line at ``level`` ("error", "warning" or "info"), skipped
+	when the same line was logged on the same site in the last ``dedupe_seconds`` (per process,
+	and across processes through Redis) so a failure that repeats per finding or per request
+	writes one line. ``dedupe_key`` is the stable text to dedupe on when ``message`` carries an
+	id that changes per event. It never raises (an RQ job timeout excepted) and should be called
+	outside any ``except``."""
 	if not _claim_slot("line", dedupe_key or message, dedupe_seconds):
 		return
 
 	def _write() -> None:
 		import frappe
 
-		frappe.logger("optimus").error(message)
+		getattr(frappe.logger("optimus"), level if level in ("error", "warning", "info") else "error")(message)
 
 	best_effort(_write, None)
 

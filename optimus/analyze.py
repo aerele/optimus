@@ -757,6 +757,37 @@ def _auto_arm_phase2(docname: str, context) -> None:
 		log_ai_failure("optimus ai auto-arm line profiling", failure)
 
 
+_SKIP_SUMMARY_LIMIT = 5
+_SKIP_LOGGED_REASONS = 3
+
+
+def _only_own_code_skipped(skipped: list[dict]) -> bool:
+	"""True when there is no skip reason other than "Optimus's own code" (also when none is given)."""
+	from optimus.line_profile.picker import OWN_CODE_REASON
+
+	return all(item.get("reason") == OWN_CODE_REASON for item in skipped)
+
+
+def _report_nothing_armed(docname: str, context, picked: int, skipped: list[dict]) -> None:
+	"""Say why auto-arm started no run: one log line with the first reasons (never a path or
+	function name) and an event that shows the full reason list on the open form."""
+	reasons = "; ".join(item["reason"] or "no reason recorded" for item in skipped[:_SKIP_LOGGED_REASONS])
+	safe_call.log_line(
+		f"optimus auto-arm line profiling: none of {picked} hot function(s) could be captured ({reasons})",
+		level="error",
+	)
+	from optimus.realtime import publish_session_event
+	publish_session_event(
+		"optimus_phase2_not_armed",
+		{
+			"docname": docname,
+			"session_uuid": context.session_uuid,
+			"skipped": skipped,
+			"skipped_count": len(skipped),
+		},
+	)
+
+
 def _arm_phase2(docname: str, context) -> None:
 	if not frappe.conf.get("optimus_phase2_auto_arm"):
 		return
@@ -805,25 +836,33 @@ def _arm_phase2(docname: str, context) -> None:
 	from optimus.settings import get_ignored_apps
 	_ignored_apps = get_ignored_apps()
 	candidates, _ = _lp_picker.filter_out_ignored_apps(candidates, _ignored_apps)
-	picks = [
-		{"dotted_path": c["dotted_path"], "source": "curated"}
-		for c in candidates
-		if c.get("recommended") and c.get("dotted_path")
-	]
+	hottest = sorted(
+		(c for c in candidates if c.get("recommended") and _lp_capture.is_valid_dotted_path(c.get("dotted_path"))),
+		key=lambda c: float(c.get("cumulative_ms") or 0),
+		reverse=True,
+	)[:_lp_capture.MAX_PICKS]
+	picks = [{"dotted_path": c["dotted_path"], "source": "curated"} for c in hottest]
 	if not picks:
 		return
 
+	nothing_capturable = None
 	try:
-		prepared = _lp_capture.prepare_line_profile_picks(picks)
-	except _lp_capture.NoEligiblePickError:
-		# Every recommended function is ineligible (for example Optimus's own code): nothing to arm.
-		try:
-			frappe.logger("optimus").debug(
-				f"optimus: auto-arm skipped for session {context.session_uuid}: every recommended function"
-				" was ineligible for line profiling (for example Optimus's own code)"
-			)
-		except Exception:
-			pass  # a log line never fails the analysis
+		prepared = _lp_capture.prepare_line_profile_picks(picks, server_chosen=True)
+	except _lp_capture.NoEligiblePickError as exc:
+		nothing_capturable = exc
+	if nothing_capturable is not None:
+		skipped = getattr(nothing_capturable, "skipped", [])
+		if _only_own_code_skipped(skipped):
+			# Every recommended function is Optimus's own code: nothing to arm, and nothing to report.
+			try:
+				frappe.logger("optimus").debug(
+					f"optimus: auto-arm skipped for session {context.session_uuid}: every recommended function"
+					" was ineligible for line profiling (for example Optimus's own code)"
+				)
+			except Exception:
+				pass  # a log line never fails the analysis
+		else:
+			_report_nothing_armed(docname, context, len(picks), skipped)
 		return
 	run_uuid = _uuid.uuid4().hex
 	from optimus.api import _lock_phase2_for_write, _persist_phase2_capture
@@ -844,6 +883,12 @@ def _arm_phase2(docname: str, context) -> None:
 	# form tell them a pass is armed and what to do next (re-run + Stop),
 	# since arming alone does nothing until the flow re-executes.
 	functions = [r["dotted_path"].rsplit(".", 1)[-1] for r in eligible][:5]
+	skipped = _lp_capture.skipped_functions(resolved, limit=_SKIP_SUMMARY_LIMIT)
+	if skipped:
+		safe_call.log_line(
+			f"optimus auto-arm line profiling: skipped {len(resolved) - len(eligible)} hot function(s)",
+			level="info",
+		)
 	from optimus.realtime import publish_session_event
 	publish_session_event(
 		"optimus_phase2_armed",
@@ -852,6 +897,8 @@ def _arm_phase2(docname: str, context) -> None:
 			"run_uuid": run_uuid,
 			"count": len(eligible),
 			"functions": functions,
+			"skipped": skipped,
+			"skipped_count": len(resolved) - len(eligible),
 		},
 	)
 
