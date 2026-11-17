@@ -156,6 +156,16 @@ _step "build framework print assets"
 bench build --app frappe
 _end
 
+_step "disable client TLS requirement for the no-TLS MariaDB service"
+# The GitHub runner image refreshed on 2026-11-15 ships a mariadb-client that
+# defaults to requiring TLS, but the mariadb:10.6 service container offers none.
+# bench new-site bootstraps the schema through that CLI, so it fails with
+# "ERROR 2026 (HY000): TLS/SSL error: SSL is required, but the server does not
+# support it" before any Optimus code runs. Tell the client not to require TLS;
+# the mariadb/mysql CLI reads ~/.my.cnf [client] automatically.
+printf '[client]\nskip-ssl\n' > ~/.my.cnf
+_end
+
 _step "bench new-site ${TEST_SITE}"
 # Create the test site. --no-mariadb-socket forces TCP (the runner's
 # MariaDB service doesn't expose a unix socket).
