@@ -13,7 +13,7 @@ import frappe
 from frappe.utils import add_to_date, now_datetime
 
 from optimus import safe_call, safe_commit, session
-from optimus.timing import STALE_ANALYZING_MINUTES, STALE_RECORDING_MINUTES
+from optimus.timing import LINE_PROFILE_MAX_RUN_MINUTES, STALE_ANALYZING_MINUTES, STALE_RECORDING_MINUTES
 
 # Default retention for successfully-analyzed sessions. After this many
 # days, sessions in Ready or Failed state are deleted by the daily
@@ -522,6 +522,39 @@ def _claim_stale_stopping(name: str, cutoff) -> bool:
 	return bool(locked)
 
 
+def _phase2_capture_gone(row) -> bool:
+	"""True when the run's active key expired or moved; unreadable Redis counts as gone."""
+	from optimus.line_profile import capture as _lp_capture
+
+	try:
+		return _lp_capture.is_active(row.get("recording_user"), fresh=True) != row.get("run_uuid")
+	except Exception:
+		return True
+
+
+def _phase2_run_too_old(row, max_start) -> bool:
+	return bool(row.get("started_at")) and row["started_at"] < max_start
+
+
+def _stale_phase2_recordings(cutoff):
+	"""Up to 100 expirable Recording runs; live runs are skipped before the limit, not after."""
+	max_start = add_to_date(now_datetime(), minutes=-LINE_PROFILE_MAX_RUN_MINUTES)
+	rows, start = [], 0
+	while len(rows) < 100:
+		page = frappe.db.get_all(
+			"Optimus Phase Two Run", filters={"status": "Recording", "modified": ["<", cutoff]},
+			fields=["name", "parent", "run_uuid", "recording_user", "started_at"],
+			order_by="modified asc, name asc", limit_start=start, limit_page_length=100,
+		)
+		for row in page:
+			row["too_old"] = _phase2_run_too_old(row, max_start)
+		rows += [row for row in page if row["too_old"] or _phase2_capture_gone(row)]
+		if len(page) < 100:
+			break
+		start += 100
+	return rows[:100]
+
+
 def _sweep_stale_phase2_runs():
 	"""Expire old captures/legacy jobs with a current locked status check.
 
@@ -532,10 +565,14 @@ def _sweep_stale_phase2_runs():
 
 	for status, age in (("Recording", STALE_RECORDING_MINUTES), ("Analyzing", STALE_ANALYZING_MINUTES)):
 		cutoff = add_to_date(now_datetime(), minutes=-age)
-		rows = frappe.db.get_all(
-			"Optimus Phase Two Run", filters={"status": status, "modified": ["<", cutoff]},
-			fields=["name", "parent", "run_uuid"], limit_page_length=100,
-		)
+		if status == "Recording":
+			# ``modified`` stays at the start; a live run keeps its active key renewed.
+			rows = _stale_phase2_recordings(cutoff)
+		else:
+			rows = frappe.db.get_all(
+				"Optimus Phase Two Run", filters={"status": status, "modified": ["<", cutoff]},
+				fields=["name", "parent", "run_uuid"], limit_page_length=100,
+			)
 		ai_jobs._transaction(lambda: None)
 		for row in rows:
 			from optimus.analyze import _run_ai_step
@@ -567,4 +604,6 @@ def _expire_phase2_run(row, status, cutoff):
 	if outcome == "analyze":
 		_lp_jobs.analyze_expired(row["parent"], row["run_uuid"], cutoff=cutoff)
 	elif outcome is True and status == "Recording" and samples is False:
+		if row.get("too_old"):
+			_lp_capture.stop_line_profile_pass(row["run_uuid"], row["recording_user"])
 		_lp_capture.cleanup_run(row["run_uuid"])

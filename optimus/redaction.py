@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import ItemsView, KeysView
 from functools import lru_cache
 from typing import NamedTuple
 from urllib.parse import quote, unquote_plus
@@ -96,6 +97,51 @@ def is_key_bearing_endpoint(path, cmd) -> bool:
 	return any(token in target for token in _KEY_BEARING_ENDPOINTS)
 
 
+# Deeper containers are replaced, not walked: a payload nested past the interpreter's recursion
+# limit must never be stored or rendered unredacted, and no real form has this many levels.
+_MAX_REDACT_DEPTH = 100
+# Containers visited in one call: a payload that shares its subtrees (``x = [y, y]`` repeated)
+# is small in memory and exponential to walk.
+_MAX_REDACT_CONTAINERS = 100_000
+NESTED_TOO_DEEP = "<REDACTED:nested too deep>"
+CIRCULAR = "<REDACTED:circular>"
+TOO_LARGE = "<REDACTED:too large>"
+UNSUPPORTED_TYPE = "<REDACTED:unsupported type>"
+UNREADABLE_JSON = "<REDACTED:unreadable json>"
+# Stored in a recording's form data (or headers) with the number of fail-closed markers
+# the redaction wrote there, so the report can say values were omitted.
+OMITTED_COUNT_KEY = "_optimus_omitted"
+_FAIL_CLOSED_MARKERS = frozenset(
+	{NESTED_TOO_DEEP, CIRCULAR, TOO_LARGE, UNSUPPORTED_TYPE, UNREADABLE_JSON}
+)
+# A values view is not here: it drops the keys, so a secret under ``password`` could not be found.
+_SEQUENCE_TYPES = (list, tuple, set, frozenset, KeysView)
+_CONTAINER_TYPES = (dict, ItemsView, *_SEQUENCE_TYPES)
+_SCALAR_TYPES = (int, float, bool, type(None))
+
+
+class _Walk:
+	"""State of one ``redact_sensitive`` call: the containers left to visit, the ones
+	currently being walked (to end a cycle at once) and the fail-closed markers written."""
+
+	__slots__ = ("active", "left", "omitted")
+
+	def __init__(self):
+		self.left = _MAX_REDACT_CONTAINERS
+		self.active: set[int] = set()
+		self.omitted = 0
+
+	@property
+	def visited(self) -> int:
+		"""Containers and JSON parse attempts spent from the budget so far."""
+		return _MAX_REDACT_CONTAINERS - self.left
+
+	def fail(self, marker: str) -> str:
+		"""Count ``marker`` as one omitted value and return it."""
+		self.omitted += 1
+		return marker
+
+
 def redact_sensitive(
 	payload,
 	*,
@@ -103,18 +149,72 @@ def redact_sensitive(
 	mask_key: bool = False,
 	mask_code: bool = False,
 	header: bool = False,
+	walk: _Walk | None = None,
 ):
-	"""Walk a dict / list / tuple and return a deep copy with values
+	"""Walk a dict / list / tuple / set / dict view and return a deep copy with values
 	under sensitive keys replaced by ``"<REDACTED:keyname>"``. A string value
 	that is a URL has its sensitive query values masked (:func:`redact_url`).
 	``mask_key`` also masks the top-level bare ``key`` (see
 	:func:`is_key_bearing_endpoint`) and ``mask_code`` the bare ``code`` of an OAuth callback (see
 	:func:`is_oauth_callback`). ``header`` treats the top-level names as HTTP header names, which
 	also masks a ``-Key`` suffix and ``auth`` / ``bearer`` names (:func:`is_secret_header_name`).
-	Other scalars pass through unchanged.
+	Numbers, booleans and None pass through unchanged. Part of a payload that nests deeper than
+	``_MAX_REDACT_DEPTH``, repeats itself, is shared past the container budget, or has a
+	type that is not known to be safe (bytes, objects) becomes a marker: it fails closed.
+	``walk`` collects the markers written and the budget spent (see :func:`redact_sensitive_walk`).
 
 	Pure never mutates the input.
 	"""
+	top = (mask_key, mask_code, header)
+	return _redact(payload, extra_keys, 0, walk or _Walk(), top)
+
+
+def redact_sensitive_walk(payload, *, extra_keys: tuple[str, ...] = (), **flags):
+	"""``redact_sensitive`` plus the walk state: ``(redacted, walk)``, where ``walk.omitted``
+	counts the fail-closed markers written and ``walk.visited`` the budget spent."""
+	walk = _Walk()
+	return redact_sensitive(payload, extra_keys=extra_keys, walk=walk, **flags), walk
+
+
+def count_omitted(recording) -> int:
+	"""Fail-closed markers capture stored in one recording's form data and headers."""
+	total = 0
+	if not isinstance(recording, dict):
+		return 0
+	for name in ("form_dict", "headers"):
+		part = recording.get(name)
+		count = part.get(OMITTED_COUNT_KEY) if isinstance(part, dict) else None
+		if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+			total += count
+	return total
+
+
+def _redact(payload, extra_keys: tuple[str, ...], depth: int, walk: _Walk, top=(False, False, False)):
+	"""``top`` holds the (mask_key, mask_code, header) flags, which apply to the top-level dict only."""
+	if isinstance(payload, str):
+		return _redact_string(payload, extra_keys, depth, walk)
+	if isinstance(payload, _SCALAR_TYPES):
+		return payload
+	if not isinstance(payload, _CONTAINER_TYPES):
+		return walk.fail(UNSUPPORTED_TYPE)
+	if depth >= _MAX_REDACT_DEPTH:
+		return walk.fail(NESTED_TOO_DEEP)
+	if id(payload) in walk.active:
+		return walk.fail(CIRCULAR)
+	if walk.left <= 0:
+		return walk.fail(TOO_LARGE)
+	walk.left -= 1
+	walk.active.add(id(payload))
+	try:
+		return _redact_container(payload, extra_keys, depth, walk, top)
+	finally:
+		walk.active.discard(id(payload))
+
+
+def _redact_container(payload, extra_keys: tuple[str, ...], depth: int, walk: _Walk, top):
+	mask_key, mask_code, header = top
+	if isinstance(payload, ItemsView):
+		payload = dict(payload)
 	if isinstance(payload, dict):
 		out = {}
 		for k, v in payload.items():
@@ -126,19 +226,16 @@ def redact_sensitive(
 			):
 				out[k] = f"<REDACTED:{k}>"
 			else:
-				out[k] = redact_sensitive(v, extra_keys=extra_keys)
+				out[k] = _redact(v, extra_keys, depth + 1, walk)
 		# set_value style args: the secret sits under "value", named by "fieldname".
 		field = out.get("fieldname")
 		if "value" in out and is_sensitive_key(field, extra=extra_keys):
 			out["value"] = f"<REDACTED:{field}>"
 		return out
+	items = [_redact(item, extra_keys, depth + 1, walk) for item in payload]
 	if isinstance(payload, list):
-		return _mask_filter_value([redact_sensitive(item, extra_keys=extra_keys) for item in payload], extra_keys)
-	if isinstance(payload, tuple):
-		return tuple(redact_sensitive(item, extra_keys=extra_keys) for item in payload)
-	if isinstance(payload, str):
-		return _redact_string(payload, extra_keys)
-	return payload
+		return _mask_filter_value(items, extra_keys)
+	return tuple(items) if isinstance(payload, tuple) else items
 
 
 _FILTER_OPERATORS = frozenset(
@@ -200,9 +297,9 @@ def redact_string_value(text: str, extra_keys: tuple[str, ...] = ()) -> str:
 	return _redact_string(text, tuple(extra_keys or ())) if isinstance(text, str) else text
 
 
-def _redact_string(text: str, extra_keys: tuple[str, ...]) -> str:
+def _redact_string(text: str, extra_keys: tuple[str, ...], depth: int = 0, walk: _Walk | None = None) -> str:
 	if text.lstrip().startswith(("{", "[")):
-		redacted = _redact_json_string(text, extra_keys)
+		redacted = _redact_json_string(text, extra_keys, depth, walk)
 		if redacted != text:
 			return redacted
 	return _redact_url_text(text, extra_keys)
@@ -230,34 +327,82 @@ def _may_hold_url(text: str) -> bool:
 	return _looks_like_url(text)
 
 
-def _redact_json_string(text: str, extra_keys: tuple[str, ...]) -> str:
-	"""Redact inside a JSON-encoded object or list (savedocs ``doc``, ``args``)."""
+_JSON_OPENING = re.compile(r"""\s*[\[{]\s*["'\[{]""")
+
+
+def _redact_json_string(
+	text: str, extra_keys: tuple[str, ...], depth: int = 0, walk: _Walk | None = None
+) -> str:
+	"""Redact inside a JSON-encoded object or list (savedocs ``doc``, ``args``). Each parse
+	attempt spends the container budget; a text that cannot be JSON (it does not end in a
+	closing bracket) is not parsed, and one that mentions a sensitive key but cannot be read
+	becomes a marker instead of being kept."""
+	walk = walk or _Walk()
 	if not text.lstrip().startswith(("{", "[")):
 		return text
+	if not text.rstrip().endswith(("}", "]")):
+		return _unreadable_json(text, extra_keys, walk)
+	if walk.left <= 0:
+		return walk.fail(TOO_LARGE)
+	if _json_nests_deeper_than(text, _MAX_REDACT_DEPTH - depth):
+		return walk.fail(NESTED_TOO_DEEP)
+	walk.left -= 1
+	repeated = []
+
+	def _pairs(pairs):
+		out = dict(pairs)
+		if len(out) != len(pairs):
+			repeated.append(True)
+		return out
+
 	try:
-		parsed = json.loads(text)
+		parsed = json.loads(text, object_pairs_hook=_pairs)
 		if not isinstance(parsed, dict | list):
 			return text
-		redacted = redact_sensitive(parsed, extra_keys=extra_keys)
-	except (ValueError, RecursionError):
-		return _mask_unparsed_json(text, extra_keys)
-	return text if redacted == parsed else json.dumps(redacted)
+		redacted = _redact(parsed, extra_keys, depth, walk)
+	except ValueError:
+		return _unreadable_json(text, extra_keys, walk)
+	# A repeated key collapsed in the parse: the text still holds the first value.
+	return text if redacted == parsed and not repeated else json.dumps(redacted)
+
+
+# An unterminated string runs to the end of the text (``\Z``): a pattern that can fail to end
+# one is retried from every later escaped quote, which is quadratic.
+_JSON_STRING_OR_BRACKET = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*(?:"|\Z)|[\[\]{}]', re.S)
+
+
+def _json_nests_deeper_than(text: str, limit: int) -> bool:
+	"""Whether ``text`` opens more than ``limit`` brackets at once outside its strings. The
+	depth is read off the text, so the verdict is the same on every interpreter: how deep
+	``json.loads`` gets before a ``RecursionError`` is not (3.14 bounds the C stack instead).
+	Linear in the length of ``text``."""
+	open_now = 0
+	for token in _JSON_STRING_OR_BRACKET.finditer(text):
+		char = token.group()
+		if char in "[{":
+			open_now += 1
+			if open_now > limit:
+				return True
+		elif char in "]}":
+			open_now -= 1
+	return False
+
+
+def _unreadable_json(text: str, extra_keys: tuple[str, ...], walk: _Walk) -> str:
+	"""JSON-looking text that does not parse (cut off, malformed): kept unless it names a
+	sensitive key, since a value after that key cannot be told from the rest. A quoted key is
+	found whatever the text opens with; the plain substring check is for text that opens like JSON,
+	so prose such as ``[INFO] token refreshed`` stays."""
+	lower = text.lower()
+	extra = tuple(p for p in extra_keys or () if p)
+	if (_JSON_OPENING.match(text) and any(p in lower for p in DEFAULT_SENSITIVE_KEYS + extra)) or any(
+		is_sensitive_key(pair.group(1)[1:-1], extra=extra) for pair in _JSON_PAIR.finditer(text)
+	):
+		return walk.fail(UNREADABLE_JSON)
+	return text
 
 
 _JSON_PAIR = re.compile(r'("(?:[^"\\]|\\.){1,128}")(\s*:\s*)("(?:[^"\\]|\\.)*(?:"|$)|[^,{}\[\]\s"]+)')
-
-
-def _mask_unparsed_json(text: str, extra_keys: tuple[str, ...]) -> str:
-	"""JSON text that does not parse (cut short, or nested too deeply): the values after secret names are
-	masked pair by pair, so a cut or deep value is not stored raw."""
-
-	def mask(match):
-		name = match.group(1)[1:-1]
-		if not is_sensitive_key(name, extra=extra_keys):
-			return match.group(0)
-		return f'{match.group(1)}{match.group(2)}"{URL_PLACEHOLDER}"'
-
-	return _JSON_PAIR.sub(mask, text)
 
 
 # ---------------------------------------------------------------------------

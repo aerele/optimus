@@ -224,6 +224,22 @@ def test_persistence_conflict_is_not_replayed_with_mutated_trees(delivery, monke
 	assert delivery.recordings and not [e for e in delivery.events if e[0] == "cleanup"]
 
 
+def test_omitted_request_values_are_reported_in_the_analyzer_warnings(delivery, monkeypatch):
+	state = delivery
+	state.recordings = [{"uuid": "r", "calls": [], "form_dict": {"_optimus_omitted": 2}}]
+	persisted = []
+	monkeypatch.setattr(analyze, "_persist", lambda docname, context, *a: persisted.append(list(context.warnings)))
+	analyze.run("s")
+	assert any(w.startswith("2 request values were omitted") for w in persisted[0])
+
+
+def test_no_omitted_values_warning_for_a_clean_capture(delivery, monkeypatch):
+	persisted = []
+	monkeypatch.setattr(analyze, "_persist", lambda docname, context, *a: persisted.append(list(context.warnings)))
+	analyze.run("s")
+	assert not any("omitted" in w for w in persisted[0])
+
+
 def test_generic_failure_stores_its_type_for_the_session_form(delivery, monkeypatch):
 	def boom(*a, **kw):
 		raise KeyError("secret-detail")
