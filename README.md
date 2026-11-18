@@ -563,7 +563,7 @@ user override these per run.
 
 | Field | Default | Purpose |
 |---|---|---|
-| **Line Profiling: Max Runs per Session** | `10` | Cap on how many line profiling runs one Optimus Session can hold. Once the session has this many, new runs are refused (and auto-arm stops). `0` = no limit. _Strict 0 · Recommended 10 · Relaxed 5._ |
+| **Line Profiling: Max Runs per Session** | `10` | Cap on how many line profiling runs one Optimus Session can hold. Once the session has this many runs that are recording, analyzing or finished, new runs are refused (and auto-arm stops). Failed runs do not count. `0` = no limit. _Strict 0 · Recommended 10 · Relaxed 5._ |
 | **Default Auto-Expand Hot Chain** | ✓ on | When on, the picker dialog's `Auto-expand hot chain` checkbox starts ticked. Auto-expansion walks each pick down the profile's call tree to instrument the full hot chain in one shot. |
 | **Auto-Expand: Max Depth** | `10` | How many levels deep auto-expand will follow (`0` = walk to the leaf). _Strict 0 · Recommended 10 · Relaxed 5._ |
 | **Auto-Expand: Minimum Child Time (ms)** | `50` | Auto-expand stops descending when the next-hottest child consumes less than this. Lower = follow deeper into smaller hot spots. _Strict 10 · Recommended 50 · Relaxed 100._ |

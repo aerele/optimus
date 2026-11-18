@@ -45,6 +45,21 @@ _RESULT_SAVE = ContextVar("optimus_phase2_result_save", default=False)
 _CAPTURE_CREATION = ContextVar("optimus_phase2_capture_creation", default=None)
 
 
+def runs_counted_by_limit(rows) -> int:
+	"""Runs that use up phase2_max_runs_per_session; Failed runs hold no results."""
+	return sum(1 for row in rows or []
+		if (row.get("status") if isinstance(row, dict) else getattr(row, "status", None)) != "Failed")
+
+
+def _at_run_cap(docname) -> bool:
+	"""Rechecked under the parent lock: a retried Failed run counts again, so it needs a free slot."""
+	from optimus.settings import get_config
+
+	cap = get_config().phase2_max_runs_per_session
+	rows = frappe.db.get_values(TABLE, {"parent": docname}, ["status"], as_dict=True)
+	return cap > 0 and runs_counted_by_limit(rows) >= cap
+
+
 @contextmanager
 def capture_creation(parent, run_uuid, user):
 	"""Allow only the new capture row admitted by the server under its lock."""
@@ -229,6 +244,8 @@ def _admit(docname, session_uuid, run_uuid, requested_by, *, generation, now, fr
 	attempts = row.get("analyze_attempts") or 0
 	if type(attempts) is not int or not 0 <= attempts < MAX_ATTEMPTS:
 		return {"status": "refused", "reason": "retry_limit"}
+	if row["status"] == "Failed" and not from_recording and _at_run_cap(docname):
+		return {"status": "refused", "reason": "run_limit"}
 	if workers is not True:
 		if row["status"] != "Failed":
 			message = ("Line profiling needs a worker listening on the long queue. Start a worker and retry analysis while the captured input is available."
