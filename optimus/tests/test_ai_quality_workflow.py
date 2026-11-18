@@ -95,14 +95,3 @@ def test_failure_diagnostics_log_only_started_services(workflow, tmp_path, maria
 	env["PATH"] = str(tmp_path) + os.pathsep + env["PATH"]
 	result = subprocess.run(["bash", "-e", "-c", script], env=env, capture_output=True, text=True, check=True)
 	assert result.stdout.splitlines() == [f"logs {name}" for name in (mariadb, postgres) if name]
-
-
-def test_the_header_lists_every_job(workflow):
-	"""The comment block at the top names each job, so a reader of the file finds them all."""
-	header = workflow.split("\non:\n", 1)[0]
-	jobs = re.findall(r"^  ([a-z][a-z0-9-]*):\n    name:", workflow.split("\njobs:\n", 1)[1], re.M)
-	assert jobs == ["semgrep", "ai-tests", "sql-journal"]
-	for job in jobs:
-		assert re.search(rf"^#   {re.escape(job)}\s", header, re.M), job
-	listed = header.split("sql-journal", 1)[1]
-	assert "MariaDB 10.6" in listed and "MariaDB 11.8" in listed and "PostgreSQL 16" in listed

@@ -279,8 +279,13 @@ class TestBgWaitForPendingJobs:
 		monkeypatch.setattr(analyze, "_rq_status", lambda jid: "started")
 		monkeypatch.setattr(analyze, "_publish_progress", lambda *a, **k: None)
 		monkeypatch.setattr(analyze.time, "sleep", lambda *a, **k: None)
-		# The status-set is best-effort (try/except in the SUT frappe.db
-		# being unavailable here is fine). Capture the re-enqueue.
+		# The drain keeps the session on "Capturing Background Jobs" (never "Analyzing")
+		# while it waits; capture that status write and the re-enqueue.
+		statuses = []
+		monkeypatch.setattr(
+			frappe, "db", types.SimpleNamespace(set_value=lambda *a, **k: statuses.append(a)), raising=False
+		)
+		monkeypatch.setattr(analyze, "safe_commit", lambda: None)
 		enq = []
 		monkeypatch.setattr(frappe, "enqueue", lambda *a, **k: enq.append((a, k)), raising=False)
 
@@ -291,6 +296,7 @@ class TestBgWaitForPendingJobs:
 		assert args[0] == "optimus.analyze.run"
 		assert kwargs.get("session_uuid") == "s1"
 		assert "_bg_wait_until" in kwargs
+		assert [a[-1] for a in statuses] == ["Capturing Background Jobs"]
 
 
 # --------------------------------------------------------------------------

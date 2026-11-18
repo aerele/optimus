@@ -78,6 +78,23 @@ class TestDefaults:
 		# default is 2000 comfortable for most flows, with a clear
 		# banner when truncation kicks in for heavier flows.
 		assert cfg.max_queries_per_recording == 2000
+		# Severity thresholds
+		assert cfg.slow_query_threshold_ms == 200.0
+		assert cfg.slow_hot_path_pct_threshold == 25.0
+		assert cfg.slow_hot_path_min_ms == 200.0
+		assert cfg.hot_line_high_pct == 50.0
+		assert cfg.hot_line_high_min_ms == 100.0
+		# Capture
+		assert cfg.pyinstrument_sampler_interval_ms == 1.0
+		assert cfg.min_action_duration_ms == 0.0
+		# Line profiling
+		assert cfg.phase2_max_runs_per_session == 10
+		assert cfg.phase2_default_auto_expand is True
+		assert cfg.auto_expand_max_depth == 10
+		assert cfg.auto_expand_min_ms == 50.0
+		# Skip lists default to empty tuple (immutable for caching).
+		assert cfg.skip_request_paths == ()
+		assert cfg.skip_users == ()
 
 	def test_config_is_frozen(self):
 		cfg = settings.OptimusConfig()

@@ -3,9 +3,11 @@
 
 """Session lifecycle endpoints in ``optimus.api`` (start, stop, status, retry)."""
 
+import ast
 import datetime
 import time
 import types
+from pathlib import Path
 
 import pytest
 
@@ -249,9 +251,14 @@ class TestStop:
 		_row(env)
 
 		monkeypatch.setattr(api.time, "time", lambda: 1000.0)
+		# Record the status each commit makes durable: the enqueued analyze worker must not
+		# read a stale "Stopping", so the new status has to be committed the moment it is set.
+		committed = []
+		monkeypatch.setattr(api, "safe_commit", lambda: committed.append(env.db.rows["u1"]["status"]))
 		api.stop()
 
 		assert env.db.rows["u1"]["status"] == "Capturing Background Jobs"
+		assert committed.count("Capturing Background Jobs") == 1
 		# deadline = wait + 60s analyze grace
 		assert env.store.draining["u1"] == 1090.0
 
@@ -533,6 +540,18 @@ class TestStatusEndpoints:
 
 
 class TestDrainProgress:
+	def test_the_endpoint_is_whitelisted(self):
+		# The conftest frappe stub makes ``whitelist`` an identity decorator, so the only
+		# way to prove the endpoint is exposed is the decorator in the source (the same AST
+		# check ``test_api_gate_audit`` uses).
+		tree = ast.parse(Path(api.__file__).read_text(encoding="utf-8"))
+		fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "drain_progress")
+
+		assert any(
+			ast.unparse(dec.func if isinstance(dec, ast.Call) else dec) == "frappe.whitelist"
+			for dec in fn.decorator_list
+		)
+
 	def test_reports_pending_jobs_and_remaining_window_without_the_grace(self, env, monkeypatch):
 		_bg_wait(monkeypatch, 300)
 		_row(env, status="Capturing Background Jobs")
@@ -564,6 +583,19 @@ class TestDrainProgress:
 		assert out["remaining_seconds"] is None
 		assert out["window_seconds"] is None
 		assert out["pending"] == 0
+
+	def test_permission_gate_runs_before_any_store_read(self, env, monkeypatch):
+		def denied(session_uuid):
+			raise PermissionError(session_uuid)
+
+		def no_read(*a, **kw):
+			raise AssertionError("the store was read before the permission check")
+
+		monkeypatch.setattr(api, "_require_session_permission", denied)
+		monkeypatch.setattr(env.db, "get_value", no_read)
+		monkeypatch.setattr(env.store, "get_session_meta", no_read, raising=False)
+		with pytest.raises(PermissionError):
+			api.drain_progress("u1")
 
 
 class TestRetryAnalyze:

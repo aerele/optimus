@@ -41,45 +41,30 @@ def test_app_include_css_contains_version():
 
 
 def test_app_include_paths_are_correct():
+	# hooks.py: the pill state logic must load before floating_widget.js, and the
+	# frontend shim after it (it reads the widget's data-session-uuid attribute).
 	entries = _js_entries()
-	# floating_widget.js must always be present.
-	assert any(
-		e.startswith("/assets/optimus/js/floating_widget.js")
-		for e in entries
-	)
-	# v0.5.0 adds optimus_frontend.js alongside it.
-	assert any(
-		e.startswith("/assets/optimus/js/optimus_frontend.js")
-		for e in entries
-	)
+	assert [e.split("?")[0] for e in entries] == [
+		"/assets/optimus/js/optimus_pill_state.js",
+		"/assets/optimus/js/floating_widget.js",
+		"/assets/optimus/js/optimus_frontend.js",
+	]
 	assert hooks.app_include_css.startswith("/assets/optimus/css/floating_widget.css")
 
 
-def test_mtime_component_auto_invalidates_on_file_edit(tmp_path, monkeypatch):
+def test_mtime_component_auto_invalidates_on_file_edit(monkeypatch):
 	"""The ?v= suffix includes the file's mtime so any edit to the JS/CSS
 	auto-busts the browser cache even when __version__ hasn't been bumped.
 	"""
 	from optimus.hooks import _asset_version
 
-	# Call twice result should change if the file is touched.
-	v1 = _asset_version("js/floating_widget.js")
-	# The version string format is "<version>.<mtime>" or just
-	# "<version>" if the file couldn't be stat'd.
-	assert v1.startswith(__version__), (
-		f"Asset version must start with __version__ {__version__}; "
-		f"got: {v1}"
-	)
-	# If the file existed (common case), there's a dot + digits.
-	assert "." in v1, (
-		f"Asset version must include an mtime component; got: {v1}. "
-		"Without mtime, any JS edit needs a manual __version__ bump "
-		"to invalidate the browser cache."
-	)
-	# And the mtime part must be purely digits (integer seconds).
-	mtime_suffix = v1[len(__version__) + 1:]
-	assert mtime_suffix.isdigit(), (
-		f"Mtime component must be an integer; got: {mtime_suffix!r}"
-	)
+	monkeypatch.setattr(hooks._os.path, "getmtime", lambda path: 1700000000.9)
+	before = _asset_version("js/floating_widget.js")
+	monkeypatch.setattr(hooks._os.path, "getmtime", lambda path: 1700000500.2)
+	after = _asset_version("js/floating_widget.js")
+	assert before == f"{__version__}.1700000000"
+	assert after == f"{__version__}.1700000500"
+	assert before != after
 
 
 def test_asset_version_falls_back_when_file_missing(monkeypatch):

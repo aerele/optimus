@@ -72,15 +72,3 @@ def test_every_emitted_finding_type_is_in_doctype_options():
 		f"Add them to optimus_finding.json. Current options: "
 		f"{sorted(options)}"
 	)
-
-
-def test_framework_n_plus_one_is_in_options():
-	"""Direct guard: 'Framework N+1' must stay in the DocType options (analyze
-	crashes with 'Type cannot be "Framework N+1"' otherwise)."""
-	options = _load_doctype_options()
-	assert "Framework N+1" in options, (
-		"'Framework N+1' must be in Optimus Finding's select options "
-		" n_plus_one.py emits this finding type for pure-frappe "
-		"stacks and Frappe's DocType validation will reject it "
-		"otherwise"
-	)

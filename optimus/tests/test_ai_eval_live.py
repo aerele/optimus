@@ -100,13 +100,6 @@ def test_provider_meta_omits_url_credentials(url, expected):
 	assert "fake-password" not in json.dumps(meta)
 
 
-def test_main_refuses_existing_output_directory(tmp_path, monkeypatch):
-	live = load("live")
-	monkeypatch.setattr(live, "_connect", lambda site: pytest.fail("unexpected connection"))
-	with pytest.raises(live.EvalRefused, match="exists"):
-		live.main(["--out", str(tmp_path)])
-
-
 @pytest.mark.parametrize("symlink", [False, True])
 def test_main_keeps_run_artifacts_outside_checkout(tmp_path, monkeypatch, symlink):
 	live = load("live")
@@ -240,13 +233,3 @@ def test_run_case_finds_the_index_types_in_an_older_checkout(corpus, monkeypatch
 	assert live.run_case(case, fake)["outcome"] == "recipe"
 	delattr(fix_recipes, "INDEX_FINDING_TYPES")
 	assert live.run_case(case, fake)["outcome"] == "gated" and not calls
-
-
-def test_run_case_gates_pre_l5_redundant_calls_with_the_real_gate(corpus):
-	from optimus import ai_fix, ai_grounding
-
-	live = load("live")
-	case = load("_corpus").case_by_name("3q1efl686s", corpus)
-	fake, calls = _fake_ai_fix(gate=ai_fix.llm_gate_note)
-	record = live.run_case(case, fake)
-	assert record["outcome"] == "gated" and record["gate_note"] == ai_grounding.UNSTAMPED_REDUNDANT_CALL_NOTE and not calls

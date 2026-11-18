@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from optimus import settings
+from optimus import hooks, settings
 
 _APP = Path(__file__).resolve().parents[2]
 _SETTINGS_JSON = _APP / "optimus" / "optimus" / "doctype" / "optimus_settings" / "optimus_settings.json"
@@ -167,3 +167,13 @@ def test_readme_no_pdf_button_claim_matches_code():
 	assert "download_pdf" in _readme()
 	js = "".join(p.read_text() for p in (_APP / "optimus" / "public" / "js").glob("*.js"))
 	assert "download_pdf" not in js
+
+
+@pytest.mark.parametrize("document", ["CHANGELOG.md", "SECURITY.md"])
+def test_documented_hook_check_command_matches_the_registered_hook(document):
+	text = (_APP / document).read_text()
+	checks = re.findall(r"bench --site <site> execute frappe\.get_\w+[^`\n]*", text)
+	assert checks
+	command = 'bench --site <site> execute frappe.get_doc_hooks | grep -o \'"Error Log": {[^}]*}\''
+	assert all(check == command for check in checks)
+	assert hooks.doc_events["Error Log"]["before_insert"] == "optimus.error_log_mask.mask_error_log"
