@@ -12,6 +12,7 @@ falls back cleanly instead of raising ImportError.
 from __future__ import annotations
 
 import re
+from datetime import datetime
 
 from markupsafe import Markup
 
@@ -43,17 +44,33 @@ def _format_duration_ms(ms, threshold_ms: float = DEFAULT_DISPLAY_THRESHOLD_MS, 
 	return Markup(text)
 
 
+def _in_site_time(value):
+	"""A timezone-aware value (a UTC ISO string or datetime) converted to the site time
+	zone; a naive value is already site time and passes through unchanged."""
+	if isinstance(value, str):
+		try:
+			value = datetime.fromisoformat(value.strip())
+		except ValueError:
+			return value
+	if not isinstance(value, datetime) or value.tzinfo is None:
+		return value
+	from frappe.utils import convert_utc_to_system_timezone
+
+	return convert_utc_to_system_timezone(value).replace(tzinfo=None)
+
+
 def _format_datetime_display(value) -> str:
 	"""Format a datetime (or datetime-string) for display in the report using
 	the site's System Settings (Date Format + Time Format) which also drops
-	the microseconds. Falls back to the value with any trailing microseconds
-	stripped when Frappe isn't available (standalone / tests)."""
+	the microseconds, after moving an aware time to the site time zone. Falls
+	back to the value with any trailing microseconds stripped when Frappe isn't
+	available (standalone / tests)."""
 	if not value:
 		return ""
 	try:
 		from frappe.utils import format_datetime
 
-		return format_datetime(value)
+		return format_datetime(_in_site_time(value))
 	except Exception:
 		return re.sub(r"\.\d+", "", str(value))
 

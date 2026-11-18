@@ -17,6 +17,8 @@ import types
 import frappe
 import pytest
 
+from optimus import hooks_callbacks, session
+
 pytest.importorskip("rq")
 pytestmark = pytest.mark.rq  # selected by ai-quality.yml, which installs rq
 
@@ -44,8 +46,6 @@ class FakeJob:
 def captures(monkeypatch):
 	"""Capture calls to session.record_job and session.set_job_status without
 	hitting Redis. Returns the same dict to all tests; tests inspect it."""
-	from optimus import session
-
 	store = {"record_job": [], "set_job_status": []}
 	monkeypatch.setattr(
 		session,
@@ -159,8 +159,6 @@ def fake_db(monkeypatch):
 
 class TestTrackBgJobStarted:
 	def test_records_method_and_marks_running_with_started_at(self, captures, fake_local, fake_rq_job):
-		from optimus import hooks_callbacks
-
 		hooks_callbacks._track_bg_job_started("S1", "myapp.tasks.foo")
 
 		# Method recorded so analyze can populate the bg-job row's Method
@@ -181,8 +179,6 @@ class TestTrackBgJobStarted:
 	def test_callable_method_uses___name__(self, captures, fake_local, fake_rq_job):
 		"""frappe.enqueue accepts a callable too extract its __name__ so the
 		row doesn't render ``<function foo at 0x...>``."""
-		from optimus import hooks_callbacks
-
 		def my_callable():
 			pass
 
@@ -195,16 +191,12 @@ class TestTrackBgJobStarted:
 		import rq
 
 		monkeypatch.setattr(rq, "get_current_job", lambda: None, raising=False)
-		from optimus import hooks_callbacks
-
 		hooks_callbacks._track_bg_job_started("S1", "myapp.tasks.foo")
 		assert captures["record_job"] == []
 		assert captures["set_job_status"] == []
 
 	def test_swallows_exceptions(self, captures, fake_local, fake_rq_job, monkeypatch):
 		"""Tracking is best-effort; a Redis hiccup must NEVER break the job."""
-		from optimus import hooks_callbacks, session
-
 		def boom(*a, **kw):
 			raise RuntimeError("redis is on fire")
 
@@ -220,8 +212,6 @@ class TestTrackBgJobStarted:
 
 class TestTrackBgJobFinished:
 	def test_completed_with_duration_no_exception(self, captures, fake_local, fake_rq_job):
-		from optimus import hooks_callbacks
-
 		# Simulate before_job having stashed the baseline ~500ms ago.
 		fake_local.optimus_bg_job_start_mono = time.monotonic() - 0.5
 
@@ -241,8 +231,6 @@ class TestTrackBgJobFinished:
 		"""after_job runs in a Frappe ``finally`` block if the user's method
 		raised, ``sys.exc_info()`` reports it. We must capture that as
 		``status=Failed`` with a useful error string."""
-		from optimus import hooks_callbacks
-
 		fake_local.optimus_bg_job_start_mono = time.monotonic() - 0.1
 		try:
 			raise ValueError("bad doc_name")
@@ -259,8 +247,6 @@ class TestTrackBgJobFinished:
 		"""RQ kills a job that exceeds its timeout with
 		``rq.timeouts.JobTimeoutException``: distinguish that from a
 		generic user-code failure so the report can flag it specifically."""
-		from optimus import hooks_callbacks
-
 		# Synthesize the class so we don't depend on rq's internals (its
 		# class name is what the SUT keys on, not the import path).
 		class JobTimeoutException(Exception):
@@ -281,8 +267,6 @@ class TestTrackBgJobFinished:
 		"""If before_job didn't fire (e.g. the worker was upgraded mid-job),
 		we have no baseline → duration_ms is None and analyze can fall back to
 		whatever RQ's record still says. Don't fabricate a duration."""
-		from optimus import hooks_callbacks
-
 		# Note: NO optimus_bg_job_start_mono on fake_local.
 		hooks_callbacks._track_bg_job_finished("S1", "J1")
 
@@ -291,8 +275,6 @@ class TestTrackBgJobFinished:
 		assert fields["duration_ms"] is None
 
 	def test_swallows_exceptions(self, captures, fake_local, fake_rq_job, monkeypatch):
-		from optimus import hooks_callbacks, session
-
 		def boom(*a, **kw):
 			raise RuntimeError("redis is on fire")
 
@@ -432,8 +414,6 @@ class TestEndToEndPersist:
 		persisted Optimus Background Job row has Method/Status/Duration)."""
 		import frappe
 
-		from optimus import session
-
 		cache = _FakeCache()
 		monkeypatch.setattr(frappe, "cache", cache, raising=False)
 
@@ -488,8 +468,6 @@ class TestLateFinishDocTypeFallback:
 		"""Happy path: long job finishes after analyze finalized. The hook
 		writes to Redis (no-op for a deleted hash) AND updates the persisted
 		DocType row via set_value + commit."""
-		from optimus import hooks_callbacks
-
 		fake_local.optimus_bg_job_start_mono = time.monotonic() - 0.5  # ~500ms
 		fake_db["session_status"] = "Ready"
 		fake_db["child_status"] = "Running"
@@ -517,8 +495,6 @@ class TestLateFinishDocTypeFallback:
 	def test_late_finish_replaces_queued_and_never_ran_placeholders(
 		self, captures, fake_local, fake_rq_job, fake_db, status, error
 	):
-		from optimus import hooks_callbacks
-
 		fake_local.optimus_bg_job_start_mono = time.monotonic() - 0.5
 		fake_db["session_status"] = "Ready"
 		fake_db["child_status"] = status
@@ -531,8 +507,6 @@ class TestLateFinishDocTypeFallback:
 
 	@pytest.mark.parametrize("status", ["Completed", "Failed", "Timeout"])
 	def test_late_finish_keeps_a_terminal_row(self, captures, fake_local, fake_rq_job, fake_db, status):
-		from optimus import hooks_callbacks
-
 		fake_db["session_status"] = "Ready"
 		fake_db["child_status"] = status
 
@@ -541,8 +515,6 @@ class TestLateFinishDocTypeFallback:
 		assert fake_db["set_value_calls"] == []
 
 	def test_late_finish_keeps_a_stopped_row_that_did_run(self, captures, fake_local, fake_rq_job, fake_db):
-		from optimus import hooks_callbacks
-
 		fake_db["session_status"] = "Ready"
 		fake_db["child_status"] = "Stopped"
 		fake_db["child_error"] = "Stopped by an operator"
@@ -556,8 +528,6 @@ class TestLateFinishDocTypeFallback:
 		bails out so analyze's persist remains the source of truth. The Redis
 		write (covered by test_after_job_writes_completed_with_ended_at_and_duration)
 		still fires; the DocType update doesn't."""
-		from optimus import hooks_callbacks
-
 		fake_local.optimus_bg_job_start_mono = time.monotonic() - 0.1
 		fake_db["session_status"] = "Analyzing"  # not terminal
 
@@ -575,8 +545,6 @@ class TestLateFinishDocTypeFallback:
 		"""Idempotency guard: if some earlier path (analyze re-run, a retry's
 		earlier attempt) already filled the row with Completed, don't overwrite
 		only the Running placeholder is a candidate for backfill."""
-		from optimus import hooks_callbacks
-
 		fake_local.optimus_bg_job_start_mono = time.monotonic() - 0.1
 		fake_db["session_status"] = "Ready"
 		fake_db["child_status"] = "Completed"  # already filled
@@ -589,8 +557,6 @@ class TestLateFinishDocTypeFallback:
 	def test_late_finish_noop_when_session_doc_missing(self, captures, fake_local, fake_rq_job, fake_db):
 		"""Session UUID has no persisted Optimus Session doc yet (analyze still
 		bootstrapping, or the session was admin-deleted). Bail silently."""
-		from optimus import hooks_callbacks
-
 		fake_local.optimus_bg_job_start_mono = time.monotonic() - 0.1
 		fake_db["session_name"] = None  # session lookup returns None
 
@@ -604,8 +570,6 @@ class TestLateFinishDocTypeFallback:
 		never tracked it (extremely rare: an enqueue patch failed silently, or
 		the job was enqueued from a context that the marker injection didn't
 		cover). Bail rather than INSERT a phantom row."""
-		from optimus import hooks_callbacks
-
 		fake_local.optimus_bg_job_start_mono = time.monotonic() - 0.1
 		fake_db["session_status"] = "Ready"
 		fake_db["child_name"] = None  # child lookup returns None
@@ -619,8 +583,6 @@ class TestLateFinishDocTypeFallback:
 		"""Failed late-finish: if the long job raised before returning, the
 		fallback must persist status=Failed + the exception string into the
 		DocType row (not just Completed)."""
-		from optimus import hooks_callbacks
-
 		fake_local.optimus_bg_job_start_mono = time.monotonic() - 0.1
 		fake_db["session_status"] = "Ready"
 		fake_db["child_status"] = "Running"
@@ -641,8 +603,6 @@ class TestLateFinishDocTypeFallback:
 		out of the hook (which would break the worker's after_job dispatcher).
 		The earlier Redis set_job_status write must NOT be suppressed either
 		the fallback's try/except is separate from the helper's outer try."""
-		from optimus import hooks_callbacks
-
 		fake_local.optimus_bg_job_start_mono = time.monotonic() - 0.1
 		fake_db["session_status"] = "Ready"
 
