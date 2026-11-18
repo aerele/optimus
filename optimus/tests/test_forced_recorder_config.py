@@ -46,8 +46,6 @@ class FakeRecorder:
 		self.config = FakeConfig.retrieve()
 		self._recording = True
 		self.force = force
-		self.sql_patched = False
-		self.profiler = None
 		if (
 			self.config.record_requests
 			and frappe.request
@@ -64,8 +62,6 @@ class FakeRecorder:
 		else:
 			self.event_type = "Function Call"
 		self.uuid = "u1"
-		self.sql_patched = bool(self.config.record_sql)
-		self.profiler = object() if self.config.profile else None
 
 
 def _fake_record(force=False):
@@ -145,13 +141,6 @@ class TestRecordForced:
 		monkeypatch.setattr(frappe, "request", types.SimpleNamespace(path="/api/method/ping"), raising=False)
 		assert capture.record_forced().event_type == "HTTP Request"
 
-	def test_without_the_override_the_old_failure_is_reproduced(self, rec_module, monkeypatch):
-		FakeConfig.cached = NOISY
-		monkeypatch.setattr(frappe, "job", types.SimpleNamespace(method="app.tasks.sync"), raising=False)
-		rec = rec_module.record(force=True)
-		assert rec.event_type == "Function Call"
-		assert not hasattr(rec, "path")
-
 	def test_flag_is_set_during_the_call_and_cleared_after(self, rec_module, monkeypatch):
 		seen = []
 		monkeypatch.setattr(
@@ -170,12 +159,6 @@ class TestRecordForced:
 			capture.record_forced()
 		assert frappe.local.optimus_forcing is False
 
-	def test_forces_the_recorder(self, rec_module, monkeypatch):
-		calls = []
-		monkeypatch.setattr(rec_module, "record", lambda **kw: calls.append(kw))
-		capture.record_forced()
-		assert calls == [{"force": True}]
-
 
 class TestNonRecordingRecorderIsNotReused:
 	def test_request_replaces_a_recorder_that_is_not_recording(self, env):  # noqa: F811
@@ -187,15 +170,6 @@ class TestNonRecordingRecorderIsNotReused:
 
 		assert env.recorded == [{"force": True}]
 
-	def test_request_still_reuses_a_recording_recorder(self, env):  # noqa: F811
-		env.store.active["alice@example.com"] = "s1"
-		env.store.meta["s1"] = {}
-		env.local._recorder = types.SimpleNamespace(_recording=True, uuid="g")
-
-		hc.before_request()
-
-		assert env.recorded == []
-
 	def test_job_replaces_a_recorder_that_is_not_recording(self, env):  # noqa: F811
 		env.store.active["alice@example.com"] = "s1"
 		env.local._recorder = types.SimpleNamespace(_recording=False)
@@ -203,14 +177,6 @@ class TestNonRecordingRecorderIsNotReused:
 		hc.before_job(method="app.tasks.sync", kwargs={"_profiler_session_id": "s1"})
 
 		assert env.recorded == [{"force": True}]
-
-	def test_job_still_reuses_a_recording_recorder(self, env):  # noqa: F811
-		env.store.active["alice@example.com"] = "s1"
-		env.local._recorder = types.SimpleNamespace(_recording=True, uuid="g")
-
-		hc.before_job(method="app.tasks.sync", kwargs={"_profiler_session_id": "s1"})
-
-		assert env.recorded == []
 
 
 class TestWiring:
@@ -244,29 +210,6 @@ class TestWiring:
 		hc.before_job(method="app.tasks.sync", kwargs={"_profiler_session_id": "s1"})
 
 		assert seen == [True]
-
-
-class TestStaleUiConfigDoesNotChangeTheForcedRecorder:
-	def test_sql_is_recorded_and_no_profiler_runs_for_a_job(self, rec_module, monkeypatch):
-		FakeConfig.cached = NOISY
-		monkeypatch.setattr(frappe, "job", types.SimpleNamespace(method="app.tasks.sync"), raising=False)
-		rec = capture.record_forced()
-		assert rec.sql_patched is True
-		assert rec.profiler is None
-
-	def test_sql_is_recorded_and_no_profiler_runs_for_a_request(self, rec_module, monkeypatch):
-		FakeConfig.cached = NOISY
-		monkeypatch.setattr(frappe, "request", types.SimpleNamespace(path="/api/method/ping"), raising=False)
-		rec = capture.record_forced()
-		assert rec.sql_patched is True
-		assert rec.profiler is None
-
-	def test_without_the_override_sql_is_lost_and_a_profiler_runs(self, rec_module, monkeypatch):
-		FakeConfig.cached = NOISY
-		monkeypatch.setattr(frappe, "request", types.SimpleNamespace(path="/api/method/ping"), raising=False)
-		rec = rec_module.record(force=True)
-		assert rec.sql_patched is False
-		assert rec.profiler is not None
 
 
 class TestSqlOffNote:

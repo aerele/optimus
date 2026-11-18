@@ -99,6 +99,17 @@ def test_missing_expected_inputs_never_finalize_or_delete_last_input(delivery, k
 		"_finalize_with_empty_session", "_render_and_attach_reports", "delete_session_state"}]
 
 
+def test_run_waits_for_the_background_jobs_and_yields_when_the_wait_re_enqueued_it(delivery, monkeypatch):
+	state = delivery
+	waits, acquired = [], []
+	monkeypatch.setattr(analyze, "_bg_wait_for_pending_jobs", lambda *a: waits.append(a))  # None: re-enqueued
+	state.on_acquire = lambda: acquired.append(True)
+	analyze.run("s")
+	assert waits == [("s", "doc", None)]
+	assert acquired == [] and state.status == "Stopping"
+	assert not [e for e in state.events if e[0] in {"write", "_persist", "cleanup", "delete_session_state"}]
+
+
 def test_run_drops_own_queries_from_the_fetched_recordings_for_its_session(delivery, monkeypatch):
 	state = delivery
 	state.requested = ["rec"]

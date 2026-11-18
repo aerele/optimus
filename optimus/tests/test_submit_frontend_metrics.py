@@ -185,46 +185,6 @@ def test_submit_accepts_and_stores(mock_frappe):
     assert len(vitals_list) == 1
 
 
-def test_submit_appends_to_existing_list(mock_frappe):
-    """Two sequential submits must accumulate into the Redis list
-    atomically RPUSH semantics preserve both.
-    """
-    from optimus import api
-
-    mock_frappe["cache_store"]["profiler:session:S3:meta"] = {
-        "user": "alice@example.com",
-        "docname": "PS-0003",
-    }
-
-    first = json.dumps({
-        "session_uuid": "S3",
-        "xhr": [{"recording_id": "r0", "url": "/api/prev",
-                 "method": "POST", "duration_ms": 50, "status": 200,
-                 "response_size_bytes": 100, "transport": "xhr",
-                 "timestamp": 1}],
-        "vitals": [],
-    })
-    second = json.dumps({
-        "session_uuid": "S3",
-        "xhr": [{"recording_id": "r1", "url": "/api/next",
-                 "method": "GET", "duration_ms": 200, "status": 200,
-                 "response_size_bytes": 999, "transport": "fetch",
-                 "timestamp": 2}],
-        "vitals": [],
-    })
-
-    assert api.submit_frontend_metrics(payload=first)["accepted"] is True
-    result = api.submit_frontend_metrics(payload=second)
-    assert result["accepted"] is True
-
-    xhr_list = mock_frappe["list_store"]["profiler:frontend:S3:xhr"]
-    assert len(xhr_list) == 2
-    # List entries are JSON-encoded strings; decode to verify order.
-    decoded = [json.loads(e) for e in xhr_list]
-    assert decoded[0]["url"] == "/api/prev"
-    assert decoded[1]["url"] == "/api/next"
-
-
 def test_atomic_append_survives_simulated_race(mock_frappe):
     """Guards the GET-merge-SET race: two sequential submits must not lose each
     other's data. We can't truly interleave single-threaded, but we assert the

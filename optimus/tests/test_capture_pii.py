@@ -33,20 +33,6 @@ def test_identify_args_cache_get_hashes_key():
 	assert "@" not in safe
 
 
-def test_identify_args_has_permission_keeps_doctype_and_ptype():
-	# Frappe signature: has_permission(doctype, ptype="read", doc=None, ...)
-	# So args[0]=doctype, args[1]=ptype, args[2]=doc.
-	raw, safe = capture._identify_args(
-		"has_permission",
-		("Sales Invoice", "read", "SI-2026-00042"),
-		{},
-	)
-	assert raw == ("Sales Invoice", "SI-2026-00042", "read")
-	assert safe[0] == "Sales Invoice"  # doctype unchanged
-	assert len(safe[1]) == 12  # name hashed
-	assert safe[2] == "read"  # ptype unchanged
-
-
 def test_identify_args_handles_missing_name():
 	# has_permission can be called with name=None
 	raw, safe = capture._identify_args("has_permission", ("Sales Invoice",), {})
@@ -113,6 +99,7 @@ def test_identify_args_has_permission_correct_signature():
 	assert raw == ("Sales Invoice", "SI-2026-00042", "read")
 	assert safe[0] == "Sales Invoice"
 	assert len(safe[1]) == 12
+	assert safe[2] == "read"
 
 	# Positional with doc as a dict
 	raw, safe = capture._identify_args(

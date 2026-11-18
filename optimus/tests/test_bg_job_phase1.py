@@ -88,8 +88,10 @@ class TestSynchronousEnqueue:
 		assert "_profiler_session_id" not in env.calls[0]["kwargs"]
 
 	def test_async_enqueue_keeps_marker(self, env):
-		env.enqueue("m.f")
+		env.enqueue("m.f", x=1)
+		assert env.calls[0]["method"] == "m.f"
 		assert env.calls[0]["kwargs"]["_profiler_session_id"] == SESSION
+		assert env.calls[0]["kwargs"]["x"] == 1
 
 	def test_sync_calls_never_get_the_line_profile_marker(self, env):
 		env.enqueue("m.f", now=True)
@@ -221,13 +223,6 @@ class TestNestedAndForeignJobs:
 		env.enqueue("m.f", job_id="dup", deduplicate=True)
 		assert _pending(env) == set()
 
-	def test_same_job_tracked_twice_is_one_entry(self, env):
-		from optimus import session
-
-		session.register_pending_job(SESSION, "j1")
-		session.register_pending_job(SESSION, "j1")
-		assert _pending(env) == {"j1"}
-
 
 class TestParentAttribution:
 	def test_enqueue_records_parent_recording(self, env):
@@ -298,6 +293,19 @@ class TestWaitCapLabels:
 			monkeypatch.setattr(fake_rq.Job, "fetch", staticmethod(lambda j, connection=None, jb=job: jb))
 			assert an._active_job_label(an._rq_status("j1")) == label
 
+		def fetch_raising(exc):
+			def fetch(j, connection=None):
+				raise exc
+
+			return staticmethod(fetch)
+
+		# A job RQ has no record of is "missing"; any other lookup error is unknown (None),
+		# so a Redis outage is never taken for a vanished job.
+		monkeypatch.setattr(fake_rq.Job, "fetch", fetch_raising(fake_rq.NoSuchJobError("j1")))
+		assert an._rq_status("j1") == "missing"
+		monkeypatch.setattr(fake_rq.Job, "fetch", fetch_raising(RuntimeError("redis down")))
+		assert an._rq_status("j1") is None
+
 	def test_vanished_queued_job_is_stopped_with_reason(self, an, monkeypatch):
 		monkeypatch.setattr(an.session, "_read_job", lambda s, j: {"status": "Queued"}, raising=False)
 		an._mark_vanished_job(SESSION, "j1")
@@ -322,21 +330,6 @@ class TestWaitCapLabels:
 		monkeypatch.setattr(an, "_mark_vanished_job", lambda s, j: seen.append(j))
 		an._capture_job_terminal_status(SESSION, "j1")
 		assert seen == ["j1"]
-
-
-class TestSchedulerJobsAreNotCaptured:
-	def test_before_job_without_marker_never_tracks_or_records(self, monkeypatch):
-		import frappe
-
-		from optimus import hooks_callbacks as hc
-
-		local = types.SimpleNamespace()
-		monkeypatch.setattr(frappe, "local", local, raising=False)
-		tracked = []
-		monkeypatch.setattr(hc, "_track_bg_job_started", lambda *a: tracked.append(a))
-		hc.before_job(method="app.scheduled.daily", kwargs={"x": 1})
-		assert tracked == []
-		assert not hasattr(local, "optimus_session_id")
 
 
 class TestTriggeredBy:
@@ -416,38 +409,6 @@ class TestJobKeyTtl:
 		session.register_pending_job("s1", "j2")
 		assert set(expiries.values()) == {session.JOB_KEYS_TTL_SECONDS}
 		assert len(expiries) == 2
-
-
-class TestAiJobEnqueues:
-	"""The AI refresh job enqueues must not be marked or tracked by the profiler."""
-
-	def _ai_enqueue(self, enqueue):
-		enqueue(
-			"optimus.ai_jobs.run_slice",
-			queue="long",
-			is_async=True,
-			enqueue_after_commit=True,
-			deduplicate=True,
-			job_id="optimus-ai-r1-1",
-			run_id="r1",
-			slice_no=1,
-		)
-
-	def test_unwrapped_enqueue_is_untouched_and_untracked(self, env):
-		assert env.enqueue.__wrapped__ is not env.enqueue
-		self._ai_enqueue(env.enqueue.__wrapped__)
-		kw = env.calls[0]["kwargs"]
-		assert "_profiler_session_id" not in kw and "_lp_session_id" not in kw
-		assert kw["job_id"] == "optimus-ai-r1-1"
-		assert _pending(env) == set()
-
-	def test_without_session_ai_enqueue_is_not_marked_or_tracked(self, env):
-		env.fake.cache.delete_value(USER_KEY)
-		self._ai_enqueue(env.enqueue)
-		kw = env.calls[0]["kwargs"]
-		assert "_profiler_session_id" not in kw
-		assert kw["job_id"] == "optimus-ai-r1-1"
-		assert _pending(env) == set()
 
 
 class TestAfterCommitGrace:

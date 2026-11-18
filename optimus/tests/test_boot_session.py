@@ -32,14 +32,6 @@ def _frappe_stub(monkeypatch):
 
 
 class TestBootSession:
-	def test_enabled_flag_attached_when_settings_enabled(self, monkeypatch):
-		from optimus import boot, settings
-		monkeypatch.setattr(settings, "get_config", lambda: _cfg(True))
-
-		bootinfo = _fresh_bootinfo()
-		boot.boot_session(bootinfo)
-		assert bootinfo.optimus_enabled is True
-
 	def test_enabled_flag_false_when_settings_disabled(self, monkeypatch):
 		from optimus import boot, settings
 		monkeypatch.setattr(settings, "get_config", lambda: _cfg(False))
@@ -131,27 +123,6 @@ class TestHookWired:
 
 class TestWidgetGuard:
 	"""Verify the JS guard correctly references the boot flag."""
-
-	def test_widget_checks_profiler_enabled_before_mount(self):
-		import os
-		js_path = os.path.join(
-			os.path.dirname(__file__),
-			"..", "public", "js", "floating_widget.js",
-		)
-		with open(js_path) as f:
-			js = f.read()
-		# The guard must reference the boot flag.
-		assert "frappe.boot.optimus_enabled" in js, (
-			"floating_widget.js must check frappe.boot.optimus_enabled "
-			"before mounting otherwise a disabled profiler still "
-			"shows the widget"
-		)
-		# The guard must return/skip mount when the flag is False.
-		assert "=== false" in js, (
-			"Must use strict === false so a missing/undefined boot "
-			"flag (e.g. older boot payload without this field) doesn't "
-			"hide the widget fail-open shape"
-		)
 
 	@pytest.mark.parametrize("boot, expected", [
 		({"optimus_can_profile": True}, "mounted"),

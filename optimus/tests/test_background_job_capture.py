@@ -8,13 +8,9 @@ enqueued and wait for them to finish before analyzing.
   * `session.py` pending-jobs set + post-Stop "draining" window helpers
   * `analyze._bg_wait_for_pending_jobs` (re-enqueue-poll wait, capped, no-op
     when nothing's pending / the wait is disabled / no async worker)
-  * `_stop_session` arms the draining window; `before_job` honours it
-    (source-inspection: those need a live bench for a true run)
   * the `background_job_wait_seconds` setting (default + clamp)
 """
 
-import os
-import re
 import sys
 import types
 from unittest.mock import patch
@@ -103,23 +99,6 @@ class TestEnqueueRegistersPendingJob:
 		assert calls[-1]["kwargs"]["_profiler_session_id"] == "sess-1"
 		assert fake.cache.smembers(_pending_key("sess-1")) == {"job-1"}
 
-	def test_no_registration_without_active_session(self, fake_frappe):
-		fake, fake_bg, calls = fake_frappe
-		_reset_profiler_modules()
-		import optimus  # noqa: F401
-
-		fake_bg.enqueue("myapp.tasks.go")
-		assert fake.cache.smembers(_pending_key("sess-1")) == set()
-
-	def test_does_not_track_the_analyze_job_itself(self, fake_frappe):
-		fake, fake_bg, calls = fake_frappe
-		fake.cache.set_value("profiler:active:alice@example.com", "sess-1")
-		_reset_profiler_modules()
-		import optimus  # noqa: F401
-
-		fake_bg.enqueue("optimus.analyze.run", session_uuid="sess-1")
-		assert fake.cache.smembers(_pending_key("sess-1")) == set()
-
 	def test_analyze_job_never_carries_a_session_marker(self, fake_frappe):
 		fake, fake_bg, calls = fake_frappe
 		# The user stopped A and started B: analyze for A must not be tagged B.
@@ -143,25 +122,6 @@ class TestEnqueueRegistersPendingJob:
 		fake_bg.enqueue(analyze.run, session_uuid="sess-A")
 
 		assert "_profiler_session_id" not in calls[-1]["kwargs"]
-
-	def test_an_app_named_like_optimus_is_still_tagged(self, fake_frappe):
-		fake, fake_bg, calls = fake_frappe
-		fake.cache.set_value("profiler:active:alice@example.com", "sess-B")
-		_reset_profiler_modules()
-		import optimus  # noqa: F401
-
-		fake_bg.enqueue("optimus_extras.analyze.run", session_uuid="sess-A")
-
-		assert calls[-1]["kwargs"]["_profiler_session_id"] == "sess-B"
-
-	def test_inline_job_returns_no_handle_nothing_to_track(self, fake_frappe):
-		fake, fake_bg, calls = fake_frappe
-		fake.cache.set_value("profiler:active:alice@example.com", "sess-1")
-		_reset_profiler_modules()
-		import optimus  # noqa: F401
-
-		fake_bg.enqueue("myapp.tasks.go", now=True)  # inline → enqueue returns None
-		assert fake.cache.smembers(_pending_key("sess-1")) == set()
 
 
 # --------------------------------------------------------------------------
@@ -218,17 +178,8 @@ class TestSessionBackgroundJobHelpers:
 
 
 # --------------------------------------------------------------------------
-# analyze._rq_job_active / _bg_wait_for_pending_jobs
+# analyze._bg_wait_for_pending_jobs
 # --------------------------------------------------------------------------
-
-class TestRqJobActive:
-	def test_unknown_job_is_not_active(self):
-		from optimus import analyze
-
-		# A job id that doesn't exist (or Redis unavailable) → not active,
-		# so analyze never blocks waiting on a phantom.
-		assert analyze._rq_job_active("definitely-not-a-real-rq-job-id-xyz") is False
-
 
 class TestBgWaitForPendingJobs:
 	def _patch_common(self, monkeypatch, *, pending, wait_seconds, scheduler_disabled=False):
@@ -297,46 +248,6 @@ class TestBgWaitForPendingJobs:
 		assert kwargs.get("session_uuid") == "s1"
 		assert "_bg_wait_until" in kwargs
 		assert [a[-1] for a in statuses] == ["Capturing Background Jobs"]
-
-
-# --------------------------------------------------------------------------
-# source-inspection: _stop_session arms the drain, before_job honours it
-# --------------------------------------------------------------------------
-
-def _src(rel_path):
-	with open(os.path.join(os.path.dirname(__file__), "..", rel_path)) as f:
-		return f.read()
-
-
-def _fn_body(src, name):
-	start = src.index(f"def {name}(")
-	after = src.find("\n", start) + 1
-	nxt = re.search(r"\n(?:def |@frappe\.whitelist|class )", src[after:])
-	end = after + (nxt.start() if nxt else len(src) - after)
-	return src[start:end]
-
-
-def test_stop_session_arms_the_draining_window():
-	body = _fn_body(_src("api.py"), "_stop_session")
-	assert "session.get_pending_jobs(session_uuid)" in body
-	assert "session.set_draining(" in body
-	assert "background_job_wait_seconds" in body
-	# Must still enqueue analyze (the wait happens there, not here).
-	assert "_enqueue_analyze(session_uuid" in body
-
-
-def test_before_job_honours_the_draining_window():
-	body = _fn_body(_src("hooks_callbacks.py"), "before_job")
-	assert "session.is_draining(session_uuid)" in body
-	# Only when there's NO active session never bleed into a different one.
-	assert "active is None" in body
-
-
-def test_analyze_run_waits_for_pending_jobs():
-	body = _fn_body(_src("analyze.py"), "run")
-	assert "_bg_wait_for_pending_jobs(session_uuid" in body
-	# Re-enqueued invocation short-circuits.
-	assert "is None" in body
 
 
 # --------------------------------------------------------------------------

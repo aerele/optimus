@@ -480,13 +480,6 @@ def _rq_status(job_id: str) -> str | None:
 		return None
 
 
-def _rq_job_active(job_id: str) -> bool:
-	"""True if RQ job ``job_id`` is still queued / started / deferred / scheduled.
-	False if terminal or no longer fetchable. Any error counts as not active (so
-	analyze never blocks on it)."""
-	return _rq_status(job_id) in _RQ_ACTIVE
-
-
 def _short_exc(exc_info) -> str | None:
 	"""Last non-empty line of an RQ ``exc_info`` traceback (the one that names the
 	exception, e.g. ``ValueError: bad doc_name``), truncated to 500 chars."""

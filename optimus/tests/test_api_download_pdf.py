@@ -66,10 +66,10 @@ def test_download_pdf_returns_file_url(fake_env):
 
 
 def test_download_pdf_requires_ready_status(fake_env):
-	with pytest.raises(Exception):
+	with pytest.raises(Exception, match="Cannot generate PDF for session in 'Failed' state"):
 		api.download_pdf(session_uuid="uuid-failed")
 
 
 def test_download_pdf_unknown_session_raises(fake_env):
-	with pytest.raises(Exception):
+	with pytest.raises(Exception, match="No Optimus Session found for uuid nonexistent"):
 		api.download_pdf(session_uuid="nonexistent")

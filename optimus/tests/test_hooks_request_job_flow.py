@@ -23,6 +23,7 @@ class FakeStore:
 		self.cap_hit = False
 		self.cleared_jobs = []
 		self.job_recordings = []
+		self.order = []
 
 	def get_active_session_for(self, user):
 		return self.active.get(user)
@@ -39,9 +40,11 @@ class FakeStore:
 
 	def clear_pending_job(self, session_uuid, job_id):
 		self.cleared_jobs.append((session_uuid, job_id))
+		self.order.append("clear_pending_job")
 
 	def set_job_recording(self, session_uuid, job_id, recording_uuid):
 		self.job_recordings.append((session_uuid, job_id, recording_uuid))
+		self.order.append("set_job_recording")
 
 
 @pytest.fixture
@@ -104,7 +107,11 @@ def env(monkeypatch):
 		lambda uuid, response=None: state.headers.append((uuid, response)),
 	)
 	monkeypatch.setattr(hc, "_track_bg_job_started", lambda uuid, method: state.bg_started.append((uuid, method)))
-	monkeypatch.setattr(hc, "_track_bg_job_finished", lambda su, jid: state.bg_finished.append((su, jid)))
+	monkeypatch.setattr(
+		hc,
+		"_track_bg_job_finished",
+		lambda su, jid: (state.bg_finished.append((su, jid)), store.order.append("track_bg_job_finished")),
+	)
 	return state
 
 
@@ -153,6 +160,7 @@ class TestBeforeRequest:
 		hc.before_request()
 
 		assert env.recorded == []
+		assert not hasattr(env.local, "optimus_session_id")
 
 	def test_requests_made_by_the_analyze_pipeline_are_not_recorded(self, env):
 		env.store.active["alice@example.com"] = "s1"
@@ -177,6 +185,7 @@ class TestBeforeRequest:
 		hc.before_request()
 
 		assert env.recorded == []
+		assert not hasattr(env.local, "optimus_session_id")
 
 	def test_existing_standalone_recorder_is_reused_not_replaced(self, env):
 		env.store.active["alice@example.com"] = "s1"
@@ -364,6 +373,7 @@ class TestBeforeJob:
 		assert env.recorded == []
 		assert env.bg_started == []
 		assert kwargs == {"doc": "X"}
+		assert not hasattr(env.local, "optimus_session_id")
 
 	def test_disabled_profiler_still_strips_the_marker(self, env):
 		env.enabled = False
@@ -423,12 +433,18 @@ class TestBeforeJob:
 
 		assert env.recorded == []
 
-	def test_job_of_a_superseded_session_is_dropped(self, env):
+	@pytest.mark.parametrize("draining", [False, True])
+	def test_job_of_a_superseded_session_is_dropped(self, env, draining):
+		# Even while the old session drains, a late job never joins the newer session the user started.
 		env.store.active["alice@example.com"] = "newer-session"
+		if draining:
+			env.store.draining.add("old")
 
 		hc.before_job(method="m", kwargs={"_profiler_session_id": "old"})
 
 		assert env.recorded == []
+		# Dropped from recording, but still tracked on its own session so the report lists it.
+		assert env.bg_started == [("old", "m")]
 
 	def test_late_job_is_recorded_while_the_stopped_session_is_draining(self, env):
 		env.store.draining.add("s1")  # user has no active session any more
@@ -505,6 +521,8 @@ class TestAfterJob:
 		assert env.store.cleared_jobs == [("s1", "rq-1")]
 		assert env.store.job_recordings == [("s1", "rq-1", "rec-9")]
 		assert env.bg_finished == [("s1", "rq-1")]
+		# The recording link is written before the status-only write, so the status never replaces it.
+		assert env.store.order == ["clear_pending_job", "set_job_recording", "track_bg_job_finished"]
 		assert env.cache_writes[redis_keys.infra("rec-9")] == {"diff": True}
 		assert env.dumped == ["rec-9"]
 
@@ -537,6 +555,9 @@ class TestAfterJob:
 		hc.after_job()
 
 		assert env.errors == []
+		# The dropped recording still ends the job's bookkeeping and clears the worker markers.
+		assert env.bg_finished == [("s1", "rq-1")]
+		assert not hasattr(env.local, "optimus_session_id")
 
 	def test_register_failure_is_logged_and_cleanup_still_runs(self, env, rq, monkeypatch):
 		self._finished_job(env)

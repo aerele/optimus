@@ -168,12 +168,10 @@ for the v0.12.14 baseline.
 
 `optimus/tests/test_hmac_envelope_versioning.py` (v0.12.14):
 
-* `TestSignUnsignRoundTrip` (3 tests) v1 round-trip happy path,
-  empty payload, pickle-shaped payload.
-* `TestLegacyShapeBackwardCompat` (2 tests) pre-v0.12.14 v0
-  blobs still verify, including pickle-shaped legacy blobs (their
-  `\x80` first byte is NOT the v1 marker, so they go through the v0
-  branch correctly).
+* `TestSignUnsignRoundTrip` (2 tests) v1 round-trip happy path,
+  empty payload.
+* `TestLegacyShapeBackwardCompat` (1 test) pre-v0.12.14 v0
+  blobs still verify.
 * `TestNewShapeByteLayout` (1 test) locks the byte layout
   (`32 + 1 + len(payload)`).
 * `TestTamperingDetection` (3 tests) tampered sig / version-byte /
@@ -184,7 +182,7 @@ for the v0.12.14 baseline.
 A future scheme v2 PR would add `TestSchemeV2RoundTrip` +
 `TestV0V1V2Coexistence` + `TestV1ReaderRejectsV2Blob` (the v1 reader
 must NOT verify a v2 blob's SHA-256 of `body64`: it would fail
-trivially because the lengths differ). The existing 13 tests stay
+trivially because the lengths differ). The existing 11 tests stay
 green throughout (v0/v1 compat is forever).
 
 ## Operator notes

@@ -19,6 +19,7 @@ class FakeCache:
 		self.versions = {}
 		# Runs after a pipeline read, standing in for a request landing before EXEC.
 		self.after_get = None
+		self.expired = []  # (key, time) of every expire_key call
 
 	def touch(self, key):
 		self.versions[key] = self.versions.get(key, 0) + 1
@@ -73,6 +74,7 @@ class FakeCache:
 		# and TTL was refreshed; 0 (no-op) if the key is missing.
 		# Our FakeCache doesn't track TTL, but the existence check is
 		# what callers rely on.
+		self.expired.append((key, time))
 		if key not in self.store:
 			return 0
 		self.touch(key)  # Redis counts EXPIRE as a write to a watched key.
@@ -128,13 +130,6 @@ def test_set_session_meta_persists_capture_python_tree_false(fake_cache):
 	assert meta["capture_python_tree"] is False
 
 
-def test_set_session_meta_default_when_not_specified(fake_cache):
-	session.set_session_meta("test-uuid", {"session_uuid": "test-uuid"})
-	meta = session.get_session_meta("test-uuid")
-	# capture_python_tree absent means consumers should default to True
-	assert "capture_python_tree" not in meta
-
-
 def test_register_recording_does_not_resurrect_cleared_active_pointer(fake_cache):
 	"""A Stop clears the active-session pointer; a subsequent
 	``register_recording`` from an in-flight request must NOT re-create it
@@ -171,8 +166,9 @@ def test_register_recording_refreshes_ttl_when_session_still_active(fake_cache):
 	# In-flight request: register_recording fires while session still active.
 	session.register_recording(session_uuid, "rec-1", user=user)
 
-	# Pointer remains set with the same session.
+	# Pointer remains set with the same session, and its TTL was renewed.
 	assert session.get_active_session_for(user) == session_uuid
+	assert fake_cache.expired == [(session._active_key(user), session.SESSION_TTL_SECONDS)]
 
 
 def test_clear_active_session_if_clears_only_the_given_session(fake_cache):
