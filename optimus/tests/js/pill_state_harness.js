@@ -120,6 +120,32 @@ test("stale recording snapshot is ignored once stopping/analyzing/ready", () => 
 	assert.strictEqual(Pill.reduceServer(Pill.initialState(), { phase: "recording", session_uuid: "s1" }, T0).state.display, "recording");
 });
 
+test("a newer recording replaces a finished report from another session", () => {
+	const r = Pill.reduceServer(analyzing({ display: "ready" }), { phase: "recording", scope: "session", session_uuid: "s2", docname: "OS-2" }, T0);
+	assert.strictEqual(r.state.display, "recording");
+	assert.strictEqual(r.state.session_uuid, "s2");
+	assert.strictEqual(r.state.docname, "OS-2");
+	assert.strictEqual(r.ui.label, "Recording");
+	assert.strictEqual(Pill.reduceServer(analyzing({ display: "analyzing" }), { phase: "recording", session_uuid: "s2" }, T0), null);
+});
+
+test("a ready pill with no tracked session adopts a recording", () => {
+	const r = Pill.reduceServer(analyzing({ display: "ready", session_uuid: null }), { phase: "recording", scope: "session", session_uuid: "s2", docname: "OS-2" }, T0);
+	assert.strictEqual(r.state.display, "recording");
+	assert.strictEqual(r.state.session_uuid, "s2");
+});
+
+test("a stopping pill ignores a recording reply for another session", () => {
+	assert.strictEqual(Pill.reduceServer(analyzing({ display: "stopping" }), { phase: "recording", session_uuid: "s2" }, T0), null);
+});
+
+test("a line profiling report yields to a newer recording", () => {
+	const r = Pill.reduceServer(analyzing({ display: "ready", phase2: true, run_uuid: "r1" }), { phase: "recording", scope: "session", session_uuid: "s2", docname: "OS-2" }, T0);
+	assert.strictEqual(r.state.display, "recording");
+	assert.strictEqual(r.state.phase2, false);
+	assert.strictEqual(r.state.session_uuid, "s2");
+});
+
 test("reload recovery: a line profiling recording comes back with its run", () => {
 	const r = Pill.reduceServer(Pill.initialState(), { phase: "recording", scope: "phase2", session_uuid: "s1", docname: "OS-1", run_uuid: "r1" }, T0);
 	assert.strictEqual(r.state.display, "recording");

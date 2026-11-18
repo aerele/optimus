@@ -335,6 +335,16 @@ test("the stop of an ended session names the server's session, not whatever the 
 	assert.strictEqual(callsTo(env, "optimus.api.stop")[0].args.session_uuid, "s1");
 });
 
+test("a ready pill that adopts a newer recording stops that recording", () => {
+	const env = load();
+	env.t.state = Object.assign(env.t.Pill.initialState(), { display: "ready", session_uuid: "s1", docname: "OS-1" });
+	env.t.refreshStatus();
+	env.calls[0].callback({ message: { phase: "recording", scope: "session", session_uuid: "s2", docname: "OS-2" } });
+	assert.strictEqual(env.t.state.display, "recording");
+	env.t.onClick();
+	assert.strictEqual(callsTo(env, "optimus.api.stop")[0].args.session_uuid, "s2");
+});
+
 test("an ended session found on page load is stopped by uuid", () => {
 	const env = load();
 	env.t.refreshStatus();
