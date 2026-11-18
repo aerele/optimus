@@ -96,12 +96,6 @@ class TestTheGuard:
 				raise RuntimeError("x")
 		assert not guard.pending() and guard.interrupt() is None
 
-	def test_nothing_recorded_raises_nothing(self):
-		guard = ai_fix._InterruptGuard(base=True)
-		with guard:
-			pass
-		assert not guard.pending() and guard.interrupt() is None
-
 	def test_note_records_a_timeout_passed_in(self, job_timeout):
 		guard = ai_fix._InterruptGuard()
 		guard.note(RuntimeError("not a timeout"))

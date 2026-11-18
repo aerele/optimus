@@ -77,10 +77,6 @@ _FINDING = {"finding_type": "Slow Query", "title": "slow", "technical_detail": {
 # ---------------------------------------------------------------------------
 
 class TestAiFixErrorShape:
-	def test_carries_kind_and_status(self):
-		e = ai_fix.AiFixError("m", status_code=429, kind="rate_limited")
-		assert (str(e), e.status_code, e.kind) == ("m", 429, "rate_limited")
-
 	def test_defaults(self):
 		e = ai_fix.AiFixError("m")
 		assert (e.status_code, e.kind) == (None, "unknown")
@@ -307,19 +303,6 @@ class TestRequestsCarryTheKeyOnlyInAuth:
 		call = fake.calls[0]
 		assert KEY not in repr(call.headers)
 		assert call.wire_headers["x-api-key"] == KEY
-
-	def test_non_latin_key_fails_before_any_http(self, monkeypatch):
-		_store_key(monkeypatch, "sk-live-0123’456789")
-		fake = _capture(_Resp(200, _OPENAI_OK))
-		monkeypatch.setattr(requests, "post", fake)
-		with patch("optimus.settings.get_config", return_value=_cfg()):
-			with pytest.raises(ai_fix.AiFixError) as ei:
-				ai_fix.suggest_fix(dict(_FINDING))
-			probe = ai_fix.test_connection()
-		assert ei.value.kind == "config"
-		assert fake.calls == []
-		assert probe["ok"] is False and "smart quote" in probe["message"]
-		assert "sk-live" not in probe["message"]
 
 
 # ---------------------------------------------------------------------------

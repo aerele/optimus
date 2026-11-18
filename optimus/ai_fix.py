@@ -1400,14 +1400,6 @@ def _build_steps_messages(
 	return system, [{"role": "user", "content": content}]
 
 
-def _build_messages(
-	finding: dict, *, threshold_ms: float = 1000.0, context_tokens: int = 200000
-) -> tuple[str, list[dict]]:
-	"""``(system, [user_message])`` for ``finding``; see ``_build_fix_request``."""
-	system, messages, _shown = _build_fix_request(finding, threshold_ms=threshold_ms, context_tokens=context_tokens)
-	return system, messages
-
-
 _REASONING_MODEL_RE = re.compile(r"^(?:[\w.-]+/)*(?:o\d|gpt-5)")
 _PARAM_RETRY_STATUSES = (400, 422)
 

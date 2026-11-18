@@ -190,3 +190,11 @@ def test_docs_have_no_phase_wording(document):
 	"""The docs say "line profiling", not "Phase 1/2" (the doctype name is the one exception)."""
 	for n, line in enumerate((_APP / document).read_text().splitlines(), 1):
 		assert not PHASE_RE.search(line.replace(DOCTYPE_NAME, "")), (document, n, line)
+
+
+def test_the_changelog_has_an_entry_for_the_current_version():
+	"""A user-visible change bumps ``__version__``; the changelog then needs its entry."""
+	import optimus
+
+	changelog = " ".join((_APP / "CHANGELOG.md").read_text(encoding="utf-8").split())
+	assert f"## [{optimus.__version__}]" in changelog

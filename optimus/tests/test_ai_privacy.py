@@ -127,6 +127,7 @@ class TestSuggestFixRefuses:
 		with pytest.raises(ai_fix.AiFixError) as excinfo:
 			ai_fix.suggest_fix({"finding_type": "Slow Query", "title": "x"})
 		assert "listed under Excluded finding types" in str(excinfo.value)
+		assert excinfo.value.kind == "not_eligible"
 
 	def test_suggest_fix_no_http_call_when_excluded(self, monkeypatch):
 		# Belt + suspenders: even if the operator's network were intercepted,

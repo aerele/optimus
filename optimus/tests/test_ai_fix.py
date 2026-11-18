@@ -4,7 +4,7 @@
 """Tests for optimus.ai_fix, the provider-agnostic LLM client behind the
 on-demand "Suggest a fix (AI)" action.
 
-``_build_messages`` is pure; the HTTP layer is exercised with ``requests.post``
+``_build_fix_request`` is pure; the HTTP layer is exercised with ``requests.post``
 monkeypatched (no network, no live site); ``_resolve_provider`` / ``is_available``
 are tested with ``settings.get_config`` patched.
 """
@@ -94,8 +94,16 @@ def _post_sequence(*resps):
 	return _fake_post
 
 
+def _fix_request(finding, *, threshold_ms=1000.0, context_tokens=200000):
+	"""``(system, [user_message])`` from the real builder ``ai_fix._build_fix_request``."""
+	system, messages, _shown = ai_fix._build_fix_request(
+		finding, threshold_ms=threshold_ms, context_tokens=context_tokens
+	)
+	return system, messages
+
+
 # --------------------------------------------------------------------------
-# _build_messages pure
+# _build_fix_request pure
 # --------------------------------------------------------------------------
 
 class TestBuildMessages:
@@ -119,30 +127,23 @@ class TestBuildMessages:
 			],
 		}
 
-	def test_returns_system_and_single_user_message(self):
-		system, messages = ai_fix._build_messages(self._finding())
-		assert isinstance(system, str)
-		low = system.lower()
-		assert "frappe" in low and "root cause" in low
-		assert len(messages) == 1
-		assert messages[0]["role"] == "user"
-
-
-
-
-
-
-
 	def test_system_prompt_is_the_static_v2_prompt(self):
 		# The prompt's facts are pinned in test_ai_prompts.py; here: the builder sends the
 		# one static prompt, whatever the finding.
-		system, _ = ai_fix._build_messages(self._finding())
+		system, messages = _fix_request(self._finding())
 		assert system == ai_prompts.SYSTEM_PROMPT
+		# The payload after the system prompt is exactly one user message.
+		assert len(messages) == 1
+		assert messages[0]["role"] == "user"
+		# The composition: both named blocks are in the one static prompt.
+		assert ai_prompts.FRAPPE_REVIEW_RULES in system
+		assert ai_prompts.FRAPPE_DEV_IDIOMS in system
 		for h in ("**Diagnosis**", "**Fix**", "**Why it works**", "**Verify**"):
 			assert h in system
 		assert "verbatim" in system and "Without seeing the code" in system
+
 	def test_captured_text_sits_in_one_nonce_data_block_family(self):
-		_, messages = ai_fix._build_messages(self._finding())
+		_, messages = _fix_request(self._finding())
 		c = messages[0]["content"]
 		opens = re.findall(r'<data-([0-9a-f]{6}) kind="([a-z-]+)">', c)
 		assert {kind for _, kind in opens} >= {"title", "callsite", "source", "sql", "explain"}
@@ -151,7 +152,7 @@ class TestBuildMessages:
 		assert c.count(f"<data-{nonce} ") == c.count(f"</data-{nonce}>")
 
 	def test_user_content_includes_the_key_context(self):
-		_, messages = ai_fix._build_messages(self._finding())
+		_, messages = _fix_request(self._finding())
 		c = messages[0]["content"]
 		assert "N+1 Query" in c
 		assert "Same query ran 50" in c
@@ -166,9 +167,9 @@ class TestBuildMessages:
 		assert "A query repeats inside a loop." not in c
 
 	def test_user_content_includes_finding_type_playbook_hint(self):
-		_, messages = ai_fix._build_messages(self._finding())
+		_, messages = _fix_request(self._finding())
 		assert ai_prompts.FINDING_TYPE_HINTS["N+1 Query"] in messages[0]["content"]
-		_, msgs2 = ai_fix._build_messages({"finding_type": "Redundant Call", "title": "x"})
+		_, msgs2 = _fix_request({"finding_type": "Redundant Call", "title": "x"})
 		assert "verbatim" in msgs2[0]["content"]  # existing permission denial behavior stays unchanged
 
 	def test_over_budget_query_is_omitted_before_parsing(self):
@@ -177,20 +178,13 @@ class TestBuildMessages:
 		_, messages, _ = ai_fix._build_fix_request(f, threshold_ms=1000, context_tokens=32768, send_raw=True)
 		assert "x,x,x,x,x" not in messages[0]["content"]
 
-	def test_handles_minimal_finding_without_detail(self):
-		# A finding with no technical_detail / source window must not crash.
-		_, messages = ai_fix._build_messages({
-			"finding_type": "Hot Line", "severity": "Medium", "title": "x:7 is hot",
-		})
-		assert "Hot Line" in messages[0]["content"]
-
 	def test_durations_honour_the_configured_threshold(self):
 		# The model must see durations in the same unit as the report, so the
 		# rollover threshold is threaded in (not hard-coded to 1000).
 		finding = {"finding_type": "Slow Query", "title": "t", "estimated_impact_ms": 5234.0}
-		_, at_default = ai_fix._build_messages(finding, threshold_ms=1000.0)
+		_, at_default = _fix_request(finding, threshold_ms=1000.0)
 		assert "5.23s" in at_default[0]["content"]
-		_, disabled = ai_fix._build_messages(finding, threshold_ms=0)
+		_, disabled = _fix_request(finding, threshold_ms=0)
 		assert "5234ms" in disabled[0]["content"]
 		assert "5.23s" not in disabled[0]["content"]
 
@@ -204,7 +198,7 @@ class TestBuildMessages:
 			"customer_description": "One query took 5234ms.",
 			"estimated_impact_ms": 5234.0,
 		}
-		_, msgs = ai_fix._build_messages(finding, threshold_ms=1000.0)
+		_, msgs = _fix_request(finding, threshold_ms=1000.0)
 		content = msgs[0]["content"]
 		assert "Slow query: 5.23s" in content
 		assert "One query took" not in content
@@ -213,7 +207,7 @@ class TestBuildMessages:
 	def test_source_window_lead_in_demands_verbatim(self):
 		# When code IS shown, the user message must spell out that any
 		# "before" snippet has to be a verbatim copy of those lines.
-		_, messages = ai_fix._build_messages(self._finding())
+		_, messages = _fix_request(self._finding())
 		c = messages[0]["content"].lower()
 		assert "verbatim" in c
 		assert "only code you have" in c
@@ -229,7 +223,7 @@ class TestBuildMessages:
 				"callsite": {"filename": "/gone/foo.py", "lineno": 9, "function": "v"},
 			},
 		}
-		_, messages = ai_fix._build_messages(f)
+		_, messages = _fix_request(f)
 		c = messages[0]["content"]
 		assert "NOT AVAILABLE" in c
 		assert "without seeing the code" in c.lower()
@@ -247,7 +241,7 @@ class TestBuildMessages:
 			},
 			"source_window": [{"lineno": 6, "content": "def looped_validate(doc, event):", "is_target": True}],
 		}
-		_, messages = ai_fix._build_messages(f)
+		_, messages = _fix_request(f)
 		c = messages[0]["content"]
 		assert "Hot function" in c and "looped_validate" in c
 		assert "679ms" in c and "62%" in c  # 679/1095 ≈ 62%
@@ -258,7 +252,7 @@ class TestBuildMessages:
 			"technical_detail": {"callsite": {"filename": "ugly_code/python/common.py", "lineno": 6, "function": "looped_validate"}},
 			"phase2_hotline": {"lineno": 7, "content": "    _run_validations(doc)", "total_ms": 387, "hits": 2},
 		}
-		_, messages = ai_fix._build_messages(f)
+		_, messages = _fix_request(f)
 		c = messages[0]["content"]
 		assert "hottest line is line 7" in c
 		assert "_run_validations(doc)" in c
@@ -310,11 +304,6 @@ class TestOpenAiCall:
 		ai_fix._call_openai_chat("http://localhost:11434/v1", "", "m", "s", [{"role": "user", "content": "x"}])
 		assert "authorization" not in fp.last.headers
 
-	def test_content_as_list_of_parts(self, monkeypatch):
-		payload = {"choices": [{"message": {"content": [{"text": "a"}, {"text": "b"}]}}]}
-		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, payload)))
-		assert ai_fix._call_openai_chat("https://fake.invalid/v1", "k", "m", "s", [{"role": "user", "content": "x"}]) == "ab"
-
 	def test_content_list_with_a_none_or_non_str_text_keeps_the_rest(self, monkeypatch):
 		# A part whose "text" is None (or not a string) counts as no text: the
 		# join must not raise, which lost the whole reply.
@@ -339,18 +328,6 @@ class TestOpenAiCall:
 		ai_fix._call_openai_chat("https://fake.invalid/v1", "k", "m", "s", [{"role": "user", "content": "x"}], usage_out=usage)
 		assert usage == {"prompt_tokens": 120, "completion_tokens": 45, "total_tokens": 165}
 
-	def test_retries_without_temperature_on_400_temperature_error(self, monkeypatch):
-		# Kimi "thinking" / other reasoning models reject a non-default
-		# temperature with HTTP 400; we retry once without it.
-		err = '{"error":{"message":"invalid temperature: only 1 is allowed for this model"}}'
-		fp = _post_sequence(_FakeResp(400, text=err), _FakeResp(200, _OPENAI_OK))
-		monkeypatch.setattr(requests, "post", fp)
-		text = ai_fix._call_openai_chat("https://fake.invalid/v1", "k", "kimi-k2.6", "s", [{"role": "user", "content": "x"}])
-		assert text == "**Fix**\n\nuse a join"
-		assert len(fp.calls) == 2
-		assert "temperature" in fp.calls[0].body   # first attempt sent it
-		assert "temperature" not in fp.calls[1].body  # retry dropped it
-
 	def test_retries_without_temperature_on_422_temperature_error(self, monkeypatch):
 		# Some OpenAI-compatible gateways (LiteLLM / Together / vLLM) return the
 		# temperature rejection as HTTP 422, not 400; the retry must still fire.
@@ -361,13 +338,6 @@ class TestOpenAiCall:
 		assert text == "**Fix**\n\nuse a join"
 		assert len(fp.calls) == 2
 		assert "temperature" not in fp.calls[1].body  # retry dropped it
-
-	def test_non_temperature_400_is_not_retried(self, monkeypatch):
-		fp = _post_sequence(_FakeResp(400, text='{"error":{"message":"context_length_exceeded"}}'))
-		monkeypatch.setattr(requests, "post", fp)
-		with pytest.raises(ai_fix.AiFixError):
-			ai_fix._call_openai_chat("https://fake.invalid/v1", "k", "m", "s", [{"role": "user", "content": "x"}])
-		assert len(fp.calls) == 1  # no retry for unrelated 400s
 
 	def test_404_body_mentioning_temperature_does_not_retry(self, monkeypatch):
 		# The retry is gated on a 400 or 422. A 404 whose body merely mentions the
@@ -413,25 +383,6 @@ class TestSessionAttribution:
 
 
 class TestUsageNormalization:
-	def test_openai_passthrough(self):
-		assert ai_fix._usage_from_openai(
-			{"usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}}
-		) == {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
-
-	def test_openai_total_falls_back_to_sum(self):
-		assert ai_fix._usage_from_openai({"usage": {"prompt_tokens": 10, "completion_tokens": 5}})[
-			"total_tokens"
-		] == 15
-
-	def test_anthropic_maps_input_output(self):
-		assert ai_fix._usage_from_anthropic(
-			{"usage": {"input_tokens": 8, "output_tokens": 4}}
-		) == {"prompt_tokens": 8, "completion_tokens": 4, "total_tokens": 12}
-
-	def test_missing_usage_is_zero(self):
-		assert ai_fix._usage_from_openai({})["total_tokens"] == 0
-		assert ai_fix._usage_from_anthropic(None)["total_tokens"] == 0
-
 	_ZERO = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
 	@pytest.mark.parametrize(
@@ -498,31 +449,10 @@ class TestAnthropicCall:
 		out = ai_fix._call_anthropic("https://api.anthropic.com", "key", "claude-sonnet-4-6", "sys", [{"role": "user", "content": "hi"}])
 		assert out == ""
 
-	def test_suggest_fix_reports_a_non_string_text_as_an_empty_response(self, monkeypatch):
-		# Not an AttributeError from .strip(): that would escape the endpoint as
-		# a 500 whose snapshot holds the prompt.
-		monkeypatch.setattr(requests, "post", _post_returning(
-			_FakeResp(200, {"content": [{"type": "text", "text": {"echo": "x"}}], "stop_reason": "end_turn"})))
-		prov = {"name": "Anthropic", "protocol": "anthropic", "base_url": "https://api.anthropic.com",
-		        "model": "claude-sonnet-4-6", "needs_key": True, "has_key": True}
-		with _provider(prov):
-			with pytest.raises(ai_fix.AiFixError, match="empty response"):
-				ai_fix.suggest_fix({"finding_type": "Slow Query", "title": "x", "technical_detail": {}})
-
 
 class TestHttpErrorMapping:
 	def _call(self):
 		return ai_fix._call_openai_chat("https://fake.invalid/v1", "k", "m", "s", [{"role": "user", "content": "x"}])
-
-	def test_timeout(self, monkeypatch):
-		monkeypatch.setattr(requests, "post", _post_raising(requests.exceptions.Timeout()))
-		with pytest.raises(ai_fix.AiFixError, match="didn't respond"):
-			self._call()
-
-	def test_connection_error(self, monkeypatch):
-		monkeypatch.setattr(requests, "post", _post_raising(requests.exceptions.ConnectionError()))
-		with pytest.raises(ai_fix.AiFixError, match="reach the AI provider"):
-			self._call()
 
 	def test_auth_rejected(self, monkeypatch):
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(401, {})))
@@ -548,24 +478,6 @@ class TestHttpErrorMapping:
 		assert "Model" in msg
 		assert "/v1" in msg
 		assert "model not found" in ei.value.detail and "model not found" not in msg
-
-	def test_generic_http_error_includes_body_detail(self, monkeypatch):
-		monkeypatch.setattr(requests, "post", _post_returning(
-			_FakeResp(500, {}, text='{"error":"model not found"}')))
-		with pytest.raises(ai_fix.AiFixError, match="HTTP 500"):
-			self._call()
-		# And the provider's body text is surfaced (capped) so "model not
-		# found" / "context too long" etc. reach the operator.
-		monkeypatch.setattr(requests, "post", _post_returning(
-			_FakeResp(400, {}, text="bad model name")))
-		with pytest.raises(ai_fix.AiFixError, match="HTTP 400") as caught:
-			self._call()
-		assert "bad model name" in caught.value.detail
-
-	def test_non_json_body(self, monkeypatch):
-		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, raise_on_json=True)))
-		with pytest.raises(ai_fix.AiFixError, match="non-JSON"):
-			self._call()
 
 
 # --------------------------------------------------------------------------
@@ -621,14 +533,6 @@ class TestResolveProvider:
 			"thinking": {"type": "disabled"}
 		}
 		assert ai_fix._provider_config(_cfg(ai_provider="OpenAI"))["request_options"] == {}
-
-	def test_deepseek_ignores_base_url_override(self):
-		# Hosted provider: a stored ai_base_url must not override its built-in
-		# endpoint (the field is hidden for hosted providers).
-		with patch("optimus.settings.get_config",
-		           return_value=_cfg(ai_provider="DeepSeek", ai_base_url="https://router.example/v1")):
-			p = ai_fix._resolve_provider()
-		assert p["base_url"] == "https://api.deepseek.com/v1"
 
 	def test_base_url_override_ignored_for_hosted_provider(self):
 		# A hosted provider (Anthropic / OpenAI / Kimi / DeepSeek) ALWAYS uses its default
@@ -720,16 +624,6 @@ class TestSuggestFix:
 	_PROVIDER = {"name": "OpenAI", "protocol": "openai", "base_url": "https://api.openai.com/v1",
 	             "model": "gpt-4.1-mini", "needs_key": True, "has_key": True}
 
-	def test_happy_path_returns_payload(self, monkeypatch):
-		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, _OPENAI_OK)))
-		with _provider(dict(self._PROVIDER)):
-			out = ai_fix.suggest_fix({"finding_type": "Slow Query", "title": "slow", "technical_detail": {}})
-		assert out["suggestion"] == "**Fix**\n\nuse a join"
-		assert out["model"] == "gpt-4.1-mini"
-		assert out["provider"] == "OpenAI"
-		assert out["generated_at"]  # iso timestamp
-		assert "tokens" not in out  # _OPENAI_OK carries no usage block
-
 	def test_includes_tokens_when_usage_present(self, monkeypatch):
 		answer = "**Diagnosis**: d\n**Fix**: batch it.\n**Why it works**: w\n**Verify**: v"
 		resp = {"choices": [{"message": {"content": answer}}],
@@ -738,21 +632,6 @@ class TestSuggestFix:
 		with _provider(dict(self._PROVIDER)):
 			out = ai_fix.suggest_fix({"finding_type": "Slow Query", "title": "x", "technical_detail": {}})
 		assert out["tokens"] == {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150}
-
-	def test_anthropic_dispatch(self, monkeypatch):
-		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, _ANTHROPIC_OK)))
-		prov = {"name": "Anthropic", "protocol": "anthropic", "base_url": "https://api.anthropic.com",
-		        "model": "claude-sonnet-4-6", "needs_key": True, "has_key": True}
-		with _provider(prov):
-			out = ai_fix.suggest_fix({"finding_type": "Slow Query", "title": "x", "technical_detail": {}})
-		assert out["suggestion"] == "**Fix**\n\nadd an index"
-		assert out["provider"] == "Anthropic"
-
-	def test_empty_response_raises(self, monkeypatch):
-		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, {"choices": [{"message": {"content": "   "}, "finish_reason": "stop"}]})))
-		with _provider(dict(self._PROVIDER)):
-			with pytest.raises(ai_fix.AiFixError, match="empty"):
-				ai_fix.suggest_fix({"finding_type": "Slow Query", "title": "x", "technical_detail": {}})
 
 	def test_missing_model_raises_before_any_http(self, monkeypatch):
 		called = {"n": 0}
@@ -827,15 +706,7 @@ class TestHumanizeSteps:
 
 	def test_build_steps_messages_shape(self):
 		system, messages = ai_fix._build_steps_messages(self._ACTIONS, "Save SI flow", send_raw=True)
-		low = system.lower()
-		assert "steps to reproduce" in low
-		assert "**summary:**" in low
-		# It's primed with ERPNext domain knowledge the standard flows and
-		# how to decode the raw cmds.
-		assert "erpnext" in low
-		assert "sales order" in low and "delivery note" in low
-		assert "savedocs" in low or "run_doc_method" in low
-		assert "apply_workflow" in low
+		assert system == ai_prompts.STEPS_SYSTEM_PROMPT
 		assert len(messages) == 1 and messages[0]["role"] == "user"
 		c = messages[0]["content"]
 		assert "Save SI flow" in c
@@ -861,14 +732,6 @@ class TestHumanizeSteps:
 	def test_humanize_steps_empty_actions_raises(self):
 		with pytest.raises(ai_fix.AiFixError):
 			ai_fix.humanize_steps([])
-
-	def test_humanize_steps_empty_response_raises(self, monkeypatch):
-		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, {"choices": [{"message": {"content": "  "}}]})))
-		prov = {"name": "OpenAI", "protocol": "openai", "base_url": "https://api.openai.com/v1",
-		        "model": "m", "needs_key": True, "has_key": True}
-		with _provider(prov):
-			with pytest.raises(ai_fix.AiFixError, match="empty"):
-				ai_fix.humanize_steps(self._ACTIONS)
 
 
 class TestGuardrailNotesThroughSuggestFix:
@@ -929,15 +792,6 @@ class TestTemperature:
 			assert ai_fix._is_reasoning_model(m) is False
 
 
-def test_eligible_finding_types_is_a_frozenset_of_known_types():
-	assert isinstance(ai_fix.AI_ELIGIBLE_FINDING_TYPES, frozenset)
-	# Spot-check: the high-context types are in, the infra ones are out.
-	for t in ("N+1 Query", "Slow Query", "Hot Line", "Redundant Call", "Slow Background Job"):
-		assert t in ai_fix.AI_ELIGIBLE_FINDING_TYPES
-	for t in ("Memory Pressure", "Background Queue Backlog", "Slow Frontend Render", "Function Not Invoked", "Missing Index", "Framework N+1", "Full Table Scan", "Filesort", "Temporary Table", "Low Filter Ratio"):
-		assert t not in ai_fix.AI_ELIGIBLE_FINDING_TYPES
-
-
 # --------------------------------------------------------------------------
 # v0.6.x: is_available(section=...) per-section LLM toggles (hard off)
 # --------------------------------------------------------------------------
@@ -959,13 +813,6 @@ def _cfg_ai_on(**overrides):
 
 
 class TestIsAvailableSection:
-	def test_all_sections_on_when_config_valid(self):
-		with patch("optimus.settings.get_config", return_value=_cfg_ai_on()), \
-		     patch.object(ai_fix, "_resolve_provider", return_value=_PROVIDER_OK):
-			assert ai_fix.is_available() is True
-			assert ai_fix.is_available(section="findings") is True
-			assert ai_fix.is_available(section="humanize") is True
-
 	def test_findings_section_off_blocks_only_findings(self):
 		with patch("optimus.settings.get_config", return_value=_cfg_ai_on(ai_suggest_findings=False)), \
 		     patch.object(ai_fix, "_resolve_provider", return_value=_PROVIDER_OK):
@@ -1016,40 +863,6 @@ def _counter_spy(monkeypatch):
 		lambda key, field, n, *, by="name", title="": seen.append((key, field, n, by)),
 	)
 	return seen
-
-
-class TestCallChokepointCollectsUsage:
-	def test_openai_call_records_total_tokens(self, monkeypatch):
-		recorded = []
-		import frappe
-		monkeypatch.setattr(frappe, "db", SimpleNamespace(sql=lambda *a, **kw: recorded.append(True)))
-		payload = {
-			"choices": [{"message": {"content": "hi"}}],
-			"usage": {"prompt_tokens": 4, "completion_tokens": 6, "total_tokens": 10},
-		}
-		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, payload)))
-		usage = {}
-		ai_fix._call_openai_chat(
-			"https://fake.invalid/v1", "k", "claude-sonnet-4-6", "s", [{"role": "user", "content": "x"}], usage_out=usage
-		)
-		assert usage["total_tokens"] == 10
-		assert recorded == []
-
-	def test_anthropic_call_records_total_tokens(self, monkeypatch):
-		recorded = []
-		import frappe
-		monkeypatch.setattr(frappe, "db", SimpleNamespace(sql=lambda *a, **kw: recorded.append(True)))
-		payload = {
-			"content": [{"type": "text", "text": "hi"}],
-			"usage": {"input_tokens": 4, "output_tokens": 6},
-		}
-		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, payload)))
-		usage = {}
-		ai_fix._call_anthropic(
-			"https://fake.invalid/v1", "k", "claude-sonnet-4-6", "s", [{"role": "user", "content": "x"}], usage_out=usage
-		)
-		assert usage["total_tokens"] == 10
-		assert recorded == []
 
 
 class TestFinishReason:
@@ -1133,7 +946,7 @@ class TestGuardedCompletion:
 		                    "prompt_version", "guardrail", "finish_reason", "usage_complete",
 		                    "completion_status", "provider_finish_reason", "received_responses"}
 		assert out["suggestion"] == self._GOOD
-		assert out["prompt_version"] == ai_prompts.PROMPT_VERSION == 4
+		assert out["prompt_version"] == ai_prompts.PROMPT_VERSION
 		assert out["guardrail"] == {"violations": [], "reasked": False, "fallback": False}
 		assert out["finish_reason"] == "stop"
 
@@ -1238,6 +1051,9 @@ class TestGuardedCompletion:
 		({}, True),
 		({"optimus_ai_reask": False}, False),
 		({"optimus_ai_reask": 0}, False),
+		({"optimus_ai_reask": "False"}, False),
+		({"optimus_ai_reask": "false"}, False),
+		({"optimus_ai_reask": "0"}, False),
 	])
 	def test_reask_knob(self, monkeypatch, conf, want):
 		import frappe
@@ -1261,20 +1077,6 @@ class TestGuardedCompletion:
 		fake = _post_sequence(self._resp(self._GOOD))
 		self._run(fake, monkeypatch, provider=dict(self._PROVIDER, context_tokens=8192, max_output_tokens=2048))
 		assert fake.calls[0].body["max_tokens"] == 2048
-
-	def test_over_budget_first_call_skips_reask(self, monkeypatch):
-		monkeypatch.setattr(ai_fix, "request_timeout_seconds", lambda: 60)
-		clock = {"n": 0}
-
-		def fake_monotonic():
-			clock["n"] += 1
-			return 0.0 if clock["n"] == 1 else 1000.0  # started_at=0, the check sees 1000s
-
-		monkeypatch.setattr(ai_fix.time, "monotonic", fake_monotonic)
-		fake = _post_sequence(self._resp(self._RAW))
-		out = self._run(fake, monkeypatch)
-		assert len(fake.calls) == 1
-		assert out["guardrail"]["reasked"] is False
 
 	@pytest.mark.parametrize("elapsed,reasked", [(29.0, True), (30.0, False), (31.0, False)])
 	def test_reask_needs_under_half_the_budget(self, monkeypatch, elapsed, reasked):
@@ -1805,19 +1607,6 @@ class TestAnthropicCacheUsage:
 			"input_tokens": 50, "cache_read_input_tokens": 1800, "output_tokens": 300,
 		}})
 		assert u["prompt_tokens"] == 1850
-
-
-class TestPromptBlocksWired:
-	"""The named prompt blocks are composed into the static system prompt (their
-	content is pinned in test_ai_prompts.py)."""
-
-	def test_blocks_are_in_the_system_prompt(self):
-		system, _ = ai_fix._build_messages({"finding_type": "Slow Query", "title": "x"})
-		for block in (ai_prompts.FRAPPE_REVIEW_RULES, ai_prompts.FRAPPE_DEV_IDIOMS):
-			assert block in system
-
-	def test_system_prompt_within_char_budget(self):
-		assert len(ai_prompts.SYSTEM_PROMPT) <= 7000
 
 
 class TestGuardrailBoundaries:

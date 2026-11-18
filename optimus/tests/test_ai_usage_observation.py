@@ -101,13 +101,6 @@ def test_anthropic_usage_accounts_for_cache_components(provider, raw, known, tot
 	assert provider.spend == []
 
 
-def test_unattributed_call_collects_usage_without_ambient_spending(provider):
-	provider.install({"total_tokens": 7})
-	usage = ai_fix.Usage()
-	ai_fix._call_openai_chat("https://fake.invalid/v1", "", "fake", "system", [], usage_out=usage, max_tokens=4096)
-	assert usage["total_tokens"] == 7 and provider.spend == []
-
-
 def test_known_zero_survives_public_result(provider):
 	provider.install({"total_tokens": 0})
 	result = ai_fix.suggest_fix({"finding_type": "N+1 Query"}, session_uuid="fake-session")

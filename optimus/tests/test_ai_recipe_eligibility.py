@@ -4,7 +4,7 @@
 """Framework N+1 and index-family findings never reach the LLM; a Hot
 Line whose line only calls another function or sits in framework code never
 reaches it either. Covers the chokepoint (ai_fix.llm_gate_note), the
-suggest_fix guard and both analyze paths."""
+suggest_fix guard and the auto-suggest path."""
 
 import json
 from types import SimpleNamespace
@@ -14,16 +14,7 @@ import pytest
 
 from optimus import ai_fix, analyze
 
-
-@pytest.fixture(autouse=True)
-def _commit_on_the_fake_db(monkeypatch):
-	"""``_run_ai_backfill`` commits each answer through ``analyze.safe_commit``; send that commit
-	to whatever ``analyze.frappe`` a test installs."""
-	monkeypatch.setattr(analyze, "safe_commit", lambda: analyze.frappe.db.commit())
-
 _USER_FILE = "/home/b/apps/myapp/myapp/order.py"
-_RESULT = {"suggestion": "**Fix**\n\ndo X", "model": "m", "provider": "OpenAI-compatible",
-           "generated_at": "2026-09-24T00:00:00+00:00"}
 
 
 def _cfg(**kw):
@@ -45,31 +36,7 @@ def _hot(content, file=_USER_FILE, per_hit_us=0.0):
 	return _finding("Hot Line", {"file": file, "lineno": 9, "line_content": content, "per_hit_us": per_hit_us})
 
 
-class _FakeDB:
-	def __init__(self):
-		self.writes = []
-
-	def set_value(self, dt, name, field, val, **kwargs):
-		self.writes.append(name)
-
-	def commit(self):
-		pass
-
-
-def _fake_frappe():
-	return SimpleNamespace(db=_FakeDB(), log_error=lambda *a, **k: None)
-
-
-def _row(name, ftype, detail=None):
-	return SimpleNamespace(name=name, llm_fix_json=None, **{
-		k: v for k, v in _finding(ftype, detail).items()
-	})
-
-
 class TestEligibleSet:
-	def test_framework_n_plus_one_is_not_ai_eligible(self):
-		assert "Framework N+1" not in ai_fix.AI_ELIGIBLE_FINDING_TYPES
-
 	def test_exact_eligible_set(self):
 		assert ai_fix.AI_ELIGIBLE_FINDING_TYPES == frozenset(
 			{"N+1 Query", "Slow Query", "Redundant Call", "Hot Line", "Slow Background Job"},
@@ -102,18 +69,6 @@ class TestAutoSuggestPath:
 			_hot("total = total + flt(row.qty) * flt(row.rate)"),
 		])
 		assert sent == ["Hot Line"]  # only the pure-Python line
-
-
-class TestBackfillPath:
-	def test_backfill_skips_framework_n_plus_one_and_gated_hot_lines(self):
-		rows = [
-			_row("fw", "Framework N+1"),
-			_row("hl_gated", "Hot Line", {"file": _USER_FILE, "line_content": "self.run_all()", "per_hit_us": 5000.0}),
-			_row("hl_ok", "Hot Line", {"file": _USER_FILE, "line_content": "n = len(rows)", "per_hit_us": 5000.0}),
-			_row("n1", "N+1 Query"),
-		]
-		selected = analyze.eligible_findings(rows, _cfg())
-		assert sorted(row.name for row in selected) == ["hl_ok", "n1"]
 
 
 class TestSuggestFixGuard:

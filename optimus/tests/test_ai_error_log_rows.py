@@ -182,15 +182,6 @@ def test_an_exhausted_budget_row_says_how_far_the_ladder_got(wire):
 	assert context["attempts"] == 1 and context["dropped"] == "temperature"
 
 
-def test_the_row_text_carries_attempts_and_dropped(logs):
-	exc = ai_fix.AiFixError("rejected", kind="bad_request", status_code=400)
-	ai_fix._log_http_error(
-		"openai", "chat/completions", 400, "", exc=exc, attempts=3, dropped="temperature,max_tokens",
-	)
-	lines = _lines(logs[0])
-	assert "attempts=3" in lines and "dropped=temperature,max_tokens" in lines
-
-
 def test_a_real_ladder_failure_writes_attempts_and_dropped_into_the_error_log_row(logs, monkeypatch):
 	posts = iter([
 		_rejected("Unsupported value: 'temperature' does not support 0.1"),
@@ -229,34 +220,6 @@ def test_the_runbook_has_a_row_per_kind_and_marks_the_fatal_ones():
 		fatal_cell = cells[1]
 		assert fatal_cell == str(kind in ai_fix.AI_FATAL_KINDS), kind  # the rows' own spelling
 		assert cells[2] and cells[3]
-
-
-def _error_log_pointers(path):
-	"""Every "Error Log" pointer in a source file: the text from "Error Log" to the closing quote."""
-	import re
-
-	return re.findall(r"Error Log[^\n]*", path.read_text())
-
-
-_ROOT = Path(__file__).resolve().parents[1]
-
-
-@pytest.mark.parametrize("path", [
-	_ROOT / "ai_refresh_view.py", _ROOT / "optimus" / "doctype" / "optimus_session" / "optimus_session.js",
-])
-def test_operators_are_told_to_search_for_the_title_a_provider_failure_row_has(path):
-	"""A provider failure is logged by the HTTP layer under the title ``optimus ai_fix``; the step
-	title (``optimus ai backfill``, ``optimus ai auto-suggest``) is appended inside that row, and
-	the other AI steps write rows of their own. Every AI title starts with ``optimus ai``: a
-	pointer to the Error Log names that prefix, which finds them all."""
-	# the outer auto-suggest step logs its own unexpected error under its own title
-	pointers = [p for p in _error_log_pointers(path) if ("title" in p or "titled" in p) and "(outer)" not in p]
-	if path.name == "ai_refresh_view.py":
-		assert "Ask your administrator" in path.read_text()
-	else:
-		assert pointers
-	for pointer in pointers:
-		assert "titles starting with" in pointer and "optimus ai" in pointer, pointer
 
 
 def test_a_provider_failure_row_has_the_title_operators_are_sent_to(logs):

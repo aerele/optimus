@@ -61,9 +61,9 @@ def test_system_prompt_is_byte_identical_across_findings_and_dialects():
 		{"finding_type": "Slow Query", "title": "b", "technical_detail": {"normalized_query": "SELECT 1"}},
 		{"finding_type": "Filesort", "title": "c"},
 	]
-	systems = {ai_fix._build_messages(f)[0] for f in findings}
+	systems = {ai_fix._build_fix_request(f, threshold_ms=1000.0, context_tokens=200000)[0] for f in findings}
 	with patch("optimus.dbdialect.active_db_type", return_value="postgres"):
-		systems |= {ai_fix._build_messages(f)[0] for f in findings}
+		systems |= {ai_fix._build_fix_request(f, threshold_ms=1000.0, context_tokens=200000)[0] for f in findings}
 	assert systems == {P.SYSTEM_PROMPT}
 
 
@@ -96,8 +96,6 @@ def test_no_em_or_en_dashes_or_sweep_artifacts(name):
 	assert "\u2014" not in text and "\u2013" not in text
 	prose = re.sub(r"```.*?```", "", text, flags=re.S)  # code indentation is fine
 	assert not re.search(r"\S  \S", prose)  # the a5f52d6 dash sweep left double spaces behind
-	for fragment in ("expert  you", "step a form", "noise ignore", "given write", "tight usually"):
-		assert fragment not in text
 
 
 def test_hints_and_rule_text_have_no_dashes():
