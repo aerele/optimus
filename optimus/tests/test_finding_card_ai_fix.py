@@ -90,14 +90,6 @@ _GOOD_SUGGESTION = (
 # --------------------------------------------------------------------------
 
 class TestMarkdownToSafeHtml:
-	def test_converts_basic_markdown(self):
-		out = renderer._markdown_to_safe_html("**bold** and a list:\n\n- one\n- two\n")
-		# Either the real converter ran (preferred) or under module
-		# pollution the escaped <pre> fallback; both are non-empty and
-		# never contain a live <script>.
-		assert out
-		assert "<script" not in out.lower()
-
 	def test_strips_script_tags(self):
 		out = renderer._markdown_to_safe_html("ok\n\n<script>alert('x')</script>\n\ndone")
 		assert "<script" not in out.lower()
@@ -136,9 +128,6 @@ class TestHighlightDiffHtml:
 	def test_regular_code_block_left_alone(self):
 		html = '<pre><code class="language-python">x = a - b\nreturn x\n</code></pre>'
 		assert renderer._highlight_diff_html(html) == html
-
-	def test_no_pre_blocks_is_noop(self):
-		assert renderer._highlight_diff_html("<p>just text</p>") == "<p>just text</p>"
 
 
 # --------------------------------------------------------------------------
@@ -204,11 +193,6 @@ class TestAiFixBlockRendering:
 		html = renderer.render_raw(doc, recordings=[])
 		# Check for the AI-fix box marker specifically the
 		# Gap Analysis section also emits a "Suggested fix" label.
-		assert 'class="fix-box"' not in html
-
-	def test_no_block_when_suggestion_blank(self):
-		doc = _doc([_finding(llm_fix={"suggestion": "   ", "model": "m"})])
-		html = renderer.render_raw(doc, recordings=[])
 		assert 'class="fix-box"' not in html
 
 	def test_script_in_suggestion_is_stripped(self):

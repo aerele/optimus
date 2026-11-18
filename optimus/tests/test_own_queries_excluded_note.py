@@ -98,9 +98,9 @@ class TestReportNote:
 		import frappe
 
 		monkeypatch.setattr(frappe, "_", lambda msg, *a, **k: "T:" + msg, raising=False)
-		html = renderer.render(_session_doc(), recordings=[_recording("r1", stamped=5)])
-		assert "T:{0} queries from Optimus's own code were excluded from this report" not in html
-		assert "T:" in _note(html)
+		html = renderer.render(_session_doc(), recordings=[_recording("r1", stamped=7)])
+		# The translated template is formatted afterwards: the count fills the {0} slot.
+		assert _note(html) == "T:7 queries from Optimus's own code were excluded from this report"
 
 
 def _unregistered_recording(uuid):

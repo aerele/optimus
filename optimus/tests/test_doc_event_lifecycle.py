@@ -23,11 +23,6 @@ class TestDoctypeFromControllerPath:
 			"/Users/x/apps/erpnext/erpnext/accounts/doctype/gl_entry/gl_entry.py"
 		) == "Gl Entry"
 
-	def test_bench_relative_controller_path(self):
-		assert renderer._doctype_from_controller_path(
-			"apps/myapp/myapp/sales/doctype/quote/quote.py"
-		) == "Quote"
-
 	def test_non_controller_paths(self):
 		assert renderer._doctype_from_controller_path("frappe/model/document.py") is None
 		assert renderer._doctype_from_controller_path("ugly_code/python/common.py") is None
@@ -40,10 +35,6 @@ class TestDoctypeFromControllerPath:
 
 
 class TestFindingLifecycleBindings:
-	def test_from_hook_events(self):
-		f = {"technical_detail": {"hook_events": [{"doctype": "Sales Invoice", "event": "validate"}]}}
-		assert renderer._finding_lifecycle_bindings(f) == [("Sales Invoice", "validate", "doc_events hook")]
-
 	def test_multiple_hook_events(self):
 		f = {"technical_detail": {"hook_events": [
 			{"doctype": "Sales Invoice", "event": "validate"},

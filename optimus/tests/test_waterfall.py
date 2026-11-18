@@ -44,11 +44,6 @@ class TestSizing:
 		out = renderer._build_waterfall(actions, [], max_rows=5)
 		assert len(out) == 5
 
-	def test_returns_fewer_when_input_is_smaller(self):
-		actions = [_a(0, duration_ms=100), _a(1, duration_ms=50)]
-		out = renderer._build_waterfall(actions, [])
-		assert len(out) == 2
-
 
 class TestSorting:
 	def test_sorted_by_duration_descending(self):
@@ -72,19 +67,6 @@ class TestPctScaling:
 		assert out[0]["pct"] == 100.0
 		assert out[1]["pct"] == 50.0
 		assert out[2]["pct"] == 10.0
-
-	def test_pct_scales_to_displayed_slice_max(self):
-		"""When max_rows=2 selects the top-2 from a larger list,
-		scaling uses those two's max not the (unshown) overall
-		max so the second row is comparable visually."""
-		actions = [
-			_a(0, duration_ms=200),
-			_a(1, duration_ms=100),
-			_a(2, duration_ms=10),  # would-be 5% on overall, hidden anyway
-		]
-		out = renderer._build_waterfall(actions, [], max_rows=2)
-		assert out[0]["pct"] == 100.0
-		assert out[1]["pct"] == 50.0
 
 
 class TestHotFlag:

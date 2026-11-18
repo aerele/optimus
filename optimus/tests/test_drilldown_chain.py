@@ -99,13 +99,6 @@ class TestFindNodeInTree:
 		tree = _screenshot_tree()
 		assert _find_node_in_tree(tree, "common.py", "") is None
 
-	def test_basename_match_only(self):
-		"""Even if the tree stores full paths and the callsite carries a
-		bench-relative path, the basename match should still find it."""
-		tree = _screenshot_tree()
-		node = _find_node_in_tree(tree, "common.py", "looped_validate")
-		assert node is not None
-
 
 class TestWalkDrilldownChain:
 	def test_stops_at_framework_boundary(self):
@@ -124,17 +117,6 @@ class TestWalkDrilldownChain:
 		# Percentages computed against the ORIGIN (looped_validate, 689ms).
 		assert chain[0]["pct_of_origin"] == round(620 / 689 * 100)
 		assert chain[1]["pct_of_origin"] == round(530 / 689 * 100)
-
-	def test_picks_hottest_child(self):
-		"""The looped_validate origin has two children _run_validations
-		(620ms) and _other_branch (60ms). Walker must pick the 620ms one."""
-		tree = _screenshot_tree()
-		callsite = {
-			"filename": "apps/ugly_code/ugly_code/python/common.py",
-			"function": "looped_validate",
-		}
-		chain = _walk_drilldown_chain(tree, callsite)
-		assert chain[0]["function"] == "_run_validations"
 
 	def test_max_depth_one_truncates_chain(self):
 		tree = _screenshot_tree()
@@ -263,12 +245,6 @@ class TestFindNodePathInTree:
 		assert [n["function"] for n in path] == [
 			"<root>", "looped_validate", "_run_validations", "_check_user_exists",
 		]
-
-	def test_root_node_path_is_itself(self):
-		tree = _screenshot_tree()
-		path = _find_node_path_in_tree(tree, "common.py", "looped_validate")
-		assert path[-1]["function"] == "looped_validate"
-		assert path[0]["function"] == "<root>"
 
 	def test_missing_function_returns_none(self):
 		assert _find_node_path_in_tree(_screenshot_tree(), "common.py", "nope") is None

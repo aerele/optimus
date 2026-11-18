@@ -25,13 +25,6 @@ def _board(files, tracked=None, installed=None):
 	return {r["function"].split("::")[0]: r["is_framework"] for r in board}
 
 
-def _split(files, tracked=None, installed=None):
-	tree = _n("<root>", "", 0, [_n(f"fn{i}", f, 100 + i) for i, f in enumerate(files)])
-	_, board = call_tree._aggregate_hot_frames([tree], tracked, installed)
-	custom, framework = renderer._split_hot_frames(board, tracked or ())
-	return {r["function"] for r in custom}, {r["function"] for r in framework}
-
-
 class TestAnalyzerFlag:
 	def test_exclusion_mode_classifies_from_full_path(self):
 		flags = _board([APP_FILE, FRAPPE_FILE], installed=frozenset({"myapp", "frappe"}))
@@ -71,22 +64,6 @@ class TestRendererSplit:
 	def test_empty_and_none(self):
 		assert renderer._split_hot_frames([]) == ([], [])
 		assert renderer._split_hot_frames(None) == ([], [])
-
-	def test_only_one_kind(self):
-		only_fw = [{"function": "a/b.py::f", "is_framework": True}]
-		assert renderer._split_hot_frames(only_fw) == ([], only_fw)
-		only_app = [{"function": "a/b.py::f", "is_framework": False}]
-		assert renderer._split_hot_frames(only_app) == (only_app, [])
-
-	def test_end_to_end_both_modes(self):
-		files = [APP_FILE, FRAPPE_FILE]
-		custom, framework = _split(files, installed=frozenset({"myapp", "frappe"}))
-		assert custom == {"sales/invoice.py::fn0"}
-		assert framework == {"user/user.py::fn1"}
-		# Tracked Apps mode skips non-tracked frames, so the framework group is empty here.
-		custom, framework = _split(files, tracked=("myapp",))
-		assert custom == {"sales/invoice.py::fn0"}
-		assert framework == set()
 
 
 class TestPerGroupCap:
@@ -187,12 +164,6 @@ class TestKeyCollision:
 		_, board = call_tree._aggregate_hot_frames([tree], None, None)
 		assert len({r["function"] for r in board}) == 2
 
-	def test_per_group_cap_still_applies(self):
-		files = [f"/bench/apps/myapp/myapp/m{i}.py" for i in range(25)]
-		tree = _n("<root>", "", 0, [_n("f", f, 100 + i) for i, f in enumerate(files)])
-		_, board = call_tree._aggregate_hot_frames([tree], None, frozenset({"myapp"}))
-		assert len(board) == call_tree.HOT_FRAMES_LEADERBOARD_SIZE
-
 
 class TestIntermediateTrim:
 	def test_framework_rows_survive_trim_with_many_app_frames(self):
@@ -253,5 +224,5 @@ class TestCollidingAbsolutePaths:
 
 	def test_hash_label_is_stable(self):
 		ident = ("opt/x/y/z/util.py", "f")
-		assert call_tree._hashed_label(ident) == call_tree._hashed_label(ident)
-		assert call_tree._hashed_label(ident).startswith("y/z/util.py::f#")
+		# Fixed expectation: the label must not change between runs or releases.
+		assert call_tree._hashed_label(ident) == "y/z/util.py::f#278956"

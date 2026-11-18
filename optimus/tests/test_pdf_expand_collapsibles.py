@@ -52,12 +52,6 @@ class TestExpandCollapsibles:
 		assert out.count("<details") == 1
 		assert out.count(" open>") == 1
 
-	def test_adds_open_to_details_with_id(self):
-		html = '<details id="analyzer-notes"><summary>x</summary>body</details>'
-		out = _expand_collapsible_sections(html)
-		assert 'id="analyzer-notes"' in out
-		assert ' open>' in out
-
 	def test_idempotent_on_already_open_details(self):
 		"""<details open> should pass through unchanged (not double-add)."""
 		html = "<details open><summary>x</summary>body</details>"

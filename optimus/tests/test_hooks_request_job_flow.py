@@ -307,6 +307,33 @@ class TestAfterRequest:
 
 		assert env.cache_writes[redis_keys.resolved_doc("rec-1")] == "SO-0001"
 
+	def test_resolved_doc_stash_never_touches_the_recorder_hash(self, env, monkeypatch):
+		# The retired path did a read-modify-write of the recorder request hash
+		# (dead for HTTP, the hash is not written yet). The sidecar key must be
+		# the only cache interaction: any hget/hset/other call is recorded here.
+		from optimus.renderer import doc_event_renderer
+
+		stray = []
+
+		class _Cache:
+			def set_value(self, key, value, expires_in_sec=None):
+				env.cache_writes[key] = value
+
+			def __getattr__(self, name):
+				stray.append(name)
+				raise AssertionError(f"unexpected cache.{name}")
+
+		monkeypatch.setattr(frappe, "cache", _Cache(), raising=False)
+		monkeypatch.setattr(
+			doc_event_renderer, "resolve_target_doc_from_response", lambda form, resp: "SO-0001"
+		)
+		self._recorded_request(env)
+
+		hc.after_request()
+
+		assert stray == []
+		assert env.errors == []
+
 
 class TestBeforeJob:
 	def _job(self, env, kwargs, method="app.tasks.sync"):

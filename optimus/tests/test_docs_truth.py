@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from optimus import hooks, settings
+from optimus.tests.test_line_profiling_wording import DOCTYPE_NAME, PHASE_RE
 
 _APP = Path(__file__).resolve().parents[2]
 _SETTINGS_JSON = _APP / "optimus" / "optimus" / "doctype" / "optimus_settings" / "optimus_settings.json"
@@ -34,6 +35,11 @@ _REMOVED_FEATURE_PATTERNS = {
 	"partner-shop handoff": r"partner shop",
 	"archived line-profile runs": r"moved to a private file|archived to a private",
 }
+
+
+_NO_PHASE_WORDING_DOCS = (
+	"README.md", "SECURITY.md", "docs/AI-FIXING.md", "docs/AI-REFRESH.md", "docs/REDIS-SCHEMA.md",
+)
 
 
 def _doc_paths():
@@ -177,3 +183,10 @@ def test_documented_hook_check_command_matches_the_registered_hook(document):
 	command = 'bench --site <site> execute frappe.get_doc_hooks | grep -o \'"Error Log": {[^}]*}\''
 	assert all(check == command for check in checks)
 	assert hooks.doc_events["Error Log"]["before_insert"] == "optimus.error_log_mask.mask_error_log"
+
+
+@pytest.mark.parametrize("document", _NO_PHASE_WORDING_DOCS)
+def test_docs_have_no_phase_wording(document):
+	"""The docs say "line profiling", not "Phase 1/2" (the doctype name is the one exception)."""
+	for n, line in enumerate((_APP / document).read_text().splitlines(), 1):
+		assert not PHASE_RE.search(line.replace(DOCTYPE_NAME, "")), (document, n, line)

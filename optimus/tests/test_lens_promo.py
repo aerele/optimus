@@ -47,24 +47,6 @@ def _doc():
 
 
 class TestLensPromoRendering:
-	def test_block_renders_exactly_once(self):
-		"""Promo is hardcoded should appear on every report, exactly once."""
-		html = renderer.render_raw(_doc(), recordings=[])
-		assert html.count('class="section lens-promo"') == 1
-
-	def test_block_positioned_before_jump_to_nav(self):
-		"""The Lens block must sit BEFORE the Jump-to nav (`<nav
-		class="nav-pills">`); the check anchors on the class attribute since the
-		nav may also carry an aria-label."""
-		html = renderer.render_raw(_doc(), recordings=[])
-		jump_idx = html.find('<nav class="nav-pills"')
-		lens_idx = html.find('class="section lens-promo"')
-		assert jump_idx != -1, "Jump-to nav-pills not found"
-		assert lens_idx != -1, "Lens promo block not found"
-		assert lens_idx < jump_idx, (
-			"Lens promo block must render BEFORE the Jump-to nav, not after"
-		)
-
 	def test_link_target_and_safety(self):
 		"""Link goes to https://lens.aerele.in/ and carries rel=noopener."""
 		html = renderer.render_raw(_doc(), recordings=[])

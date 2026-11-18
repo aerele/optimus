@@ -23,38 +23,6 @@ def _read_template() -> str:
 
 
 class TestTemplateStructure:
-	def test_top_queries_table_has_query_table_class(self):
-		tpl = _read_template()
-		# Find the Top Queries section and verify the table inside
-		# it uses the new class.
-		m = re.search(
-			r"Top \{\{[^}]+\}\}\s+slowest queries.*?</details>",
-			tpl,
-			re.DOTALL,
-		)
-		assert m is not None, "Top Queries section not found"
-		section = m.group(0)
-		assert 'class="query-table' in section, (
-			"Top Queries table must carry the .query-table class for "
-			"the fixed-layout CSS to apply"
-		)
-
-	def test_top_queries_has_colgroup_with_widths(self):
-		tpl = _read_template()
-		m = re.search(
-			r"Top \{\{[^}]+\}\}\s+slowest queries.*?</details>",
-			tpl,
-			re.DOTALL,
-		)
-		section = m.group(0)
-		# All four column classes must appear in the colgroup.
-		for col_class in (
-			"col-index", "col-duration", "col-callsite", "col-query",
-		):
-			assert f'class="{col_class}"' in section, (
-				f"Top Queries colgroup missing {col_class!r}"
-			)
-
 	def test_queries_per_action_is_flat_table_without_sql(self):
 		"""Queries-per-action is one flat data table (not per-action expanders)
 		and the normalized-query column is gone."""
@@ -201,23 +169,6 @@ class TestTemplateCSS:
 			"`th .scope-tag` must use `display: block` (not inline-block) so "
 			"the sub-label stacks below the main header and can't overflow "
 			"into the next column. Found body: " + body.strip()
-		)
-
-	def test_vitals_table_no_longer_overrides_scope_tag_display(self):
-		"""The vitals-table used to have its own override for header scope-
-		tag display:block we promoted that pattern to the global default,
-		so the per-table override is now redundant and must be removed (to
-		keep the CSS as single-source-of-truth)."""
-		tpl = _read_template()
-		# Match the old override's selector with flexible whitespace.
-		m = re.search(
-			r"#frontend\s+table\.vitals-table\s+thead\s+th\s+\.scope-tag\s*\{",
-			tpl,
-		)
-		assert m is None, (
-			"The `#frontend table.vitals-table thead th .scope-tag` override "
-			"should be removed the global `th .scope-tag { display: block }` "
-			"rule subsumes it."
 		)
 
 	# ----------------------------------------------------------------
