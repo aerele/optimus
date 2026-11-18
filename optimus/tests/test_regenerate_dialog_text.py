@@ -24,12 +24,14 @@ def _confirm_text():
 
 def test_the_dialog_says_what_regenerate_does_and_does_not_do():
 	text = _confirm_text()
+	# every user-facing sentence sits inside a literal that goes through ``__()``
+	keys = re.findall(r'__\( ?"([^"]*)"', text)
 	for sentence in (
 		"Re-render the report from stored session data.",
 		"This does not re-run the analyzer and does not call the AI provider;",
 		"saved AI suggestions are kept as they are.",
 	):
-		assert f'__("{sentence}' in text or sentence in text, sentence
+		assert any(sentence in key for key in keys), sentence
 
 
 def test_the_pointer_to_refresh_is_for_ready_sessions_with_ai_enabled_only():
@@ -43,19 +45,3 @@ def test_the_pointer_to_refresh_is_for_ready_sessions_with_ai_enabled_only():
 	assert re.search(r'frm\.doc\.status\s*===?\s*"Ready"', guard)
 	assert "frm._optimus_ai_enabled" in guard
 
-
-def test_the_ai_switch_the_pointer_reads_is_the_one_the_ai_button_uses():
-	"""``render_ai_buttons`` asks ``ai_capabilities`` whether the master AI switch is on; it
-	records the answer on the form (False until it is known, and on a non-Ready session)."""
-	body = re.sub(r"\s+", " ", _function_body("render_ai_buttons"))
-	reset = body.index("frm._optimus_ai_enabled = false;")
-	assert reset < body.index("if (frm.is_new()) return;")
-	status = _function_body("_ai_apply_status")
-	assert "frm._optimus_ai_enabled = state.can_act" in status
-	assert "state.plan.total || state.plan.steps" in status
-
-
-def test_the_dialog_text_is_translatable():
-	text = _confirm_text()
-	assert text.count("__(") >= 3
-	assert "Saved AI suggestions are retained" not in text

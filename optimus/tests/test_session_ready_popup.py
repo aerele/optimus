@@ -88,10 +88,12 @@ for (const [name, data, title] of [
 
 def test_popup_failure_does_not_block_state_transition():
 	_run(r"""
-const d = desk({dialogThrows:true});
+const warns = [];
+const d = desk({dialogThrows:true, warns});
 d.handlers.optimus_session_ready(ev());
 assert.equal(d.state.display, 'ready');
 assert.equal(d.alerts.length, 1);
+assert.equal(warns.length, 1);
 const f = desk({dialogThrows:true});
 f.handlers.optimus_session_failed(ev());
 assert.equal(f.state.display, 'ready');
@@ -421,15 +423,6 @@ def test_popup_link_is_underlined_in_the_widget_css():
 	css = WIDGET_JS.parents[1].joinpath("css", "floating_widget.css").read_text(encoding="utf-8")
 	rule = css[css.index(".optimus-session-popup a.optimus-session-link"):]
 	assert "text-decoration: underline" in rule.split("}", 1)[0]
-
-
-def test_popup_failure_is_logged_with_console_warn():
-	_run(r"""
-const warns = [];
-const d = desk({dialogThrows:true, warns});
-d.handlers.optimus_session_ready(ev());
-assert.equal(warns.length, 1);
-""")
 
 
 def test_popup_works_when_local_storage_is_unavailable():

@@ -59,7 +59,6 @@ def test_persist_keeps_the_tail_of_each_v5_aggregate_list_and_warns(monkeypatch)
 		assert any(f"{name} truncated from {before} to {cap} entries" in line for line in warnings)
 
 
-
 def test_persist_leaves_the_notes_a_user_wrote_unchanged(monkeypatch):
 	# The steps are only auto-filled into empty notes; text typed on the form between start and stop stays.
 	monkeypatch.setattr(analyze, "_build_auto_notes_html", lambda *a: "generated steps")
