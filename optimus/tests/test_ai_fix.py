@@ -73,12 +73,6 @@ def _provider(provider: dict):
 	return stack
 
 
-def _post_raising(exc):
-	def _fake_post(url, headers=None, json=None, timeout=None, auth=None, allow_redirects=True):  # noqa: A002, F811
-		raise exc
-	return _fake_post
-
-
 def _post_sequence(*resps):
 	"""Return successive responses on successive calls; snapshots each request
 	body (shallow copy, since callers may mutate the dict between attempts)."""
@@ -854,19 +848,8 @@ class TestIsAvailableSection:
 
 
 # --------------------------------------------------------------------------
-# Protocol handlers expose usage; only the journal worker persists spending.
+# Finish-reason mapping: each protocol handler reports a normalised reason.
 # --------------------------------------------------------------------------
-
-
-def _counter_spy(monkeypatch):
-	from optimus import analyze
-
-	seen = []
-	monkeypatch.setattr(
-		analyze, "_increment_session_counter",
-		lambda key, field, n, *, by="name", title="": seen.append((key, field, n, by)),
-	)
-	return seen
 
 
 class TestFinishReason:

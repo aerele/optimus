@@ -278,18 +278,6 @@ def _row(name, ftype, detail):
 	)
 
 
-def _record_suggest(sent):
-	def suggest(payload, **kwargs):
-		sent.append(payload["finding_type"])
-		return {"suggestion": "x", "model": "m"}
-
-	return suggest
-
-
-
-
-
-
 def test_a_broken_gate_never_offers_a_refresh(monkeypatch):
 	"""The outdated-fix footer must not promise that Refresh would redo a gated Hot Line."""
 	monkeypatch.setattr(ai_grounding, "hot_line_gate", _boom)

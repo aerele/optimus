@@ -544,7 +544,3 @@ class TestReviewRound4Fixes:
 		assert _resolve_threshold_ms({"large_duration_threshold_ms": "abc"}) == DEFAULT_DISPLAY_THRESHOLD_MS
 		assert _resolve_threshold_ms({"large_duration_threshold_ms": "500"}) == 500.0
 		assert _resolve_threshold_ms({"large_duration_threshold_ms": 0}) == 0.0
-
-
-class TestFinalizeProse:
-	"""_finalize_prose is the single home of the format-before-em-dash order."""

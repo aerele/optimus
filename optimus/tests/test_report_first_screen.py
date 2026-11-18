@@ -9,7 +9,7 @@ import types
 
 
 class TestEndToEndRender:
-	def test_card_renders_into_html(self):
+	def test_kpi_issues_cell_renders(self):
 		from optimus import renderer
 
 		doc = types.SimpleNamespace()
@@ -53,9 +53,8 @@ class TestEndToEndRender:
 
 		html = renderer.render(doc, recordings=[])
 
-		# v0.7.x redesign Phase B: the "At a glance" exec-summary card
-		# was replaced by the TL;DR hero (single composed headline); the
-		# assertions below hold via the TL;DR composition + the KPI strip.
+		# The first screen is the TL;DR hero (single composed headline) plus
+		# the KPI strip; the assertions below check both.
 		assert 'class="tldr"' in html, "TL;DR hero must render"
 		# Duration crosses the 1000ms threshold rendered as seconds
 		# with .time-high (timing rule applies everywhere).
@@ -77,7 +76,7 @@ class TestEndToEndRender:
 		assert _re.sub(r"<[^>]+>", "", m.group(1)).strip() == "1"  # one finding total
 		assert "1 high" in _re.sub(r"<[^>]+>", "", m.group(2))
 
-	def test_clean_session_no_card(self):
+	def test_clean_session_shows_nothing_to_fix_hero(self):
 		from optimus import renderer
 
 		doc = types.SimpleNamespace()
@@ -107,9 +106,9 @@ class TestEndToEndRender:
 
 		html = renderer.render(doc, recordings=[])
 
-		# v0.7.x redesign Phase B: the exec-summary card was replaced
-		# by the TL;DR hero. The hero ALWAYS renders clean sessions
-		# get a "Nothing to fix" branch instead of being hidden.
+		# The TL;DR hero ALWAYS renders: clean sessions get a "Nothing to
+		# fix" branch instead of being hidden. The retired exec-summary
+		# card markup must stay absent.
 		assert 'class="exec-summary' not in html, (
 			"Old exec-summary card markup must not be present"
 		)

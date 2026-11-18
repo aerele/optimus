@@ -249,6 +249,33 @@ class TestBgWaitForPendingJobs:
 		assert "_bg_wait_until" in kwargs
 		assert [a[-1] for a in statuses] == ["Capturing Background Jobs"]
 
+	def test_reenqueues_even_when_the_status_write_raises(self, monkeypatch):
+		import time
+
+		import frappe
+
+		analyze = self._patch_common(monkeypatch, pending=["j1"], wait_seconds=60)
+		monkeypatch.setattr(analyze, "_rq_status", lambda jid: "started")
+		monkeypatch.setattr(analyze, "_publish_progress", lambda *a, **k: None)
+		monkeypatch.setattr(analyze.time, "sleep", lambda *a, **k: None)
+
+		def _boom(*a, **k):
+			raise RuntimeError("database went away")
+
+		# The "Capturing Background Jobs" status write is cosmetic: a failure
+		# there must not stop the drain from re-enqueueing analyze.
+		monkeypatch.setattr(frappe, "db", types.SimpleNamespace(set_value=_boom), raising=False)
+		monkeypatch.setattr(analyze, "safe_commit", lambda: None)
+		enq = []
+		monkeypatch.setattr(frappe, "enqueue", lambda *a, **k: enq.append((a, k)), raising=False)
+
+		out = analyze._bg_wait_for_pending_jobs("s1", "PS-1", time.time() + 60)
+		assert out is None
+		assert len(enq) == 1
+		args, kwargs = enq[0]
+		assert args[0] == "optimus.analyze.run"
+		assert "_bg_wait_until" in kwargs
+
 
 # --------------------------------------------------------------------------
 # the background_job_wait_seconds setting

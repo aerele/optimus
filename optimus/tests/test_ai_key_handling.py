@@ -443,6 +443,7 @@ class TestAKeylessProviderIgnoresAnUnsendableKey:
 			probe = ai_fix.test_connection()
 		assert ei.value.kind == "config" and "sk-live" not in str(ei.value)
 		assert probe["ok"] is False and "smart quote" in probe["message"]
+		assert "sk-live" not in probe["message"]
 		assert fake.calls == []
 
 	def test_get_api_key_without_need(self, monkeypatch):

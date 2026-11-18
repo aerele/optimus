@@ -547,7 +547,7 @@ class TestEntryCallsiteInReport:
 
 # --------------------------------------------------------------------------
 # v0.6.x: action/finding context target document (from form_dict) shown in
-# the per-action table, on the finding card and appended to exec-summary bullets
+# the per-action table and on the finding card
 # --------------------------------------------------------------------------
 
 class TestActionContextInReport:
@@ -577,11 +577,6 @@ class TestActionContextInReport:
 		# Finding card: "Document:" line.
 		assert "Document:" in html
 		assert "Sales Invoice" in html
-		# v0.7.x redesign Phase B: the exec-summary bullet that
-		# augmented its text with " Sales Invoice SINV-1" is gone
-		# (exec-summary card replaced by TL;DR hero). Target-doc
-		# surfacing now lives in the per-action breakdown + finding
-		# card breadcrumb above. Drop the bullet-text assertion.
 
 	def test_action_with_no_doc_in_form_dict_has_no_target_doc_line(self):
 		action = _action(

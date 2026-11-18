@@ -170,8 +170,10 @@ for the v0.12.14 baseline.
 
 * `TestSignUnsignRoundTrip` (2 tests) v1 round-trip happy path,
   empty payload.
-* `TestLegacyShapeBackwardCompat` (1 test) pre-v0.12.14 v0
-  blobs still verify.
+* `TestLegacyShapeBackwardCompat` (1 test, 2 cases) pre-v0.12.14 v0
+  blobs still verify. One case uses a plain payload. The other case
+  uses a payload whose first byte is a pickle opcode (`\x80`), so
+  the legacy pickle-first-byte shape stays pinned.
 * `TestNewShapeByteLayout` (1 test) locks the byte layout
   (`32 + 1 + len(payload)`).
 * `TestTamperingDetection` (3 tests) tampered sig / version-byte /
@@ -182,7 +184,8 @@ for the v0.12.14 baseline.
 A future scheme v2 PR would add `TestSchemeV2RoundTrip` +
 `TestV0V1V2Coexistence` + `TestV1ReaderRejectsV2Blob` (the v1 reader
 must NOT verify a v2 blob's SHA-256 of `body64`: it would fail
-trivially because the lengths differ). The existing 11 tests stay
+trivially because the lengths differ). The file has 11 tests, which
+collect as 12 cases. The existing tests stay
 green throughout (v0/v1 compat is forever).
 
 ## Operator notes
