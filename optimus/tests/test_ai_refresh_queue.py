@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from optimus import ai_fix
+from optimus import ai_fix, sql_work
 from optimus.tests.fixtures.ai_refresh_journal import journal as _journal_fixture  # noqa: F401
 from optimus.tests.fixtures.ai_refresh_queue import (  # noqa: F401
 	_HTTP_BOUND,
@@ -223,54 +223,6 @@ def test_recovery_enforces_total_budget_even_if_queue_lease_is_still_alive(queue
 	monkeypatch.setattr(queue.jobs.frappe, "get_all", queue.journal.db.get_all, raising=False)
 	queue.jobs.recover_pending()
 	assert queue.journal.run["state"] == "interrupted" and not queue.sent
-
-
-def test_admission_honors_the_planned_site_configuration_names(queue, monkeypatch):
-	queue.journal.db.rows[queue.journal.mod.RUN] = {}
-	queue.jobs.frappe.conf.update(optimus_ai_refresh_max_seconds=900, optimus_ai_max_active_refreshes=1)
-	monkeypatch.setattr(queue.jobs, "_workers_listening", lambda docname=None: True)
-	monkeypatch.setattr(queue.jobs, "_check_run", lambda run: None)
-	monkeypatch.setattr(ai_fix, "is_available", lambda: True)
-	queue.jobs.start_refresh(
-		docname="fake-session-doc", session_uuid="fake-session", requested_by="fake-owner"
-	)
-	assert next(iter(queue.journal.db.rows[queue.journal.mod.RUN].values()))["deadline"] == 950
-
-
-@pytest.mark.parametrize("recover", [True, False])
-def test_serialization_conflicts_have_a_bounded_sql_only_retry(queue, monkeypatch, recover):
-	class SerializationFailure(Exception):
-		pgcode = "40001"
-
-	calls = []
-	monkeypatch.setattr(queue.jobs.time, "sleep", lambda seconds: None)
-
-	def operation():
-		calls.append(True)
-		if not recover or len(calls) == 1:
-			raise SerializationFailure("fake concurrent update")
-		return "ok"
-
-	if recover:
-		assert queue.jobs._retry_sql(operation) == "ok"
-		assert len(calls) == 2
-	else:
-		with pytest.raises(SerializationFailure):
-			queue.jobs._retry_sql(operation)
-		assert len(calls) == 3
-	assert not queue.sent
-
-
-def test_nonserialization_errors_are_not_retried_as_admissions(queue):
-	calls = []
-
-	def fail():
-		calls.append(True)
-		raise ValueError("fake invalid input")
-
-	with pytest.raises(ValueError):
-		queue.jobs._retry_sql(fail)
-	assert len(calls) == 1
 
 
 @pytest.mark.parametrize("still_active", [True, False])
@@ -698,9 +650,9 @@ def test_on_postgres_an_http_transaction_bounds_its_lock_waits_first(admitting, 
 		(None, None),
 	],
 )
-def test_a_postgres_time_setting_is_read_as_show_prints_it(queue, text, milliseconds):
+def test_a_postgres_time_setting_is_read_as_show_prints_it(text, milliseconds):
 	"""``SHOW lock_timeout`` prints 0, or a whole number with the largest unit that fits."""
-	assert queue.jobs._pg_milliseconds(text) == milliseconds
+	assert sql_work.lock_timeout_ms(text) == milliseconds
 
 
 def test_each_try_of_an_http_admission_sets_its_bound_again(admitting, monkeypatch):

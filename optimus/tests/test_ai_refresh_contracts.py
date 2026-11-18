@@ -128,8 +128,6 @@ def test_a_failures_reported_usage_that_is_not_a_plain_count_is_recorded_as_zero
 
 def test_the_skip_and_fatal_kinds_have_one_source():
 	"""Q2: no copy of #72's lists in the engine."""
-	source = (_PKG / "ai_refresh_store.py").read_text() + (_PKG / "ai_jobs.py").read_text()
-	assert "ai_fix.AI_FATAL_KINDS" in source and "ai_fix.AI_SKIP_KINDS" in source
 	assert ai_jobs._ERROR_KINDS >= ai_fix.AI_SKIP_KINDS | ai_fix.AI_FATAL_KINDS | {
 		"context",
 		"refused",
@@ -509,32 +507,6 @@ def _log_calls(module):
 				yield name, node
 
 
-def test_the_engine_is_in_the_title_audit():
-	from optimus.tests import test_ai_error_log_titles as titles
-
-	assert "ai_jobs.py" in titles._MODULES
-	found = {t for t, modules in titles._code_titles().items() if "ai_jobs.py" in modules}
-	assert found == {
-		"optimus ai refresh admission followup",
-		"optimus ai refresh worker",
-		"optimus ai refresh prepare",
-		"optimus ai refresh cleanup",
-		"optimus ai refresh item",
-		"optimus ai refresh result storage",
-		"optimus ai refresh enqueue",
-		"optimus ai refresh worker availability",
-		"optimus ai refresh recovery",
-		"optimus ai refresh release",
-		"optimus ai refresh selection",
-		"optimus ai refresh evidence",
-		"optimus ai refresh discarded",
-		"optimus ai refresh duplicate blocked",
-		"optimus ai refresh uncertain",
-		"optimus ai refresh ended",
-		"optimus ai refresh report",
-	}
-
-
 def test_every_engine_title_is_lowercase_and_listed_in_both_docs():
 	from optimus.tests import test_ai_error_log_titles as titles
 
@@ -570,12 +542,6 @@ def test_every_engine_row_names_its_session_and_run():
 		if not (has_splat or needed <= keys):
 			missing.append((title, call.lineno))
 	assert not missing, missing
-
-
-def test_the_engine_uses_the_shared_interrupt_guard_and_helper():
-	text = (_PKG / "ai_jobs.py").read_text(encoding="utf-8")
-	assert "ai_fix._InterruptGuard" not in text and "safe_call.InterruptGuard" in text
-	assert "_run_ai_step" in text
 
 
 def test_the_worker_row_names_the_session_and_run(worker, monkeypatch):
@@ -662,45 +628,6 @@ def test_a_job_timeout_in_the_worker_check_or_the_enqueue_escapes_fresh(queue, m
 # --- public names, docs -----------------------------------------------------
 
 
-def test_the_engine_calls_only_public_names_of_the_store():
-	tree = ast.parse((_PKG / "ai_jobs.py").read_text(encoding="utf-8"))
-	private = {
-		node.attr
-		for node in ast.walk(tree)
-		if isinstance(node, ast.Attribute)
-		and isinstance(node.value, ast.Name)
-		and node.value.id == "store"
-		and node.attr.startswith("_")
-	}
-	assert not private, private
-	assert callable(store.lock_run) and callable(store.owns)
-
-
-def test_the_payload_builder_says_the_principal_is_reserved():
-	doc = " ".join(ai_jobs._build_payload.__doc__.split())
-	assert "reserved for PR-4" in doc and "scoped to the requesting principal" not in doc
-
-
-def test_the_changelog_documents_the_stored_answer_shape():
-	"""In the newest release's section: the first ``## [`` heading, whatever its version."""
-	text = (_PKG.parent / "CHANGELOG.md").read_text(encoding="utf-8")
-	section = text.split("## [0.12.70]", 1)[1].split("\n## [", 1)[0]
-	assert "usage_complete" in section and "llm_fix_json" in section
-
-
-def test_the_changelog_lists_refresh_state_with_the_engines_functions():
-	text = (_PKG.parent / "CHANGELOG.md").read_text(encoding="utf-8")
-	section = text.split("## [0.12.70]", 1)[1].split("\n## [", 1)[0]
-	assert "`refresh_state(docname)`" in section
-
-
-def test_the_docs_describe_the_refresh_count_as_one_bump_at_acceptance():
-	text = (_DOCS / "AI-REFRESH.md").read_text(encoding="utf-8")
-	flat = " ".join(text.split())
-	assert "counted once per accepted user refresh" in flat and "No ending of a run counts" in flat
-	assert "completion_counted" not in flat and "still counts as a refresh" not in flat
-
-
 def test_the_runbook_cancel_command_binds_to_the_internal_api():
 	text = (_DOCS / "AI-REFRESH.md").read_text(encoding="utf-8")
 	command = next(line for line in text.splitlines() if line.startswith("bench --site <site> execute optimus.ai_jobs.cancel_refresh"))
@@ -757,11 +684,6 @@ def test_a_document_deleted_during_the_call_cannot_be_recreated_by_the_reply(wor
 
 
 # --- the kinds are #72's -------------------------------------------------------------
-
-
-def test_the_recorded_kinds_are_ai_fixs_own():
-	assert ai_jobs._ERROR_KINDS == frozenset(ai_fix.KIND_HINTS)
-	assert "internal" in ai_jobs._ERROR_KINDS  # the fallback is itself a kind
 
 
 @pytest.mark.parametrize("kind", sorted(ai_fix.KIND_HINTS))

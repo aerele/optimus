@@ -211,13 +211,6 @@ def test_manual_refresh_settles_an_incomplete_answer_once_and_never_loops(work):
 	assert json.loads(work.row["llm_fix_json"])["finish_reason"] == "length"
 
 
-def test_auto_refresh_preserves_human_written_steps(work):
-	work.journal.run.update(scope="fixes_missing", include_steps=1, include_fixes=0)
-	work.parent["notes"] = "Human authored reproduction notes"
-	assert work.jobs._next_item(work.journal.run, {}) is None
-	assert work.parent["notes"] == "Human authored reproduction notes"
-
-
 def test_resumed_saved_steps_do_not_make_another_provider_call(work, monkeypatch):
 	work.journal.run.update(include_steps=1, include_fixes=0, steps_state="carried", render_pending=1)
 

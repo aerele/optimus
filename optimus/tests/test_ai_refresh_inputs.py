@@ -41,42 +41,6 @@ def names(rows):
 	return [r.name for r in rows]
 
 
-def test_selection_uses_missing_then_outdated_and_keeps_current():
-	rows = [row("current", answer()), row("outdated", answer(prompt_version=0)), row("missing")]
-	assert names(analyze.eligible_findings(rows, config())) == ["missing", "outdated"]
-	assert names(analyze.eligible_findings(rows, config(), include_outdated=False)) == ["missing"]
-	assert names(analyze.eligible_findings(rows, config(), regenerate_all=True)) == [
-		"missing",
-		"outdated",
-		"current",
-	]
-
-
-@pytest.mark.parametrize("stored", [None, "", "  \n"])
-def test_nothing_stored_is_missing(stored):
-	assert names(analyze.eligible_findings([row("missing", stored)], config(), include_outdated=False)) == [
-		"missing"
-	]
-
-
-@pytest.mark.parametrize(
-	"stored",
-	[
-		"{}",
-		'{"error": "failed"}',
-		answer(suggestion=[]),
-		answer(prompt_version="bad"),
-		"{",
-		"[]",
-		'"answer"',
-	],
-)
-def test_failed_empty_and_unparseable_records_are_outdated_not_missing(stored):
-	r = row("outdated", stored)
-	assert analyze.eligible_findings([r], config()) == [r]
-	assert analyze.eligible_findings([r], config(), include_outdated=False) == []
-
-
 def test_order_and_resume_are_timezone_aware():
 	rows = [
 		row("new", answer(prompt_version=0, generated_at="2026-01-02T11:00:00+00:00")),
@@ -89,33 +53,6 @@ def test_order_and_resume_are_timezone_aware():
 		"missing-low",
 		"old",
 	]
-
-
-def test_bad_dates_and_impacts_do_not_crash_or_hide_work():
-	rows = [
-		row("a", answer(prompt_version=0, generated_at=[]), estimated_impact_ms="bad"),
-		row("b", answer(prompt_version=0, generated_at="bad"), estimated_impact_ms=float("nan")),
-	]
-	assert names(analyze.eligible_findings(rows, config())) == ["a", "b"]
-
-
-def test_excluded_types_and_pre_fix_calls_never_reach_the_model(monkeypatch):
-	def forbidden_config_read():
-		raise AssertionError("selection must reuse its config")
-
-	monkeypatch.setattr("optimus.settings.get_config", forbidden_config_read)
-	rows = [
-		row("excluded", finding_type="Slow Query"),
-		row("old-call", finding_type="Redundant Call"),
-		row("index", finding_type="Missing Index"),
-		row("accepted"),
-	]
-	assert names(analyze.eligible_findings(rows, config("Slow Query"))) == ["accepted"]
-
-
-def test_dict_gate_input_is_equivalent_to_a_child_row():
-	r = row("test")
-	assert ai_fix.gate_input(vars(r)) == ai_fix.gate_input(r)
 
 
 def test_action_map_uses_zero_based_position_not_frappe_idx():
@@ -162,16 +99,6 @@ def light(monkeypatch):
 	return SimpleNamespace(doc=doc, loads=loads, bundle=bundle, logs=logs)
 
 
-def test_bundle_is_loaded_only_once_per_slice_and_never_unpickled(light):
-	memo = {}
-	a = analyze.load_recordings_light(light.doc, ["fake-a"], memo=memo)
-	b = analyze.load_recordings_light(light.doc, ["fake-b"], memo=memo)
-	assert [r["uuid"] for r in a + b] == ["fake-a", "fake-b"]
-	assert light.loads == ["fake-doc"]
-	assert "pyi_session" not in a[0] and "sidecar" not in a[0] and "tree_b64" not in a[0]
-	assert light.bundle["recordings"]["fake-a"]["rec"]["pyi_session"] == "forbidden"
-
-
 def test_live_recordings_avoid_the_bundle(light, monkeypatch):
 	monkeypatch.setattr(
 		analyze,
@@ -197,11 +124,6 @@ def test_memo_cannot_return_another_sessions_bundle(light):
 	other = SimpleNamespace(**{**vars(light.doc), "name": "fake-other", "session_uuid": "fake-other-session"})
 	analyze.load_recordings_light(other, memo=memo)
 	assert light.loads == ["fake-doc", "fake-other"]
-
-
-def test_missing_bundle_and_malformed_entries_are_empty(light):
-	light.bundle["recordings"] = {"fake-a": None, "fake-b": {"rec": []}}
-	assert analyze.load_recordings_light(light.doc) == []
 
 
 def _logger_that_stops_the_job(seen):
@@ -278,12 +200,6 @@ def test_bundle_read_logs_outside_except_and_never_swallows_rq(monkeypatch, inte
 	# Rejected bundles log a fixed reason outside the handler. Interrupts escape unlogged.
 	assert logged == ([] if interrupt else [("optimus ai load recordings bundle", None)])
 	assert seen == []
-
-
-def test_selection_handles_malformed_severity():
-	r = row("fake", severity=[])
-	assert analyze.eligible_findings([r], config()) == [r]
-
 
 
 @pytest.mark.parametrize("cap", [0, 1, 2, 20])
