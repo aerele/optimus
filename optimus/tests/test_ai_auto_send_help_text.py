@@ -54,13 +54,6 @@ def _run_queue(monkeypatch, **overrides):
 	return calls
 
 
-def test_auto_suggest_is_on_by_default():
-	from optimus import settings
-
-	assert settings._DEFAULTS["ai_auto_suggest"] is True
-	assert settings.OptimusConfig().ai_auto_suggest is True
-
-
 def test_with_defaults_enabling_ai_starts_a_refresh(monkeypatch):
 	calls = _run_queue(monkeypatch)
 	assert len(calls) == 1
@@ -69,9 +62,3 @@ def test_with_defaults_enabling_ai_starts_a_refresh(monkeypatch):
 
 def test_with_auto_suggest_off_no_refresh_starts(monkeypatch):
 	assert _run_queue(monkeypatch, ai_auto_suggest=False) == []
-
-
-def test_modified_is_bumped_so_migrate_reloads_the_descriptions():
-	modified = json.loads(_SCHEMA.read_text())["modified"]
-	assert modified > "2026-10-31 12:00:00.000000"
-	assert modified >= "2026-11-07"

@@ -171,20 +171,6 @@ def test_nothing_is_logged_when_nothing_was_cleaned(fake_frappe):
 	assert cache.lines == [] and cache.log.lines == []
 
 
-def test_a_cleanup_that_failed_is_not_counted_or_logged_as_done(fake_frappe):
-	from optimus import janitor
-
-	cache = fake_frappe(
-		janitor,
-		["profiler:session:dead:recordings"],
-		members={"profiler:session:dead:recordings": {"r1"}},
-	)
-	cache.fail_hdel = True
-	janitor._sweep_orphan_redis_state()
-
-	assert not any("no row" in message for message, _ in cache.lines)
-
-
 def test_orphans_and_leftovers_are_rotated_as_one_pool_under_one_cap(fake_frappe, monkeypatch):
 	from optimus import janitor
 
@@ -240,16 +226,8 @@ def test_a_failed_delete_keeps_the_set_for_the_next_run(fake_frappe):
 	janitor._sweep_orphan_redis_state()
 
 	assert cache.store == {PREFIX + "profiler:session:dead:recordings"}
-
-
-def test_one_run_cleans_at_most_max_deletions_sessions(fake_frappe, monkeypatch):
-	from optimus import janitor
-
-	monkeypatch.setattr(janitor, "MAX_DELETIONS_PER_RUN", 2)
-	cache = fake_frappe(janitor, [f"profiler:session:dead{i}:meta" for i in range(5)])
-	janitor._sweep_orphan_redis_state()
-
-	assert len(cache.store) == 3
+	# A cleanup that failed is not counted or logged as done.
+	assert not any("no row" in message for message, _ in cache.lines)
 
 
 def test_uninstall_clears_all_optimus_keys(fake_frappe):

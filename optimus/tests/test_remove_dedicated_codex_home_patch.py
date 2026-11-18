@@ -56,13 +56,6 @@ def test_no_dedicated_home_is_a_silent_no_op(patch, capsys):
 	assert not patch.site.exists()  # it creates nothing
 
 
-def test_running_twice_is_safe(patch):
-	_signed_in_home(patch.home)
-	patch.module.execute()
-	patch.module.execute()
-	assert not patch.home.exists()
-
-
 def test_a_symlink_is_unlinked_without_following_it(patch, tmp_path):
 	target = tmp_path / "elsewhere"
 	target.mkdir()

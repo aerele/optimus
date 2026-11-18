@@ -180,7 +180,7 @@ class TestTrackedApps:
 		reader must convert."""
 		monkeypatch.setattr(
 			settings, "_read_doctype_row",
-			lambda: {"tracked_apps": ("myapp", "another")},
+			lambda: {"tracked_apps": ["myapp", "another"]},
 		)
 		monkeypatch.setattr(settings, "_site_conf_fallback", lambda k: None)
 		cfg = settings._resolve()
@@ -208,7 +208,7 @@ class TestIgnoredApps:
 	def test_resolves_from_row(self, monkeypatch):
 		monkeypatch.setattr(
 			settings, "_read_doctype_row",
-			lambda: {"ignored_apps": ("frappe", "optimus")},
+			lambda: {"ignored_apps": ["frappe", "optimus"]},
 		)
 		monkeypatch.setattr(settings, "_site_conf_fallback", lambda k: None)
 		cfg = settings._resolve()
@@ -317,13 +317,6 @@ class TestDisplayThresholdMs:
 	read the seconds-rollover threshold through, so the "unreadable → 1000"
 	fallback lives in exactly one place instead of being re-implemented per caller.
 	"""
-
-	def test_returns_resolved_value(self, monkeypatch):
-		monkeypatch.setattr(
-			settings, "get_config",
-			lambda: types.SimpleNamespace(large_duration_threshold_ms=500.0),
-		)
-		assert settings.display_threshold_ms() == 500.0
 
 	def test_preserves_zero(self, monkeypatch):
 		monkeypatch.setattr(

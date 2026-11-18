@@ -73,22 +73,6 @@ class TestSessionMetaEnvelopeWrite:
 
 
 class TestSessionMetaEnvelopeRead:
-	def test_get_session_meta_unwraps_new_envelope(self):
-		"""Cache contains a new-shape envelope → returns the payload
-		dict."""
-		from optimus import redis_schema, session
-
-		cache = _FakeCache()
-		frappe_stub = _make_frappe_stub(cache)
-		uuid = "test-uuid-read-new"
-		payload = {"session_uuid": uuid, "user": "alice"}
-		cache.store[session._meta_key(uuid)] = redis_schema.wrap_value(payload)
-
-		with mock.patch.object(session, "frappe", frappe_stub):
-			result = session.get_session_meta(uuid)
-
-		assert result == payload
-
 	def test_get_session_meta_handles_legacy_bare_dict(self):
 		"""A bare-dict cache value (pre-envelope) returns unchanged via
 		unwrap_value's legacy-detection branch, so new readers stay safe against

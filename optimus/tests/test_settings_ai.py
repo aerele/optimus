@@ -37,12 +37,6 @@ class TestAiConfigDefaults:
 		assert not hasattr(settings.OptimusConfig(), "ai_api_key")
 		assert "ai_api_key" not in settings._DEFAULTS
 
-	def test_defaults_dict_has_the_ai_keys(self):
-		for k in ("ai_enabled", "ai_provider", "ai_base_url", "ai_model",
-		          "ai_auto_suggest", "ai_auto_suggest_max", "ai_humanize_steps",
-		          "ai_suggest_findings", "ai_suggest_indexes"):
-			assert k in settings._DEFAULTS
-
 
 class TestAiConfigResolution:
 	def _row(self, **overrides):

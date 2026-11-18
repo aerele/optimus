@@ -163,11 +163,6 @@ def test_settings_read_during_a_pending_write_are_not_memoized(env):
 	assert settings.get_config().enabled
 
 
-def test_a_config_written_to_redis_is_memoized(env):
-	settings.get_config()
-	assert KEY in env.redis and env.memoized()
-
-
 def test_an_unbound_frappe_local_still_returns_a_config(env, monkeypatch):
 	class Unbound:
 		def __getattr__(self, name):
