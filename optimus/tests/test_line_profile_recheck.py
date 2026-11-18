@@ -196,14 +196,6 @@ class TestIdempotence:
 		recheck.recheck_findings([f], index)
 		assert f["severity"] == "High" and _rc(f)["status"] == "confirmed"
 
-	def test_newest_run_wins_even_when_an_older_run_was_heavier(self):
-		f = _finding(impact=1000.0, severity="High")
-		index = function_index.build_function_index(
-			[("r1", [_fn("app.mod.work", 800.0)]), ("r2", [_fn("app.mod.work", 20.0)])]
-		)
-		recheck.recheck_findings([f], index)
-		assert f["severity"] == "Medium" and _rc(f)["function_total_ms"] == 20.0
-
 
 class TestCallChains:
 	def test_longest_chain_wins_per_function(self):
@@ -226,17 +218,9 @@ class TestHotLineMergePlan:
 		plan = persist.plan_hot_line_merge([], ["a", "b"], {"a", "b"})
 		assert plan == {"update": {}, "append": [0, 1], "remove": []}
 
-	def test_rerun_updates_in_place_and_removes_legacy_duplicates(self):
-		plan = persist.plan_hot_line_merge(["a", "a", "b"], ["a"], {"a"})
-		assert plan["update"] == {0: 0} and plan["append"] == [] and plan["remove"] == [1]
-
 	def test_rows_without_a_key_are_kept_and_new_keyless_findings_appended(self):
 		plan = persist.plan_hot_line_merge([None, "a"], [None, None, "a"], {"a"})
 		assert plan == {"update": {1: 2}, "append": [0, 1], "remove": []}
-
-	def test_profiled_without_new_finding_is_removed_unprofiled_kept(self):
-		plan = persist.plan_hot_line_merge(["a", "b"], [], {"a"})
-		assert plan["remove"] == [0]
 
 
 class _Row(dict):

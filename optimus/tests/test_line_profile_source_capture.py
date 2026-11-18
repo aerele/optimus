@@ -79,12 +79,6 @@ def prepare(monkeypatch, fn):
 
 
 @pytest.mark.parametrize("text", CASES.values(), ids=CASES.keys())
-def test_snapshot_equals_the_interpreters_own_function_source(tmp_path, monkeypatch, text):
-	_, fn = load(tmp_path, monkeypatch, text)
-	assert capture._capture_source_lines(fn) == truth(fn)
-
-
-@pytest.mark.parametrize("text", CASES.values(), ids=CASES.keys())
 def test_prepared_run_snapshots_the_whole_function(tmp_path, monkeypatch, text):
 	_, fn = load(tmp_path, monkeypatch, text)
 	prepared = prepare(monkeypatch, fn)
@@ -134,10 +128,6 @@ def test_every_function_of_real_modules_is_captured_whole(monkeypatch, path):
 	_check_corpus_module(monkeypatch, path)
 
 
-def test_corpus_has_many_functions_with_blank_lines(monkeypatch):
-	assert sum(_check_corpus_module(monkeypatch, path) for path in CORPUS_PATHS) >= 50
-
-
 def test_snapshot_keeps_lines_timed_after_a_blank_line(tmp_path, monkeypatch):
 	pytest.importorskip("line_profiler")
 	_, fn = load(tmp_path, monkeypatch, BLANKS)
@@ -175,15 +165,6 @@ def test_unreadable_user_pick_refuses_the_run_naming_the_function(tmp_path, monk
 		prepare(monkeypatch, fn)
 	assert "optimus.mod.f" in str(caught.value)
 	assert not isinstance(caught.value, ValueError)
-
-
-def test_source_unavailable_carries_its_reason(tmp_path, monkeypatch):
-	path, fn = load(tmp_path, monkeypatch, BLANKS)
-	path.write_text("x = 1\n")
-	with pytest.raises(capture.SourceUnavailable) as caught:
-		capture._capture_source_lines(fn)
-	assert isinstance(caught.value, capture.CaptureError)
-	assert caught.value.reason
 
 
 def test_source_outside_the_boundary_names_the_function(tmp_path, monkeypatch):

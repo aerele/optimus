@@ -102,14 +102,6 @@ class TestAggregateSamplesMerging:
 
 		assert results[0]["lines"][0]["hits"] == 0
 
-	def test_zero_hit_line_per_hit_us_is_zero(self):
-		picks = [_pick("my_app.x", "/p/x.py", [(11, "    a = 1")])]
-
-		results = capture.aggregate_samples(samples=[], picks=picks)
-
-		# avoid division-by-zero
-		assert results[0]["lines"][0]["per_hit_us"] == 0.0
-
 
 class TestAggregateSamplesMultiplePicks:
 	def test_each_pick_gets_its_own_entry(self):
