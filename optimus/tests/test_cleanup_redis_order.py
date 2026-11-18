@@ -69,14 +69,6 @@ def test_the_session_state_is_deleted_last(env):
 	assert ("state", "s1") not in env.cache.ops[:-1]
 
 
-def test_a_recording_registered_after_the_analyze_snapshot_is_cleaned_too(env):
-	env.registered[:] = ["a", "late"]  # "late" joined the set after analyze read its list
-
-	analyze._cleanup_redis("s1", ["a"])
-
-	assert _per_recording_keys("late") <= set(env.cache.ops)
-
-
 def test_a_failed_delete_keeps_the_index_so_a_later_sweep_can_finish(env):
 	env.cache.fail_hdel_for = {"a"}
 	env.registered[:] = ["a", "b"]

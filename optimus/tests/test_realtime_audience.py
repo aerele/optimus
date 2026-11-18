@@ -39,6 +39,20 @@ def test_all_paths_use_recording_user_and_document_rooms(audience, publish):
 	assert audience.lookups[0][0][1]["session_uuid"] == "session-uuid"
 
 
+@pytest.mark.parametrize("publish", [
+	lambda: analyze._publish_session_event("optimus_session_ready", session_uuid="s", docname="d"),
+	lambda: api._publish_session_event("optimus_session_stopping", session_uuid="s", docname="d", user="u"),
+], ids=["analyze", "api"])
+def test_a_failing_realtime_bridge_never_breaks_the_caller(monkeypatch, publish):
+	# Realtime is a convenience: with the Socket.IO bridge down the analyze job and the
+	# stop request must carry on (the state is durable on the session row).
+	def bridge_down(event, payload):
+		raise ConnectionError("socketio bridge down")
+
+	monkeypatch.setattr(realtime, "publish_session_event", bridge_down)
+	assert publish() is None
+
+
 def test_publications_have_distinct_ids_and_do_not_mutate_the_callers_payload(audience):
 	payload = {"session_uuid": "session-uuid", "recording_user": "forged", "event_id": "forged"}
 	for _ in range(2):

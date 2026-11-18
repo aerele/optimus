@@ -71,7 +71,7 @@ def test_widget_has_visibility_listener():
 	assert "visibilitychange" in src
 	# v0.5.1: no more stopPolling the handler just re-fetches
 	# state on visibility return. The polling-pause machinery was
-	# removed; see test_realtime_session_events for the new
+	# removed; see test_realtime_ui and test_pill_state_js for the
 	# realtime contract.
 	assert "refreshStatus" in src
 

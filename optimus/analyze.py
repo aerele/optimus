@@ -54,7 +54,6 @@ from optimus.analyzers.base import (
 	AnalyzeContext,
 	dur,
 	is_error_log_hook_query,
-	own_query_frame,
 	row_get,
 	strip_own_calls,
 	strip_profiler_own_calls,
@@ -1672,17 +1671,10 @@ def _fetch_recordings(recording_uuids: list[str]):
 		yield rec
 
 
-def _frame_source(frame) -> str:
-	"""``file:function`` of an Optimus frame, or "unknown" without one."""
-	if not isinstance(frame, dict):
-		return "unknown"
+def _frame_source(frame: dict) -> str:
+	"""``file:function`` of the Optimus frame that decided a call was Optimus's own."""
 	function = frame.get("function")
 	return f"{frame.get('filename')}:{function if isinstance(function, str) else '?'}"
-
-
-def _own_source(stack) -> str:
-	"""``file:function`` of the Optimus frame that made a dropped call's stack Optimus's own."""
-	return _frame_source(own_query_frame(stack))
 
 
 def _top_sources(frames: list, limit: int = 2) -> str:

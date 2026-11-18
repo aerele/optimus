@@ -8,7 +8,6 @@ EXPLAIN/sqlparse burst in _enrich_recordings. Both default to inert and are
 result-invariant.
 """
 
-import inspect
 import os
 import re
 import sys
@@ -18,6 +17,7 @@ import frappe
 import pytest
 
 from optimus import analyze
+from optimus.tests.test_analyze_delivery_guards import delivery  # noqa: F401
 
 # ---------------------------------------------------------------------------
 # M5 os.nice
@@ -49,11 +49,15 @@ class TestApplyNice:
 		monkeypatch.setattr(os, "nice", boom)
 		analyze._apply_nice()  # must not raise
 
-	def test_run_applies_nice_gated_to_async(self):
-		src = inspect.getsource(analyze.run)
-		assert "_apply_nice" in src
-		# Must be guarded by the inline check (os.nice is sticky per-process).
-		assert "is_scheduler_disabled" in src
+	@pytest.mark.parametrize("scheduler_disabled, expected", [(False, [7]), (True, [])])
+	def test_run_renices_only_on_the_async_path(self, delivery, monkeypatch, scheduler_disabled, expected):  # noqa: F811
+		# os.nice is sticky per process: the inline path runs in a shared gunicorn worker.
+		recorded = []
+		monkeypatch.setattr(os, "nice", lambda inc: recorded.append(inc))
+		monkeypatch.setattr(frappe, "conf", {"optimus_analyze_nice": 7, "optimus_analyze_gc_collect": False}, raising=False)
+		monkeypatch.setattr(analyze, "is_scheduler_disabled", lambda: scheduler_disabled)
+		analyze.run("s")
+		assert recorded == expected
 
 
 # ---------------------------------------------------------------------------

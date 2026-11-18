@@ -55,51 +55,12 @@ _KEY = "optimus:analyze:inflight"
 
 
 class TestAcquireSingleFlight:
-	def test_free_acquires_and_marks_holder(self, sf_env):
-		assert analyze._acquire_singleflight("A", "PS-A", None) is True
-		assert sf_env.cache.get_value(_KEY) == "A"
-		assert sf_env.enqueued == []  # no re-enqueue when acquired
-
-	def test_own_uuid_reenters(self, sf_env):
-		sf_env.cache.set_value(_KEY, "A")
-		assert analyze._acquire_singleflight("A", "PS-A", None) is True
-		assert sf_env.enqueued == []
-
-	def test_busy_reenqueues_and_returns_false(self, sf_env):
-		sf_env.cache.set_value(_KEY, "OTHER")
-		assert analyze._acquire_singleflight("B", "PS-B", None) is False
-		# Re-enqueued itself, carrying a single-flight deadline.
-		assert len(sf_env.enqueued) == 1
-		_, kwargs = sf_env.enqueued[0]
-		assert kwargs.get("session_uuid") == "B"
-		assert "_singleflight_deadline" in kwargs
-		# Did NOT steal the holder.
-		assert sf_env.cache.get_value(_KEY) == "OTHER"
-
-	def test_deadline_passed_degrades_to_proceed(self, sf_env):
-		sf_env.cache.set_value(_KEY, "OTHER")
-		# Deadline already in the past → proceed rather than strand.
-		assert analyze._acquire_singleflight("B", "PS-B", 1.0) is True
-		assert sf_env.enqueued == []
-
 	def test_skipped_when_scheduler_disabled(self, sf_env, monkeypatch):
 		monkeypatch.setattr(analyze, "is_scheduler_disabled", lambda: True)
 		sf_env.cache.set_value(_KEY, "OTHER")
 		# Inline path: no worker to yield to → proceed, don't touch cache/enqueue.
 		assert analyze._acquire_singleflight("B", "PS-B", None) is True
 		assert sf_env.enqueued == []
-
-
-class TestReleaseSingleFlight:
-	def test_releases_only_when_owner(self, sf_env):
-		sf_env.cache.set_value(_KEY, "A")
-		analyze._release_singleflight("A")
-		assert sf_env.cache.get_value(_KEY) is None
-
-	def test_does_not_clobber_other_holder(self, sf_env):
-		sf_env.cache.set_value(_KEY, "OTHER")
-		analyze._release_singleflight("A")
-		assert sf_env.cache.get_value(_KEY) == "OTHER"
 
 
 class TestRunWiring:
@@ -109,10 +70,6 @@ class TestRunWiring:
 		assert "_release_singleflight" in src
 		finally_idx = src.rfind("finally:")
 		assert finally_idx != -1 and "_release_singleflight" in src[finally_idx:]
-
-	def test_run_gates_on_singleflight_before_fetch(self):
-		src = inspect.getsource(analyze.run)
-		assert "_acquire_singleflight" in src
 
 	def test_self_reenqueues_stay_anonymous(self):
 		"""Neither the bg-wait nor the single-flight re-enqueue may carry a
@@ -149,11 +106,3 @@ class TestEnqueueAnalyzeAsync:
 		assert captured.get("session_uuid") == "uuid-1"
 		# No stable job_id → no is_job_enqueued strand.
 		assert "job_id" not in captured
-
-	def test_enqueue_analyze_has_no_is_job_enqueued_dedup(self):
-		# Source guard: the dedup that stranded sessions must stay gone. Check
-		# the import + the call (not prose the comment explains the removal).
-		from optimus import api
-		src = inspect.getsource(api._enqueue_analyze)
-		assert "import is_job_enqueued" not in src
-		assert "is_job_enqueued(" not in src

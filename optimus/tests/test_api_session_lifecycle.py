@@ -199,9 +199,15 @@ class TestStop:
 		_scheduler(monkeypatch, disabled=False)
 		env.store.active["alice@example.com"] = "u1"
 		_row(env)
+		published = []
+		monkeypatch.setattr(api, "_publish_session_event", lambda *a, **kw: published.append((a, kw)))
 
 		out = api.stop()
 
+		# The other open Desk tabs learn about the stop from this event.
+		assert published == [
+			(("optimus_session_stopping",), {"session_uuid": "u1", "docname": "OPT-1", "user": "alice@example.com"})
+		]
 		assert out == {
 			"stopped": True,
 			"session_uuid": "u1",

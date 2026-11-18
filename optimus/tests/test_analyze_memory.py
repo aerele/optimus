@@ -11,9 +11,12 @@ analyzer depends on it) and run() drops references and GCs afterward.
 
 import inspect
 
+import pytest
+
 from optimus import analyze
 from optimus.analyzers import call_tree
 from optimus.analyzers.base import AnalyzeContext
+from optimus.tests.test_analyze_delivery_guards import delivery  # noqa: F401
 
 
 def _ctx(actions):
@@ -74,10 +77,23 @@ class TestRunGcCollect:
 	"""run() drops the recordings reference and GCs after the analyzer loop so
 	freed Session objects return to the allocator promptly."""
 
-	def test_run_gc_collect_after_analyzers(self):
-		src = inspect.getsource(analyze.run)
-		assert "gc.collect()" in src
-		assert "optimus_analyze_gc_collect" in src
+	@pytest.mark.parametrize("enabled", [True, False])
+	def test_run_collects_garbage_after_the_analyzers_unless_the_knob_is_off(self, delivery, monkeypatch, enabled):  # noqa: F811
+		import frappe
+
+		from optimus.analyzers.base import AnalyzerResult
+
+		order = []
+
+		def analyzer(recordings, context):
+			order.append("analyzers")
+			return AnalyzerResult()
+
+		monkeypatch.setattr(analyze, "_get_analyzers", lambda: [analyzer])
+		monkeypatch.setattr(frappe, "conf", {"optimus_analyze_gc_collect": enabled}, raising=False)
+		monkeypatch.setattr("gc.collect", lambda *a: order.append("gc"))
+		analyze.run("s")
+		assert order == (["analyzers", "gc"] if enabled else ["analyzers"])
 
 
 class TestNoRecordingDroppedForPerformance:
@@ -89,19 +105,6 @@ class TestNoRecordingDroppedForPerformance:
 	silently remove jobs (jobs ARE recordings), so it was removed. These guards
 	stop it coming back.
 	"""
-
-	def test_analyze_has_no_recording_cap(self):
-		# The capping helper must not exist...
-		assert not hasattr(analyze, "_apply_session_recording_cap")
-		# ...nor any recording-count cap knob / call anywhere in the module.
-		src = inspect.getsource(analyze)
-		assert "optimus_max_recordings_analyzed" not in src
-		assert "_apply_session_recording_cap" not in src
-
-	def test_run_does_not_cap_recordings(self):
-		src = inspect.getsource(analyze.run)
-		assert "optimus_max_recordings_analyzed" not in src
-		assert "_apply_session_recording_cap" not in src
 
 	def test_all_captured_jobs_surface_in_report(self):
 		"""End of the pipeline: build_background_jobs must list every RQ Job

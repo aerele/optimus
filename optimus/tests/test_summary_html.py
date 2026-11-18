@@ -123,22 +123,6 @@ class TestSummaryBulletShape:
 	"""The Summary section must render as a <ul>/<li> list, not <p> paragraphs.
 	These tests pin the structural shape (TestSummaryProse pins the text)."""
 
-	def test_summary_wraps_in_ul(self):
-		"""Both the <ul> wrapper and at least one <li> item must be present (and no
-		<p>)."""
-		ctx = _ctx(
-			actions=[{"action_label": "x", "recording_uuid": "r0", "duration_ms": 10}],
-			findings=[{"severity": "High", "title": "a", "estimated_impact_ms": 5}],
-		)
-		html = analyze._build_summary_html(ctx, 5, [{"uuid": "r0"}])
-		assert "<ul" in html
-		assert "<li>" in html
-		assert "</ul>" in html
-		# And there are no leftover <p> wrappers from the pre-v0.7.x
-		# shape those would render as paragraphs interleaved with the
-		# bullet list, looking broken.
-		assert "<p>" not in html
-
 	def test_bullet_count_happy_path(self):
 		"""Actions + findings produce exactly 3 bullets (scope, slowest,
 		findings-count)."""
@@ -148,6 +132,9 @@ class TestSummaryBulletShape:
 		)
 		html = analyze._build_summary_html(ctx, 5, [{"uuid": "r0"}])
 		assert html.count("<li>") == 3
+		# One <ul> wraps the bullets; a stray <p> would render as a paragraph between them.
+		assert "<ul" in html and "</ul>" in html
+		assert "<p>" not in html
 
 	def test_bullet_count_no_findings_with_actions(self):
 		"""Actions with no findings produce 4 bullets (scope + slowest + the
