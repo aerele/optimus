@@ -290,13 +290,6 @@ def _secret_header_name(name: str) -> bool:
 	)
 
 
-def redact_string_value(text: str, extra_keys: tuple[str, ...] = ()) -> str:
-	"""``text`` with secrets masked as ``redact_sensitive`` does for a string value: JSON inside it
-	by name, URLs inside it by query parameter and user info. For callers that hold a string, not a
-	dict (a SQL string literal, a log line)."""
-	return _redact_string(text, tuple(extra_keys or ())) if isinstance(text, str) else text
-
-
 def _redact_string(text: str, extra_keys: tuple[str, ...], depth: int = 0, walk: _Walk | None = None) -> str:
 	if text.lstrip().startswith(("{", "[")):
 		redacted = _redact_json_string(text, extra_keys, depth, walk)

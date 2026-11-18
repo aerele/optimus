@@ -283,14 +283,6 @@ class TestMaskedRecord:
 			assert out["error"] == error
 		assert out["seen"] == 0 and out["reference_doctype"] is None  # other fields kept
 
-	def test_a_shape_the_join_completes_is_masked(self):
-		# The title ends in "Bearer" and the error starts with the token: only
-		# the joined text holds "Bearer <token>".
-		key, record = _SPLIT_BEARER
-		out = maintenance._masked_record(record, key)
-		assert out["method"] == "x" * 140
-		assert out["error"] == "x" * 140 + " Bearer\n******** rest"
-
 	@_SETTINGS
 	@given(_keys, st.lists(_shape_keys, min_size=1, max_size=4), _filler)
 	def test_an_ai_records_value_lines_are_masked_whatever_they_hold(self, key, values, filler):

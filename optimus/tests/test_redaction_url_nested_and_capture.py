@@ -253,6 +253,3 @@ class TestMinors:
 	def test_truncated_json_without_a_secret_is_unchanged(self):
 		text = '{"doc": {"name": "a", "x": "' + "y" * 50
 		assert redaction.redact_sensitive({"doc": text}) == {"doc": text}
-
-	def test_the_string_helper_is_public(self):
-		assert redaction.redact_string_value("go /a?token=S now") == f"go /a?token={REDACTED} now"

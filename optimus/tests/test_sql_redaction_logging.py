@@ -39,6 +39,7 @@ def test_unreadable_settings_are_logged_once_and_defaults_still_mask(monkeypatch
 	warned = [r for r in caplog.records if "sensitive_form_keys" in r.getMessage()]
 	assert len(warned) == 1 and "TimeoutError" in warned[0].getMessage()
 	assert S not in caplog.text
+	assert "cache down" not in caplog.text
 
 
 def test_drift_is_logged_with_counts_only(caplog, fresh_log):

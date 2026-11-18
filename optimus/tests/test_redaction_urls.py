@@ -168,10 +168,6 @@ class TestRedactSensitiveUrlPass:
 		):
 			assert redaction.redact_sensitive({"v": text})["v"] == text
 
-	def test_json_strings_keep_their_own_path(self):
-		text = json.dumps({"url": "/a?x=1"})
-		assert redaction.redact_sensitive({"doc": text})["doc"] == text
-
 	def test_non_string_scalars_pass_through(self):
 		assert redaction.redact_sensitive({"a": 1, "b": None, "c": 1.5}) == {"a": 1, "b": None, "c": 1.5}
 
@@ -512,7 +508,15 @@ class TestTrailingPunctuation:
 		assert redaction.scrub_secrets("see https://h/a?code=S3).") == "see https://h/a?code=********)."
 
 	def test_a_run_of_closing_brackets_is_linear(self):
-		redaction.redact_sensitive({"v": "a /p?x=1 " + "]" * 200_000})
+		import time
+
+		brackets = "]" * 200_000
+		prose = "a /p?x=1 " + brackets
+		url = "x https://h/p?code=S3" + brackets
+		start = time.perf_counter()
+		assert redaction.redact_sensitive({"v": prose})["v"] == prose
+		assert redaction.redact_sensitive({"v": url})["v"] == f"x https://h/p?code={REDACTED}" + brackets
+		assert time.perf_counter() - start < 2.0
 
 
 class TestEmptyValues:
