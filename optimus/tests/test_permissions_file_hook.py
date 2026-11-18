@@ -122,9 +122,10 @@ def test_generic_attachment_on_optimus_session_defers_true(monkeypatch):
 	assert permissions.file_has_permission(doc, "read", user="stranger@example.com") is True
 
 
-def test_system_manager_defers_true(monkeypatch):
+@pytest.mark.parametrize("field", sorted(("raw_report_file", "raw_report_pdf_file", "recordings_file")))
+def test_system_manager_defers_true(monkeypatch, field):
 	_patch(monkeypatch, roles=["System Manager"])
-	doc = _doc()
+	doc = _doc(attached_to_field=field)
 	assert permissions.file_has_permission(doc, "read", user="sysmgr@example.com") is True
 
 
@@ -146,9 +147,10 @@ def test_stranger_denies_false(monkeypatch):
 	assert permissions.file_has_permission(doc, "read", user="stranger@example.com") is False
 
 
-def test_recording_user_defers_true(monkeypatch):
+@pytest.mark.parametrize("field", sorted(("raw_report_file", "raw_report_pdf_file", "recordings_file")))
+def test_recording_user_defers_true(monkeypatch, field):
 	_patch(monkeypatch, recording_user="owner@example.com")
-	doc = _doc()
+	doc = _doc(attached_to_field=field)
 	assert permissions.file_has_permission(doc, "read", user="owner@example.com") is True
 
 

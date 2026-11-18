@@ -47,6 +47,7 @@ class TestAlignFunction:
 		assert all(r["status"] == "matched" for r in rows)
 		assert rows[0]["delta_ms"] == -1.0  # 4 - 5
 		assert rows[1]["delta_ms"] == -2.0  # 8 - 10
+		assert diff.align_function([], []) == []
 
 	def test_whitespace_only_edit_matches(self):
 		a = [_line(1, "x = 1", 5.0)]

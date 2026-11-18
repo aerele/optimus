@@ -33,7 +33,7 @@ class _FakeCache:
 	def __init__(self) -> None:
 		self.store: dict = {}
 
-	def get_value(self, key):
+	def get_value(self, key, expires=False):
 		return self.store.get(key)
 
 	def set_value(self, key, value, **_):
@@ -130,7 +130,7 @@ class TestSettingsEnvelopeLegacyCompat:
 		cache = _FakeCache()
 		# Pre-seed with a BARE OptimusConfig field dict no envelope, no
 		# ``_v`` key. This is exactly what pre-v0.12.11 writers stored.
-		seed_payload = fresh.OptimusConfig().__dict__
+		seed_payload = {**fresh.OptimusConfig().__dict__, "session_retention_days": 77}
 		cache.store[fresh._CACHE_KEY] = seed_payload
 		frappe_stub = _stub_frappe(cache)
 
@@ -138,6 +138,8 @@ class TestSettingsEnvelopeLegacyCompat:
 			cfg = fresh.get_config()
 
 		assert cfg is not None
+		# A real cache hit: the seeded non-default value comes back.
+		assert cfg.session_retention_days == 77
 		# CRITICAL: the legacy value was NOT discarded it was used
 		# as-is. (Migrating legacy values on read is explicitly OUT of
 		# scope for the rollout; the next on_update cache invalidation

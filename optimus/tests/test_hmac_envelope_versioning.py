@@ -21,6 +21,8 @@ from __future__ import annotations
 import hashlib
 import hmac
 
+import pytest
+
 from optimus import session
 
 
@@ -71,11 +73,21 @@ class TestLegacyShapeBackwardCompat:
 	marker. ``unsign_blob`` must still verify them and return the original
 	payload."""
 
-	def test_legacy_v0_blob_verifies_and_returns_payload(self, monkeypatch):
+	@pytest.mark.parametrize(
+		"payload",
+		[
+			b"legacy payload from a pre-v0.12.14 writer",
+			# Pickle bytes, the common legacy payload: the first byte is
+			# \x80, which is not the v1 marker (\x01), so the reader must
+			# keep it as part of the payload.
+			b"\x80\x04legacy pickle-opcode payload",
+		],
+		ids=["plain", "pickle-opcode-first-byte"],
+	)
+	def test_legacy_v0_blob_verifies_and_returns_payload(self, monkeypatch, payload):
 		"""Hand-craft a v0 blob (no version marker) and verify the
 		new reader handles it."""
 		secret = _force_stable_secret(monkeypatch)
-		payload = b"legacy payload from a pre-v0.12.14 writer"
 		legacy_sig = hmac.new(secret, payload, hashlib.sha256).digest()
 		legacy_signed = legacy_sig + payload
 
@@ -148,7 +160,6 @@ class TestEdgeCases:
 
 	def test_sign_blob_rejects_non_bytes(self, monkeypatch):
 		_force_stable_secret(monkeypatch)
-		import pytest
 
 		with pytest.raises(TypeError):
 			session.sign_blob("not bytes")

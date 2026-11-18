@@ -825,6 +825,11 @@ class TestPickerDialogIndent:
 		assert "fp-toggle" in src
 		assert "fp-spacer" in src
 		assert "fp-children" in src
+		# The dialog must still re-nest the flat DFS list via the depth stack
+		# (the Python picker assigns the depths the tests above pin down).
+		assert "stack[stack.length - 1].depth >= depth" in src
+		# The exact pad that made depth-0 leaves render as if nested.
+		assert "padding:2px 0 2px 22px" not in src
 
 
 class TestFilterOutIgnoredApps:

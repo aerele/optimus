@@ -14,15 +14,16 @@ def test_save_recording_file_failure_is_logged_safely_and_remains_optional(monke
 
 	from optimus import ai_fix, analyze
 
-	request, logs = object(), []
+	request, logs, seen = object(), [], []
 	local = SimpleNamespace(request=request)
 	def insert(**kw):
-		assert local.request is None
+		seen.append(local.request)
 		raise RuntimeError("fake insert failure")
 	monkeypatch.setattr(analyze, "frappe", SimpleNamespace(local=local,
 		get_doc=lambda *a: SimpleNamespace(insert=insert)))
 	monkeypatch.setattr(ai_fix, "log_ai_failure", lambda *a, **kw: logs.append((sys.exc_info()[0], kw)))
 	assert analyze._save_report_file(docname="fake-doc", filename="fake.json.gz",
 		attached_to_field="recordings_file", content=b"fake") is None
+	assert seen == [None]
 	assert local.request is request
 	assert logs == [(None, {"reason": "file_write_failed"})]
