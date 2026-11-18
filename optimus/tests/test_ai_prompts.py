@@ -132,6 +132,7 @@ def test_the_prompt_has_no_index_recipe_of_its_own():
 	assert not hasattr(P, "INDEX_RULES")
 	assert "on_doctype_update" not in P.SYSTEM_PROMPT and "INDEXES" not in P.SYSTEM_PROMPT
 	assert "profiler's index advice" in P._OUTPUT
+	assert "profiler's index advice" in P.FINDING_TYPE_HINTS["Slow Query"]
 
 
 def test_metadata_index_rule_text_still_forbids_a_leading_metadata_column():

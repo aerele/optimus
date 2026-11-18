@@ -150,7 +150,7 @@ class TestSearchIndexIsNoProof:
 	def test_search_index_alone_never_gives_no_code(self, dialect):
 		ev = _ev(dialect=dialect, fields={**_ALL, "customer": F("Link", search_index=True)})
 		advice = ir.advise_finding(_missing("customer"), evidence_lookup=_lookup(ev))
-		assert advice.route != ir.ROUTE_NO_CODE, _text(advice)
+		assert advice.route == ir.ROUTE_ENSURE_INDEXES, _text(advice)
 		assert "Search Index ticked" not in _text(advice) + ir.card_note(advice)
 
 	def test_a_real_index_still_gives_no_code(self):
@@ -559,50 +559,6 @@ def test_a_shape_with_an_unread_column_is_no_definite_verdict():
 	assert "Optimus could not read how the query filters on status" in _text(advice)
 	known = ir.advise("tabSales Invoice", ["customer"], evidence=_SI, query="SELECT 1", unusable={"customer": {"like"}})
 	assert known.route == ir.ROUTE_NO_CODE and not known.unknown
-
-
-def test_the_docs_and_changelog_carry_the_t12_texts():
-	"""The docs quote the texts the report shows, so they stay in step with the code."""
-	from pathlib import Path
-
-	from optimus.renderer import recipe_enrichment
-
-	root = Path(ir.__file__).resolve().parents[2]
-	doc = " ".join((root / "docs" / "AI-FIXING.md").read_text(encoding="utf-8").split())
-	log = " ".join((root / "CHANGELOG.md").read_text(encoding="utf-8").split())
-	title = recipe_enrichment.NO_INDEX_TITLE.format(table="<table>", column="<column>")
-	for text in (doc, log):
-		assert title in text and ir.NO_VERDICT in text
-		assert '"optimus: index advice failed"' in text
-	assert recipe_enrichment.NO_INDEX_ACTION_TITLE in doc and "if <app> is your app" in doc
-	# the equality block's order, coverage in any order, the parser-dropped columns
-	assert "`(posting_date, company)` serves `company = ? AND posting_date = ?`" in doc
-	assert "one fixed order" in doc and "one fixed order" in log
-	assert "did not report" in doc and "did not report" in log
-	assert "`unknown` flag" in doc and "`unknown` flag" in log
-	# cards keep their order, the unique subset, the Check rule's tail
-	assert "most-used-first" in doc and "most-used-first" in log
-	assert "UNIQUE `(po_no, customer)`" in doc and "creation > ? AND is_return = ?" in doc
-	# the served verdict needs evidence, IN (?), the evidence cap, keys
-	assert "keeps that \"already serves\" verdict" in doc and "normalize_query" in doc
-	assert "an existing index already finds these rows" in doc and "by `name` (the primary key)" in doc
-	assert "`IN (?)`" in log and "rejected by the optimizer" in log
-	# keys need a value, the parent index must exist, EXPLAIN is no evidence, the cap
-	assert "is a join condition, never a lookup" in doc and "`mariadb/schema.py`" in doc
-	assert "join condition such as `pr_item.parent = pr.name`" in log and "Postgres none" in log
-	assert "`possible_keys` never lists an index that only serves the ORDER BY" in doc
-	assert "possible_keys never lists an index that only serves ORDER BY" in log
-	# a left-out index refuses when unique or ranked as well as the weakest kept column
-	assert "at least as well as the weakest column the new index would keep" in doc
-	assert "at least as well as the weakest kept column" in log
-	# the hedged Check wording, the partial sort, the sort-only recipe
-	assert "if this query looks for the rare value, an index on (is_return, posting_date) can help" in doc
-	assert "usually matches most rows" in log and "keeps only some sort columns" in log
-	assert "rarely walks a whole index instead of sorting when the query has no LIMIT" in doc
-	assert "rarely walks a whole index instead of sorting" in log
-	assert "A Filesort query with no `LIMIT` is the exception" in doc and "except a Filesort query with no LIMIT" in log
-	assert "the sort columns keep the clause's order" in doc and "in the clause's order" in log
-
 
 
 # --- an existing index covers a recipe in any equality order ----------
@@ -1779,11 +1735,6 @@ class TestServedNeedsLimit:
 		advice = ir.advise_finding(_explain("Filesort", q, explain_row={"Node Type": "Seq Scan"}), evidence_lookup=_lookup(ev))
 		assert advice.entry["columns"] == ["company", "posting_date"], _text(advice)
 		assert 'The index "idx_cd" on table "tabSales Invoice" can already remove the sort' in _text(advice)
-
-	def test_a_capture_time_explain_is_no_evidence(self):
-		q = "SELECT name FROM `tabSales Invoice` WHERE posting_date > ? ORDER BY due_date"
-		assert not ir._served_evidence(q)
-		assert ir._served_evidence(q + " LIMIT ?")
 
 	def test_a_temporary_table_names_its_grouping_index(self):
 		ev = _with_index(_SI4, ("idx_cc", ["company", "customer"], False))

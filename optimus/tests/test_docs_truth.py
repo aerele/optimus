@@ -198,3 +198,31 @@ def test_the_changelog_has_an_entry_for_the_current_version():
 
 	changelog = " ".join((_APP / "CHANGELOG.md").read_text(encoding="utf-8").split())
 	assert f"## [{optimus.__version__}]" in changelog
+
+
+def _index_advice_text(key):
+	from optimus.renderer import index_recipes, recipe_enrichment
+
+	return {
+		"NO_INDEX_TITLE": recipe_enrichment.NO_INDEX_TITLE.format(table="<table>", column="<column>"),
+		"NO_INDEX_UNKNOWN_TITLE": recipe_enrichment.NO_INDEX_UNKNOWN_TITLE.format(table="<table>", column="<column>"),
+		"NO_VERDICT": index_recipes.NO_VERDICT,
+		"_NARROWS": index_recipes._NARROWS.strip(),
+		"NO_INDEX_ACTION_TITLE": recipe_enrichment.NO_INDEX_ACTION_TITLE,
+		"SORT_STAYS_NOTES[Filesort]": recipe_enrichment.SORT_STAYS_NOTES["Filesort"],
+		"failed-advice log line": '"optimus: index advice failed"',
+	}[key]
+
+
+@pytest.mark.parametrize("document,key", [
+	*((document, key) for document in ("docs/AI-FIXING.md", "CHANGELOG.md") for key in (
+		"NO_INDEX_TITLE", "NO_INDEX_UNKNOWN_TITLE", "NO_VERDICT", "_NARROWS", "failed-advice log line",
+	)),
+	# the CHANGELOG never quoted these two
+	("docs/AI-FIXING.md", "NO_INDEX_ACTION_TITLE"),
+	("docs/AI-FIXING.md", "SORT_STAYS_NOTES[Filesort]"),
+])
+def test_the_doc_quotes_the_index_advice_text_the_code_shows(document, key):
+	"""The docs quote the index-advice texts the report shows, so they stay in step with the code."""
+	text = " ".join((_APP / document).read_text(encoding="utf-8").split())
+	assert _index_advice_text(key) in text, (document, key)

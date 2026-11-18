@@ -1,8 +1,8 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""The system prompt no longer teaches its own index recipe; a Slow Query prompt
-carries the profiler's deterministic advice instead, inside a data block."""
+"""A Slow Query prompt carries the profiler's deterministic index advice inside a data
+block (the system prompt has no index recipe of its own: test_ai_prompts.py)."""
 
 import json
 from types import SimpleNamespace
@@ -11,14 +11,6 @@ from optimus import ai_fix, ai_prompts, analyze
 from optimus.renderer.recipe_enrichment import FieldEvidence, TableEvidence
 
 _QUERY = "SELECT name FROM `tabSales Invoice` WHERE customer = ? AND status = ?"
-
-
-def test_index_advice_comes_from_the_profiler_not_the_system_prompt():
-	assert not hasattr(ai_prompts, "INDEX_RULES")
-	for gone in ("INDEXES", "on_doctype_update", "in a patch", "search_index = 1"):
-		assert gone not in ai_prompts.SYSTEM_PROMPT, gone
-	assert "profiler's index advice" in ai_prompts._OUTPUT
-	assert "profiler's index advice" in ai_prompts.FINDING_TYPE_HINTS["Slow Query"]
 
 
 def test_slow_query_prompt_carries_the_advice_inside_a_data_block():
