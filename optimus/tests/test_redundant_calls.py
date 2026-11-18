@@ -213,6 +213,32 @@ def test_identifier_safe_is_used_as_bucket_key():
 	assert len(rc) == 2
 
 
+def test_repeated_calls_with_a_none_argument_are_reported_not_skipped():
+	recording = {
+		"uuid": "rec-1",
+		"calls": [],
+		"sidecar": [_sidecar_entry("get_doc", ("Item", None), ("Item", None)) for _ in range(8)],
+		"pyi_session": None,
+	}
+	ctx = AnalyzeContext(session_uuid="t", docname="t")
+	result = redundant_calls.analyze([recording], ctx)
+	assert len([f for f in result.findings if f["finding_type"] == "Redundant Call"]) == 1
+	assert not [w for w in ctx.warnings if "skipped" in w]
+
+
+def test_an_unhashable_argument_is_still_skipped():
+	recording = {
+		"uuid": "rec-1",
+		"calls": [],
+		"sidecar": [_sidecar_entry("get_doc", ({"a": 1},), ({"a": 1},)) for _ in range(8)],
+		"pyi_session": None,
+	}
+	ctx = AnalyzeContext(session_uuid="t", docname="t")
+	result = redundant_calls.analyze([recording], ctx)
+	assert not [f for f in result.findings if f["finding_type"] == "Redundant Call"]
+	assert [w for w in ctx.warnings if "skipped 8" in w]
+
+
 # ---------------------------------------------------------------------------
 # v0.5.2: callsite-based filtering
 # ---------------------------------------------------------------------------
