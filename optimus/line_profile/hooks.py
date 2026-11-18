@@ -119,6 +119,8 @@ def before_request_line_profile(*args, **kwargs) -> None:
 			_discard_failed_start(profiler)
 	if failure is not None:
 		_log_capture_failure("line profiling before_request failed", failure)
+	elif ready:
+		_renew_active(user)
 
 
 @capture._interrupt_boundary
@@ -216,6 +218,8 @@ def before_job_line_profile(method=None, kwargs=None, **rest) -> None:
 			_discard_failed_start(profiler)
 	if failure is not None:
 		_log_capture_failure("line profiling before_job failed", failure)
+	elif ready:
+		_renew_active(user)
 
 
 @capture._interrupt_boundary
@@ -232,6 +236,15 @@ def after_job_line_profile(method=None, kwargs=None, result=None, **rest) -> Non
 	failure = _finish_capture(profiler, run_uuid)
 	if failure is not None:
 		_log_capture_failure("line profiling after_job failed", failure)
+
+
+def _renew_active(user):
+	"""Renew outside the start path: a Redis error must not read as a failed start."""
+	try:
+		capture.renew_active(user)
+	except Exception as exc:
+		capture._raise_if_interrupt(exc)
+		_log_capture_failure("line profiling active key renewal failed", exc)
 
 
 def _log_capture_failure(title, failure):
