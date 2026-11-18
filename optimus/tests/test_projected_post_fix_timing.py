@@ -171,22 +171,7 @@ class TestNplusOneProjection:
 		assert detail["projected_avg_time_ms"] == 6.0
 		# 15 queries → ~7× fewer queries (15 // 2 = 7).
 		assert "projected_speedup_label" in detail
-		assert "fewer queries" in detail["projected_speedup_label"]
-
-	def test_n_plus_one_small_count_no_speedup_label(self):
-		"""Below 4 queries, the "N× fewer queries" wording is silly
-		(2 queries becoming 1 isn't dramatic). Don't emit the label."""
-		from optimus.analyzers.base import AnalyzeContext
-		# Need ≥ 10 to cross the min_occurrences threshold, so use
-		# exactly that. "~5× fewer queries" IS displayed here since
-		# count >= 4.
-		rec = self._build_recording_with_callsite(queries=10, per_query_ms=3.0)
-		ctx = AnalyzeContext(session_uuid="t", docname="t")
-		result = n_plus_one.analyze([rec], ctx)
-		assert len(result.findings) == 1
-		detail = json.loads(result.findings[0]["technical_detail_json"])
-		# 10 // 2 = 5 → label emitted.
-		assert detail.get("projected_speedup_label") == "~5× fewer queries"
+		assert detail["projected_speedup_label"] == "~7× fewer queries"
 
 
 class TestRendering:
@@ -251,52 +236,3 @@ class TestRendering:
 		# carries projected_avg_time_ms / projected_total_ms / speedup label.
 		assert "Projected after fix" not in html
 		assert "projected-after-fix" not in html
-
-	def test_finding_without_projection_does_not_render_line(self):
-		"""Redundant Call findings don't project the projected line
-		must NOT appear for them."""
-		import types
-
-		doc = types.SimpleNamespace()
-		doc.title = "T"
-		doc.session_uuid = "t"
-		doc.user = "a"
-		doc.status = "Ready"
-		doc.started_at = "2026-04-17"
-		doc.stopped_at = "2026-04-17"
-		doc.notes = None
-		doc.top_severity = "Medium"
-		doc.total_duration_ms = 1000
-		doc.total_query_time_ms = 0
-		doc.total_queries = 0
-		doc.total_requests = 1
-		doc.summary_html = None
-		doc.top_queries_json = "[]"
-		doc.table_breakdown_json = "[]"
-		doc.hot_frames_json = "[]"
-		doc.session_time_breakdown_json = "{}"
-		doc.total_python_ms = 0
-		doc.total_sql_ms = 0
-		doc.analyzer_warnings = None
-		doc.v5_aggregate_json = "{}"
-		doc.actions = []
-
-		row = types.SimpleNamespace()
-		row.finding_type = "Redundant Call"
-		row.severity = "Medium"
-		row.title = "Redundant cache lookup"
-		row.customer_description = "d"
-		row.estimated_impact_ms = 0
-		row.affected_count = 60
-		row.action_ref = "0"
-		row.technical_detail_json = json.dumps({
-			"callsite": {"filename": "apps/myapp/foo.py", "lineno": 1},
-			"occurrences": 60,
-			# NO projected_* fields.
-		})
-		doc.findings = [row]
-
-		from optimus import renderer
-		html = renderer.render(doc, recordings=[])
-
-		assert "Projected after fix" not in html

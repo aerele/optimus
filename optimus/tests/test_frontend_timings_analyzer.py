@@ -203,6 +203,8 @@ def test_missing_frontend_data_attribute_is_safe():
     # Deliberately do not set ctx.frontend_data.
     result = frontend_timings.analyze([], ctx)
     assert result.findings == []
+    assert result.aggregate["frontend_xhr_matched"] == []
+    assert result.aggregate["frontend_vitals_by_page"] == {}
 
 
 # ---------------------------------------------------------------------------

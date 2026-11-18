@@ -171,6 +171,10 @@ class TestBuildMessages:
 		assert ai_prompts.FINDING_TYPE_HINTS["N+1 Query"] in messages[0]["content"]
 		_, msgs2 = _fix_request({"finding_type": "Redundant Call", "title": "x"})
 		assert "verbatim" in msgs2[0]["content"]  # existing permission denial behavior stays unchanged
+		# A finding type without a playbook hint (the EXPLAIN types among them) gets no hint line.
+		for finding_type in ("Full Table Scan", "Filesort", "Temporary Table", "Low Filter Ratio"):
+			_, msgs3 = _fix_request({"finding_type": finding_type, "title": "x"})
+			assert "How this type is usually fixed" not in msgs3[0]["content"]
 
 	def test_over_budget_query_is_omitted_before_parsing(self):
 		f = self._finding()

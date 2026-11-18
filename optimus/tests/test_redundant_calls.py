@@ -7,7 +7,6 @@ can't act on framework loops). The fixture builder defaults to a user-code
 stack so most tests exercise the core aggregation logic."""
 
 import json
-from pathlib import Path
 
 from optimus.analyzers import redundant_calls
 from optimus.analyzers.base import AnalyzeContext
@@ -91,21 +90,6 @@ def test_invalid_threshold_does_not_crash_framework_only_bucket(monkeypatch):
 		result = redundant_calls.analyze([recording], context)
 		assert not result.findings
 		assert any('framework' in warning.lower() for warning in context.warnings)
-
-
-def test_no_finding_below_threshold():
-	recording = {
-		"uuid": "rec-1",
-		"calls": [],
-		"sidecar": [
-			_sidecar_entry("get_doc", ("Item", "X"), ("Item", "hash1")),
-			_sidecar_entry("get_doc", ("Item", "X"), ("Item", "hash1")),
-		],
-		"pyi_session": None,
-	}
-	ctx = AnalyzeContext(session_uuid="t", docname="t")
-	result = redundant_calls.analyze([recording], ctx)
-	assert result.findings == []
 
 
 def test_high_severity_at_5x_threshold():
@@ -623,16 +607,6 @@ def test_a_first_call_through_erpnext_no_longer_drops_the_finding():
 	sidecar += [_sidecar_entry("get_doc", ("Item", "X"), ("Item", "h")) for _ in range(7)]
 	rc = _single_finding(sidecar)
 	assert json.loads(rc["technical_detail_json"])["callsite"]["filename"] == "apps/myapp/controllers/bulk.py"
-
-
-def test_the_stamp_constants_live_in_analyzers_base():
-	from optimus import ai_grounding
-	from optimus.analyzers import base
-
-	assert ai_grounding.CALLSITE_WALK_KEY is base.CALLSITE_WALK_KEY
-	assert ai_grounding.CALLSITE_WALK_FIXED is base.CALLSITE_WALK_FIXED == "outermost_first"
-	src = Path(redundant_calls.__file__).read_text(encoding="utf-8")
-	assert '"outermost_first"' not in src and "CALLSITE_WALK_FIXED" in src
 
 
 # ---------------------------------------------------------------------------

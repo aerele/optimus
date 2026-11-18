@@ -102,13 +102,10 @@ class TestRoundingBoundaryAgreement:
 	and the same duration re-parsed from already-rounded "1235ms" finding text
 	(the title) can't disagree by 0.01s at a rounding boundary."""
 
-	def test_raw_float_and_rounded_ms_agree(self):
-		# 1234.99 (raw impact) rounds to 1235ms (baked title); both must render
-		# the same string, not "1.23s" vs "1.24s".
-		assert humanize_duration_ms(1234.99) == humanize_duration_ms(1235.0)
-
 	def test_fractional_ms_matches_its_rounded_int(self):
-		for raw in (1500.4, 1500.6, 2749.5, 999.6):
+		# 1234.99 is the regression value: the raw impact float rounds to the
+		# baked title's 1235ms, and both must read "1.24s", not "1.23s" vs "1.24s".
+		for raw in (1500.4, 1500.6, 2749.5, 999.6, 1234.99):
 			assert humanize_duration_ms(raw) == humanize_duration_ms(round(raw))
 
 

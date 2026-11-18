@@ -409,11 +409,6 @@ _TEMPERATURE = 0.1
 
 _ANTHROPIC_VERSION = "2023-06-01"
 
-# Compact "what this finding type means + how it's usually fixed in Frappe"
-# line, injected into the user message. Keeps the system prompt general and
-# gives the model a strong, type-specific starting point.
-_FINDING_TYPE_HINTS = ai_prompts.FINDING_TYPE_HINTS
-
 
 def _finding_type_hint(ftype):
 	"""Per-finding-type hint for the LLM prompt (dialect-neutral: the EXPLAIN
