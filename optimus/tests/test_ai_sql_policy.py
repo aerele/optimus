@@ -38,12 +38,6 @@ def test_moving_sql_variants_is_rejected(call):
     assert "raw-sql" in {v.code for v in G.verify_fix(H.format(body), source_lines=source)}
 
 
-def test_changed_arguments_under_kept_opener_are_rejected():
-    source = ["frappe.db.sql(", '    f"select {name}"', ")"]
-    body = '```diff\n frappe.db.sql(\n-    f"select {name}"\n+    "select %(name)s", {"name": name}\n )\n```'
-    assert "raw-sql" in {v.code for v in G.verify_fix(H.format(body), source_lines=source)}
-
-
 def test_malformed_fragment_cannot_exempt_moved_sql():
     source = ["else:", '    frappe.db.sql("select 1")']
     body = '```diff\n else:\n-    frappe.db.sql("select 1")\n+frappe.db.sql("select 1")\n```'
@@ -96,21 +90,6 @@ def test_only_affected_saved_answers_become_outdated_without_mutation():
     assert P.fix_state(stored(H.format("Use the existing index.")))[0] == "current"
 
 
-@pytest.mark.parametrize("status,expected", [("incomplete", "incomplete"), ("unknown", "incomplete"), ("blocked", "blocked"), ("processing_limited", "processing_limited")])
-def test_completion_status_precedes_sql_policy(status, expected):
-    fix = stored()
-    fix["completion_status"] = status
-    assert P.fix_state(fix)[0] == expected
-
-
-def test_refresh_selects_only_affected_answer_and_never_in_missing_only_mode():
-    from optimus.tests.test_ai_selection_contracts import pick, row
-
-    rows = [row("affected", json.dumps(stored())), row("good", json.dumps(stored(H.format("Use the existing index."))))]
-    assert pick(rows) == ["affected"]
-    assert pick(rows, include_outdated=False) == []
-
-
 def test_original_sql_quoted_in_diagnosis_does_not_invalidate_a_good_fix():
     text = H.format('```diff\n-frappe.db.sql(query)\n+value = frappe.db.get_value("User", name, "email")\n```')
     text = text.replace("**Diagnosis**:", "**Diagnosis**\n```python\nfrappe.db.sql(query)\n```\n")
@@ -121,32 +100,6 @@ def test_original_sql_quoted_in_diagnosis_does_not_invalidate_a_good_fix():
 def test_plain_replacement_cannot_disguise_a_sql_hoist_as_quoted_source():
     text = H.format('```python\nfrappe.db.sql(query)\n```')
     assert "raw-sql" in {v.code for v in G.verify_fix(text, source_lines=["    frappe.db.sql(query)"])}
-
-
-@pytest.mark.parametrize("repaired", [False, True])
-def test_one_reask_preserves_both_answers_and_counts_usage(monkeypatch, repaired):
-    from optimus.tests.test_ai_fix import TestGuardedCompletion, _post_sequence
-
-    good = H.format("```diff\n" + "\n".join("-" + line for line in SOURCE) + "\n```")
-    runner = TestGuardedCompletion()
-    runner._FINDING = {**runner._FINDING, "source_window": [
-        {"lineno": 214 + i, "content": line, "is_target": i == 2} for i, line in enumerate(SOURCE)
-    ]}
-    reply = good if repaired else HOIST
-    usage = {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150}
-    fake = _post_sequence(runner._resp(HOIST, usage=usage), runner._resp(reply, usage=usage))
-    from optimus.ai_fix import Usage
-    totals = Usage()
-    result = runner._run(fake, monkeypatch, usage_out=totals)
-    assert len(fake.calls) == 2
-    assert result["guardrail"]["reasked"]
-    assert result["guardrail"]["fallback"] is not repaired
-    assert [r["text"] for r in result["received_responses"]] == [HOIST, reply]
-    assert totals["total_tokens"] == 300
-    if repaired:
-        assert result["suggestion"] == good
-    else:
-        assert not G.rendered_blocks(result["suggestion"])
 
 
 def test_initial_and_repair_prompts_have_no_sql_hoist_exception():

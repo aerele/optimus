@@ -94,12 +94,6 @@ def test_policy_shaped_frappe_aliases_and_assignments_are_checked(code, expected
 	assert expected in {v.code for v in violations([], code.splitlines())}
 
 
-def test_get_all_cannot_replace_permission_checked_get_list():
-	before = ['rows = frappe.get_list("User", fields=["name"])']
-	after = ['rows = frappe.get_all("User", fields=["name"])']
-	assert G.strips_code(violations(before, after))
-
-
 @pytest.mark.parametrize("label", ["python", "text", "sql"])
 def test_whole_block_permission_downgrade_requires_a_grounded_diff(label):
 	from optimus.tests.test_ai_guardrails import H

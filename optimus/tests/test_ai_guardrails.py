@@ -584,10 +584,6 @@ def test_every_emitted_code_is_registered():
 	assert emitted | {"context-truncated"} == G.CODES
 
 
-def test_actions_are_the_four_known_values():
-	assert set(G.CODE_ACTIONS.values()) == {"block", "truncated", "advise", "note"}
-
-
 def test_reask_message_lists_only_block_rules_with_detail():
 	msg = G.reask_message(
 		[

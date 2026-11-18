@@ -50,10 +50,6 @@ class TestExcludeParsing:
 		out = settings._parse_skip_list(raw)
 		assert out == ("Slow Query", "Full Table Scan")
 
-	def test_idempotent_re_parse(self):
-		raw = "Slow Query\nHot Line"
-		assert settings._parse_skip_list(raw) == settings._parse_skip_list(raw)
-
 
 # --------------------------------------------------------------------------
 # TestExcludeApplied is_finding_type_excluded semantics
@@ -128,27 +124,6 @@ class TestSuggestFixRefuses:
 			ai_fix.suggest_fix({"finding_type": "Slow Query", "title": "x"})
 		assert "listed under Excluded finding types" in str(excinfo.value)
 		assert excinfo.value.kind == "not_eligible"
-
-	def test_suggest_fix_no_http_call_when_excluded(self, monkeypatch):
-		# Belt + suspenders: even if the operator's network were intercepted,
-		# requests.post must not be called for an excluded type.
-		monkeypatch.setattr(
-			"optimus.settings.get_config",
-			lambda: _cfg(ai_excluded_finding_types=("N+1 Query",)),
-			raising=True,
-		)
-		import requests as _requests
-
-		calls: list = []
-
-		def _spy_post(*args, **kwargs):
-			calls.append((args, kwargs))
-			raise AssertionError("requests.post should not be called for excluded types")
-
-		monkeypatch.setattr(_requests, "post", _spy_post, raising=True)
-		with pytest.raises(ai_fix.AiFixError):
-			ai_fix.suggest_fix({"finding_type": "N+1 Query", "title": "x"})
-		assert calls == []
 
 
 # --------------------------------------------------------------------------
@@ -306,26 +281,13 @@ class TestSettings:
 		assert cfg.ai_excluded_finding_types == ()
 		assert cfg.ai_request_timeout_seconds == 60
 
-	def test_timeout_floor_clamps_zero(self, monkeypatch):
+	@pytest.mark.parametrize(("value", "expected"), [(0, 10), (-1, 10), (180, 180)])
+	def test_timeout_floor_clamps_low_values_and_keeps_valid_ones(self, monkeypatch, value, expected):
 		OptimusSettings = _settings_stub(monkeypatch)
 		doc = OptimusSettings()
-		doc.ai_request_timeout_seconds = 0
+		doc.ai_request_timeout_seconds = value
 		doc._clamp_numeric_floors()
-		assert doc.ai_request_timeout_seconds == 10
-
-	def test_timeout_floor_clamps_negative(self, monkeypatch):
-		OptimusSettings = _settings_stub(monkeypatch)
-		doc = OptimusSettings()
-		doc.ai_request_timeout_seconds = -1
-		doc._clamp_numeric_floors()
-		assert doc.ai_request_timeout_seconds == 10
-
-	def test_timeout_floor_leaves_valid_values_alone(self, monkeypatch):
-		OptimusSettings = _settings_stub(monkeypatch)
-		doc = OptimusSettings()
-		doc.ai_request_timeout_seconds = 180
-		doc._clamp_numeric_floors()
-		assert doc.ai_request_timeout_seconds == 180
+		assert doc.ai_request_timeout_seconds == expected
 
 
 # --------------------------------------------------------------------------

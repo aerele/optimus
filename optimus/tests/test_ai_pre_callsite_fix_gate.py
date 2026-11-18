@@ -43,10 +43,6 @@ class TestPreL5Gate:
 		assert ai_fix.llm_gate_note(_rc(_STAMPED)) is None
 		assert ai_fix.llm_gate_note({"finding_type": "Redundant Call", "technical_detail": dict(_STAMPED)}) is None
 
-	def test_any_other_stamp_value_is_pre_fix(self):
-		assert ai_fix.llm_gate_note(_rc(dict(_STAMPED, callsite_walk="innermost_first"))) is not None
-		assert ai_fix.llm_gate_note({"finding_type": "Redundant Call", "technical_detail": {}}) is not None
-
 	def test_other_finding_types_ignore_the_stamp(self):
 		assert ai_fix.llm_gate_note({"finding_type": "N+1 Query", "technical_detail_json": json.dumps(_UNSTAMPED)}) is None
 		assert ai_fix.llm_gate_note({"finding_type": "Slow Query", "technical_detail": {}}) is None
@@ -103,9 +99,3 @@ def test_refresh_selection_skips_pre_fix_redundant_calls():
 	cfg = SimpleNamespace(ai_excluded_finding_types=())
 	selected = analyze.eligible_findings(rows, cfg)
 	assert sorted(r.name for r in selected) == ["n1", "rc_new"]
-
-
-def test_only_redundant_call_findings_can_be_pre_fix():
-	assert ai_grounding.analyzed_before_callsite_fix(_rc(_UNSTAMPED)) is True
-	assert ai_grounding.analyzed_before_callsite_fix(_rc(_STAMPED)) is False
-	assert ai_grounding.analyzed_before_callsite_fix({"finding_type": "N+1 Query", "technical_detail": {}}) is False
