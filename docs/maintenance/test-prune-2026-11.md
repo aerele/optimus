@@ -55,7 +55,7 @@ Each name had no caller outside `optimus/tests/`. The matching tests were delete
 | `_build_messages` | `optimus/ai_fix.py` | wrapper of `_build_fix_request`; callers moved to `_build_fix_request` |
 | `_pg_milliseconds` | `optimus/ai_jobs.py` | alias of `sql_work.lock_timeout_ms`; its test now calls `lock_timeout_ms` |
 | `_rq_job_active` | `optimus/analyze.py` | only a test called it; `_rq_status` error path carried into a keeper |
-| `_own_source` | `optimus/analyze.py` | wrapper of `_frame_source`; only tests called it (dead guard removed) |
+| `_own_source` | `optimus/analyze.py` | wrapper of `_frame_source`; only tests called it |
 | `own_query_frame` (import) | `optimus/analyze.py` | unused after `_own_source` went; the name stays in `analyzers/base.py` |
 | `redact_string_value` | `optimus/redaction.py` | no caller; `_redact_string` stays and is tested through its callers |
 | `_build_executive_summary` | `optimus/renderer/_internal.py` | orphaned data layer, not wired into the report since v0.7.x |

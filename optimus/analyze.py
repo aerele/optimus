@@ -1664,8 +1664,10 @@ def _fetch_recordings(recording_uuids: list[str]):
 		yield rec
 
 
-def _frame_source(frame: dict) -> str:
-	"""``file:function`` of the Optimus frame that decided a call was Optimus's own."""
+def _frame_source(frame) -> str:
+	"""``file:function`` of an Optimus frame, or "unknown" without one."""
+	if not isinstance(frame, dict):
+		return "unknown"
 	function = frame.get("function")
 	return f"{frame.get('filename')}:{function if isinstance(function, str) else '?'}"
 
