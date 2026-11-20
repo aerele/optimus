@@ -40,12 +40,13 @@ using installed Frappe code, rather than the hook-loop replays below.
 
 An autouse fixture pins frappe.__version__ to a Frappe 16 release, so
 Part A runs on the v16 contract. Part A pins file_has_permission's own
-return values directly (``is``, so None and True are told apart). Part C
-pins the version parsing and replays v15's loop against the real function
-plus a minimal stand-in for the core File hook. Part D (appended by
-Task 2) is a static guard over the function's return statements. The
-v16 loop replay was removed: its scenarios call the same function with
-the same arguments as Part A.
+return values directly (``is``, so None and True are told apart). Part B
+keeps one v16 loop test (a read-sharee denied for recordings_file) that
+proves Frappe's core File hook never runs. Part C pins the version parsing
+and replays v15's loop against the real function plus a minimal stand-in
+for the core File hook. Part D (appended by Task 2) is a static guard over
+the function's return statements. The other v16 loop replays were removed:
+their scenarios call the same function with the same arguments as Part A.
 """
 
 from __future__ import annotations
@@ -186,7 +187,7 @@ def test_recordings_file_hook_denies_stranger(monkeypatch):
 	assert permissions.file_has_permission(doc, "read", user="stranger@example.com") is False
 
 
-# --- Stand-in core File hook (used by Part C) ---------------------------------
+# --- Stand-in core File hook (used by Parts B and C) ---------------------------------
 
 def _core_file_hook(doc, ptype=None, user=None, debug=False, *, ref_has_permission=None, shared_with=()):
 	"""Minimal stand-in for frappe.core.doctype.file.file.has_permission
@@ -220,8 +221,8 @@ def _core_file_hook(doc, ptype=None, user=None, debug=False, *, ref_has_permissi
 
 def _spy_core(calls, **kw):
 	"""The stand-in core File hook with its real signature, recording each
-	call so a test can prove the loop reached it (or never did). Used by
-	Part C (v15): recording at hook entry, not
+	call so a test can prove the loop reached it (or never did). Used in
+	both Part B (v16) and Part C (v15): recording at hook entry, not
 	inside a delegated callback like ``ref_has_permission``, is what makes
 	``calls == []`` actually prove core never ran, rather than only
 	proving one particular branch inside core was not reached."""
@@ -243,6 +244,47 @@ def _newargs(fn, kwargs):
 	if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
 		return dict(kwargs)
 	return {k: v for k, v in kwargs.items() if k in params}
+
+
+# --- Part B (Frappe 16 loop, one test) -------------------------------------
+
+def _has_controller_permissions(doc, ptype, user, methods, *, debug=False):
+	"""Verbatim copy of the control flow in frappe.permissions.
+	has_controller_permissions on Frappe 16 (frappe/permissions.py:481-498,
+	Frappe v16.18.0), plus frappe.call's kwarg filtering (frappe/__init__.py:
+	1122-1129) so it runs against plain callables with real hook
+	signatures. ``methods`` must be given in installed-app order (frappe's
+	own File hook first, optimus's added after): this helper reverses it
+	exactly as the real function does, so optimus's hook runs FIRST, and
+	it stops at the first FALSY answer."""
+	kwargs = dict(doc=doc, ptype=ptype, user=user, debug=debug)
+	for method in reversed(methods):
+		controller_permission = method(**_newargs(method, kwargs))
+		if not controller_permission:
+			return bool(controller_permission)
+	return True
+
+
+def test_read_sharee_denied_recordings_file_through_controller_hooks(monkeypatch):
+	"""The v16 hook loop denies File read access before core can grant it.
+
+	This models form/REST checks on File, not /private/files downloads.
+	The latter bypass this loop and still grant a parent read-sharee access
+	to the raw bundle, as test_permissions_download_boundary.py demonstrates.
+	"""
+	doc = types.SimpleNamespace(
+		attached_to_doctype="Optimus Session", attached_to_field="recordings_file",
+		attached_to_name="OS-0004", is_private=True, owner="system@example.com",
+	)
+	_patch(monkeypatch, roles=[], recording_user="owner@example.com")
+	calls = []
+	# A share-ee: core's own hook WOULD grant access by delegating to
+	# the parent doc's has_permission, which returns True for a valid
+	# DocShare. optimus's hook must deny before core ever gets asked.
+	core = _spy_core(calls, ref_has_permission=lambda ptype, user: True)
+	methods = [core, permissions.file_has_permission]
+	assert _has_controller_permissions(doc, "read", "sharee@example.com", methods) is False
+	assert calls == []
 
 
 # --- Part C (version parsing, Frappe 15 contract and loop replay) -------------
@@ -342,6 +384,47 @@ def _file(**kw):
 	)
 	base.update(kw)
 	return types.SimpleNamespace(**base)
+
+
+@pytest.mark.parametrize(
+	"doc",
+	[
+		pytest.param(_file(), id="unattached"),
+		pytest.param(_file(attached_to_doctype="ToDo", attached_to_name="TD-0002"), id="attached-to-unreadable-todo"),
+	],
+)
+def test_v15_private_file_of_another_user_denied(monkeypatch, doc):
+	"""The Frappe 15 confidentiality pin: bob asks for alice's private File.
+	Optimus has no objection (None), so the v15 loop moves on to Frappe's
+	own File hook, which denies: bob is not the owner, the File is not
+	shared with him, and he can't read the document it is attached to. If
+	optimus answered True here, the v15 loop would stop at optimus and
+	grant, and the File DocType's "All" read permission would then let any
+	logged-in user read any private file."""
+	_on_frappe(monkeypatch, _V15)
+	_patch(monkeypatch)
+	calls = []
+	core = _spy_core(calls, ref_has_permission=lambda ref_ptype, user: False)
+	methods = [core, permissions.file_has_permission]
+	assert _has_controller_permissions_v15(doc, "read", "bob@example.com", methods) is False
+	assert calls == [("read", "bob@example.com")]
+
+
+def test_v15_gated_file_stranger_denied_before_core(monkeypatch):
+	"""The gate's False stops the v15 controller loop before core can grant.
+
+	This denies File read checks, not the separate direct-download path.
+	"""
+	_on_frappe(monkeypatch, _V15)
+	_patch(monkeypatch, recording_user="owner@example.com")
+	doc = _file(
+		attached_to_doctype="Optimus Session", attached_to_field="recordings_file",
+		attached_to_name="OS-0005", owner="system@example.com",
+	)
+	calls = []
+	methods = [_spy_core(calls, ref_has_permission=lambda ref_ptype, user: True), permissions.file_has_permission]
+	assert _has_controller_permissions_v15(doc, "read", "sharee@example.com", methods) is False
+	assert calls == []
 
 
 @pytest.mark.parametrize(

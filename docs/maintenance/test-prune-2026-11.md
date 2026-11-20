@@ -4,13 +4,13 @@ This campaign removed low-value unit tests from the Optimus suite, lane by lane.
 
 - Base: `d51a4c6` (develop).
 - Head: the head of the PR branch (`chore/prune-test-suite`) at the time of writing.
-- Declarations: 7,333 at the campaign baseline `852fe17`; 7,338 at develop `d51a4c6` (#155 added 5); 6,657 now. One counting method for all three: `grep -cE "^\s*(async )?def test_"` over `optimus/tests/test_*.py`.
-- Collected tests: 11,675 to 10,974, as measured.
-- Count toward the 12 % target: 594 of 880. The target was not reached. The cause is the three rules below, and the ledgers show that more volume would come only from tests those rules keep. Protected security files (46 files, 1,042 declarations, plus about 40 tests marked as security contracts) were cut only where a mutation proved a keeper. The counting rule gives 0 for a carried assertion, a parametrize fold, a rename or a move. The retention bar kept about 47 borderline tests that the controller moved from D back to R.
+- Declarations: 7,333 at the campaign baseline `852fe17`; 7,338 at develop `d51a4c6` (#155 added 5); 6,666 now (6,657 before the review restores below). One counting method for all three: `grep -cE "^\s*(async )?def test_"` over `optimus/tests/test_*.py`.
+- Collected tests: 11,675 to 10,985, as measured (10,974 before the nine review restores below, which add 11 collected cases).
+- Count toward the 12 % target: 594 of 880 as first measured, before the review restores (see the note after the lane table). The target was not reached. The cause is the three rules below, and the ledgers show that more volume would come only from tests those rules keep. Protected security files (46 files, 1,042 declarations, plus about 40 tests marked as security contracts) were cut only where a mutation proved a keeper. The counting rule gives 0 for a carried assertion, a parametrize fold, a rename or a move. The retention bar kept about 47 borderline tests that the controller moved from D back to R.
 - Suite time: 237 s to 196 s.
 - Coverage: lines 92.99 % to 93.11 %, branches 89.79 % to 89.93 %.
 
-The index lists 715 declarations that no longer exist under their old name (AST diff of `d51a4c6` against the working tree, every file under `optimus/tests/`). Of these, 615 are D (deleted), 71 are C (deleted after the check was carried into a keeper), 11 are fold (merged into a parametrized keeper), 14 are rename and 4 are move. Only D rows count toward the 594, less the D rows whose keeper needed a new assertion and the preservation fixes (see the lane table).
+The index lists 706 declarations that no longer exist under their old name (AST diff of `d51a4c6` against the working tree, every file under `optimus/tests/`; 715 before the review restores below). Of these, 606 are D (deleted), 71 are C (deleted after the check was carried into a keeper), 11 are fold (merged into a parametrized keeper), 14 are rename and 4 are move. Only D rows count toward the 594, less the D rows whose keeper needed a new assertion and the preservation fixes (see the lane table).
 
 ## Recover a deleted test
 
@@ -42,6 +42,8 @@ Marks: D = deleted, a keeper holds the contract or the finding is "no contract".
 | L5d | Deferred file `test_api_pill_state.py` (after #155 merged) | 8 | `e00d3fe` |
 | fix | Preservation-review fixes (6 removals now covered by kept tests, counts 0) | -6 | `827ee11` |
 | Total | | 594 | |
+
+Review restores: after review of #170, nine tests marked D were put back (verbatim from `d51a4c6`, minus the pre-fix contrast copies) and are marked `kept (restored after review)` in their rows: the three security tests in `test_permissions_file_hook.py`, `test_suggest_fix_no_http_call_when_excluded`, `test_get_all_cannot_replace_permission_checked_get_list`, and four in `test_ai_spend.py` found by a mutation audit of the 15 tests removed there (no kept test turned red under one production mutation each). The 594 above was not recounted per row, because the ledger kept no per-row counted flag. All nine were D rows, so read the count as 585 to 594. The `test_ai_spend.py` provider fixture also sets the ambient worker-session marker again, so its kept tests can see a stale-session regression.
 
 Still deferred: `test_api_phase2_endpoints.py`, `test_auto_arm_phase2.py`, `test_phase2_jobs.py`, `test_session_action_gate.py`, `test_phase2_queue_ui.py`, `test_session_form_buttons.py` (PRs #156 and #157 open).
 
@@ -327,7 +329,7 @@ One table per test file, in path order. Node ids are `optimus/tests/<file>::<Cla
 | Test | Mark | Keeper | Lane |
 |---|---|---|---|
 | `optimus/tests/test_ai_privacy.py::TestExcludeParsing::test_idempotent_re_parse` | D | `optimus/tests/test_ai_privacy.py::TestExcludeParsing::test_parses_one_type_per_line` (+1) | L8c |
-| `optimus/tests/test_ai_privacy.py::TestSuggestFixRefuses::test_suggest_fix_no_http_call_when_excluded` | D | `optimus/tests/test_ai_privacy.py::TestSuggestFixRefuses::test_suggest_fix_short_circuits_for_excluded_type` | L8c |
+| `optimus/tests/test_ai_privacy.py::TestSuggestFixRefuses::test_suggest_fix_no_http_call_when_excluded` | kept (restored after review) | `optimus/tests/test_ai_privacy.py::TestSuggestFixRefuses::test_suggest_fix_no_http_call_when_excluded` | L8c |
 | `optimus/tests/test_ai_privacy.py::TestSettings::test_timeout_floor_clamps_zero` | rename | `optimus/tests/test_ai_privacy.py::TestSettings::test_timeout_floor_clamps_low_values_and_keeps_valid_ones` | L8c |
 | `optimus/tests/test_ai_privacy.py::TestSettings::test_timeout_floor_clamps_negative` | fold | `optimus/tests/test_ai_privacy.py::TestSettings::test_timeout_floor_clamps_low_values_and_keeps_valid_ones` | L8c |
 | `optimus/tests/test_ai_privacy.py::TestSettings::test_timeout_floor_leaves_valid_values_alone` | fold | `optimus/tests/test_ai_privacy.py::TestSettings::test_timeout_floor_clamps_low_values_and_keeps_valid_ones` | L8c |
@@ -438,21 +440,21 @@ One table per test file, in path order. Node ids are `optimus/tests/<file>::<Cla
 
 | Test | Mark | Keeper | Lane |
 |---|---|---|---|
-| `optimus/tests/test_ai_spend.py::test_ambient_counter_query_matches_the_session_uuid` | D | no contract; behaviour in `optimus/tests/test_ai_spend.py::test_counter_query_adds_in_database_with_null_coalescing` | L8a |
+| `optimus/tests/test_ai_spend.py::test_ambient_counter_query_matches_the_session_uuid` | D | `optimus/tests/test_ai_spend.py::test_counter_statement_as_a_plain_string_without_the_real_query_builder` (checked by mutation after review; the old test is skipped under the CI frappe stub) | L8a |
 | `optimus/tests/test_ai_spend.py::test_an_unattributed_call_never_charges_a_previous_worker_session` | fold | `optimus/tests/test_ai_spend.py::test_no_attribution_shape_makes_ai_fix_charge_a_session` | L8a |
 | `optimus/tests/test_ai_spend.py::test_explicit_attribution_never_charges_the_ambient_session` | rename | `optimus/tests/test_ai_spend.py::test_no_attribution_shape_makes_ai_fix_charge_a_session` | L8a |
 | `optimus/tests/test_ai_spend.py::test_an_explicit_caller_records_its_spend_once_into_its_own_session` | D | `optimus/tests/test_ai_spend.py::test_spend_takes_a_usage_dict_total` (+2) | L8a |
-| `optimus/tests/test_ai_spend.py::test_an_explicit_billed_failure_carries_its_usage_and_charges_nothing` | D | `optimus/tests/test_ai_reliability_core.py::test_truncated_thinking_preserves_reported_usage_on_error` | L8a |
+| `optimus/tests/test_ai_spend.py::test_an_explicit_billed_failure_carries_its_usage_and_charges_nothing` | kept (restored after review) | `optimus/tests/test_ai_spend.py::test_an_explicit_billed_failure_carries_its_usage_and_charges_nothing` | L8a |
 | `optimus/tests/test_ai_spend.py::test_an_internal_call_with_an_explicit_session_never_charges_the_ambient_one` | D | `optimus/tests/test_ai_spend.py::test_no_attribution_shape_makes_ai_fix_charge_a_session` | L8a |
 | `optimus/tests/test_ai_spend.py::test_each_billed_call_of_a_reask_is_collected_once_for_sql_settlement` | D | `optimus/tests/test_ai_fix.py::TestGuardedCompletion::test_reask_tokens_accumulate` | L8a |
 | `optimus/tests/test_ai_spend.py::test_humanize_without_usage_out_never_charges_an_unattributed_session` | D | `optimus/tests/test_ai_spend.py::test_no_attribution_shape_makes_ai_fix_charge_a_session` | L8a |
 | `optimus/tests/test_ai_spend.py::test_an_empty_session_or_docname_is_unattributed` | fold | `optimus/tests/test_ai_spend.py::test_no_attribution_shape_makes_ai_fix_charge_a_session` | L8a |
-| `optimus/tests/test_ai_spend.py::test_public_call_explicit_session_reaches_protocol` | D | `optimus/tests/test_ai_fix.py::TestGuardedCompletion::test_timeout_argument_caps_the_budget` | L8a |
+| `optimus/tests/test_ai_spend.py::test_public_call_explicit_session_reaches_protocol` | kept (restored after review) | `optimus/tests/test_ai_spend.py::test_public_call_explicit_session_reaches_protocol` | L8a |
 | `optimus/tests/test_ai_spend.py::test_the_recording_query_treats_chained_wheres_like_one_anded_where` | D | no contract | L8a |
-| `optimus/tests/test_ai_spend.py::test_an_explicit_call_never_borrows_the_ambient_session_for_its_row` | D | `optimus/tests/test_ai_spend.py::test_an_http_failure_row_is_filed_under_the_calls_own_session` | L8a |
-| `optimus/tests/test_ai_spend.py::test_the_ambient_and_the_explicit_session_differ_and_each_row_follows_its_call` | D | `optimus/tests/test_ai_spend.py::test_an_http_failure_row_is_filed_under_the_calls_own_session` | L8a |
+| `optimus/tests/test_ai_spend.py::test_an_explicit_call_never_borrows_the_ambient_session_for_its_row` | kept (restored after review) | `optimus/tests/test_ai_spend.py::test_an_explicit_call_never_borrows_the_ambient_session_for_its_row` | L8a |
+| `optimus/tests/test_ai_spend.py::test_the_ambient_and_the_explicit_session_differ_and_each_row_follows_its_call` | kept (restored after review) | `optimus/tests/test_ai_spend.py::test_the_ambient_and_the_explicit_session_differ_and_each_row_follows_its_call` | L8a |
 | `optimus/tests/test_ai_spend.py::test_an_internal_call_with_only_a_docname_is_explicit_for_charge_and_row` | D | `optimus/tests/test_ai_spend.py::test_no_attribution_shape_makes_ai_fix_charge_a_session` (+1) | L8a |
-| `optimus/tests/test_ai_spend.py::test_an_unreadable_spend_marker_files_the_row_without_a_session` | D | no contract | L8a |
+| `optimus/tests/test_ai_spend.py::test_an_unreadable_spend_marker_files_the_row_without_a_session` | D | `optimus/tests/test_ai_queued_only.py::test_http_failure_metadata_never_uses_a_previous_workers_session` (checked by mutation after review) | L8a |
 
 ### test_ai_sql_policy.py
 
@@ -1024,7 +1026,7 @@ One table per test file, in path order. Node ids are `optimus/tests/<file>::<Cla
 
 | Test | Mark | Keeper | Lane |
 |---|---|---|---|
-| `optimus/tests/test_high_pass_guardrails.py::test_get_all_cannot_replace_permission_checked_get_list` | D | `optimus/tests/test_ai_guardrails.py::test_permission_downgrade` | L8c |
+| `optimus/tests/test_high_pass_guardrails.py::test_get_all_cannot_replace_permission_checked_get_list` | kept (restored after review) | `optimus/tests/test_high_pass_guardrails.py::test_get_all_cannot_replace_permission_checked_get_list` | L8c |
 
 ### test_hmac_envelope_versioning.py
 
@@ -1358,10 +1360,10 @@ One table per test file, in path order. Node ids are `optimus/tests/<file>::<Cla
 | `optimus/tests/test_permissions_file_hook.py::test_system_manager_allowed` | D | `optimus/tests/test_permissions_file_hook.py::test_system_manager_defers_true` | L5 |
 | `optimus/tests/test_permissions_file_hook.py::test_owner_allowed` | D | `optimus/tests/test_permissions_file_hook.py::test_recording_user_defers_true` | L5 |
 | `optimus/tests/test_permissions_file_hook.py::test_stranger_denied` | D | `optimus/tests/test_permissions_file_hook.py::test_stranger_denies_false` | L5 |
-| `optimus/tests/test_permissions_file_hook.py::test_read_sharee_denied_recordings_file_through_controller_hooks` | D | `optimus/tests/test_permissions_file_hook.py::test_recordings_file_hook_denies_stranger` | L5 |
-| `optimus/tests/test_permissions_file_hook.py::test_v15_private_file_of_another_user_denied` | D | `optimus/tests/test_permissions_file_hook.py::test_v15_defers_none` (+1) | L5 |
+| `optimus/tests/test_permissions_file_hook.py::test_read_sharee_denied_recordings_file_through_controller_hooks` | kept (restored after review) | `optimus/tests/test_permissions_file_hook.py::test_read_sharee_denied_recordings_file_through_controller_hooks` | L5 |
+| `optimus/tests/test_permissions_file_hook.py::test_v15_private_file_of_another_user_denied` | kept (restored after review) | `optimus/tests/test_permissions_file_hook.py::test_v15_private_file_of_another_user_denied` | L5 |
 | `optimus/tests/test_permissions_file_hook.py::test_v15_own_shared_public_file_allowed` | D | `optimus/tests/test_permissions_file_hook.py::test_v15_defers_none` | L5 |
-| `optimus/tests/test_permissions_file_hook.py::test_v15_gated_file_stranger_denied_before_core` | D | `optimus/tests/test_permissions_file_hook.py::test_v15_gate_still_denies_false` (+1) | L5 |
+| `optimus/tests/test_permissions_file_hook.py::test_v15_gated_file_stranger_denied_before_core` | kept (restored after review) | `optimus/tests/test_permissions_file_hook.py::test_v15_gated_file_stranger_denied_before_core` | L5 |
 
 ### test_persistent_cache_keys.py (file deleted)
 

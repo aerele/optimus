@@ -125,6 +125,35 @@ class TestSuggestFixRefuses:
 		assert "listed under Excluded finding types" in str(excinfo.value)
 		assert excinfo.value.kind == "not_eligible"
 
+	def test_suggest_fix_no_http_call_when_excluded(self, monkeypatch):
+		# A usable provider is configured, so without the exclusion guard the
+		# call would reach requests.post (the one _http_post uses).
+		monkeypatch.setattr(
+			"optimus.settings.get_config",
+			lambda: _cfg(ai_excluded_finding_types=("N+1 Query",)),
+			raising=True,
+		)
+		provider = {
+			"name": "fake", "protocol": "openai", "base_url": "https://fake.invalid/v1", "model": "fake",
+			"needs_key": False, "context_tokens": 128000, "max_output_tokens": 32768,
+		}
+		monkeypatch.setattr(ai_fix, "_provider_config", lambda *a, **k: dict(provider))
+		monkeypatch.setattr(ai_fix, "_resolve_display_threshold_ms", lambda: 1000)
+		monkeypatch.setattr(ai_fix, "_get_api_key", lambda *a, **k: "")
+		monkeypatch.setattr(ai_fix, "_current_key_or_empty", lambda: "")
+		calls: list = []
+
+		def _spy_post(*args, **kwargs):
+			calls.append((args, kwargs))
+			raise AssertionError("requests.post should not be called for excluded types")
+
+		monkeypatch.setattr(ai_fix.requests, "post", _spy_post, raising=True)
+		with pytest.raises(ai_fix.AiFixError) as excinfo:
+			ai_fix.suggest_fix({"finding_type": "N+1 Query", "title": "x"})
+		assert calls == []
+		assert "listed under Excluded finding types" in str(excinfo.value)
+		assert excinfo.value.kind == "not_eligible"
+
 
 # --------------------------------------------------------------------------
 # TestTimeoutHonored _http_post reads cfg.ai_request_timeout_seconds

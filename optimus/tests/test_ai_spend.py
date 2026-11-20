@@ -252,6 +252,9 @@ class _Reply:
 
 @pytest.fixture
 def provider(monkeypatch):
+	import frappe
+
+	monkeypatch.setattr(frappe.local, "_optimus_spend_session", "uuid-A", raising=False)
 	monkeypatch.setattr(ai_fix, "_provider_config", lambda: dict(_PROVIDER))
 	monkeypatch.setattr(ai_fix, "_resolve_display_threshold_ms", lambda: 1000)
 	monkeypatch.setattr(ai_fix, "_get_api_key", lambda *a, **kw: "")
@@ -316,6 +319,13 @@ def test_no_attribution_shape_makes_ai_fix_charge_a_session(provider, charged, e
 	assert len(provider.posts) == 1 and charged == []
 
 
+def test_an_explicit_billed_failure_carries_its_usage_and_charges_nothing(provider, charged):
+	provider.install(_Reply("<think>unfinished", 9))
+	with pytest.raises(ai_fix.AiFixError) as caught:
+		ai_fix.suggest_fix({"finding_type": "N+1 Query"}, session_uuid="uuid-B", docname="SESS-B")
+	assert caught.value.usage["total_tokens"] == 9 and charged == []
+
+
 def test_humanize_reports_each_call_once_through_a_reused_usage_out(provider, charged):
 	import requests
 
@@ -345,18 +355,38 @@ def test_an_empty_session_is_never_charged_or_logged_to_a_previous_worker_sessio
 	assert rows == [None]
 
 
+@pytest.mark.parametrize("entry", ["fix", "steps"])
+def test_public_call_explicit_session_reaches_protocol(monkeypatch, entry):
+	provider = {
+		"name": "fake",
+		"protocol": "openai",
+		"base_url": "https://fake.invalid/v1",
+		"model": "fake",
+		"needs_key": False,
+		"context_tokens": 128000,
+	}
+	monkeypatch.setattr(ai_fix, "_provider_config", lambda: provider)
+	monkeypatch.setattr(ai_fix, "_resolve_display_threshold_ms", lambda: 1000)
+	monkeypatch.setattr(ai_fix, "_get_api_key", lambda *a, **kw: "")
+	monkeypatch.setattr(ai_fix, "is_finding_type_excluded", lambda *a: False)
+	seen = []
 
+	def call(*a, **kw):
+		seen.append(kw)
+		return "## Diagnosis\nRepeated work.\n## Fix\nBatch the call.\n## Why it works\nFewer calls.\n## Verify\nProfile again."
 
-
-
-
-
-
-
-
-
-
-
+	monkeypatch.setattr(ai_fix, "_call_openai_chat", call)
+	if entry == "fix":
+		ai_fix.suggest_fix(
+			{"finding_type": "N+1 Query"}, session_uuid="fake-session", docname="fake-doc", timeout=17
+		)
+	else:
+		ai_fix.humanize_steps(
+			[{"label": "fake"}], session_uuid="fake-session", docname="fake-doc", timeout=17
+		)
+	assert seen[0]["session_uuid"] == "fake-session" and seen[0]["timeout"] == 17
+	# the explicit caller records this call's spend itself (analyze._add_ai_spend)
+	assert seen[0]["docname"] == "fake-doc"
 
 
 def test_health_window_uses_stopped_at_not_ai_modified(monkeypatch):
@@ -558,7 +588,8 @@ class _Rejected:
 
 @pytest.fixture
 def http_rows(monkeypatch, provider):
-	"""Every row the HTTP layer writes, as (title, session_uuid, docname)."""
+	"""Every row the HTTP layer writes, as (title, session_uuid, docname); the worker's ambient
+	spend marker names session A (the ``provider`` fixture), a stale one for an explicit call."""
 	seen = []
 	monkeypatch.setattr(ai_fix, "_log_http_error", _REAL_LOG_HTTP_ERROR)
 	monkeypatch.setattr(
@@ -598,6 +629,24 @@ def test_an_http_failure_row_is_filed_under_the_calls_own_session(
 	with pytest.raises(ai_fix.AiFixError):
 		_ask(entry, **attribution)
 	assert http_rows == [("optimus ai_fix", *row)]
+
+
+def test_an_explicit_call_never_borrows_the_ambient_session_for_its_row(provider, http_rows):
+	"""``record_spend`` False marks an explicit call: with no session or docname of its own, its
+	row has no session rather than the worker's last one."""
+	provider.install(_Reply("x", 1, status=500))
+	with pytest.raises(ai_fix.AiFixError):
+		ai_fix._dispatch_call(dict(_PROVIDER), "system", [], usage_out={})
+	assert http_rows == [("optimus ai_fix", None, None)]
+
+
+def test_the_ambient_and_the_explicit_session_differ_and_each_row_follows_its_call(provider, http_rows):
+	provider.install(_Reply("x", 1, status=500), _Reply("x", 1, status=500))
+	with pytest.raises(ai_fix.AiFixError):
+		ai_fix.suggest_fix({"finding_type": "N+1 Query"}, docname="SESS-B")
+	with pytest.raises(ai_fix.AiFixError):
+		ai_fix.suggest_fix({"finding_type": "N+1 Query"})
+	assert http_rows == [("optimus ai_fix", None, "SESS-B"), ("optimus ai_fix", None, None)]
 
 
 # --- the .usage boundary ------------------------------------------------------------------------
