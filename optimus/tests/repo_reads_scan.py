@@ -79,6 +79,8 @@ OPEN_MODULES = frozenset({"io", "codecs", "gzip", "bz2", "lzma", "tarfile"})  # 
 PATH_CLASSES = frozenset({"Path", "PurePath", "PosixPath", "PureWindowsPath", "WindowsPath"})
 WRITE_MODE_CHARS = "wax"
 SKIPPED_FOLDERS = frozenset({"fixtures", "data"})
+CACHE_FOLDERS = frozenset({"__pycache__"})  # never scanned, even for a file pytest would collect
+VENV_MARKER = "pyvenv.cfg"  # a folder holding this file is a virtual environment, whatever its name
 COLLECTED_PATTERNS = ("test_*.py", "*_test.py", "conftest.py")  # what pytest collects by default
 COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
 
@@ -850,12 +852,25 @@ def _collected_by_pytest(name: str) -> bool:
 	return any(fnmatch.fnmatchcase(name, pattern) for pattern in COLLECTED_PATTERNS)
 
 
+def _outside_the_repo_code(root: Path, relative: Path) -> bool:
+	"""True when a folder above the file is hidden (``.venv``, ``.idea``), a cache, or a virtual environment.
+
+	Only the folders below ``root`` count, so a tree that itself sits in a hidden folder is still scanned.
+	"""
+	folders = relative.parts[:-1]
+	if any(name.startswith(".") or name in CACHE_FOLDERS for name in folders):
+		return True
+	return any((root.joinpath(*folders[:depth]) / VENV_MARKER).is_file() for depth in range(1, len(folders) + 1))
+
+
 def scanned_files(root: Path, exempt: dict[str, str]) -> dict[str, Path]:
 	"""``{posix path relative to root: path}`` of every file the gate scans, in sorted order."""
 	found = {}
 	for path in sorted(root.rglob("*.py")):
 		relative = path.relative_to(root)
 		if relative.as_posix() in exempt or path.is_dir():
+			continue
+		if _outside_the_repo_code(root, relative):
 			continue
 		if SKIPPED_FOLDERS & set(relative.parts[:-1]) and not _collected_by_pytest(path.name):
 			continue

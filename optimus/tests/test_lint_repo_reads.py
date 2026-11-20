@@ -613,6 +613,26 @@ class TestGate:
 		files = {"fixtures/x.py": READ, "data/y.py": READ, "sub/fixtures/z.py": READ}
 		assert gate(tmp_path, files) is None
 
+	def test_hidden_cache_and_virtualenv_folders_are_not_scanned(self, tmp_path):
+		files = {
+			".venv/lib/test_bad.py": READ,
+			"pkg/__pycache__/x.py": READ,
+			".idea/test_y.py": READ,
+			"sub/.hidden/test_z.py": READ,
+			"venv/pyvenv.cfg": "home = /usr/bin\n",
+			"venv/lib/test_v.py": READ,
+			"sub/test_ok.py": READ,
+		}
+		message = gate(tmp_path, files)
+		assert "t/sub/test_ok.py:5" in message
+		for skipped in (".venv", "__pycache__", ".idea", ".hidden", "venv/"):
+			assert skipped not in message
+		assert sorted(scan_tree(tmp_path, exempt={})) == ["sub/test_ok.py"]
+
+	def test_a_tree_inside_a_hidden_folder_is_still_scanned(self, tmp_path):
+		root = tree(tmp_path / ".claude" / "worktrees" / "x", {"test_a.py": READ})
+		assert sorted(scan_tree(root, exempt={})) == ["test_a.py"]
+
 	def test_a_syntax_error_file_is_a_problem_line_not_a_crash(self, tmp_path):
 		message = gate(tmp_path, {"test_a.py": "def broken(:\n"})
 		assert "t/test_a.py:1: cannot parse" in message
