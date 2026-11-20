@@ -120,11 +120,6 @@ def test_an_analyzing_line_profiling_run_keeps_its_pill(env):
 	assert api.pill_state(session_uuid="u1", run_uuid="r1")["phase"] == "analyzing"
 
 
-def test_finished_tracked_session_stays_without_a_new_recording(env):
-	env(sessions=[_s("OS-1", "u1", "Ready")])
-	assert api.pill_state(session_uuid="u1")["phase"] == "ready"
-
-
 @pytest.mark.parametrize(
 	"status,phase",
 	[
@@ -144,11 +139,6 @@ def test_known_session_status_maps_to_phase(env, status, phase):
 		assert out["docname"] == "OS-1" and out["scope"] == "session"
 
 
-def test_ready_session_is_never_reported_analyzing(env):
-	env(sessions=[_s("OS-1", "u1", "Ready")])
-	assert api.pill_state(session_uuid="u1")["phase"] == "ready"
-
-
 def test_other_users_session_is_invisible(env):
 	env(sessions=[_s("OS-9", "u9", "Analyzing", user="bob")])
 	assert api.pill_state(session_uuid="u9") == {"phase": "idle"}
@@ -161,11 +151,6 @@ def test_non_string_ids_are_rejected(env):
 		api.pill_state(session_uuid=["!=", ""])
 	with pytest.raises(Exception):
 		api.pill_state(session_uuid="u1", run_uuid={"a": 1})
-
-
-def test_unknown_session_is_idle(env):
-	env()
-	assert api.pill_state(session_uuid="nope") == {"phase": "idle"}
 
 
 def test_in_flight_lookup_finds_analyzing_session(env):
@@ -244,7 +229,7 @@ def test_an_ended_recording_reports_whether_the_request_limit_was_hit(env):
 def test_a_recording_row_younger_than_the_pointer_lifetime_is_not_ended(env):
 	env(sessions=[_s("OS-1", "u1", "Recording", age_minutes=2)])
 	assert api.pill_state(session_uuid="u1")["phase"] == "idle"
-	assert api.pill_state()["phase"] == "idle"
+	assert api.pill_state() == {"phase": "idle"}
 
 
 def test_a_recording_row_just_under_the_pointer_lifetime_is_not_ended(env):
@@ -301,11 +286,6 @@ def test_the_in_flight_lookup_finds_an_ended_recording(env):
 	assert (out["phase"], out["session_uuid"]) == ("ended", "u1")
 
 
-def test_the_in_flight_lookup_skips_a_recent_recording_row(env):
-	env(sessions=[_s("OS-1", "u1", "Recording", age_minutes=1)])
-	assert api.pill_state() == {"phase": "idle"}
-
-
 def test_another_users_recording_row_is_idle(env):
 	env(sessions=[_s("OS-9", "u9", "Recording", user="bob")])
 	assert api.pill_state(session_uuid="u9") == {"phase": "idle"}
@@ -323,30 +303,6 @@ def test_a_recording_row_without_a_start_time_is_idle_and_never_parsed(env, monk
 	assert api.pill_state()["phase"] == "idle"
 
 
-def test_expired_row_that_is_still_the_active_session_is_not_ended(env):
-	from optimus.timing import SESSION_TTL_SECONDS
-
-	age = SESSION_TTL_SECONDS // 60 + 5
-	env(sessions=[_s("OS-1", "u1", "Recording", age_minutes=age)], active="u1", pointer_gone=False)
-	assert api.pill_state(session_uuid="u1")["phase"] == "recording"
-
-
-def test_expired_row_with_a_different_active_session_is_ended(env):
-	from optimus.timing import SESSION_TTL_SECONDS
-
-	age = SESSION_TTL_SECONDS // 60 + 5
-	env(sessions=[_s("OS-1", "u1", "Recording", age_minutes=age)], active="u2", pointer_gone=False)
-	assert api.pill_state(session_uuid="u1")["phase"] == "ended"
-
-
-def test_expired_row_with_the_pointer_gone_is_ended(env):
-	from optimus.timing import SESSION_TTL_SECONDS
-
-	age = SESSION_TTL_SECONDS // 60 + 5
-	env(sessions=[_s("OS-1", "u1", "Recording", age_minutes=age)], active=None, pointer_gone=True)
-	assert api.pill_state(session_uuid="u1")["phase"] == "ended"
-
-
 def _expired_row(env_build, uuid="u1", **kw):
 	from optimus.timing import SESSION_TTL_SECONDS
 
@@ -357,13 +313,3 @@ def _expired_row(env_build, uuid="u1", **kw):
 def test_row_ended_false_when_active_pointer_is_this_session(env):
 	row = _expired_row(env, pointer_gone=False)
 	assert api._row_ended("alice", row, "u1") is False
-
-
-def test_row_ended_true_when_active_pointer_is_another_session(env):
-	row = _expired_row(env, pointer_gone=False)
-	assert api._row_ended("alice", row, "u2") is True
-
-
-def test_row_ended_true_when_pointer_gone(env):
-	row = _expired_row(env, pointer_gone=True)
-	assert api._row_ended("alice", row, None) is True

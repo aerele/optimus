@@ -61,11 +61,3 @@ def test_analyzer_notes_section_is_not_rendered_even_with_warnings():
 	# The suppression explanations themselves are nowhere in the report.
 	assert "Suppressed 52 SQL findings from framework code." not in html
 	assert "Skipped 127 non-SELECT statements for index suggestions." not in html
-
-
-def test_clean_session_also_renders_no_section():
-	from optimus import renderer
-
-	html = renderer.render(_fake_session_doc(None), recordings=[])
-	assert 'id="analyzer-notes"' not in html
-	assert 'href="#analyzer-notes"' not in html

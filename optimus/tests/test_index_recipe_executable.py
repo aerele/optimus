@@ -624,15 +624,6 @@ def test_the_longest_key_and_a_long_error_type_both_survive_the_cut(monkeypatch)
 	assert title.startswith(f"ensure_indexes: {field} skipped on postgres (the entry is for mariadb)")
 
 
-def test_a_failing_error_log_never_stops_the_next_entry(monkeypatch):
-	site = _Site(fail_on={"idx_sales_invoice_0000000b"}, log_error_fails=True)
-	entries = [
-		{"doctype": "Sales Invoice", "columns": ["customer", "remarks(255)"], "index_name": "idx_sales_invoice_0000000b"},
-		{"doctype": "Sales Invoice", "columns": ["customer", "status"], "index_name": _SI_NAME},
-	]
-	assert _run(entries, site, monkeypatch) == [("add_index", "Sales Invoice", ["customer", "status"], _SI_NAME)]
-
-
 # --- the lock wait ------------------------------------------------------------------
 
 
@@ -737,12 +728,6 @@ def test_a_written_error_log_row_prints_nothing(monkeypatch, capsys):
 	site = _Site(fail_on={_SI_NAME})
 	assert _migrate([entry], site, monkeypatch) is None
 	assert capsys.readouterr().err == "" and len(site.errors) == 1
-
-
-def test_the_ps_route_entry_is_stamped_mariadb():
-	"""PG has no get_column_index, so the Property Setter entry must never run there."""
-	code = ir.ensure_indexes_code([_PO_NO], app_name="myapp")
-	assert '{"doctype": "Sales Invoice", "search_index_field": "po_no", "db": "mariadb"}' in code
 
 
 @pytest.mark.parametrize("lock_wait", [86400, 300])  # v15 (no cap) and v16 migrate (300 s)

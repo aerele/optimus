@@ -107,23 +107,13 @@ def test_moved_or_quoted_lines_are_not_introduced():
 	added = H.format("```diff\n     frappe.throw('x')\n+    frappe.db.commit()\n```")
 	assert sg.units(moved, src) == []
 	assert sg.units(quoted, src) == []
+	trailing_space = H.format("```diff\n-    frappe.db.commit()\n+    frappe.db.commit()  \n```")
+	assert sg.units(trailing_space, src) == []  # a moved line differing only by trailing spaces
 	assert len(sg.units(quoted, [])) == 1  # nothing shown: every plain-block line is introduced
 	[unit] = sg.units(added, src)
 	assert [ln.strip() for ln, is_new in unit.lines if is_new] == ["frappe.db.commit()"]
 	ddl = H.format("```sql\nALTER TABLE `tabUser` ADD INDEX i (email);\n```")
 	assert sg.units(ddl, src) == []  # code for the report, nothing for Python/JS rules
-
-
-def test_scanner_skips_moved_lines_and_flags_new_ones():
-	rules = require_semgrep()
-	src = ["def validate(self):", "    frappe.db.commit()"]
-	texts = {
-		"moved": H.format("```diff\n-    frappe.db.commit()\n+    frappe.db.commit()  \n```"),
-		"added": H.format("```diff\n     frappe.db.commit()\n+    frappe.db.rollback()\n+    frappe.db.commit()\n```"),
-	}
-	scanned = load("_semgrep").scan_texts(texts, rules, {"moved": src, "added": src})
-	assert scanned["moved"].units == 0 and scanned["moved"].hits == []
-	assert "frappe-manual-commit" in [h["rule"] for h in scanned["added"].hits]
 
 
 def test_report_scans_only_introduced_code():

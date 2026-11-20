@@ -22,7 +22,6 @@ import types
 import pytest
 
 from optimus.renderer import (
-	_OTHER_APP_LABEL,
 	_app_from_finding,
 	_finding_to_dict,
 	_normalize_callsite,
@@ -51,11 +50,6 @@ class TestNormalizeCallsite:
 			"function": "",
 		}
 
-	def test_string_with_absolute_path(self):
-		cs = _normalize_callsite("/home/frappe/bench/apps/myapp/foo.py:10")
-		assert cs["filename"] == "/home/frappe/bench/apps/myapp/foo.py"
-		assert cs["lineno"] == 10
-
 	def test_string_with_windows_drive_letter_keeps_path(self):
 		"""Partitioning from the right keeps a drive-letter path like
 		'C:\\x\\foo.py:12' intact (the 'C:' survives)."""
@@ -65,9 +59,6 @@ class TestNormalizeCallsite:
 
 	def test_empty_string_returns_none(self):
 		assert _normalize_callsite("") is None
-
-	def test_none_returns_none(self):
-		assert _normalize_callsite(None) is None
 
 	def test_unknown_type_returns_none(self):
 		# e.g. an int slipped in from somewhere don't crash, skip.
@@ -111,31 +102,6 @@ class TestAppFromFindingRegression:
 			f"callsite; got: {app!r}"
 		)
 
-	def test_dict_callsite_still_works(self):
-		"""Regression boundary: existing dict-shape callers unaffected."""
-		finding = {
-			"finding_type": "N+1 Query",
-			"technical_detail": {
-				"callsite": {
-					"filename": "apps/myapp/foo.py",
-					"lineno": 10,
-					"function": "f",
-				},
-			},
-		}
-		assert _app_from_finding(finding) == "myapp"
-
-	def test_missing_callsite_routes_to_other(self):
-		finding = {"finding_type": "Slow Hot Path", "technical_detail": {}}
-		assert _app_from_finding(finding) == _OTHER_APP_LABEL
-
-	def test_empty_string_callsite_routes_to_other(self):
-		finding = {
-			"finding_type": "Slow Query",
-			"technical_detail": {"callsite": ""},
-		}
-		assert _app_from_finding(finding) == _OTHER_APP_LABEL
-
 
 class TestFindingToDictNormalizes:
 	"""When loading findings from DB, _finding_to_dict converts a string callsite
@@ -160,20 +126,6 @@ class TestFindingToDictNormalizes:
 		assert isinstance(cs, dict)
 		assert cs["filename"] == "apps/myapp/foo.py"
 		assert cs["lineno"] == 42
-
-	def test_dict_callsite_passes_through_unchanged(self):
-		row = self._row({"callsite": {
-			"filename": "apps/myapp/foo.py",
-			"lineno": 42,
-			"function": "f",
-		}})
-		finding = _finding_to_dict(row)
-		cs = finding["technical_detail"]["callsite"]
-		assert cs == {
-			"filename": "apps/myapp/foo.py",
-			"lineno": 42,
-			"function": "f",
-		}
 
 	def test_no_callsite_field_unchanged(self):
 		row = self._row({"normalized_query": "SELECT 1"})

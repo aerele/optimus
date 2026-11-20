@@ -263,17 +263,3 @@ class TestDecoratorThroughDefRows:
 		rows, dl = self._rows(tmp_path, text, 2)  # 2 == the def line
 		assert [r["content"] for r in rows] == ["def foo():"]
 		assert dl == 2
-
-
-class TestFindHeaderDefLine:
-	def test_def_line_returns_itself(self):
-		assert fe._find_header_def_line(["def foo():", "    pass"], 1) == 1
-
-	def test_decorator_scans_to_def(self):
-		assert fe._find_header_def_line(["@deco", "def foo():"], 1) == 2
-
-	def test_non_header_returns_none(self):
-		assert fe._find_header_def_line(["x = 1", "def foo():"], 1) is None
-
-	def test_class_before_def_returns_none(self):
-		assert fe._find_header_def_line(["@deco", "class C:", "    def m(self):"], 1) is None

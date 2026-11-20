@@ -64,17 +64,6 @@ def test_record_job_does_not_clobber_status(fake_cache):
 	assert j["duration_ms"] == 120.5
 
 
-def test_set_job_recording_and_status_merge(fake_cache):
-	session.record_job("s1", "job-1", "app.tasks.heavy")
-	session.set_job_recording("s1", "job-1", "rec-abc")
-	session.set_job_status("s1", "job-1", status="Failed", error="boom")
-	j = session.get_jobs("s1")[0]
-	assert j["recording_uuid"] == "rec-abc"
-	assert j["status"] == "Failed"
-	assert j["error"] == "boom"
-	assert j["method"] == "app.tasks.heavy"  # earlier fields preserved
-
-
 def test_get_jobs_returns_all(fake_cache):
 	session.record_job("s1", "job-1", "a")
 	session.record_job("s1", "job-2", "b")
@@ -91,7 +80,9 @@ def test_delete_session_state_clears_jobs(fake_cache):
 def test_empty_session_uuid_is_safe(fake_cache):
 	session.record_job("", "job-1", "a")
 	session.set_job_status("s1", "", status="X")
+	session.set_job_status("", "job-1", status="X")
 	assert session.get_jobs("") == []
+	assert fake_cache.store == {}  # neither an empty session nor an empty job id wrote anything
 
 
 # ---------------------------------------------------------------------------
@@ -153,16 +144,6 @@ class TestAtomicMergeJobMeta:
 		assert j["method"] == "first"
 		assert j["enqueued_at"] == "t1"
 
-	def test_setdefault_writes_when_field_absent(self, fake_cache):
-		"""First call with setdefault=True must actually write the fields
-		(setdefault should NOT mean 'never write')."""
-		session._atomic_merge_job_meta(
-			"s1", "job-1", {"method": "foo", "enqueued_at": "t1"}, setdefault=True
-		)
-		j = session.get_jobs("s1")[0]
-		assert j["method"] == "foo"
-		assert j["enqueued_at"] == "t1"
-
 	def test_fallback_when_eval_raises(self, fake_cache, monkeypatch):
 		"""If frappe.cache.eval exists but raises (e.g. NoScriptError on a
 		Redis variant), the helper must still complete via the non-atomic
@@ -184,12 +165,6 @@ class TestAtomicMergeJobMeta:
 		session._atomic_merge_job_meta("s1", "job-1", {})
 		session._atomic_merge_job_meta("s1", "job-1", {"error": None})
 		assert session.get_jobs("s1") == []  # never wrote anything
-
-	def test_empty_session_or_job_id_is_safe(self, fake_cache):
-		"""Defensive: empty session_uuid or job_id silently no-ops."""
-		session._atomic_merge_job_meta("", "job-1", {"status": "x"})
-		session._atomic_merge_job_meta("s1", "", {"status": "x"})
-		assert session.get_jobs("s1") == []
 
 
 # ---------------------------------------------------------------------------

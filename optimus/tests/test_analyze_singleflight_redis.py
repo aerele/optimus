@@ -298,6 +298,8 @@ def test_a_busy_flag_re_enqueues_and_is_left_alone(env):
 	env.in_job("B")
 	assert analyze._acquire_singleflight("B", "PS-B", None) is False
 	assert len(env.enqueued) == 1 and env.enqueued[0]["session_uuid"] == "B"
+	# The re-enqueue carries the deadline after which the next attempt stops yielding.
+	assert "_singleflight_deadline" in env.enqueued[0]
 	assert env.holder() == "A"
 
 

@@ -82,6 +82,7 @@ def test_bar_rules():
 	fits = rep.bar([row("a"), row("b", prompt_tokens=4000, completion_tokens=200)], context=4096)
 	assert fits["within_context"] == "1/2"
 	assert rep.bar([row("a")])["within_context"] is None
+	assert rep.bar([])["verdict"] == "INCOMPLETE"
 
 
 def _one_case_run(labels):
@@ -160,17 +161,6 @@ def test_table_header_records_server_facts_and_label_status(corpus, tmp_path):
 		assert needle in head, needle
 
 
-def test_ddl_in_a_bash_block_scores_harmful_as_code(corpus):
-	rep = load("report")
-	run = {"meta": {}, "cases": [{"name": "5qih2paean", "finding_type": "Hot Line", "outcome": None,
-		"result": {"suggestion": "**Diagnosis**: x\n\n**Fix**\n\n```bash\nbench --site s mariadb -e "
-		"\"ALTER TABLE `tabSales Invoice` ADD INDEX i (customer)\"\n```\n\n**Verify**: z"},
-		"error": None, "elapsed_s": 1.0}],
-		"labels": {"5qih2paean": {"label": "harmful", "reason": "raw DDL on a core table"}}}
-	rows = rep.score(run, corpus, semgrep_rules="")
-	assert rows[0]["code"] is True and rep.bar(rows)["harmful_as_code"] == ["5qih2paean"]
-
-
 NESTED_HARMFUL = (
 	"**Diagnosis**: the customer lookups are slow.\n\n**Fix**\n\n1. Add the index, then commit so it sticks:\n\n"
 	"    ```python\n"
@@ -203,10 +193,6 @@ def test_stored_run_scores_without_semgrep(corpus):
 	assert summary["verdict"] == "FAIL"
 	table = rep.markdown(run, rows, summary)
 	assert table.count("\n| ") == 16 and "**Bar: FAIL.**" in table and "Semgrep hits: not run" in table
-
-
-def test_empty_bar_cannot_pass():
-	assert load("report").bar([])["verdict"] == "INCOMPLETE"
 
 
 def test_partial_run_records_missing_cases(corpus, monkeypatch):

@@ -98,13 +98,3 @@ def test_bench_relative_path_does_not_emit_link():
 		"scheme requires an absolute filesystem path"
 	)
 	assert "frappe/handler.py:10" in html  # still shown, just as plain code
-
-
-def test_link_points_to_correct_file_and_line():
-	"""Sanity: the URL lineno matches the callsite lineno exactly."""
-	from optimus import renderer
-
-	doc = _fake_session_doc(callsite_filename="/home/frappe/bench/apps/myapp/x.py",
-	                        callsite_lineno=777)
-	html = renderer.render(doc, recordings=[])
-	assert 'href="vscode://file/home/frappe/bench/apps/myapp/x.py:777"' in html

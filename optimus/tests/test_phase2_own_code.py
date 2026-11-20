@@ -123,12 +123,6 @@ class TestWrapperChain:
 		assert wrapped._profiler_original is original
 		assert inspect.unwrap(wrapped) is original
 
-	def test_a_wrapped_pick_resolves_to_the_real_file_and_line(self, app):
-		meta = picker.resolve_freeform("zz_p2app.api.decorated")
-		real = inspect.unwrap(__import__("zz_p2app.api", fromlist=["x"]).decorated).__code__
-		assert (meta["file"], meta["lineno"]) == (real.co_filename, real.co_firstlineno)
-		assert meta["eligible"] is True
-
 	def test_an_unwrap_cycle_is_ineligible_without_raising(self, app):
 		import zz_p2app.api as api
 
@@ -163,20 +157,6 @@ class TestOptimusCodeIsNotProfiled:
 		eligible, _reason, _code = picker._profile_target(target)
 		assert eligible is True
 
-	def test_a_typed_optimus_function_is_ineligible_with_a_fixed_reason(self):
-		meta = picker.resolve_freeform("optimus.analyzers.base.is_optimus_path")
-		assert meta["eligible"] is False
-		assert meta["ineligible_reason"] == OWN_CODE_REASON
-
-	def test_a_frappe_style_function_wrapped_by_optimus_is_eligible_and_points_at_the_original(self, app):
-		meta = picker.resolve_freeform("zz_p2app.core.get_doc")
-		assert meta["eligible"] is True
-		assert meta["file"].endswith("zz_p2app/core.py")
-
-	def test_a_user_module_with_optimus_in_its_path_stays_eligible(self, app):
-		meta = picker.resolve_freeform("zz_p2app.optimus.report.build")
-		assert meta["eligible"] is True and meta["ineligible_reason"] is None
-
 	def test_the_reason_is_visible_in_the_prepared_metadata_without_paths(self, app, monkeypatch):
 		prepared = capture.prepare_line_profile_picks(
 			[{"dotted_path": "optimus.analyzers.base.is_optimus_path"}, {"dotted_path": "zz_p2app.api.plain"}]
@@ -191,9 +171,6 @@ class TestOptimusCodeIsNotProfiled:
 		assert str(caught.value) == (
 			f"No selected function can be line-profiled: optimus.analyzers.base.is_optimus_path: {OWN_CODE_REASON}"
 		)
-
-	def test_the_no_eligible_error_is_a_capture_error_so_the_manual_path_still_shows_it(self):
-		assert issubclass(capture.NoEligiblePickError, capture.CaptureError)
 
 	def test_all_ineligible_lists_at_most_five_picks_and_no_filesystem_paths(self, app, monkeypatch):
 		def refuse(dotted):

@@ -19,10 +19,6 @@ from optimus.analyzers.base import (
 
 
 class TestFrameworkAppsMembership:
-	def test_frappe_core_in_set(self):
-		assert "frappe" in FRAMEWORK_APPS
-		assert "optimus" in FRAMEWORK_APPS
-
 	def test_all_official_apps_present(self):
 		"""Pins the full list so accidentally dropping one (e.g.
 		hrms) re-introduces noise for users of that app."""
@@ -351,17 +347,6 @@ class TestUserAppWithAppsSubpackage:
 		assert _top_level_app("f", "shop/apps/models/order.py") == "shop"
 
 
-class TestThirdPartyLibSetsUnified:
-	"""The SQL-findings classifier (base._THIRD_PARTY_LIB_NAMES) and the
-	hot-frame classifier (call_tree._THIRD_PARTY_LIB_SEGMENTS) must be the SAME
-	app-root set, so the two surfaces can never disagree on whether a library is
-	user code."""
-
-	def test_call_tree_reuses_base_lib_set(self):
-		from optimus.analyzers import base, call_tree
-		assert call_tree._THIRD_PARTY_LIB_SEGMENTS is base._THIRD_PARTY_LIB_NAMES
-
-
 class TestInstalledAppsAllowlist:
 	"""Exclusion mode with the ground-truth installed-apps allowlist (what a real
 	site passes): application-vs-library is decided by 'is it an installed Frappe
@@ -416,12 +401,27 @@ class TestInstalledAppsAllowlist:
 		# A user app NOT named like any bundled lib is still user code off-bench.
 		assert is_framework_callsite("myapp/myapp/api.py", installed_apps=None) is False
 
-	def test_allowlist_resolver_none_off_bench(self):
-		# On this off-bench unit-test host frappe.get_installed_apps isn't callable
-		# in the analyzer context, so the resolver returns None → heuristic fallback.
+	def test_allowlist_resolver_none_off_bench(self, monkeypatch):
+		# The resolver returns the installed apps as a frozenset, and None (the
+		# off-bench heuristic fallback) when frappe cannot answer or answers empty.
+		import frappe
+
 		from optimus.analyzers.base import installed_apps_allowlist
-		result = installed_apps_allowlist()
-		assert result is None or isinstance(result, frozenset)
+
+		def _installed():
+			return ["frappe", "myapp"]
+
+		def _raises():
+			raise RuntimeError("no site")
+
+		monkeypatch.setattr(frappe, "get_installed_apps", _installed, raising=False)
+		assert installed_apps_allowlist() == frozenset({"frappe", "myapp"})
+
+		monkeypatch.setattr(frappe, "get_installed_apps", _raises, raising=False)
+		assert installed_apps_allowlist() is None
+
+		monkeypatch.setattr(frappe, "get_installed_apps", lambda: [], raising=False)
+		assert installed_apps_allowlist() is None
 
 
 class TestPureHelperFrameAllowlistOnBench:

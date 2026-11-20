@@ -57,23 +57,6 @@ def test_multi_variant_callsite_emits_no_finding():
 	)
 
 
-def test_single_variant_keeps_classic_title():
-	"""Backwards compat: 1 variant × N occurrences still reads as
-	'Same query ran N× at file:line' the classic N+1 shape."""
-	stack = [
-		{"filename": "apps/myapp/foo.py", "lineno": 10, "function": "loop"},
-	]
-	recording = _make_recording(stack, queries_per_variant=15, variants=1)
-	ctx = AnalyzeContext(session_uuid="t", docname="t")
-	result = n_plus_one.analyze([recording], ctx)
-
-	assert len(result.findings) == 1
-	f = result.findings[0]
-	assert "Same query ran 15× at" in f["title"], (
-		f"Single-variant title must match classic shape; got: {f['title']!r}"
-	)
-
-
 def test_max_variant_threshold_prevents_fanout_false_positives():
 	"""A fan-out callsite 10 different queries, each called once
 	isn't an N+1. It's a function that dispatches to multiple queries.

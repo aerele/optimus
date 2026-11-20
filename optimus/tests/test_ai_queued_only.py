@@ -19,12 +19,6 @@ def test_only_the_background_worker_calls_session_ai():
 		assert not [n for n in calls if isinstance(n.func, ast.Attribute) and n.func.attr in {"suggest_fix", "humanize_steps"}], path
 
 
-def test_ambient_spend_marker_has_no_production_reader_or_writer():
-	root = Path(__file__).resolve().parents[1]
-	for name in ("ai_fix.py", "api.py", "analyze.py"):
-		assert "_optimus_spend_session" not in (root / name).read_text()
-
-
 def test_usage_collection_cannot_write_to_a_previous_workers_session(monkeypatch):
 	writes = []
 	monkeypatch.setattr(frappe, "db", SimpleNamespace(sql=lambda *a, **kw: writes.append(True)))

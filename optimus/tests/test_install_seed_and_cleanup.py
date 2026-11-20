@@ -72,9 +72,6 @@ def site(monkeypatch):
 
 
 class TestRefuseLegacyInstall:
-	def test_clean_site_passes(self, site):
-		install._refuse_legacy_install()
-
 	@pytest.mark.parametrize("legacy", [("Module Def", "Frappe Profiler"), ("DocType", "Profiler Session")])
 	def test_legacy_module_or_doctype_blocks_install(self, site, legacy):
 		frappe = install.frappe

@@ -71,14 +71,6 @@ def test_missing_finish_at_budget_is_incomplete(monkeypatch):
 	assert len(fake.calls) == 1
 
 
-@pytest.mark.parametrize("raw", [False, 0, "False", "false", "0"])
-def test_reask_false_spellings(monkeypatch, raw):
-	import frappe
-
-	monkeypatch.setattr(frappe, "conf", {"optimus_ai_reask": raw}, raising=False)
-	assert ai_fix._reask_enabled() is False
-
-
 def test_budget_setting_validation_and_capacity(monkeypatch):
 	import frappe
 

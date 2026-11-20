@@ -7,7 +7,7 @@
   ``AI_ENDPOINT_ALLOWLIST`` with a written reason. An endpoint nothing calls is attack surface
   and maintenance cost (the four PR-1 deleted had no caller in Optimus, the other bench apps or
   the docs).
-* The four deleted endpoints stay deleted; their library functions in ``ai_fix`` stay.
+* The four deleted endpoints stay deleted.
 * ``test_ai_connection`` is System-Manager-only and limited per user; ``ai_capabilities`` is a
   read-only role-gated GET.
 * ``_humanize_steps_core`` (kept: ``refill_ai_suggestions`` uses it) persists the notes and the
@@ -139,11 +139,6 @@ def test_stale_allowlist_entries_are_caught():
 @pytest.mark.parametrize("name", DELETED)
 def test_unused_ai_endpoints_are_deleted(name):
 	assert not hasattr(api, name), f"api.{name} was deleted in PR-1; use refill_ai_suggestions"
-
-
-@pytest.mark.parametrize("name", ["suggest_fix", "humanize_steps"])
-def test_the_ai_library_functions_stay(name):
-	assert callable(getattr(ai_fix, name))
 
 
 # --- test_ai_connection ----------------------------------------------------------------------

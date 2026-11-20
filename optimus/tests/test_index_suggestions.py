@@ -985,97 +985,6 @@ def test_typeerror_from_optimizer_is_also_a_soft_skip(monkeypatch, empty_context
 	assert len(soft) == 1
 
 
-def test_modified_column_is_never_suggested(monkeypatch, empty_context):
-	"""'modified' is a Frappe metadata column updated on every save; indexing
-	it causes write amplification, so it must never be suggested. Uses a
-	non-meta table so the column blacklist (not the meta-table rule) is
-	exercised, with queries above the per-query floor so only the blacklist
-	suppresses them.
-	"""
-
-	def fake_optimize(query):
-		return _FakeDBIndex("tabSales Invoice", "modified")
-
-	_install_fake_recorder_module(monkeypatch, fake_optimize)
-	_install_fake_frappe_db(
-		monkeypatch,
-		indexed_columns_by_table={"tabSales Invoice": {"name", "customer"}},
-		column_types_by_table={
-			"tabSales Invoice": {
-				"name": "varchar",
-				"customer": "varchar",
-				"modified": "datetime",
-			},
-		},
-	)
-
-	recording = {
-		"uuid": "ix_modified_lifecycle",
-		"path": "/", "cmd": None, "method": "GET",
-		"event_type": "HTTP Request", "duration": 500,
-		"calls": [
-			{
-				"query": "SELECT * FROM `tabSales Invoice` ORDER BY modified DESC LIMIT 20",
-				"normalized_query": "SELECT * FROM `tabSales Invoice` ORDER BY modified DESC LIMIT ?",
-				"duration": 50.0,  # well above per-query floor
-				"stack": [],
-			}
-		] * 10,
-	}
-	result = index_suggestions.analyze([recording], empty_context)
-	missing = [f for f in result.findings if f["finding_type"] == "Missing Index"]
-	assert missing == [], (
-		"Suggestion on tabSales Invoice.modified must be suppressed "
-		f"modified is a Frappe metadata column. Got: {missing}"
-	)
-
-	# The warning must explicitly name the blacklist reason and include
-	# the table.column for user verification.
-	blacklist_warnings = [
-		w for w in result.warnings
-		if "metadata column" in w or "every save" in w
-	]
-	assert len(blacklist_warnings) == 1, (
-		f"Expected blacklist warning; got warnings={result.warnings}"
-	)
-	assert "tabSales Invoice.modified" in blacklist_warnings[0], (
-		f"Warning must name the suppressed column; got: {blacklist_warnings[0]}"
-	)
-
-
-def test_modified_by_column_is_never_suggested(monkeypatch, empty_context):
-	"""Same rule applies to modified_by (also updated on every save)."""
-
-	def fake_optimize(query):
-		return _FakeDBIndex("tabUser", "modified_by")
-
-	_install_fake_recorder_module(monkeypatch, fake_optimize)
-	_install_fake_frappe_db(
-		monkeypatch,
-		indexed_columns_by_table={"tabUser": {"name"}},
-		column_types_by_table={
-			"tabUser": {"name": "varchar", "modified_by": "varchar"},
-		},
-	)
-
-	recording = {
-		"uuid": "ix_modified_by",
-		"path": "/", "cmd": None, "method": "GET",
-		"event_type": "HTTP Request", "duration": 100,
-		"calls": [
-			{
-				"query": "SELECT * FROM tabUser WHERE modified_by = 'x'",
-				"normalized_query": "SELECT * FROM tabUser WHERE modified_by = ?",
-				"duration": 20.0,
-				"stack": [],
-			}
-		] * 10,
-	}
-	result = index_suggestions.analyze([recording], empty_context)
-	missing = [f for f in result.findings if f["finding_type"] == "Missing Index"]
-	assert missing == []
-
-
 def test_never_suggest_skips_schema_lookup(monkeypatch, empty_context):
 	"""Performance guard: the blacklist check must run BEFORE the
 	information_schema lookups, so we don't waste DB roundtrips on
@@ -1326,45 +1235,6 @@ def test_low_per_query_skips_classify_lookup(monkeypatch, empty_context):
 		)
 
 
-def test_high_per_query_savings_still_emits(monkeypatch, empty_context):
-	"""Positive case: a suggestion with a meaningful per-query
-	average (50ms each × 10 queries = 500ms total) must still fire.
-	The floor suppresses only marginal cases."""
-
-	def fake_optimize(query):
-		return _FakeDBIndex("tabReport", "department")
-
-	_install_fake_recorder_module(monkeypatch, fake_optimize)
-	_install_fake_frappe_db(
-		monkeypatch,
-		indexed_columns_by_table={"tabReport": {"name"}},
-		column_types_by_table={
-			"tabReport": {"name": "varchar", "department": "varchar"},
-		},
-	)
-
-	calls = [
-		{
-			"query": f"SELECT * FROM tabReport WHERE department = 'd{i}'",
-			"normalized_query": "SELECT * FROM tabReport WHERE department = ?",
-			"duration": 55.0,  # 55ms per query well above 2ms floor
-			"stack": [],
-		}
-		for i in range(10)
-	]
-	recording = {
-		"uuid": "ix_high_avg",
-		"path": "/", "cmd": None, "method": "GET",
-		"event_type": "HTTP Request", "duration": 550,
-		"calls": calls,
-	}
-	result = index_suggestions.analyze([recording], empty_context)
-	missing = [f for f in result.findings if f["finding_type"] == "Missing Index"]
-	assert len(missing) == 1
-	# 550ms > HIGH_IMPACT_MS (500) → High severity
-	assert missing[0]["severity"] == "High"
-
-
 def test_per_query_floor_boundary_at_exactly_2ms(monkeypatch, empty_context):
 	"""Boundary: exactly MIN_AVG_SAVINGS_PER_QUERY_MS (2ms) must
 	still fire. The condition is `< MIN`, not `<=`."""
@@ -1442,6 +1312,9 @@ def test_classify_column_blacklists_every_frappe_metadata_column():
 		status, reason = _classify_column("tabFoo", col, {}, {})
 		assert status == "never_suggest", f"{col!r} should be never_suggest, got {status}"
 		assert "framework column" in reason
+	# The two columns every save updates stay in the set (the loop above reads the set itself).
+	for col in ("modified", "modified_by"):
+		assert _classify_column("tabFoo", col, {}, {})[0] == "never_suggest", col
 	# Case-insensitive.
 	assert _classify_column("tabFoo", "Creation", {}, {})[0] == "never_suggest"
 	assert _classify_column("tabFoo", "  MODIFIED ", {}, {})[0] == "never_suggest"

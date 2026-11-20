@@ -143,26 +143,6 @@ class TestFunctionNotInvoked:
 	# v0.7.x: a picked-but-uninvoked function no longer emits a per-function
 	# "Function Not Invoked" finding (it cluttered the Findings list). It's
 	# folded into ONE consolidated warning instead the report stays clean.
-	def test_empty_lines_emits_warning_not_finding(self):
-		fn = _function("my_app.never_runs", [])
-
-		result = analyzer.analyze([fn])
-
-		assert not [f for f in result.findings if f["finding_type"] == "Function Not Invoked"]
-		assert any("never_runs" in w for w in result.warnings)
-
-	def test_all_zero_hits_emits_warning_not_finding(self):
-		# Some line_profiler versions still report the lines but with hits=0.
-		fn = _function("my_app.never_runs", [
-			_line(1, "x = 1", 0, 0.0),
-			_line(2, "return x", 0, 0.0),
-		])
-
-		result = analyzer.analyze([fn])
-
-		assert not [f for f in result.findings if f["finding_type"] == "Function Not Invoked"]
-		assert any("never_runs" in w for w in result.warnings)
-
 	def test_multiple_uninvoked_share_one_warning(self):
 		result = analyzer.analyze([
 			_function("my_app.a", []),

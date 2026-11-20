@@ -18,8 +18,6 @@ from optimus import ai_fix, ai_privacy, analyze
 from optimus.analyzers import call_tree, per_action
 from optimus.analyzers.base import AnalyzeContext
 from optimus.renderer import source_resolution
-from optimus.report_context import build_report_context
-from optimus.tests.test_report_context import _ctx, _doc
 
 JOB_PATH = "erpnext.accounts.utils.repost_gle"
 GET_LABEL = f"GET {JOB_PATH}"
@@ -255,17 +253,6 @@ def test_summary_drops_the_prefix_of_an_old_session_title():
 # ---- render side -----------------------------------------------------------------------
 
 
-def test_report_actions_mark_a_background_job_event_as_bg():
-	actions = [{"action_label": JOB_LABEL, "event_type": "Background Job", "duration_ms": 100}]
-	out = build_report_context(_doc(), _ctx(actions=actions))
-	assert out["actions"][0]["kind"] == "bg"
-
-
-def test_source_resolution_reads_the_job_path():
-	action = {"event_type": "Background Job", "path": "erpnext.x.y"}
-	assert source_resolution._action_dotted_entry(action) == "erpnext.x.y"
-
-
 @pytest.mark.parametrize("event_type", ["Background Job", "RQ Job"])
 def test_source_resolution_strips_the_query_from_a_job_path(event_type):
 	action = {"event_type": event_type, "path": "pkg.mod.fn?x=1"}
@@ -303,13 +290,6 @@ def test_job_label_without_a_usable_method_tail(path):
 def test_job_with_a_cmd_still_gets_the_job_label():
 	rec = {**_job_v16(), "cmd": "frappe.client.get_list", "form_dict": {"doctype": "User"}}
 	assert per_action.humanized_label(rec) == JOB_LABEL
-
-
-def test_actions_carry_no_inline_finding_field():
-	findings = [{"severity": "High", "title": "Slow loop", "action_ref": "1"}]
-	actions = [{"action_label": "save", "duration_ms": 1}]
-	out = build_report_context(_doc(), _ctx(actions=actions, findings=findings))
-	assert all("finding_inline_html" not in a for a in out["actions"] + out["actions_framework"])
 
 
 UNKNOWN_JOB_TYPES = ["Function Call", "RQ Job", None, "", "Scheduled Job"]

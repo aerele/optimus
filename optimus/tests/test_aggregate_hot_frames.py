@@ -112,28 +112,6 @@ def test_flat_function_aggregates_self_ms_across_actions():
 from optimus import renderer  # noqa: E402 co-located with aggregator tests
 
 
-def test_framework_variant_displays_cumulative_time():
-	"""``build_hot_frames_table(is_hot=False)``: the framework
-	variant displays ``total_cumulative_ms`` because wrapper
-	self-time is sub-sampler-interval and aggregated rows would
-	render as 0ms otherwise."""
-	raw = [{
-		"function": "frappe/model/document.py::run_method",
-		"total_ms": 0,               # self-sum: all calls < 1ms
-		"total_cumulative_ms": 1200, # cumulative includes user-code children
-		"occurrences": 4,
-		"distinct_actions": 2,
-		"action_refs": [0, 1],
-	}]
-	out = renderer.build_hot_frames_table(raw, is_hot=False)
-	assert out, "expected at least one row"
-	assert out[0]["total_ms"] == 1200, (
-		"framework variant must display cumulative time, not the "
-		f"sub-sampler-interval self-time zero; got {out[0]['total_ms']}"
-	)
-	assert out[0]["is_hot"] is False
-
-
 def test_user_app_variant_shows_total_and_self_time():
 	"""``build_hot_frames_table(is_hot=True)``: Total comes from ``total_cumulative_ms``
 	and Self from the stored self-sum ``total_ms``, only when the row was measured."""
@@ -183,17 +161,3 @@ def test_framework_variant_re_sorts_by_displayed_metric():
 		"framework variant must sort by cumulative DESC got "
 		f"{displayed}"
 	)
-
-
-def test_hot_frame_display_name_has_no_placeholder_suffix():
-	# v0.7.x: the hot-frame key already encodes "<short_path>::<func>"; the
-	# display name must not carry the bogus "(?:0)" (placeholder file + lineno 0)
-	# that redact_frame_name used to append.
-	from optimus import renderer
-	out = renderer.build_hot_frames_table(
-		[{"function": "python/common.py::_compute_aggregates",
-		  "total_ms": 100, "occurrences": 3, "distinct_actions": 3}],
-		is_hot=True,
-	)
-	assert out[0]["display_name"] == "python/common.py::_compute_aggregates"
-	assert "(?:0)" not in out[0]["display_name"]

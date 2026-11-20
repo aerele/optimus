@@ -176,14 +176,6 @@ def test_a_failed_insert_releases_the_shared_slot_for_the_other_processes(monkey
 	assert rows == ["t"]
 
 
-def test_a_log_error_that_raises_does_not_escape(monkeypatch):
-	def boom(**kw):
-		raise RuntimeError("insert failed on an aborted transaction")
-
-	_frappe(monkeypatch, FakeRedis(), [], log_error=boom)
-	safe_call.log_hook_error("optimus after_request")
-
-
 def test_the_message_is_passed_on_but_never_part_of_the_key(monkeypatch):
 	import frappe
 
@@ -290,9 +282,34 @@ def test_the_janitor_cap_line_is_keyed_without_the_backlog_count(monkeypatch):
 	assert keys == ["janitor deletion cap hit"]
 
 
-def test_the_import_time_probe_keeps_its_print_fallback():
-	text = (ROOT / "__init__.py").read_text()
-	assert "log = print" in text and 'log = frappe.logger("optimus").error' in text
+def test_the_import_time_probe_falls_back_to_print_before_frappe_is_ready(monkeypatch, capsys):
+	"""Before frappe.init the logger is not usable: the startup probe still reports a
+	foreign owner of sys.monitoring tool 2, through print, and leaves that tool alone."""
+	import sys
+
+	import frappe
+
+	import optimus
+
+	freed = []
+	fake_monitoring = types.SimpleNamespace(
+		PROFILER_ID=2,
+		get_tool=lambda tool_id: "some_other_profiler",
+		set_events=lambda *args: freed.append(args),
+		free_tool_id=lambda tool_id: freed.append(tool_id),
+	)
+	monkeypatch.setattr(sys, "monitoring", fake_monitoring, raising=False)
+
+	def logger_not_ready(*args, **kwargs):
+		raise RuntimeError("frappe is not initialised")
+
+	monkeypatch.setattr(frappe, "logger", logger_not_ready, raising=False)
+
+	optimus._startup_probe_tool2()
+
+	out = capsys.readouterr().out
+	assert "sys.monitoring tool 2 is already owned by 'some_other_profiler'" in out
+	assert freed == []
 
 
 def test_the_retention_backlog_marker_outlives_the_daily_sweep():

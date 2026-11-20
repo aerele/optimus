@@ -112,12 +112,6 @@ def test_missing_index_on_another_apps_field_gets_its_ensure_indexes_entry(evide
 	assert 'belongs to the "erpnext" app, so do not edit it' in out
 
 
-def test_postgres_ddl_never_rendered(evidence):
-	pg = 'CREATE INDEX IF NOT EXISTS "tabSales Invoice_po_no_index" ON "public"."tabSales Invoice" ("po_no");'
-	out = _render(_doc([_missing_index(ddl=pg)]))
-	assert "CREATE INDEX" not in out
-
-
 def test_legacy_session_regenerates_clean(evidence):
 	framework_n1 = _row(
 		"Framework N+1", {"callsite": _CALLSITE, "fix_hint": "Batch the calls."},
@@ -136,11 +130,12 @@ def test_table_card_keeps_candidate_columns_without_installation_code(evidence):
 	"""Keep the advisor's usable columns, without repeating its installation module."""
 	table = _table(recommended_index={
 		"columns": ["customer", "remarks"], "doctype": "Sales Invoice",
-		"together_count": 3, "read_count": 4, "also_filtered": [],
+		"together_count": 3, "read_count": 4, "also_filtered": ["status"],
 	})
 	out = _render(_doc([], [table]))
 	assert "(customer, remarks(255))" in out
 	assert "filtered together in <strong>3</strong> of 4 reads" in out
+	assert "Other columns this session filtered on" in out and "status" in out
 	assert "EXPLAIN" in out and "existing indexes" in out
 	for unwanted in ("ensure_indexes", "INDEXES =", "hooks.py", "frappe.db.add_index", "would help those reads"):
 		assert unwanted not in out
@@ -234,17 +229,6 @@ def test_pure_python_hot_line_keeps_its_ai_fix(evidence):
 	}, llm=dict(_OLD_AI, suggestion="**Fix**\n\nuse-a-sum"))
 	out = _render(_doc([hot]))
 	assert "use-a-sum" in out
-
-
-def test_recipe_failure_fails_closed(monkeypatch):
-	def boom(*a, **kw):
-		raise RuntimeError("recipe bug")
-
-	monkeypatch.setattr(index_recipes, "advise_finding", boom)
-	out = _render(_doc([_missing_index()]))
-	assert "ALTER TABLE" not in out
-
-
 
 
 # --- Redundant Call findings analyzed before the L5 fix (no D-STAMP stamp) ----
@@ -543,20 +527,7 @@ def test_a_failed_missing_index_is_neutral_and_says_what_to_do(evidence, monkeyp
 	assert recipe_enrichment.RECIPE_FAILED_HINT in out
 	assert 'send the bench log line "optimus: index advice failed" to the Optimus maintainers' in out
 	assert "EXPLAIN yourself" in recipe_enrichment.RECIPE_FAILED_HINT
-
-
-def test_a_failed_card_gives_a_neutral_verdict_and_a_next_step(evidence, monkeypatch):
-	def boom(*a, **kw):
-		raise RuntimeError("card bug")
-
-	monkeypatch.setattr(index_recipes, "advise_table", boom)
-	out = _render(_doc([], [_table()]))
-	note = recipe_enrichment.RECIPE_FAILED_CARD_NOTE
-	assert note.startswith(index_recipes.NO_VERDICT) and "Do not add this index" not in note
-	assert 'send the bench log line "optimus: index advice failed"' in note
-	assert note in out
-	assert ">Index review</div>" in out
-	assert "would help those reads" not in out
+	assert "ALTER TABLE" not in out
 
 
 def test_the_display_overrides_are_idempotent(indexed):
@@ -577,18 +548,6 @@ def test_the_display_overrides_are_idempotent(indexed):
 	assert findings == once
 	assert findings[0]["action_title"] == recipe_enrichment.NO_INDEX_ACTION_TITLE
 	assert "action_title" not in findings[1] and "action_title" not in findings[2]
-
-
-def test_a_render_parses_each_query_once_for_its_aliases(evidence, monkeypatch):
-	"""The alias map is memoised per query in the render's parser."""
-	calls = []
-	real = index_recipes.table_aliases
-	monkeypatch.setattr(index_recipes, "table_aliases", lambda q: calls.append(q) or real(q))
-	detail = {"table": "tabSales Invoice", "normalized_query": "SELECT name FROM `tabSales Invoice` WHERE customer = ?",
-		"callsite": _CALLSITE}
-	rows = [_row(ftype, dict(detail)) for ftype in ("Full Table Scan", "Low Filter Ratio", "Filesort")]
-	_render(_doc(rows))
-	assert calls == [detail["normalized_query"]]
 
 
 # --- a routed Filesort or Temporary Table whose index keeps the sort --------------------

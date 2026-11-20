@@ -7,9 +7,6 @@ from optimus.line_profile import diff
 
 
 class TestContentHash:
-	def test_same_text_same_hash(self):
-		assert diff.content_hash("a = 1") == diff.content_hash("a = 1")
-
 	def test_trailing_whitespace_ignored(self):
 		assert diff.content_hash("a = 1") == diff.content_hash("a = 1   ")
 
@@ -50,6 +47,7 @@ class TestAlignFunction:
 		assert all(r["status"] == "matched" for r in rows)
 		assert rows[0]["delta_ms"] == -1.0  # 4 - 5
 		assert rows[1]["delta_ms"] == -2.0  # 8 - 10
+		assert diff.align_function([], []) == []
 
 	def test_whitespace_only_edit_matches(self):
 		a = [_line(1, "x = 1", 5.0)]
@@ -90,9 +88,6 @@ class TestAlignFunction:
 
 		statuses = sorted(r["status"] for r in rows)
 		assert statuses == ["added", "removed"]
-
-	def test_empty_inputs_empty_output(self):
-		assert diff.align_function([], []) == []
 
 	def test_matched_row_has_full_shape(self):
 		a = [_line(10, "compute()", 50.0, hits=3)]

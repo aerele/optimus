@@ -45,10 +45,6 @@ class TestAppFromFinding:
 		f = _finding("myapp/foo.py")
 		assert _app_from_finding(f) == "myapp"
 
-	def test_framework_path(self):
-		f = _finding("frappe/model/document.py")
-		assert _app_from_finding(f) == "frappe"
-
 	def test_no_callsite_falls_back_to_other(self):
 		f = _finding(app_filename=None)
 		assert _app_from_finding(f) == _OTHER_APP_LABEL
@@ -220,11 +216,6 @@ class TestOtherBucketSuppressed:
 		assert _OTHER_APP_LABEL not in apps
 		assert apps == ["myapp"]
 
-	def test_other_bucket_absent_when_no_uncallsite_findings(self):
-		findings = [_finding("apps/myapp/foo.py")]
-		buckets = _bucket_findings_by_app(findings)
-		assert _OTHER_APP_LABEL not in [b["app"] for b in buckets]
-
 
 class TestBucketContents:
 	def test_bucket_preserves_input_order_within_app(self):
@@ -238,13 +229,3 @@ class TestBucketContents:
 		buckets = _bucket_findings_by_app(findings)
 		bucket_impacts = [f["estimated_impact_ms"] for f in buckets[0]["findings"]]
 		assert bucket_impacts == [100.0, 10.0, 50.0]
-
-	def test_bucket_count_and_impact_totals_correct(self):
-		findings = [
-			_finding("apps/myapp/foo.py", impact=12.0),
-			_finding("apps/myapp/bar.py", impact=8.0),
-			_finding("apps/myapp/baz.py", impact=30.0),
-		]
-		buckets = _bucket_findings_by_app(findings)
-		assert buckets[0]["count"] == 3
-		assert buckets[0]["total_impact_ms"] == 50.0

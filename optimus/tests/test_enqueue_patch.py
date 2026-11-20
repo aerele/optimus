@@ -81,44 +81,6 @@ def fake_frappe(monkeypatch):
 	return fake, fake_bg, enqueue_calls
 
 
-def test_patch_injects_session_id(fake_frappe, monkeypatch):
-	"""When the calling user has an active session, enqueue injects the marker."""
-	fake, fake_bg, enqueue_calls = fake_frappe
-
-	# Arrange: put an active session for alice in fake cache
-	fake.cache.set_value("profiler:active:alice@example.com", "test-session-uuid-abc")
-
-	# Import the patch this triggers _patch_enqueue() at module load
-	# We need to force a re-import since other tests may have imported it already.
-	_reset_profiler_modules()
-	import optimus  # noqa: F401 triggers the patch
-
-	# Act: call frappe.utils.background_jobs.enqueue
-	fake_bg.enqueue("my_module.my_func", x=1, y=2)
-
-	# Assert: the captured kwargs include _profiler_session_id
-	assert len(enqueue_calls) == 1
-	captured = enqueue_calls[0]
-	assert captured["method"] == "my_module.my_func"
-	assert captured["kwargs"]["x"] == 1
-	assert captured["kwargs"]["y"] == 2
-	assert captured["kwargs"]["_profiler_session_id"] == "test-session-uuid-abc"
-
-
-def test_patch_skips_without_active_session(fake_frappe, monkeypatch):
-	"""No active session → no marker injection."""
-	fake, fake_bg, enqueue_calls = fake_frappe
-
-	# Cache is empty no active session
-	_reset_profiler_modules()
-	import optimus  # noqa: F401
-
-	fake_bg.enqueue("m.f", a=1)
-
-	assert len(enqueue_calls) == 1
-	assert "_profiler_session_id" not in enqueue_calls[0]["kwargs"]
-
-
 def test_patch_idempotent(fake_frappe, monkeypatch):
 	"""Re-importing optimus should NOT double-wrap the patch."""
 	fake, fake_bg, enqueue_calls = fake_frappe

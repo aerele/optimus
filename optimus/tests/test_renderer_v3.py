@@ -75,24 +75,6 @@ def test_render_raw_with_donut_and_hot_frames():
 	assert "my_acme_app.discounts.calc" in html
 
 
-def test_render_raw_shows_full_app_names():
-	doc = _fake_doc(
-		session_time_breakdown_json=json.dumps({
-			"sql_ms": 100,
-			"python_ms": 500,
-			"by_app": {"my_acme_app": 500},
-		}),
-		hot_frames_json=json.dumps([
-			{"function": "my_acme_app.discounts.calc", "total_ms": 500,
-			 "occurrences": 1, "distinct_actions": 1, "action_refs": [0]},
-		]),
-	)
-	html = renderer.render_raw(doc, recordings=[])
-	# Raw mode: full app name visible in hot frames (donut legend was
-	# removed in v0.6.0 when Time breakdown got folded into At a glance).
-	assert "my_acme_app.discounts.calc" in html
-
-
 def test_render_raw_old_session_no_v3_fields():
 	"""An older session without donut/hot-frames data must still render."""
 	doc = _fake_doc()  # all v0.3.0 fields are None
@@ -111,5 +93,7 @@ def test_render_raw_with_invalid_json_in_v3_fields():
 		hot_frames_json="also-not-valid",
 	)
 	html = renderer.render_raw(doc, recordings=[])
-	# Renderer still produces some HTML
-	assert "<html" in html or "<!DOCTYPE" in html.lower()
+	# Malformed fields degrade to "no data": no Hot frames section, rest renders.
+	assert "Hot frames" not in html
+	assert "Summary" in html
+	assert "Per-action breakdown" in html

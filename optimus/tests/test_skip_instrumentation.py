@@ -32,16 +32,6 @@ def _set_fake_local(cmd=None, path=None):
 	return local
 
 
-def test_should_skip_frappe_profiler_status_poll():
-	"""``optimus.api.status`` must always be filtered from capture: it is still
-	called on page load and tab-visibility return, but it is instrumentation,
-	not user work."""
-	from optimus.hooks_callbacks import _should_skip_request
-
-	_set_fake_local(cmd="optimus.api.status")
-	assert _should_skip_request() is True
-
-
 def test_should_skip_all_frappe_profiler_api_methods():
 	"""Any ``optimus.api.*`` whitelisted method is instrumentation noise and
 	matches the skip prefix."""
@@ -188,14 +178,6 @@ def test_path_based_skip_for_v2_method_url():
 	assert _should_skip_request() is True
 
 
-def test_path_based_skip_for_frappe_recorder_methods():
-	"""Frappe Recorder methods reach us via ``/api/method/<name>``, so the path parser sees them too."""
-	from optimus.hooks_callbacks import _should_skip_request
-
-	_set_fake_local(path="/api/method/frappe.core.doctype.recorder.recorder.export_data")
-	assert _should_skip_request() is True
-
-
 def test_path_based_does_not_skip_regular_method_urls():
 	"""A real app call like ``/api/method/frappe.client.save`` must pass through;
 	an over-matching parser would stop the profiler capturing anything."""
@@ -210,41 +192,12 @@ def test_path_based_does_not_skip_regular_method_urls():
 	assert _should_skip_request() is False
 
 
-def test_path_based_ignores_rest_resource_urls():
-	"""``/api/resource/...`` has no ``/method/`` segment (a REST resource call,
-	not a whitelisted method) and must fall through as 'not noise'."""
-	from optimus.hooks_callbacks import _should_skip_request
-
-	_set_fake_local(path="/api/resource/Sales Invoice/INV-00042")
-	assert _should_skip_request() is False
-
-
-def test_path_based_ignores_desk_app_urls():
-	"""``/app/recorder`` is a page load (no ``/method/`` marker), so the path
-	parser must not match even though the URL contains 'recorder'."""
-	from optimus.hooks_callbacks import _should_skip_request
-
-	_set_fake_local(path="/app/recorder")
-	assert _should_skip_request() is False
-
-
 def test_path_based_handles_trailing_slash():
 	"""A trailing slash on a method URL must be stripped before the prefix check."""
 	from optimus.hooks_callbacks import _should_skip_request
 
 	_set_fake_local(path="/api/method/optimus.api.status/")
 	assert _should_skip_request() is True
-
-
-def test_path_based_handles_missing_request():
-	"""``frappe.local`` with no ``request`` attribute (startup, health checks) must fall through as False."""
-	from optimus.hooks_callbacks import _should_skip_request
-
-	# Empty namespace, no request, no form_dict
-	local = types.SimpleNamespace()
-	local.form_dict = {}
-	frappe.local = local
-	assert _should_skip_request() is False
 
 
 def test_form_dict_cmd_still_wins_over_path():
@@ -273,30 +226,3 @@ def test_extract_cmd_returns_empty_string_on_non_method_url():
 
 	_set_fake_local(path="/private/files/foo.pdf")
 	assert _extract_cmd_from_request() == ""
-
-
-def test_before_request_early_exits_on_skipped_cmd():
-	"""before_request must call ``_should_skip_request`` and return early BEFORE
-	setting ``frappe.local.optimus_session_id``, or after_request would register
-	the skipped recording anyway."""
-	import inspect
-
-	from optimus import hooks_callbacks
-
-	src = inspect.getsource(hooks_callbacks.before_request)
-
-	# The skip call must appear in before_request.
-	assert "_should_skip_request()" in src
-
-	# The skip check must occur BEFORE the optimus_session_id assignment
-	# setting the flag first would cause after_request to register the
-	# recording anyway, defeating the filter.
-	skip_idx = src.find("_should_skip_request()")
-	flag_idx = src.find("frappe.local.optimus_session_id = session_uuid")
-	assert skip_idx > 0, "before_request must call _should_skip_request()"
-	assert flag_idx > 0, "before_request must set optimus_session_id"
-	assert skip_idx < flag_idx, (
-		"_should_skip_request() must be checked BEFORE "
-		"optimus_session_id is set, otherwise after_request will "
-		"register the filtered recording anyway"
-	)

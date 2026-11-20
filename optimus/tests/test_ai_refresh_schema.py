@@ -34,20 +34,6 @@ def test_active_session_and_attempt_identities_are_unique():
 	assert "dispatch_pending" in run and "slice_no" in run and "worker_token" in run
 
 
-def test_cumulative_session_usage_can_hold_the_sum_of_valid_provider_counts():
-	path = ROOT / "optimus" / "doctype" / "optimus_session" / "optimus_session.json"
-	fields = {f["fieldname"]: f for f in json.loads(path.read_text())["fields"]}
-	assert fields["ai_tokens_spent"]["fieldtype"] == "Long Int"
-
-
-def test_the_steps_token_field_keeps_its_32_bit_type():
-	"""Widening it rebuilds the Session table (MariaDB COPY, Postgres rewrite) for a count one
-	reply cannot reach, and makes the column nullable. The engine clamps the value instead."""
-	path = ROOT / "optimus" / "doctype" / "optimus_session" / "optimus_session.json"
-	fields = {f["fieldname"]: f for f in json.loads(path.read_text())["fields"]}
-	assert fields["ai_steps_tokens"]["fieldtype"] == "Int"
-
-
 def test_fresh_install_calls_the_same_seed_as_upgrade(monkeypatch):
 	from importlib import import_module
 	from types import SimpleNamespace

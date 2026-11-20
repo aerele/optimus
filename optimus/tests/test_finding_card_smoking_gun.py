@@ -105,17 +105,6 @@ class TestSourceSnippetRendering:
 		assert ">42<" in html
 		assert ">43<" in html
 
-	def test_snippet_always_rendered(self):
-		# v0.6.0 Round 7: safe-mode source toggle removed. The snippet
-		# is always shown when present (no admin opt-out for redacted
-		# rendering).
-		snippet = [{"lineno": 42, "content": "        frappe.db.sql('SELECT 1')"}]
-		doc = _fake_doc([_finding_child(source_snippet=snippet)])
-
-		html = renderer.render_raw(doc, recordings=[])
-
-		assert "frappe.db.sql" in _plain(html)
-
 	def test_finding_without_source_snippet_still_renders_callsite(self):
 		# Older sessions / sessions where the file couldn't be read.
 		doc = _fake_doc([_finding_child(source_snippet=None)])
@@ -504,7 +493,7 @@ class TestPhase2Crosslink:
 		# The parent's body wasn't useful the call line couldn't be
 		# located, so the retarget falls back, NOT to the wrapper's
 		# def line (line 6).
-		assert "common.py:6" not in html or "looped_validate" in html  # 6 may appear in breadcrumb caption text
+		assert not re.search(r"common\.py:6\b", html)
 		# Breadcrumb still mentions the wrapper.
 		assert "Time entered through" in html
 
@@ -918,7 +907,7 @@ class TestRenderTimeCallsiteResolution:
 			{"query": "SELECT * FROM `tabItem`", "normalized_query": "DIFFERENT", "duration": 1.0, "stack": []},
 		]}]
 		html = renderer.render_raw(doc, recordings=recs)
-		assert "Most-called from:" not in html
+		assert "most-called from" not in html
 		# Filtered: the fix hint no longer renders either.
 		assert "Add an index" not in html
 
@@ -1179,7 +1168,7 @@ class TestDrilldownPlaceholder:
 		# (filename is dropped from each pill the meta row above
 		# carries the file path). The inner def line is line 6 its
 		# function name appears as a chain step.
-		assert "inner:6" in html or ":6" in html
+		assert '<span class="ct-step terminal">inner:6</span>' in html
 		# Placeholder branch NOT taken.
 		assert "no deeper user-code frame" not in html
 
@@ -1231,14 +1220,6 @@ def test_phase2_callout_renders_for_empty_drilldown_self_time_finding():
 
 class TestFindingsRefinements:
 	"""Findings refinements: no generic fix fallback + single-app intro."""
-
-	def test_actionable_finding_without_fix_hint_has_no_fallback(self):
-		# Removed per user request: a Slow Hot Path with no fix_hint shows no
-		# generic "Where to start" box the smoking-gun block already says
-		# where the time went and a boilerplate next-step only added noise.
-		doc = _fake_doc([_finding_child(finding_type="Slow Hot Path")])
-		html = renderer.render_raw(doc, recordings=[])
-		assert "Where to start" not in html
 
 	def test_finding_with_fix_hint_keeps_it(self):
 		doc = _fake_doc([_finding_child(

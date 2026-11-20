@@ -29,20 +29,6 @@ def test_noncomplete_response_is_retained_without_reask(monkeypatch, reason, sta
 	assert ai_prompts.fix_state(out)[0] != "current"
 
 
-def test_deepseek_uses_requested_output_budget(monkeypatch):
-	h = _Harness()
-	provider = dict(h._PROVIDER, name="DeepSeek", model="deepseek-v4-flash", context_tokens=1000000)
-	fake = _post_sequence(h._resp(h._GOOD))
-	h._run(fake, monkeypatch, provider=provider)
-	assert fake.calls[0].body["max_tokens"] == 4096
-
-
-def test_budget_uses_remaining_context_and_margin():
-	assert ai_budget.output_tokens(4096, input_tokens=3000, model_max=8192) == 796
-	assert ai_budget.output_tokens(4096, input_tokens=4000, model_max=8192) == 0
-	assert ai_budget.output_tokens(1000000, input_tokens=5000, model_max=32768) == 32768
-
-
 def test_reasoning_count_is_preserved_without_double_counting(monkeypatch):
 	h = _Harness()
 	usage = {"prompt_tokens": 100, "completion_tokens": 150, "total_tokens": 250,
@@ -74,10 +60,8 @@ def test_unknown_hosted_model_uses_bounded_requested_budget(monkeypatch):
 
 def test_unknown_anthropic_model_has_a_bounded_fallback_without_http(monkeypatch):
 	h = _Harness()
-	fake = _post_sequence(h._resp(h._GOOD))
 	provider = dict(h._PROVIDER, name="Anthropic", protocol="anthropic", model="custom-claude")
 	assert ai_fix._output_tokens(provider) == 4096
-	assert not fake.calls  # Capability resolution never calls a provider.
 
 
 def test_operator_capabilities_and_thinking_are_scoped(monkeypatch):

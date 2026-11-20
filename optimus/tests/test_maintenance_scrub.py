@@ -804,14 +804,6 @@ class TestScrubScanSize:
 			("sql", (self.BOUNDED, (maintenance.MIGRATE_SCAN_LIMIT + 1,)), {}),
 		] * 2
 
-	def test_a_huge_queue_never_skips_the_scan_of_a_small_table(self, monkeypatch):
-		self._frappe(monkeypatch, values={"llen": maintenance.MIGRATE_SCAN_LIMIT * 10})
-		assert maintenance.measure_scan_size() == (30, None)
-
-	def test_a_queue_that_cannot_be_read_leaves_the_size_known(self, monkeypatch):
-		self._frappe(monkeypatch, fail={"llen": ConnectionError})
-		assert maintenance.measure_scan_size() == (30, None)
-
 	def test_a_deleted_document_table_past_the_limit_is_counted_only_up_to_it(self, monkeypatch):
 		self._frappe(monkeypatch, deleted_documents=5_000_000)
 		size = maintenance.scrub_scan_size()
@@ -1418,13 +1410,6 @@ class TestNoQueue:
 			"candidates", "changed", "deleted_docs_changed", "residual", "failed", "key_unreadable", "hooks_refreshed",
 		}
 
-	def test_the_queue_code_is_gone(self):
-		for name in (
-			"mask_error_log_queue", "_remask_error_log_queue", "_claim_queue", "_drain_claim", "_QUEUE_CLAIM",
-			"_ERROR_LOG_QUEUE", "_error_log_queue_length", "_claim_length", "_read_queue",
-		):
-			assert not hasattr(maintenance, name), name
-
 	def test_the_claim_key_is_no_longer_kept_across_clear_cache(self):
 		from optimus import hooks
 
@@ -1577,11 +1562,6 @@ class TestHooksCacheRefresh:
 		assert "Error Log" not in get_doc_hooks()  # stale, and cached in this process too
 		assert maintenance._refresh_hooks_cache() is True
 		assert get_doc_hooks()["Error Log"] == {"before_insert": ["optimus.error_log_mask.mask_error_log"]}
-
-	def test_it_names_the_handler_hooks_py_registers(self):
-		from optimus import hooks
-
-		assert hooks.doc_events["Error Log"]["before_insert"] == maintenance._ERROR_LOG_HOOK
 
 
 class TestScrubSummaryLine:

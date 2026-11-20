@@ -75,11 +75,6 @@ class TestCompaction:
 		assert not hasattr(session, "optimus_thinned")
 		assert len(pickle.dumps(session)) * 20 <= before_size
 
-	def test_estimate_is_at_least_the_real_pickle(self):
-		session = fake_session(unique_records(500))
-		info = capture.compact_pyi_session(session)
-		assert info["estimate"] >= len(pickle.dumps(session))
-
 	def test_estimate_counts_utf8_bytes(self):
 		name = "é" * 3000
 		session = fake_session([([frame(name, 1)], 0.1)])
@@ -188,9 +183,13 @@ class TestThinning:
 
 	def test_a_tree_just_over_the_budget_keeps_most_of_it(self, monkeypatch):
 		monkeypatch.setattr(capture, "TREE_MAX_BYTES", 400_000)
-		session = fake_session(unique_records(4000, depth=20))
+		records = unique_records(4000, depth=20)
+		total = total_time(records)
+		session = fake_session(records)
 		blob, _ = capture.pickle_pyi_session(session)
 		assert 0.75 * 400_000 <= len(blob) <= 400_000
+		# Thinning for the byte budget loses no time.
+		assert abs(total_time(pickle.loads(blob).frame_records) - total) < 1e-9
 
 	def test_thinning_is_deterministic(self, monkeypatch):
 		monkeypatch.setattr(capture, "TREE_MAX_SAMPLES", 100)
@@ -198,14 +197,6 @@ class TestThinning:
 		capture.compact_pyi_session(first)
 		capture.compact_pyi_session(second)
 		assert first.frame_records == second.frame_records
-
-	def test_over_the_byte_budget_thins_until_it_fits(self):
-		session = fake_session(unique_records(30000, depth=20))
-		total = total_time(session.frame_records)
-		blob, info = capture.pickle_pyi_session(session)
-		assert blob is not None and len(blob) <= capture.TREE_MAX_BYTES
-		assert info["every"] > 1
-		assert abs(total_time(pickle.loads(blob).frame_records) - total) < 1e-9
 
 	def test_a_long_blocking_sample_survives_the_byte_budget(self, monkeypatch):
 		monkeypatch.setattr(capture, "TREE_MAX_BYTES", 200_000)
@@ -272,18 +263,14 @@ class TestPeriodicPatterns:
 		assert abs(got["A"] - 0.75) < 1e-9 and abs(got["B"] - 0.25) < 1e-9
 		assert not hasattr(session, "optimus_thinned")
 
-	def test_thinning_a_periodic_pattern_keeps_each_share_within_a_few_points(self):
-		records = periodic_records("ABAC", 12_500)
-		kept = capture._thin_by_time(records, 2_500)
-		got = shares(kept)
-		assert abs(got["A"] - 0.5) < 0.03 and abs(got["B"] - 0.25) < 0.03 and abs(got["C"] - 0.25) < 0.03
-
-	def test_thinning_a_jittered_periodic_pattern_keeps_shares(self):
-		records = periodic_records("AAAB", 12_500, jitter=0.05)
+	@pytest.mark.parametrize(("pattern", "jitter"), [("ABAC", 0.0), ("AAAB", 0.05)])
+	def test_thinning_a_periodic_pattern_keeps_each_share_within_a_few_points(self, pattern, jitter):
+		records = periodic_records(pattern, 12_500, jitter=jitter)
 		before = shares(records)
 		kept = capture._thin_by_time(records, 2_500)
+		got = shares(kept)
 		for leaf, share in before.items():
-			assert abs(shares(kept)[leaf] - share) < 0.03
+			assert abs(got[leaf] - share) < 0.03
 
 	def test_a_period_that_divides_the_step_keeps_its_shares_through_the_byte_budget(self, monkeypatch):
 		monkeypatch.setattr(capture, "TREE_MAX_BYTES", 150_000)

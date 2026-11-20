@@ -7,7 +7,7 @@ line in no loop of its function gets the caller hint for N+1 and Redundant Call.
 
 import ast
 
-from optimus import ai_fix, ai_grounding, ai_prompts
+from optimus import ai_fix, ai_grounding
 
 _DEMO = [
 	"class DemoOrder(Document):",
@@ -58,7 +58,7 @@ def test_gapped_or_targetless_window_gives_nothing():
 
 def test_the_facts_sit_inside_a_data_block():
 	"""The identifiers no longer bypass the untrusted-data fence."""
-	content = ai_fix._build_messages(_finding())[1][-1]["content"]
+	content = ai_fix._build_fix_request(_finding(), threshold_ms=1000.0, context_tokens=200000)[1][-1]["content"]
 	head, after = content.split(ai_fix._LOOP_FACTS_HEAD, 1)
 	first, rest = after.split("\n", 2)[1], after.split("\n", 2)[2]
 	assert first.startswith("<data-") and 'kind="loop-facts"' in first
@@ -67,7 +67,7 @@ def test_the_facts_sit_inside_a_data_block():
 
 
 def test_slow_query_gets_no_loop_facts():
-	content = ai_fix._build_messages(_finding("Slow Query"))[1][-1]["content"]
+	content = ai_fix._build_fix_request(_finding("Slow Query"), threshold_ms=1000.0, context_tokens=200000)[1][-1]["content"]
 	assert ai_fix._LOOP_FACTS_HEAD not in content
 
 
@@ -79,9 +79,9 @@ def test_facts_follow_the_trimmed_window():
 	finding = _finding(window=window)
 	finding["technical_detail"]["callsite"]["lineno"] = 79
 	finding["loop_facts"] = ai_grounding.loop_facts_from_tree(ast.parse("\n".join(lines)), 79)
-	wide = ai_fix._build_messages(finding, context_tokens=200000)[1][-1]["content"]
+	wide = ai_fix._build_fix_request(finding, threshold_ms=1000.0, context_tokens=200000)[1][-1]["content"]
 	assert ai_fix._LOOP_FACTS_HEAD in wide and "for loop on line 2" in wide
-	narrow = ai_fix._build_messages(finding, context_tokens=4096)[1][-1]["content"]
+	narrow = ai_fix._build_fix_request(finding, threshold_ms=1000.0, context_tokens=4096)[1][-1]["content"]
 	assert ">> 79:" in narrow
 	assert "for loop on line 2" not in narrow
 
@@ -121,7 +121,3 @@ def test_a_line_in_no_loop_gets_the_caller_hint_for_n_plus_one_only():
 	]
 	assert "caller that is not shown" in ai_fix._loop_facts_text(_finding("N+1 Query", window))
 	assert "caller that is not shown" not in ai_fix._loop_facts_text(_finding("Hot Line", window))
-
-
-def test_prompt_version_bumped():
-	assert ai_prompts.PROMPT_VERSION == 4

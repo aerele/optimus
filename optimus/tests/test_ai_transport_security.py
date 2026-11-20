@@ -1,6 +1,5 @@
 """Exercise the real HTTP/retry path with fake responses and fake credentials."""
 
-import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -44,10 +43,6 @@ def wire(monkeypatch):
 
 def send(url="https://provider.invalid/v1/chat/completions"):
 	return ai_fix._http_post(url, {}, {"prompt": PROMPT}, provider="openai", where="chat/completions", timeout=30, auth=ai_fix._ApiKeyAuth("authorization", KEY, "Bearer "))
-
-
-def test_http_interface_is_unchanged():
-	assert tuple(inspect.signature(ai_fix._http_post).parameters) == ("url", "headers", "body", "provider", "where", "timeout", "auth", "quiet_statuses", "session_uuid", "docname", "budget", "log_extra")
 
 
 @pytest.mark.parametrize("host", ["10.0.0.5", "provider.invalid", "2130706433"])
@@ -136,11 +131,17 @@ def test_same_origin_upgrade_preserves_key_transport_policy(wire):
 
 @pytest.mark.parametrize("url", ["http://169.254.169.254/v1", "https://operator:secret@provider.invalid/v1"])
 def test_direct_transport_entry_also_validates_url(wire, url):
-	install, posts, _ = wire
+	install, posts, logs = wire
 	install(Response())
 	with pytest.raises(ai_fix.AiFixError):
 		send(url)
 	assert posts == []
+	# The same refusal through the public chat call: a config error, no request,
+	# and no Error Log row.
+	with pytest.raises(ai_fix.AiFixError) as caught:
+		ai_fix._call_openai_chat(url, KEY, "m", "s", [{"role": "user", "content": "x"}], max_tokens=4096)
+	assert caught.value.kind == "config"
+	assert posts == [] and logs == []
 
 
 @pytest.mark.parametrize("roles,expected", [([], False), (["Optimus User"], False), (["System Manager"], True)])

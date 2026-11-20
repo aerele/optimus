@@ -14,12 +14,12 @@ consume more than the action took. This guards against that regressing.
 from optimus.analyzers import call_tree
 
 
-def _walk_findings(node: dict, action_wall_ms: float) -> list[dict]:
+def _walk_findings(node: dict, action_wall_ms: float, action_idx: int = 0) -> list[dict]:
 	findings: list = []
 	call_tree._walk_for_findings(
 		node,
 		parent_chain=[],
-		action_idx=0,
+		action_idx=action_idx,
 		action_label="POST /api/method/work",
 		action_wall_time_ms=action_wall_ms,
 		findings=findings,
@@ -71,6 +71,13 @@ def test_estimated_impact_ms_clamped_to_action_wall():
 	findings = _walk_findings(tree, action_wall_ms=1000)
 	assert findings
 	assert findings[0]["estimated_impact_ms"] <= 1000
+
+	# The finding also names the action it was rooted in (as a string), so a
+	# consumer can cross-check by index; a non-zero index must pass through.
+	findings = _walk_findings(tree, action_wall_ms=1000, action_idx=7)
+	assert findings
+	assert findings[0]["estimated_impact_ms"] <= 1000
+	assert findings[0]["action_ref"] == "7"
 
 
 def test_within_action_severity_unchanged():

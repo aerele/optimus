@@ -119,7 +119,7 @@ class TestRenderPhase2PanelDiff:
 
 		assert "Cross-Run Comparison" in html
 		# Delta should be -600 (faster after fix); shown on a row
-		assert "-600.00" in html or "-600" in html
+		assert "-600.00ms" in html
 
 	def test_function_in_one_run_no_diff_section(self):
 		fn = _function("my_app.x", [_line(11, "compute()", 100, 100.0)])
@@ -170,7 +170,7 @@ class TestRenderPhase2PanelAutoExpandChain:
 		# `.indent-2` class names on the `.phase2-func` block, not
 		# inline margin. Anchor on the class instead.
 		assert "indent-1" not in nearby
-		assert "↳" not in nearby
+		assert "&#x21B3;" not in nearby
 
 	def test_auto_expanded_descendant_renders_indented(self):
 		session = SimpleNamespace(phase_2_runs=[
@@ -208,7 +208,8 @@ class TestRenderPhase2PanelAutoExpandChain:
 		fn_idx = html.rfind("my_app.x.fn")
 		assert fn_idx > -1
 		nearby = html[max(0, fn_idx - 200):fn_idx]
-		assert "↳" not in nearby
+		assert "indent-1" not in nearby
+		assert "&#x21B3;" not in nearby
 
 
 class TestRenderPhase2PanelSelfContainment:
@@ -306,13 +307,4 @@ class TestRenderPhase2PanelRefinements:
 			_line(3, "y = compute()", 5, 50.0),   # ran → not dim
 		])]
 		out = self._panel(results)
-		assert 'class="zero"' in out  # the 0-hit context rows are dimmed
-
-	def test_no_picks_line(self):
-		out = self._panel(
-			[_function("my_app.x", [_line(1, "y = 1", 5, 10.0)])],
-			picks=[{"dotted_path": "my_app.x", "source": "curated"}],
-		)
-		# the redundant "Picks:" summary line is gone (function tables +
-		# "Not exercised" note already enumerate the picks)
-		assert "Picks:" not in out
+		assert out.count('class="zero"') == 2  # exactly the two 0-hit rows are dimmed

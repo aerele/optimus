@@ -21,6 +21,8 @@ from __future__ import annotations
 import hashlib
 import hmac
 
+import pytest
+
 from optimus import session
 
 
@@ -65,50 +67,32 @@ class TestSignUnsignRoundTrip:
 		signed = session.sign_blob(b"")
 		assert session.unsign_blob(signed) == b""
 
-	def test_v1_round_trip_pickle_shaped_payload(self, monkeypatch):
-		"""A realistic payload pickle bytes starting with \\x80
-		(protocol 2-5 PROTO opcode). Confirms the marker doesn't
-		collide with the most common payload shape."""
-		import pickle
-
-		_force_stable_secret(monkeypatch)
-		payload = pickle.dumps({"recording": "uuid", "calls": []})
-		assert payload[:1] == b"\x80"  # pickle protocol 2+
-		signed = session.sign_blob(payload)
-		assert session.unsign_blob(signed) == payload
-
 
 class TestLegacyShapeBackwardCompat:
 	"""Legacy blobs were ``[32-byte HMAC of payload] + payload`` with no version
 	marker. ``unsign_blob`` must still verify them and return the original
 	payload."""
 
-	def test_legacy_v0_blob_verifies_and_returns_payload(self, monkeypatch):
+	@pytest.mark.parametrize(
+		"payload",
+		[
+			b"legacy payload from a pre-v0.12.14 writer",
+			# Pickle bytes, the common legacy payload: the first byte is
+			# \x80, which is not the v1 marker (\x01), so the reader must
+			# keep it as part of the payload.
+			b"\x80\x04legacy pickle-opcode payload",
+		],
+		ids=["plain", "pickle-opcode-first-byte"],
+	)
+	def test_legacy_v0_blob_verifies_and_returns_payload(self, monkeypatch, payload):
 		"""Hand-craft a v0 blob (no version marker) and verify the
 		new reader handles it."""
 		secret = _force_stable_secret(monkeypatch)
-		payload = b"legacy payload from a pre-v0.12.14 writer"
 		legacy_sig = hmac.new(secret, payload, hashlib.sha256).digest()
 		legacy_signed = legacy_sig + payload
 
 		out = session.unsign_blob(legacy_signed)
 		assert out == payload, f"v0 legacy blob should round-trip unchanged; got: {out!r}"
-
-	def test_legacy_v0_blob_starting_with_pickle_opcode_works(self, monkeypatch):
-		"""The most common legacy payload: pickle bytes. First byte is
-		\\x80, which is NOT the v1 marker (\\x01), so the new reader
-		correctly identifies it as a v0 blob and returns the payload
-		verbatim (no stripped first byte)."""
-		import pickle
-
-		secret = _force_stable_secret(monkeypatch)
-		payload = pickle.dumps([1, 2, 3])
-		assert payload[:1] == b"\x80"
-		legacy_sig = hmac.new(secret, payload, hashlib.sha256).digest()
-		legacy_signed = legacy_sig + payload
-
-		out = session.unsign_blob(legacy_signed)
-		assert out == payload, f"pickle bytes should round-trip unchanged through the v0 branch; got: {out!r}"
 
 
 class TestNewShapeByteLayout:
@@ -176,7 +160,6 @@ class TestEdgeCases:
 
 	def test_sign_blob_rejects_non_bytes(self, monkeypatch):
 		_force_stable_secret(monkeypatch)
-		import pytest
 
 		with pytest.raises(TypeError):
 			session.sign_blob("not bytes")

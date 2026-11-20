@@ -6,10 +6,11 @@
 
   1. Write path: a cache miss re-resolves and stores the OptimusConfig field
      dict inside the envelope (``{"_v": 1, "data": {...}}``), not bare.
-  2. New-shape read path: a cache holding an enveloped value unwraps cleanly.
-  3. Legacy-compat read path: a cache holding a bare-dict value (no ``_v``)
+  2. Legacy-compat read path: a cache holding a bare-dict value (no ``_v``)
      ALSO unwraps cleanly, so new readers don't crash on stale values left by
      old writers.
+  3. Drift: a cached envelope with a version this build does not know falls
+     through to a fresh resolve.
 
 Each test injects a dict-backed fake ``frappe.cache`` (replaced wholesale, not
 patched) to introspect the exact shape written / read.
@@ -32,7 +33,7 @@ class _FakeCache:
 	def __init__(self) -> None:
 		self.store: dict = {}
 
-	def get_value(self, key):
+	def get_value(self, key, expires=False):
 		return self.store.get(key)
 
 	def set_value(self, key, value, **_):
@@ -120,30 +121,6 @@ class TestSettingsEnvelopeWrite:
 		assert "ai_enabled" in stored["data"]
 
 
-class TestSettingsEnvelopeReadHappyPath:
-	"""A cache HIT against the new-shape envelope returns a valid
-	OptimusConfig without re-resolving."""
-
-	def test_hit_on_enveloped_value_returns_config(self, fresh):
-		cache = _FakeCache()
-		# Pre-seed the cache with a properly-enveloped value.
-		from optimus.redis_schema import wrap_value
-
-		seed_payload = fresh.OptimusConfig().__dict__
-		cache.store[fresh._CACHE_KEY] = wrap_value(seed_payload)
-		frappe_stub = _stub_frappe(cache)
-
-		with mock.patch.dict(sys.modules, {"frappe": frappe_stub}):
-			cfg = fresh.get_config()
-
-		assert cfg is not None
-		# The OptimusConfig was reconstructed from the unwrapped payload.
-		# Nothing was re-written to the cache (still the original
-		# envelope).
-		stored = cache.store.get(fresh._CACHE_KEY)
-		assert stored == wrap_value(seed_payload), "cache value changed unexpectedly during a cache HIT"
-
-
 class TestSettingsEnvelopeLegacyCompat:
 	"""A cache HIT against a bare-dict value (no envelope) STILL returns a valid
 	OptimusConfig, so new readers handle stale legacy values left by old
@@ -153,7 +130,7 @@ class TestSettingsEnvelopeLegacyCompat:
 		cache = _FakeCache()
 		# Pre-seed with a BARE OptimusConfig field dict no envelope, no
 		# ``_v`` key. This is exactly what pre-v0.12.11 writers stored.
-		seed_payload = fresh.OptimusConfig().__dict__
+		seed_payload = {**fresh.OptimusConfig().__dict__, "session_retention_days": 77}
 		cache.store[fresh._CACHE_KEY] = seed_payload
 		frappe_stub = _stub_frappe(cache)
 
@@ -161,6 +138,8 @@ class TestSettingsEnvelopeLegacyCompat:
 			cfg = fresh.get_config()
 
 		assert cfg is not None
+		# A real cache hit: the seeded non-default value comes back.
+		assert cfg.session_retention_days == 77
 		# CRITICAL: the legacy value was NOT discarded it was used
 		# as-is. (Migrating legacy values on read is explicitly OUT of
 		# scope for the rollout; the next on_update cache invalidation

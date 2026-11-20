@@ -202,11 +202,6 @@ class TestUndecided:
 	def test_a_stack_of_only_frappe_frames_is_not_own(self):
 		assert not _own([F("frappe/frappe/app.py", "application"), SQL])
 
-	def test_empty_and_malformed_stacks_are_not_own(self):
-		assert not _own(None)
-		assert not _own([])
-		assert not _own(["junk", {"filename": ""}])
-
 
 class TestMalformedFunction:
 	@pytest.mark.parametrize("function", [[1], {}, None, 5, "missing"])
@@ -241,14 +236,6 @@ class TestMalformedFunction:
 		assert _own(stack)
 		assert walk_callsite(stack) is None
 
-	def test_analyze_completes_with_a_malformed_function_in_a_stack(self, empty_context):
-		from optimus.analyzers import top_queries
-
-		frame = {"filename": "optimus/optimus/capture.py", "lineno": 1, "function": [1]}
-		rec = {"calls": [{"query": "select 1", "normalized_query": "select ?", "duration": 1,
-			"stack": [USER, frame, SQL]}]}
-		top_queries.analyze([rec], empty_context)
-
 
 class TestSharedByEverySurface:
 	def test_strip_keeps_frappe_only_wrapper_queries_and_drops_own_ones(self):
@@ -267,13 +254,6 @@ class TestSharedByEverySurface:
 			"stack": [USER, RUN_METHOD, WRAPPED, GET_DOC, SQL]}
 		top = top_queries.analyze([{"calls": [own, users]}], empty_context).aggregate["top_queries"]
 		assert [q["normalized_query"] for q in top] == ["select a"]
-
-	def test_queries_per_action_drops_an_own_hook_query_inside_a_user_flow(self):
-		from optimus.renderer.queries_per_action import _is_own_query
-
-		stack = [USER, F("optimus/optimus/managed.py", "protect_file"), SQL]
-		assert _is_own_query(stack)
-		assert not _is_own_query([USER, WRAPPED, GET_DOC, SQL])
 
 	def test_predicate_visits_each_frame_at_most_once(self):
 		deep = [F(f"frappe/frappe/m{i}.py", "f") for i in range(2000)]

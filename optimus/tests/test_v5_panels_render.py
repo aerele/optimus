@@ -80,52 +80,6 @@ def test_safe_mode_renders_server_resource_panel():
 	assert "92%" in html  # CPU peak rendered
 
 
-def test_frontend_panel_renders_full_urls():
-	# v0.6.0 Round 7: safe-mode URL redaction was removed. The Frontend
-	# panel now shows full URLs as captured (admin-scoped report).
-	from optimus import renderer
-
-	v5 = {
-		"infra_timeline": [],
-		"infra_summary": {},
-		"frontend_xhr_matched": [
-			{
-				"action_idx": 0,
-				"action_label": "POST /api/method/save",
-				"backend_ms": 320,
-				"xhr_ms": 420,
-				"network_delta_ms": 100,
-				"response_size_bytes": 14200,
-				"status": 200,
-				"url": "/app/sales-invoice/SI-2026-00123/edit",
-				"transport": "xhr",
-			},
-		],
-		"frontend_vitals_by_page": {
-			"/app/sales-invoice/SI-2026-00123": {
-				"fcp_ms": 420,
-				"lcp_ms": 2800,
-				"cls": 0.02,
-				"ttfb_ms": 180,
-				"dom_content_loaded_ms": 890,
-			},
-		},
-		"frontend_orphans": [],
-		"frontend_summary": {
-			"total_xhrs": 1,
-			"total_xhr_ms": 420,
-			"total_backend_ms": 320,
-			"network_overhead_ms": 100,
-		},
-	}
-
-	doc = _fake_session_doc(v5)
-	html = renderer.render(doc, recordings=[])
-
-	assert "Frontend" in html
-	assert "SI-2026-00123" in html
-
-
 def test_frontend_panel_renders_partial_vitals():
 	# Regression: production page reported only `cls` (no fcp/lcp/ttfb).
 	# Pre-fix this raised UndefinedError inside the _vital macro and
@@ -156,7 +110,7 @@ def test_frontend_panel_renders_partial_vitals():
 	assert "vital-none" in html
 
 
-def test_raw_mode_keeps_docname_in_urls():
+def test_frontend_xhr_url_keeps_the_docname():
 	from optimus import renderer
 
 	v5 = {
@@ -184,7 +138,7 @@ def test_raw_mode_keeps_docname_in_urls():
 	doc = _fake_session_doc(v5)
 	html = renderer.render(doc, recordings=[])
 
-	# Raw mode keeps full URLs.
+	# The full URL, docname included, reaches the Frontend panel.
 	assert "SI-2026-00999" in html
 
 

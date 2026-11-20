@@ -35,9 +35,9 @@ class TestIsSensitiveKey:
 			assert redaction.is_sensitive_key(key) is False
 
 	def test_extra_keys_extend_defaults(self):
-		assert redaction.is_sensitive_key("recovery_code", extra=("recovery_code",))
+		assert redaction.is_sensitive_key("membership_ref", extra=("membership_ref",))
 		# Default still matches even when extras supplied.
-		assert redaction.is_sensitive_key("password", extra=("recovery_code",))
+		assert redaction.is_sensitive_key("password", extra=("membership_ref",))
 
 	def test_benign_keys_pass_through(self):
 		# Note: substring match means "csrf_disabled_flag" WOULD match
@@ -65,21 +65,21 @@ class TestRedactSensitive:
 
 	def test_extra_keys_extend_redaction(self):
 		out = redaction.redact_sensitive(
-			{"recovery_code": "abc123", "name": "Alice"},
-			extra_keys=("recovery_code",),
+			{"membership_ref": "abc123", "name": "Alice"},
+			extra_keys=("membership_ref",),
 		)
-		assert out["recovery_code"] == "<REDACTED:recovery_code>"
+		assert out["membership_ref"] == "<REDACTED:membership_ref>"
 		assert out["name"] == "Alice"
 
 	def test_extra_keys_are_additive_not_replacement(self):
-		"""A customer config that adds ``recovery_code`` must not
+		"""A customer config that adds ``membership_ref`` must not
 		accidentally stop redacting ``password``."""
 		out = redaction.redact_sensitive(
-			{"password": "x", "recovery_code": "y"},
-			extra_keys=("recovery_code",),
+			{"password": "x", "membership_ref": "y"},
+			extra_keys=("membership_ref",),
 		)
 		assert out["password"] == "<REDACTED:password>"
-		assert out["recovery_code"] == "<REDACTED:recovery_code>"
+		assert out["membership_ref"] == "<REDACTED:membership_ref>"
 
 	def test_scalar_passes_through(self):
 		assert redaction.redact_sensitive("hello") == "hello"
@@ -530,10 +530,6 @@ class TestKeyLiterals:
 	def test_no_key_is_empty(self):
 		for value in (None, "", 0, b"sk-bytes-0123456789"):
 			assert redaction.key_literals(value) == ()
-
-	def test_the_minimum_length_and_placeholder_are_public(self):
-		assert redaction.MIN_KEY_LEN == 8
-		assert redaction.SECRET_PLACEHOLDER == "********"
 
 	def test_a_repr_escaped_key_is_masked_through_the_literals(self):
 		key = "sk-live-0123 456789abcdef"

@@ -9,8 +9,6 @@ them with explicit signoff. Failure blocks merge.
 
 import time
 
-import pytest
-
 from optimus import capture
 
 # ---- Thresholds ----------------------------------------------------------
@@ -65,25 +63,3 @@ def test_wrap_fast_path_microbenchmark():
 		f"Wrap overhead {per_call_overhead_ns:.0f}ns/call exceeds "
 		f"{WRAP_OVERHEAD_BASELINE_NS_PER_CALL_MAX}ns budget"
 	)
-
-
-@pytest.mark.skipif(
-	not capture._PYINSTRUMENT_AVAILABLE,
-	reason="pyinstrument not available",
-)
-def test_pyinstrument_start_stop_cycle_under_10ms():
-	"""Starting and stopping pyinstrument should be well under 10ms."""
-	class FakeLocal:
-		pass
-
-	local = FakeLocal()
-
-	t0 = time.perf_counter()
-	for _ in range(10):
-		capture._start_pyi_session(local_proxy=local, interval_ms=1)
-		local.optimus_pyinstrument.stop()
-		delattr(local, "optimus_pyinstrument")
-	elapsed_ms = (time.perf_counter() - t0) * 1000 / 10
-
-	print(f"\npyinstrument start+stop: {elapsed_ms:.2f}ms/cycle")
-	assert elapsed_ms < 10

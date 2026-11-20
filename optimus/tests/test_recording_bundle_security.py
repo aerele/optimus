@@ -111,13 +111,18 @@ def test_nonregular_or_escaping_paths_are_not_read(bundle, tmp_path, kind):
 	assert bundle.logs
 
 
-@pytest.mark.parametrize("raw", [b"not gzip", gzip.compress(b'{"schema":1,"schema":1,"session_uuid":"fake-session","recordings":{}}'),
-	gzip.compress(b'{"schema":1,"session_uuid":"fake-session","recordings":{},"x":NaN}'),
-	gzip.compress(b"[" * 1200 + b"]" * 1200)])
-def test_invalid_gzip_json_or_ambiguous_keys_are_rejected(bundle, raw):
+@pytest.mark.parametrize("raw, reason", [
+	pytest.param(b"not gzip", "bundle_read_failed", id="not gzip"),
+	pytest.param(gzip.compress(b'{"schema":1,"schema":1,"session_uuid":"fake-session","recordings":{}}'), None, id="duplicate key"),
+	pytest.param(gzip.compress(b'{"schema":1,"session_uuid":"fake-session","recordings":{},"x":NaN}'), None, id="NaN"),
+	pytest.param(gzip.compress(b"[" * 1200 + b"]" * 1200), None, id="deep"),
+])
+def test_invalid_gzip_json_or_ambiguous_keys_are_rejected(bundle, raw, reason):
 	bundle.write(raw=raw)
 	assert analyze._load_recordings_bundle(bundle.doc) is None
 	assert bundle.logs
+	if reason:
+		assert bundle.logs[0][1]["reason"] == reason
 
 
 @pytest.mark.parametrize("bound", ["compressed", "expanded", "nodes", "depth", "recordings"])

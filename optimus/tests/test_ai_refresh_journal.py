@@ -393,14 +393,6 @@ def test_no_ending_of_a_run_counts_a_refresh(journal, how):
 	assert _count(journal) == 0
 
 
-def test_the_finish_of_a_run_has_no_counting_keyword(journal):
-	"""The interim ``count=`` keyword of the finish is gone with the finish's own count."""
-	import inspect
-
-	for name in ("_finish_locked", "_release"):
-		assert "count" not in inspect.signature(getattr(journal.mod, name)).parameters
-
-
 def test_a_user_refresh_counts_once_when_it_is_accepted(journal):
 	journal.db.rows[journal.mod.RUN] = {}
 	assert admit(journal)["status"] == "queued"

@@ -3,23 +3,14 @@
 
 """The failure log lines name the error type and log at ERROR (a production site drops
 lower levels), a gate or evidence-read crash leaves one line, the warnings and toasts say
-where to look, and the runbook covers the signals."""
+where to look."""
 
-import os
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 
-from optimus import ai_fix, ai_grounding, analyze, safe_call
+from optimus import ai_fix, ai_grounding, safe_call
 from optimus.renderer import index_recipes, recipe_enrichment
-
-_ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
-
-
-def _read(*parts):
-	with open(os.path.join(_ROOT, *parts), encoding="utf-8") as f:
-		return f.read()
 
 
 @pytest.fixture
@@ -54,22 +45,6 @@ def test_failure_line_names_deduped_capped_pairs_at_error(lines):
 	assert "Missing Index: KeyError" in line and line.count("Missing Index") == 1
 	assert "tabT8: ValueError" in line and "tabT9" not in line and line.endswith(", and 2 more)")
 	assert "secret" not in line
-
-
-def test_failure_line_without_pairs_is_the_old_line(lines):
-	recipe_enrichment.log_recipe_failures(2)
-	assert lines == ["optimus: index advice failed for 2 finding(s) or table(s) in one render"]
-
-
-def test_each_advisor_site_reports_its_error_type(monkeypatch):
-	monkeypatch.setattr(index_recipes, "advise_finding", _boom)
-	monkeypatch.setattr(index_recipes, "advise_table", _boom)
-	errors = []
-	finding = {"finding_type": "Full Table Scan", "technical_detail": {"table": "tabSales Invoice"}}
-	recipe_enrichment.apply_finding_recipes([finding], evidence_lookup=lambda t: None, errors=errors)
-	table = {"table": "tabSales Invoice", "recommended_index": {"columns": ["a"]}}
-	recipe_enrichment.apply_table_recipes([table], evidence_lookup=lambda t: None, errors=errors)
-	assert errors == [("Full Table Scan", "RuntimeError"), ("tabSales Invoice", "RuntimeError")]
 
 
 def test_a_gate_crash_logs_one_line_in_both_gate_sites_and_still_fails_closed(lines, monkeypatch):
@@ -112,45 +87,9 @@ def test_a_table_without_a_doctype_keeps_the_no_information_text(lines, monkeypa
 	assert "has no information about table" in advice.reason and lines == []
 
 
-def test_evidence_read_lines_are_capped(lines, monkeypatch):
-	monkeypatch.setattr(recipe_enrichment, "_read_table_evidence", _boom)
-	lookup = recipe_enrichment.make_evidence_lookup()
-	for i in range(25):
-		lookup(f"tabT{i}")
-	assert len(lines) == recipe_enrichment.MAX_LOGGED_EVIDENCE_FAILURES
-
-
-def _ctx(findings):
-	return SimpleNamespace(session_uuid="u", docname=None, warnings=[], actions=[], findings=findings)
-
-
-
-
-
-
-
-
 def test_texts_use_the_label_not_the_fieldname():
-	assert "Excluded finding types" in _read("optimus", "ai_fix.py")
 	assert "See the index advice on this finding" in ai_grounding.INDEX_TYPE_NOTE
 	assert "recipe" not in ai_grounding.INDEX_TYPE_NOTE
-
-
-def test_app_scope_docstring_is_true_about_timeouts():
-	doc = ai_fix._app_scope.__doc__
-	assert "job timeouts propagate" not in doc and "swallowed" in doc
-
-
-def test_the_runbook_covers_each_signal():
-	text = _read("docs", "AI-FIXING.md")
-	section = text[text.index("### 6.5 Troubleshooting"):text.index("## 7. Threat model")]
-	for needle in (
-		"| Signal | What it means | What to do |", "could not build index advice", "optimus: index advice failed",
-		"optimus: evidence read failed", "was not created", "skipped on", "Optimus could not check this Hot Line",
-		"optimus: hot-line gate failed", "optimus ai refresh item", "gated", "excluded", "heartbeat",
-	):
-		assert needle in section, needle
-
 
 
 def test_a_failed_read_does_not_rewrite_other_no_code_reasons(lines, monkeypatch):

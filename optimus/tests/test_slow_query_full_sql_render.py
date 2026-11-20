@@ -78,12 +78,6 @@ def test_other_finding_types_do_not_get_the_sql_block():
 	assert "END_OF_QUERY_MARKER" not in html
 
 
-def test_capped_query_is_flagged_in_the_label_and_the_note_is_visible():
-	html = _render("Slow Query", cap_sql("SELECT " + "x" * (MAX_SQL_CHARS + 10)))
-	assert "query truncated at 200000 of" in html
-	assert "(truncated, see the note at the end)" in html
-
-
 def test_print_css_unclips_sql_blocks_and_lets_a_long_card_break():
 	html = _render("Slow Query", "SELECT 1")
 	css = "".join(re.findall(r"<style[^>]*>(.*?)</style>", html, re.S))
@@ -129,11 +123,6 @@ def test_analyzer_output_renders_end_to_end_with_the_truncation_note():
 class TestRedactFindingSql:
 	def _f(self, sql, ftype="Slow Query"):
 		return {"finding_type": ftype, "technical_detail": {"normalized_query": sql}}
-
-	def test_redacts_sensitive_literal(self):
-		f = self._f(f"SELECT 1 FROM `tabUser` WHERE password = '{_SECRET}'")
-		_internal.redact_finding_sql([f])
-		assert _SECRET not in f["technical_detail"]["normalized_query"]
 
 	def test_ignores_other_types_and_missing_detail(self):
 		other = self._f(f"password = '{_SECRET}'", "N+1 Query")

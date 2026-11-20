@@ -104,19 +104,6 @@ def test_ai_fix_keeps_its_names_as_aliases(monkeypatch):
 	assert isinstance(guard.interrupt(), _JobTimeout)
 
 
-def test_safe_call_holds_the_one_copy_of_the_interrupt_idiom():
-	tree = ast.parse((_PKG / "safe_call.py").read_text(encoding="utf-8"))
-	guard = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "InterruptGuard")
-	inside = {id(n) for n in ast.walk(guard)}
-	outside_stores = [
-		n.lineno for n in ast.walk(tree)
-		if isinstance(n, ast.Attribute) and n.attr == "__traceback__"
-		and isinstance(n.ctx, ast.Store) and id(n) not in inside
-	]
-	assert outside_stores == []
-	assert "__traceback__ = None" not in (_PKG / "ai_fix.py").read_text(encoding="utf-8")
-
-
 @pytest.mark.parametrize(
 	("level", "expected"), [("info", "info"), ("warning", "warning"), ("error", "error"), ("bogus", "error")]
 )

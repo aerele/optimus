@@ -465,14 +465,6 @@ class TestSelfTimeReliability:
 		empty = _root([], cumulative_ms=0)
 		assert call_tree._self_time_measured([real, empty]) is True
 
-	def test_flag_on_the_rows_follows_the_check(self):
-		bad = _root([_kid("f", APP, 10)], cumulative_ms=5000)
-		_, board = call_tree._aggregate_hot_frames([bad], None, INSTALLED)
-		assert board and not any(r["self_time_measured"] for r in board)
-		good = _root([_kid("f", APP, 500)])
-		_, board = call_tree._aggregate_hot_frames([good], None, INSTALLED)
-		assert board and all(r["self_time_measured"] for r in board)
-
 	def test_inconsistent_self_time_warns_and_degrades(self):
 		fixture = {"root": _root([_kid("f", APP, 10)], cumulative_ms=5000)}
 		result, ctx = _run([fixture], wall_ms={0: 5000})

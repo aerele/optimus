@@ -141,4 +141,5 @@ def test_slow_query_cap_banner_when_more_than_max_findings():
 	html = renderer.render_raw(doc, recordings=[])
 	# Banner copy lives in the Top Queries section.
 	assert "additional quer" in html, "suppressed-count banner missing"
-	assert "2" in html  # exact suppressed count (7 - 5)
+	# exact suppressed count (7 - 5), in the bold value just before the label
+	assert re.search(r"<strong>2</strong>\s*additional queries", html)

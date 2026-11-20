@@ -102,10 +102,7 @@ def test_build_finding_goes_through_the_current_message_builder(corpus):
 		assert len(finding["source_window"]) <= ai_fix._SOURCE_LINES_BEFORE + ai_fix._SOURCE_LINES_AFTER + 1
 		assert finding["technical_detail"]["callsite"]["lineno"] == target, c["name"]
 		assert bool(finding.get("phase2_hotline")) is (c["name"] in PHASE2_CASES), c["name"]
-		if hasattr(ai_fix, "_build_fix_request"):  # prompt v2 (#54)
-			_system, messages, _shown = ai_fix._build_fix_request(finding, threshold_ms=1000.0, context_tokens=4096)
-		else:
-			_system, messages = ai_fix._build_messages(finding, threshold_ms=1000.0)
+		_system, messages, _shown = ai_fix._build_fix_request(finding, threshold_ms=1000.0, context_tokens=4096)
 		user = messages[0]["content"]
 		assert f">> {target}:" in user, c["name"]
 		assert c["title"].split(" ")[0] in user, c["name"]

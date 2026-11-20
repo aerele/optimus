@@ -3,9 +3,11 @@
 
 """Session lifecycle endpoints in ``optimus.api`` (start, stop, status, retry)."""
 
+import ast
 import datetime
 import time
 import types
+from pathlib import Path
 
 import pytest
 
@@ -96,6 +98,7 @@ def env(monkeypatch):
 	db = FakeDB()
 	created = []
 	enqueued = []
+	force_stops = []
 
 	def _get_doc(fields):
 		doc = FakeDoc(fields)
@@ -106,8 +109,8 @@ def env(monkeypatch):
 	monkeypatch.setattr(api, "safe_commit", lambda: None)
 	monkeypatch.setattr(api, "now_datetime", datetime.datetime.now)
 	monkeypatch.setattr(api, "_publish_session_event", lambda *a, **kw: None)
-	monkeypatch.setattr(capture, "_force_stop_inflight_capture", lambda **kw: None)
-	monkeypatch.setattr(infra_capture, "_force_stop_inflight", lambda *a, **kw: None)
+	monkeypatch.setattr(capture, "_force_stop_inflight_capture", lambda **kw: force_stops.append("capture"))
+	monkeypatch.setattr(infra_capture, "_force_stop_inflight", lambda *a, **kw: force_stops.append("infra"))
 	monkeypatch.setattr(api.ratelimit, "enforce_user_rate_limit", lambda *a, **kw: None)
 	monkeypatch.setattr(api, "_require_profiler_user", lambda: "alice@example.com")
 	monkeypatch.setattr(api, "_require_session_permission", lambda *a, **kw: "OPT-0001")
@@ -118,7 +121,9 @@ def env(monkeypatch):
 	monkeypatch.setattr(frappe, "log_error", lambda *a, **kw: None, raising=False)
 	monkeypatch.setattr(frappe, "conf", {}, raising=False)
 	monkeypatch.setattr(frappe, "enqueue", lambda *a, **kw: enqueued.append((a, kw)), raising=False)
-	return types.SimpleNamespace(store=store, db=db, created=created, enqueued=enqueued)
+	return types.SimpleNamespace(
+		store=store, db=db, created=created, enqueued=enqueued, force_stops=force_stops
+	)
 
 
 def _scheduler(monkeypatch, disabled):
@@ -155,6 +160,8 @@ class TestStart:
 		meta = env.store.meta[out["session_uuid"]]
 		assert meta["docname"] == "OPT-0001"
 		assert meta["capture_python_tree"] is True
+		# Leaked capture and infra state of a previous request on this worker is cleared first.
+		assert env.force_stops == ["capture", "infra"]
 
 	def test_blank_notes_are_not_persisted_and_title_is_defaulted(self, env):
 		out = api.start(label="   ", notes="   ")
@@ -185,9 +192,6 @@ class TestStart:
 
 
 class TestStop:
-	def test_without_active_session_reports_nothing_stopped(self, env):
-		assert api.stop() == {"stopped": False, "reason": "no active session"}
-
 	@pytest.mark.parametrize("bad", [123, ["u1"], {"a": 1}, True])
 	def test_a_session_reference_that_is_not_text_is_refused(self, env, bad):
 		with pytest.raises(api.frappe.ValidationError):
@@ -197,9 +201,15 @@ class TestStop:
 		_scheduler(monkeypatch, disabled=False)
 		env.store.active["alice@example.com"] = "u1"
 		_row(env)
+		published = []
+		monkeypatch.setattr(api, "_publish_session_event", lambda *a, **kw: published.append((a, kw)))
 
 		out = api.stop()
 
+		# The other open Desk tabs learn about the stop from this event.
+		assert published == [
+			(("optimus_session_stopping",), {"session_uuid": "u1", "docname": "OPT-1", "user": "alice@example.com"})
+		]
 		assert out == {
 			"stopped": True,
 			"session_uuid": "u1",
@@ -211,6 +221,8 @@ class TestStop:
 		assert "alice@example.com" not in env.store.active
 		assert env.db.rows["u1"]["status"] == "Stopping"
 		assert env.enqueued[0][1]["now"] is False
+		# In-flight capture and infra state is stopped so a later start on this worker sees none.
+		assert env.force_stops == ["capture", "infra"]
 
 	def test_inline_stop_returns_the_final_status_read_back_from_the_row(self, env, monkeypatch):
 		frappe = api.frappe
@@ -249,9 +261,14 @@ class TestStop:
 		_row(env)
 
 		monkeypatch.setattr(api.time, "time", lambda: 1000.0)
+		# Record the status each commit makes durable: the enqueued analyze worker must not
+		# read a stale "Stopping", so the new status has to be committed the moment it is set.
+		committed = []
+		monkeypatch.setattr(api, "safe_commit", lambda: committed.append(env.db.rows["u1"]["status"]))
 		api.stop()
 
 		assert env.db.rows["u1"]["status"] == "Capturing Background Jobs"
+		assert committed.count("Capturing Background Jobs") == 1
 		# deadline = wait + 60s analyze grace
 		assert env.store.draining["u1"] == 1090.0
 
@@ -265,6 +282,37 @@ class TestStop:
 
 		assert env.store.draining == {}
 		assert env.db.rows["u1"]["status"] == "Stopping"
+
+	def test_an_oversized_session_stopped_inline_is_failed_not_analyzed(self, env, monkeypatch):
+		# stop() must hand the row to the inline cap check, or the cap has no doc to mark Failed.
+		_scheduler(monkeypatch, disabled=True)
+		env.store.recordings = 51
+		env.store.active["alice@example.com"] = "u1"
+		_row(env)
+
+		out = api.stop()
+
+		assert out["ran_inline"] is True and out["status"] == "Failed"
+		assert env.db.rows["u1"]["status"] == "Failed"
+		assert env.enqueued == []
+
+	@pytest.mark.parametrize(
+		("row", "expected"),
+		[(("Ready", 0), True), (("Ready", 4), False), (("Failed", 0), False)],
+	)
+	def test_stop_flags_an_empty_inline_session(self, monkeypatch, row, expected):
+		monkeypatch.setattr(api, "_require_profiler_user", lambda: "u")
+		monkeypatch.setattr(api.session, "get_active_session_for", lambda user: "s")
+		monkeypatch.setattr(api.ratelimit, "enforce_user_rate_limit", lambda *a, **kw: None)
+		monkeypatch.setattr(api, "_stop_session", lambda user, active: ("doc", True))
+		# Replace frappe.db wholesale rather than patching an attribute on it. On a real
+		# bench frappe.db is an unbound LocalProxy, so touching an attribute dereferences
+		# the unbound frappe.local and raises during setup. The CI stub exposes frappe.db
+		# as a SimpleNamespace, so replacing the whole object works in both environments.
+		monkeypatch.setattr(api.frappe, "db", types.SimpleNamespace(get_value=lambda *a, **kw: row))
+		out = api.stop()
+		assert out["status"] == row[0]
+		assert out["empty"] is expected
 
 
 class TestMarkStopping:
@@ -470,7 +518,10 @@ class TestEnqueueAnalyzeInlineCap:
 		assert api._enqueue_analyze("u1", docname="OPT-1") is True
 
 		assert env.db.rows["u1"]["status"] == "Failed"
-		assert "Retry Analyze" in env.db.rows["u1"]["analyzer_warnings"]
+		warning = env.db.rows["u1"]["analyzer_warnings"]
+		assert "Retry Analyze" in warning
+		# The message names the recording count, the limit and the way to fix it.
+		assert "51" in warning and "50" in warning and "enable-scheduler" in warning
 		assert env.enqueued == []
 
 	def test_site_config_can_raise_the_inline_cap(self, env, monkeypatch):
@@ -483,6 +534,7 @@ class TestEnqueueAnalyzeInlineCap:
 		assert api._enqueue_analyze("u1", docname="OPT-1") is True
 
 		assert env.enqueued[0][1]["now"] is True
+		assert env.enqueued[0][1]["session_uuid"] == "u1"
 
 	def test_inline_analyze_crash_is_swallowed_so_stop_does_not_500(self, env, monkeypatch):
 		frappe = api.frappe
@@ -533,6 +585,18 @@ class TestStatusEndpoints:
 
 
 class TestDrainProgress:
+	def test_the_endpoint_is_whitelisted(self):
+		# The conftest frappe stub makes ``whitelist`` an identity decorator, so the only
+		# way to prove the endpoint is exposed is the decorator in the source (the same AST
+		# check ``test_api_gate_audit`` uses).
+		tree = ast.parse(Path(api.__file__).read_text(encoding="utf-8"))
+		fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "drain_progress")
+
+		assert any(
+			ast.unparse(dec.func if isinstance(dec, ast.Call) else dec) == "frappe.whitelist"
+			for dec in fn.decorator_list
+		)
+
 	def test_reports_pending_jobs_and_remaining_window_without_the_grace(self, env, monkeypatch):
 		_bg_wait(monkeypatch, 300)
 		_row(env, status="Capturing Background Jobs")
@@ -564,6 +628,19 @@ class TestDrainProgress:
 		assert out["remaining_seconds"] is None
 		assert out["window_seconds"] is None
 		assert out["pending"] == 0
+
+	def test_permission_gate_runs_before_any_store_read(self, env, monkeypatch):
+		def denied(session_uuid):
+			raise PermissionError(session_uuid)
+
+		def no_read(*a, **kw):
+			raise AssertionError("the store was read before the permission check")
+
+		monkeypatch.setattr(api, "_require_session_permission", denied)
+		monkeypatch.setattr(env.db, "get_value", no_read)
+		monkeypatch.setattr(env.store, "get_session_meta", no_read, raising=False)
+		with pytest.raises(PermissionError):
+			api.drain_progress("u1")
 
 
 class TestRetryAnalyze:
@@ -624,28 +701,17 @@ class TestRetryAnalyze:
 
 		assert api.retry_analyze("u1")["retried"] is True
 
-	def test_failed_session_is_reset_and_requeued_asynchronously(self, env, monkeypatch):
-		from optimus import pdf_export
-
-		cleared = []
-		monkeypatch.setattr(pdf_export, "clear_cached_pdf", cleared.append)
-		_scheduler(monkeypatch, disabled=False)
+	def test_an_oversized_session_retried_inline_is_failed_not_analyzed(self, env, monkeypatch):
+		# retry_analyze must hand the row to the inline cap check, like stop() does.
+		_scheduler(monkeypatch, disabled=True)
+		env.store.recordings = 51
 		_row(env, status="Failed")
-		env.db.rows["u1"]["analyzer_warnings"] = "old error"
 
 		out = api.retry_analyze("u1")
 
-		assert out == {
-			"retried": True,
-			"session_uuid": "u1",
-			"docname": "OPT-1",
-			"ran_inline": False,
-			"status": None,
-		}
-		assert env.db.rows["u1"]["status"] == "Stopping"
-		assert env.db.rows["u1"]["analyzer_warnings"] is None
-		assert cleared == ["u1"], "stale PDF must be dropped so it regenerates from the new HTML"
-		assert env.enqueued[0][1]["now"] is False
+		assert out["ran_inline"] is True and out["status"] == "Failed"
+		assert "enable-scheduler" in env.db.rows["u1"]["analyzer_warnings"]
+		assert env.enqueued == []
 
 	def test_retry_refused_when_the_session_changed_before_the_reset(self, env, monkeypatch):
 		frappe = api.frappe
@@ -686,3 +752,25 @@ class TestRetryAnalyze:
 		_row(env, status="Failed")
 
 		assert api.retry_analyze("u1")["retried"] is True
+
+
+def test_require_profiler_user_does_not_recurse(monkeypatch):
+	"""Regression: _require_profiler_user must not recurse into itself. Calls it
+	directly and asserts it returns (within one stack frame)."""
+	frappe = api.frappe
+
+	# Stand-in frappe.session and get_roles so we don't need a real site
+	monkeypatch.setattr(frappe, "session", types.SimpleNamespace(user="Administrator"), raising=False)
+	monkeypatch.setattr(frappe, "get_roles", lambda u: ["Administrator"], raising=False)
+
+	assert api._require_profiler_user() == "Administrator"
+
+
+def test_require_profiler_user_throws_for_user_without_role(monkeypatch):
+	frappe = api.frappe
+
+	monkeypatch.setattr(frappe, "session", types.SimpleNamespace(user="alice@example.com"), raising=False)
+	monkeypatch.setattr(frappe, "get_roles", lambda u: ["Sales User"], raising=False)
+
+	with pytest.raises(Exception):
+		api._require_profiler_user()

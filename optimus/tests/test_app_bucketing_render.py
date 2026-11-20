@@ -4,6 +4,7 @@
 """End-to-end render tests for per-app sub-grouping in the report."""
 
 import json
+import re
 import types
 
 
@@ -143,37 +144,9 @@ def test_singular_finding_header_uses_singular():
 	html = renderer.render(doc, recordings=[])
 
 	# Cosmetic: "1 finding" not "1 findings".
-	assert "1 finding " in html or "1 finding&middot;" in html or "1 finding\n" in html
+	# One bucket header per app, each singular.
+	assert len(re.findall(r"&middot; 1 finding\s", html)) == 2
 	assert "1 findings" not in html
-
-
-def test_finding_without_callsite_goes_to_other_bucket():
-	"""A finding whose technical_detail has no callsite (e.g. infra-
-	pressure observations) must still render via the "Other" bucket."""
-	from optimus import renderer
-
-	# Build a finding with NO callsite in the detail.
-	row = types.SimpleNamespace()
-	row.finding_type = "Resource Contention"  # observational type
-	row.severity = "Medium"
-	row.title = "CPU saturated"
-	row.customer_description = "desc"
-	row.affected_count = 1
-	row.action_ref = ""
-	row.estimated_impact_ms = 0
-	row.technical_detail_json = json.dumps({})
-
-	doc = _fake_session_doc_with_findings(
-		_finding_row(title="UserFinding", callsite_filename="apps/myapp/x.py"),
-		row,
-	)
-	html = renderer.render(doc, recordings=[])
-
-	# v0.7.x: the 'Other (no callsite)' bucket is suppressed from
-	# rendering for both actionable AND observational findings.
-	# A Resource Contention with no callsite no longer appears in
-	# the Observations section (pre-v0.7 it did).
-	assert "CPU saturated" not in html
 
 
 def test_observations_also_bucketed_by_app():
@@ -329,5 +302,8 @@ class TestIgnoredAppsFilter:
 		           return_value=("frappe", "erpnext")):
 			html = renderer.render(doc, recordings=[])
 		# Only "M" survives; the Issues-found stat card's value is "1".
-		assert ">1 high<" in html or "1 high" in html
+		assert re.search(
+			r'Issues found</div>\s*<div class="kpi-value[^"]*">1</div>\s*<div class="kpi-sub">1 high</div>',
+			html,
+		)
 		assert "3 high" not in html

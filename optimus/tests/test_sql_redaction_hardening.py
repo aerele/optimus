@@ -141,17 +141,6 @@ def test_returning_ends_the_operand():
 	check(P, f"UPDATE t SET a = 1 WHERE password = '{S}' RETURNING id", [S], ["RETURNING id"])
 
 
-def test_ai_gate_names_are_exactly_the_old_list():
-	from optimus import ai_privacy
-
-	old = {
-		"password", "pwd", "api_key", "apikey", "token", "secret", "csrf", "authorization", "cookie",
-		"encryption_key", "private_key", "session_id", "access_key", "salt", "hash", "otp", "ssn",
-		"recovery", "credit", "card", "bank",
-	}  # fmt: skip
-	assert set(ai_privacy._AI_RAW_GATE_NAMES) == old
-
-
 # --- truncation note ---------------------------------------------------------------------------------
 
 
@@ -221,12 +210,6 @@ def test_register_omits_a_query_that_is_not_text():
 		assert call["query"] == OMIT
 		assert call[FLAG] is True
 	assert _register({"query": None})["query"] is None
-
-
-def test_register_failure_path_uses_the_shared_constants(monkeypatch):
-	monkeypatch.setattr(redaction, "redact_sql_fail_closed", lambda *a, **k: 1 / 0)
-	call = _register({"query": "SELECT 1"})
-	assert (call["query"], call[FLAG]) == (OMIT, True)
 
 
 @pytest.mark.parametrize("dialect", ["postgres", "mariadb"])

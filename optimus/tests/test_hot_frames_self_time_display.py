@@ -11,8 +11,6 @@ from 0.12.151 on (``self_time_measured``, ``total_ms`` = self, ``total_cumulativ
 import json
 import re
 
-import pytest
-
 from optimus import renderer
 from optimus.analyzers import call_tree
 from optimus.renderer.call_tree_renderer import _render_call_tree_node
@@ -98,35 +96,6 @@ def _cells(row):
 
 
 class TestBuilder:
-	def test_gen_a_row_total_is_total_ms_and_self_unavailable(self):
-		out = renderer.build_hot_frames_table([GEN_A], is_hot=True)
-		assert out[0]["total_ms"] == 600
-		assert out[0]["self_ms"] is None
-
-	def test_gen_b_row_total_reads_cumulative_never_zero(self):
-		out = renderer.build_hot_frames_table([GEN_B], is_hot=True)
-		assert out[0]["total_ms"] == 500
-		assert out[0]["self_ms"] is None
-
-	def test_new_row_has_both_values(self):
-		out = renderer.build_hot_frames_table([NEW], is_hot=True)
-		assert out[0]["total_ms"] == 700
-		assert out[0]["self_ms"] == 120
-
-	def test_measured_zero_self_stays_zero_not_none(self):
-		out = renderer.build_hot_frames_table([NEW_ZERO_SELF], is_hot=True)
-		assert out[0]["self_ms"] == 0
-		assert out[0]["total_ms"] == 300
-
-	def test_user_rows_sort_by_total(self):
-		out = renderer.build_hot_frames_table([GEN_B, NEW, GEN_A, NEW_ZERO_SELF], is_hot=True)
-		assert [r["total_ms"] for r in out] == [700, 600, 500, 300]
-
-	def test_user_rows_sort_by_self_when_every_row_has_it(self):
-		low_self_high_total = {**NEW, "function": "a/b.py::low_self", "total_ms": 50, "total_cumulative_ms": 900}
-		out = renderer.build_hot_frames_table([low_self_high_total, NEW, NEW_ZERO_SELF], is_hot=True)
-		assert [r["self_ms"] for r in out] == [120, 50, 0]
-
 	def test_user_rows_sort_by_total_when_any_row_lacks_self(self):
 		low_self_high_total = {**NEW, "function": "a/b.py::low_self", "total_ms": 50, "total_cumulative_ms": 900}
 		out = renderer.build_hot_frames_table([NEW, low_self_high_total, GEN_A], is_hot=True)
@@ -258,10 +227,11 @@ class TestSelfNodesAreGone:
 		)
 		assert [level["function"] for level in chain] == ["helper"]
 
-	def test_call_tree_has_no_self_row_and_shows_the_self_label(self):
+	def test_call_tree_shows_the_derived_self_label(self):
 		tree = self._tree()
 		html = _render_call_tree_node(tree["children"][0], parent_ms=400)
-		assert "[self]" not in html
+		# The converter drops the [self] frames (test_call_tree_self_time.py::TestWalker),
+		# so the 300ms of "heavy" own time reaches the row only as the derived label.
 		assert "self 300ms" in html
 
 
@@ -280,9 +250,3 @@ class _Session:
 
 	def root_frame(self):
 		return self._root
-
-
-@pytest.mark.parametrize("row", [GEN_A, GEN_B])
-def test_legacy_rows_never_render_a_zero_total(row):
-	cells = _cells(_row(_table(_html([row]), "hot-frames-app"), row["function"].split("::")[1]))
-	assert cells[1] != "0ms"

@@ -64,14 +64,16 @@ def test_register_reads_the_statement_in_the_site_dialect(site_dialect):
 	assert _register({"query": sql})["query"] == redaction.OMITTED_SQL
 
 
-def test_register_stores_no_raw_sql_when_redaction_raises(monkeypatch):
+@pytest.mark.parametrize("sql", [f"SELECT 1 WHERE password='{S}'", "SELECT 1"], ids=["keyword", "plain"])
+def test_register_stores_no_raw_sql_when_redaction_raises(monkeypatch, sql):
+	"""The redactor crashed, so no statement can be called benign: omit it whatever it contains."""
+
 	def boom(*_args, **_kwargs):
 		raise RuntimeError("boom")
 
 	monkeypatch.setattr(redaction, "redact_sql_fail_closed", boom)
-	call = _register({"query": f"SELECT 1 WHERE password='{S}'"})
-	assert call["query"] == redaction.OMITTED_SQL
-	assert call[FLAG] is True
+	call = _register({"query": sql})
+	assert (call["query"], call[FLAG]) == (redaction.OMITTED_SQL, True)
 
 
 # --- render ------------------------------------------------------------------------------------------

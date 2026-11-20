@@ -221,14 +221,6 @@ class TestBuildBackgroundJobsStatusMerge:
 		assert out["jobs"][0]["status"] == "Completed"
 		assert out["status_counts"] == {"Completed": 1}
 
-	def test_job_both_captured_and_tracked_is_not_duplicated(self):
-		actions = [_action_dict(0, action_label="Job: a", event_type="RQ Job",
-		                        recording_uuid="r1", duration_ms=200)]
-		tracked = [_tracked(job_id="j1", method="myapp.a", status="Completed",
-		                    recording_uuid="r1")]
-		out = renderer.build_background_jobs(actions, {}, tracked_jobs=tracked)
-		assert out["count"] == 1  # merged by recording_uuid, not duplicated
-
 	def test_mixed_captured_and_failed(self):
 		actions = [_action_dict(0, action_label="Job: ok", event_type="RQ Job",
 		                        recording_uuid="r1", duration_ms=300, queries_count=2)]
@@ -541,7 +533,7 @@ class TestEntryCallsiteInReport:
 		html = renderer.render_raw(doc, recordings=[])
 		assert "<h2>RQ Jobs</h2>" in html
 		assert "myapp.tasks.nope_xyzq" in html  # still listed by method name
-		assert "renderer.py:" not in html        # nothing got resolved
+		assert "vscode://file" not in html       # nothing got resolved
 
 	def test_non_api_http_action_renders_no_sub_row(self):
 		doc = _doc([
@@ -549,12 +541,13 @@ class TestEntryCallsiteInReport:
 			        path="/app/sales-invoice/new", recording_uuid="r0", duration_ms=900),
 		])
 		html = renderer.render_raw(doc, recordings=[])
-		assert "renderer.py:" not in html
+		assert "GET /app" in html
+		assert "vscode://file" not in html  # no entry callsite link for a /app/ path
 
 
 # --------------------------------------------------------------------------
 # v0.6.x: action/finding context target document (from form_dict) shown in
-# the per-action table, on the finding card and appended to exec-summary bullets
+# the per-action table and on the finding card
 # --------------------------------------------------------------------------
 
 class TestActionContextInReport:
@@ -584,11 +577,6 @@ class TestActionContextInReport:
 		# Finding card: "Document:" line.
 		assert "Document:" in html
 		assert "Sales Invoice" in html
-		# v0.7.x redesign Phase B: the exec-summary bullet that
-		# augmented its text with " Sales Invoice SINV-1" is gone
-		# (exec-summary card replaced by TL;DR hero). Target-doc
-		# surfacing now lives in the per-action breakdown + finding
-		# card breadcrumb above. Drop the bullet-text assertion.
 
 	def test_action_with_no_doc_in_form_dict_has_no_target_doc_line(self):
 		action = _action(

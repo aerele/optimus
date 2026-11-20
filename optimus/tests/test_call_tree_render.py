@@ -65,15 +65,6 @@ def test_more_frames_omitted_node_is_dropped():
 	assert "looped_validate" in html
 
 
-def test_ct_is_other_frame_matches_both_synthetic_formats():
-	assert renderer._ct_is_other_frame("[other: 50 frames]")
-	assert renderer._ct_is_other_frame("[1 more frames omitted]")
-	assert renderer._ct_is_other_frame("[208 more frames omitted]")
-	# real frames / other synthetic leaves are not matched
-	assert not renderer._ct_is_other_frame("looped_validate")
-	assert not renderer._ct_is_other_frame("<sql>")
-
-
 def test_sql_leaves_dropped_from_tree():
 	# ALL <sql> leaf siblings are dropped from the call-tree display no
 	# summary line, no rows. The call tree shows only the Python hierarchy;
@@ -166,20 +157,6 @@ def test_flat_top_action_does_not_hide_deep_action():
 	assert "flat_top" in panel and "deep_second" in panel
 	# the deep action's user frame renders its structure is no longer hidden
 	assert "looped_validate" in panel
-
-
-def test_panel_excludes_background_jobs():
-	# Background jobs have their own RQ Jobs section, so they must not appear as
-	# call-tree sub-trees here even when they are the slowest action.
-	acts = [
-		{**_act("bg_slow", 9000), "event_type": "RQ Job"},
-		_act("http_fast", 100),
-	]
-	panel = renderer._render_call_tree_panel(acts)
-	assert "http_fast" in panel
-	assert "bg_slow" not in panel
-	# Only the foreground action survives, so it is the single-action layout.
-	assert "Call tree (top action)" in panel
 
 
 def test_panel_empty_when_only_background_jobs():

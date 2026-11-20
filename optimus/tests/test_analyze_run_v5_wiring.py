@@ -1,22 +1,17 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Source-inspection regression guards for analyze.py's analyzer wiring.
+"""The v0.5.0 analyzers in the registry, and what ``analyze._persist`` stores for them.
 
-analyze.run is a large orchestrator that's hard to exercise end-to-end without
-a running Frappe site, so these guard against silent removal or renaming of the
-integration points by checking the wiring symbols literally appear in the source.
+The wiring of ``run`` (infra and frontend data before the analyzers) is asserted by
+``test_analyze_delivery_guards.py``.
 """
 
-import inspect
+import json
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 from optimus import analyze
-
-
-def test_analyze_imports_v5_analyzers():
-	src = inspect.getsource(analyze)
-	assert "infra_pressure" in src
-	assert "frontend_timings" in src
 
 
 def test_builtin_analyzers_list_includes_v5():
@@ -33,37 +28,42 @@ def test_builtin_analyzers_list_includes_v5():
 	), "frontend_timings.analyze missing from _BUILTIN_ANALYZERS"
 
 
-def test_run_loads_frontend_data_into_context():
-	src = inspect.getsource(analyze.run)
-	# v0.12.0+: the Redis key is built via optimus.redis_keys (the inline
-	# f-string ``"profiler:frontend:<uuid>"`` was migrated). Assert the
-	# wiring still calls the canonical builder + assigns to the context.
-	assert "frontend_legacy(" in src or "frontend_xhr(" in src
-	assert "context.frontend_data" in src
+def _persisted(monkeypatch, aggregate):
+	doc = MagicMock(notes="written by the user", title="fake title")
+	monkeypatch.setattr(analyze, "frappe", SimpleNamespace(
+		get_doc=lambda *a: doc, db=SimpleNamespace(get_value=lambda *a: doc.notes, set_value=lambda *a, **kw: None)))
+	monkeypatch.setattr(analyze, "safe_commit", lambda: None)
+	monkeypatch.setattr(analyze.session, "get_jobs", lambda *a: [])
+	context = analyze.AnalyzeContext("fake-session", "fake-doc")
+	context.aggregate.update(aggregate)
+	analyze._persist("fake-doc", context, [])
+	return doc
 
 
-def test_run_attaches_infra_to_recordings():
-	src = inspect.getsource(analyze.run)
-	# v0.12.0+: Per-recording infra dicts are read through
-	# ``redis_keys.infra(uuid)`` (the literal ``profiler:infra:`` f-string
-	# was migrated). Assert the wiring still calls the builder + attaches
-	# the value as ``rec["infra"]`` before the analyzer loop runs.
-	assert "redis_keys.infra(" in src or "_redis_keys.infra(" in src
-	# The assignment can be spelled rec["infra"] or rec['infra']; accept either.
-	assert 'rec["infra"]' in src or "rec['infra']" in src
+def test_persist_keeps_the_tail_of_each_v5_aggregate_list_and_warns(monkeypatch):
+	# Uncapped, v5_aggregate_json grows past 1 MB on a large session and slows the form load.
+	doc = _persisted(monkeypatch, {
+		"infra_timeline": [{"i": i} for i in range(201)],
+		"frontend_xhr_matched": [{"i": i} for i in range(501)],
+		"frontend_orphans": [{"i": i} for i in range(101)],
+	})
+
+	stored = json.loads(doc.v5_aggregate_json)
+	assert stored["infra_timeline"] == [{"i": i} for i in range(1, 201)]
+	assert stored["frontend_xhr_matched"] == [{"i": i} for i in range(1, 501)]
+	assert stored["frontend_orphans"] == [{"i": i} for i in range(1, 101)]
+	# The warnings must already be in the field the session form shows.
+	warnings = doc.analyzer_warnings.splitlines()
+	assert len(warnings) == 3
+	for name, before, cap in (("infra_timeline", 201, 200), ("frontend_xhr_matched", 501, 500), ("frontend_orphans", 101, 100)):
+		assert any(f"{name} truncated from {before} to {cap} entries" in line for line in warnings)
 
 
-def test_persist_writes_v5_aggregate_json():
-	src = inspect.getsource(analyze._persist)
-	# _persist must serialize the v0.5.0 aggregate into v5_aggregate_json
-	# on the session doc, or the renderer gets nothing to work with.
-	assert "v5_aggregate_json" in src
-	# And it must read at least one of the v0.5.0 aggregate keys from context.
-	assert (
-		"infra_timeline" in src
-		and "frontend_xhr_matched" in src
-	)
-
+def test_persist_leaves_the_notes_a_user_wrote_unchanged(monkeypatch):
+	# The steps are only auto-filled into empty notes; text typed on the form between start and stop stays.
+	monkeypatch.setattr(analyze, "_build_auto_notes_html", lambda *a: "generated steps")
+	doc = _persisted(monkeypatch, {})
+	assert doc.notes == "written by the user"
 
 
 def test_truncate_finding_titles_clamps_overlong():

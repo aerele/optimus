@@ -64,7 +64,7 @@ class TestDeriveModulePath:
 		# Stdlib / venv paths don't have the apps/ wrapper.
 		path = picker._derive_module_path("/usr/lib/python3.14/json/__init__.py")
 		# No "apps" segment → walks the path as-is, dropping leading slash
-		assert path.endswith("json")
+		assert path == "usr.lib.python3.14.json"
 
 	def test_empty_returns_empty(self):
 		assert picker._derive_module_path("") == ""
@@ -126,9 +126,6 @@ class TestBenchUnderAppsFolder:
 
 
 class TestDeriveApp:
-	def test_extracts_app_from_apps_prefix(self):
-		assert picker._derive_app("apps/erpnext/erpnext/foo.py") == "erpnext"
-
 	def test_no_apps_prefix_falls_back_to_first_segment(self):
 		assert picker._derive_app("frappe/database.py") == "frappe"
 
@@ -236,42 +233,25 @@ class TestPureHelperFiltering:
 	call_tree analyzer's Repeated Hot Frame filter).
 	"""
 
-	def test_frappe_app_application_dropped(self):
-		tree = _root(_frame("application", "apps/frappe/frappe/app.py", 1, 400.0))
-		candidates = picker._build_candidates_from_trees([tree], [])
-		assert candidates == []
-
-	def test_frappe_handler_handle_dropped(self):
-		tree = _root(_frame("handle", "apps/frappe/frappe/handler.py", 1, 800.0))
-		candidates = picker._build_candidates_from_trees([tree], [])
-		assert candidates == []
-
-	def test_frappe_recorder_record_sql_dropped(self):
-		tree = _root(_frame("record_sql", "apps/frappe/frappe/recorder.py", 1, 140.0))
-		candidates = picker._build_candidates_from_trees([tree], [])
-		assert candidates == []
-
-	def test_frappe_utils_typing_validations_wrapper_dropped(self):
-		tree = _root(_frame(
-			"wrapper", "apps/frappe/frappe/utils/typing_validations.py", 1, 750.0,
-		))
-		candidates = picker._build_candidates_from_trees([tree], [])
-		assert candidates == []
-
-	def test_frappe_model_document_save_dropped(self):
-		tree = _root(_frame("save", "apps/frappe/frappe/model/document.py", 1, 380.0))
-		candidates = picker._build_candidates_from_trees([tree], [])
-		assert candidates == []
-
-	def test_frappe_model_meta_init_dropped(self):
-		tree = _root(_frame("__init__", "apps/frappe/frappe/model/meta.py", 1, 116.0))
-		candidates = picker._build_candidates_from_trees([tree], [])
-		assert candidates == []
-
-	def test_frappe_qb_query_execute_dropped(self):
-		tree = _root(_frame("execute", "apps/frappe/frappe/model/qb_query.py", 1, 137.0))
-		candidates = picker._build_candidates_from_trees([tree], [])
-		assert candidates == []
+	# Each row is a file-rule entry of call_tree (_PURE_HELPER_PATH_SUFFIXES, or the
+	# "frappe/utils/" substring for typing_validations). The function name is never a
+	# bare wrapper name, so only the file rule can drop the frame.
+	@pytest.mark.parametrize(
+		"function,filename,cumulative_ms",
+		[
+			("application", "apps/frappe/frappe/app.py", 400.0),
+			("handle", "apps/frappe/frappe/handler.py", 800.0),
+			("record_sql", "apps/frappe/frappe/recorder.py", 140.0),
+			("validate_argument_types", "apps/frappe/frappe/utils/typing_validations.py", 750.0),
+			("save", "apps/frappe/frappe/model/document.py", 380.0),
+			("__init__", "apps/frappe/frappe/model/meta.py", 116.0),
+			("execute", "apps/frappe/frappe/model/qb_query.py", 137.0),
+		],
+		ids=["app", "handler", "recorder", "typing_validations", "document", "meta", "qb_query"],
+	)
+	def test_frappe_plumbing_frames_are_dropped(self, function, filename, cumulative_ms):
+		tree = _root(_frame(function, filename, 1, cumulative_ms))
+		assert picker._build_candidates_from_trees([tree], []) == []
 
 	def test_bare_wrapper_names_dropped_anywhere(self):
 		# Decorator wrapper functions named "wrapper" / "fn" / "runner" /
@@ -739,28 +719,6 @@ class TestMultiTreePicker:
 	"""The picker walks the top-N hottest action trees, not just the single
 	hottest, so a flow with several slow actions surfaces them all."""
 
-	def test_surfaces_frames_from_multiple_trees(self):
-		hot = _root(
-			_frame("bg_long_running_job", "ugly_code/python/common.py", 10, 60000.0, children=[
-				_frame("compute_aggregates", "ugly_code/python/common.py", 20, 2400.0),
-			]),
-		)
-		mid = _root(
-			_frame("process_invoice", "ugly_code/python/sales.py", 30, 18000.0, children=[
-				_frame("apply_taxes", "ugly_code/python/sales.py", 40, 1200.0),
-			]),
-		)
-		small = _root(_frame("recompute_stock", "ugly_code/python/stock.py", 50, 2500.0))
-
-		cands = picker._build_tree_indented_candidates([hot, mid, small])
-		fns = {c["qualname"] for c in cands}
-		# All three actions' hot frames surface, not just the hottest tree.
-		assert "bg_long_running_job" in fns
-		assert "process_invoice" in fns  # MISSING under the old single-tree walk
-		assert "recompute_stock" in fns
-		# Each tree's top frame is its own depth-0 root.
-		assert len([c for c in cands if c["depth"] == 0]) >= 3
-
 	def test_skips_trivially_fast_trees(self):
 		hot = _root(_frame("real_work", "ugly_code/python/common.py", 10, 5000.0))
 		noise = _root(_frame("blip", "ugly_code/python/common.py", 20, 1.0))  # < _MIN_TREE_MS
@@ -859,10 +817,6 @@ class TestPickerDialogIndent:
 		)
 		return js.read_text(encoding="utf-8")
 
-	def test_no_hardcoded_leaf_indent(self):
-		# The exact pad that made depth-0 leaves render as if nested.
-		assert "padding:2px 0 2px 22px" not in self._js_source()
-
 	def test_uniform_row_alignment_markers_present(self):
 		src = self._js_source()
 		assert "build_tree_html" in src
@@ -871,11 +825,11 @@ class TestPickerDialogIndent:
 		assert "fp-toggle" in src
 		assert "fp-spacer" in src
 		assert "fp-children" in src
-
-	def test_depth_stack_reconstruction_intact(self):
 		# The dialog must still re-nest the flat DFS list via the depth stack
 		# (the Python picker assigns the depths the tests above pin down).
-		assert "stack[stack.length - 1].depth >= depth" in self._js_source()
+		assert "stack[stack.length - 1].depth >= depth" in src
+		# The exact pad that made depth-0 leaves render as if nested.
+		assert "padding:2px 0 2px 22px" not in src
 
 
 class TestFilterOutIgnoredApps:

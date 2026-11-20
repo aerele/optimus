@@ -54,18 +54,6 @@ def _Recorder():
 
 
 class TestPatchInstalled:
-	def test_patch_marker_on_register(self):
-		Recorder = _Recorder()
-		assert getattr(Recorder.register, "_profiler_patched", False), (
-			"Recorder.register should carry _profiler_patched = True after import"
-		)
-
-	def test_patch_marker_on_init(self):
-		Recorder = _Recorder()
-		assert getattr(Recorder.__init__, "_profiler_patched", False), (
-			"Recorder.__init__ should carry _profiler_patched = True after import"
-		)
-
 	def test_patch_is_idempotent(self):
 		"""Running _patch_recorder a second time MUST NOT double-wrap.
 		Mirrors the _patch_enqueue idempotency guarantee that re-imports
@@ -114,15 +102,20 @@ class TestRegisterRedaction:
 		Recorder.register(fake, data)
 		assert fake.calls[0]["query"] == "SELECT name FROM `tabUser` WHERE enabled=1"
 
-	def test_non_dict_data_passes_through_without_crash(self):
+	@pytest.mark.parametrize("data", [None, ["SELECT 1"], 7])
+	def test_non_dict_data_passes_through_without_crash(self, data, monkeypatch):
+		"""Data that is not a dict has no ``query`` to mask: the wrapper hands the very same object to
+		the original ``register``, adds no crash, and logs no "SQL redaction could not run" line."""
+		from optimus import safe_call
+
+		logged = []
+		monkeypatch.setattr(safe_call, "log_error_line", lambda message, **kw: logged.append(message))
 		Recorder = _Recorder()
 		fake = _FakeRecorderInstance()
-		# Original may or may not accept non-dict data; the patch must not
-		# itself add a crash path.
-		try:
-			Recorder.register(fake, None)
-		except Exception:
-			pass  # acceptable if the ORIGINAL barfs; the wrap doesn't add a crash
+		Recorder.register(fake, data)
+		assert len(fake.calls) == 1
+		assert fake.calls[0] is data
+		assert logged == []
 
 
 # ---------------------------------------------------------------------------
@@ -139,16 +132,6 @@ class TestRegisterRedaction:
 
 
 class TestInitRedaction:
-	def test_form_dict_with_sensitive_keys_redacted(self):
-		from optimus.redaction import redact_sensitive
-
-		form_dict = {"password": "hunter2", "username": "alice"}
-		out = redact_sensitive(form_dict)
-		assert out["password"] == "<REDACTED:password>"
-		assert out["username"] == "alice"
-		# Equivalent to what the patched __init__ does:
-		# self.form_dict = redact_sensitive(self.form_dict, extra_keys=cfg.sensitive_form_keys)
-
 	def test_headers_with_authorization_redacted(self):
 		from optimus.redaction import redact_sensitive
 
@@ -186,29 +169,6 @@ class TestSettingsDrivenExtras:
 		stored = fake.calls[0]["query"]
 		assert "1234567890" not in stored, f"extras-driven redaction missed: {stored!r}"
 		assert "'<REDACTED>'" in stored
-
-	def test_extra_form_keys_take_effect(self, monkeypatch):
-		"""Custom form/header keys via settings extend the default redaction."""
-		import types
-
-		from optimus import settings as _settings
-
-		def _fake_get_config():
-			return types.SimpleNamespace(
-				sensitive_form_keys=("recovery_code",),
-				sensitive_sql_columns=(),
-			)
-
-		monkeypatch.setattr(_settings, "get_config", _fake_get_config, raising=False)
-
-		from optimus.redaction import redact_sensitive
-
-		# Same call shape the patched __init__ uses.
-		_, _ = (), ()
-		extra_keys = _fake_get_config().sensitive_form_keys
-		out = redact_sensitive({"recovery_code": "abc", "name": "Alice"}, extra_keys=extra_keys)
-		assert out["recovery_code"] == "<REDACTED:recovery_code>"
-		assert out["name"] == "Alice"
 
 	def test_config_read_that_records_sql_does_not_recurse(self, monkeypatch):
 		"""On a config cache miss get_config queries the DB, and the recorder registers those queries too."""

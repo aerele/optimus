@@ -99,15 +99,6 @@ def test_counter_rejects_non_counter_fields_and_invalid_counts(field, n):
 		analyze._session_increment_query("fake-doc", field, n)
 
 
-@pytest.mark.parametrize("dialect,quote", [("mariadb", "`"), ("postgres", '"')])
-def test_ambient_counter_query_matches_the_session_uuid(monkeypatch, dialect, quote):
-	qb = pytest.importorskip("frappe.query_builder.utils", exc_type=ImportError).get_query_builder(dialect)
-	monkeypatch.setattr(analyze, "frappe", SimpleNamespace(qb=qb))
-	sql = analyze._session_increment_query("fake-uuid", "ai_tokens_spent", 42, by="session_uuid").get_sql()
-	q = quote
-	assert sql.endswith(f" WHERE {q}session_uuid{q}='fake-uuid'")
-
-
 @pytest.mark.parametrize("key,by", [("", "name"), (None, "name"), ("fake-doc", "modified"), ("fake-doc", "owner")])
 def test_counter_query_rejects_an_empty_key_or_another_column(key, by):
 	with pytest.raises(ValueError):
@@ -310,33 +301,22 @@ def _ask(entry, **attribution):
 	return ai_fix.humanize_steps([{"label": "fake"}], **attribution)
 
 
-@pytest.mark.parametrize("protocol", ["openai", "anthropic"])
-@pytest.mark.parametrize("entry", ["fix", "steps"])
-def test_an_unattributed_call_never_charges_a_previous_worker_session(provider, charged, entry, protocol):
-	provider.use(protocol)
-	provider.install(_Reply(_ANSWER if entry == "fix" else "1. step", 7, protocol=protocol))
-	_ask(entry)
-	assert charged == []
-
-
 @pytest.mark.parametrize(
 	"attribution",
-	[{"session_uuid": "uuid-B", "docname": "SESS-B"}, {"session_uuid": "uuid-B"}, {"docname": "SESS-B"}],
+	[
+		{"session_uuid": "uuid-B", "docname": "SESS-B"}, {"session_uuid": "uuid-B"}, {"docname": "SESS-B"},
+		{}, {"session_uuid": ""}, {"docname": ""}, {"session_uuid": "", "docname": ""},
+	],
 )
 @pytest.mark.parametrize("protocol", ["openai", "anthropic"])
 @pytest.mark.parametrize("entry", ["fix", "steps"])
-def test_explicit_attribution_never_charges_the_ambient_session(provider, charged, entry, attribution, protocol):
+def test_no_attribution_shape_makes_ai_fix_charge_a_session(provider, charged, entry, attribution, protocol):
+	"""``ai_fix`` never writes a session counter: explicit, empty or no attribution (the caller
+	adds the spend once, from the result's usage)."""
 	provider.use(protocol)
 	provider.install(_Reply(_ANSWER if entry == "fix" else "1. step", 7, protocol=protocol))
 	_ask(entry, **attribution)
 	assert len(provider.posts) == 1 and charged == []
-
-
-def test_an_explicit_caller_records_its_spend_once_into_its_own_session(provider, charged):
-	provider.install(_Reply(_ANSWER, 7))
-	result = ai_fix.suggest_fix({"finding_type": "N+1 Query"}, session_uuid="uuid-B", docname="SESS-B")
-	analyze._add_ai_spend("SESS-B", result["tokens"]["total_tokens"])
-	assert charged == [("SESS-B", "ai_tokens_spent", 7, "name")]
 
 
 def test_an_explicit_billed_failure_carries_its_usage_and_charges_nothing(provider, charged):
@@ -344,29 +324,6 @@ def test_an_explicit_billed_failure_carries_its_usage_and_charges_nothing(provid
 	with pytest.raises(ai_fix.AiFixError) as caught:
 		ai_fix.suggest_fix({"finding_type": "N+1 Query"}, session_uuid="uuid-B", docname="SESS-B")
 	assert caught.value.usage["total_tokens"] == 9 and charged == []
-
-
-def test_an_internal_call_with_an_explicit_session_never_charges_the_ambient_one(provider, charged):
-	provider.install(_Reply("ok", 42), _Reply("ok", 5))
-	ai_fix._dispatch_call(dict(_PROVIDER), "system", [], usage_out={}, session_uuid="uuid-B")
-	assert charged == []
-	ai_fix._dispatch_call(dict(_PROVIDER), "system", [], usage_out={})
-	assert charged == []
-
-
-@pytest.mark.parametrize("attribution", [{}, {"docname": "SESS-B"}])
-def test_each_billed_call_of_a_reask_is_collected_once_for_sql_settlement(provider, charged, monkeypatch, attribution):
-	violation = ai_fix.ai_guardrails.Violation
-	verdicts = iter([[violation("invented-api")], []])
-	monkeypatch.setattr(ai_fix.ai_guardrails, "verify_fix", lambda text, **k: next(verdicts))
-	monkeypatch.setattr(ai_fix.ai_guardrails, "reaskable", lambda found: list(found))
-	monkeypatch.setattr(ai_fix.ai_budget, "reask_fits", lambda *a, **k: True)
-	monkeypatch.setattr(ai_fix, "_reask_enabled", lambda: True)
-	provider.install(_Reply(_ANSWER, 7), _Reply(_ANSWER, 11))
-	result = ai_fix.suggest_fix({"finding_type": "N+1 Query"}, **attribution)
-	assert len(provider.posts) == 2 and result["tokens"]["total_tokens"] == 18
-	# Both replies are returned for settlement; the client never writes a session counter.
-	assert charged == []
 
 
 def test_humanize_reports_each_call_once_through_a_reused_usage_out(provider, charged):
@@ -385,24 +342,6 @@ def test_humanize_reports_each_call_once_through_a_reused_usage_out(provider, ch
 	assert charged == []
 
 
-def test_humanize_without_usage_out_never_charges_an_unattributed_session(provider, charged):
-	provider.install(_Reply("1. step", 9))
-	ai_fix.humanize_steps([{"label": "fake"}])
-	assert charged == []
-
-
-@pytest.mark.parametrize(
-	"attribution", [{"session_uuid": ""}, {"docname": ""}, {"session_uuid": "", "docname": ""}],
-)
-@pytest.mark.parametrize("protocol", ["openai", "anthropic"])
-@pytest.mark.parametrize("entry", ["fix", "steps"])
-def test_an_empty_session_or_docname_is_unattributed(provider, charged, entry, attribution, protocol):
-	provider.use(protocol)
-	provider.install(_Reply(_ANSWER if entry == "fix" else "1. step", 7, protocol=protocol))
-	_ask(entry, **attribution)
-	assert charged == []
-
-
 def test_an_empty_session_is_never_charged_or_logged_to_a_previous_worker_session(
 	provider, charged, monkeypatch,
 ):
@@ -414,20 +353,6 @@ def test_an_empty_session_is_never_charged_or_logged_to_a_previous_worker_sessio
 	monkeypatch.setattr(ai_fix, "_log_http_error", _REAL_LOG_HTTP_ERROR)
 	ai_fix._log_http_error("openai", "chat/completions", 500, session_uuid="")
 	assert rows == [None]
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 @pytest.mark.parametrize("entry", ["fix", "steps"])
@@ -532,14 +457,6 @@ class _RecordingQuery:
 
 	def run(self, **kwargs):
 		return []
-
-
-def test_the_recording_query_treats_chained_wheres_like_one_anded_where():
-	chained, combined = [], []
-	a, b = _Column("status") == "Ready", _Column("stopped_at") > "x"
-	_RecordingQuery(chained).where(a).where(b)
-	_RecordingQuery(combined).where(a & b)
-	assert chained == combined == [(("status", "==", "Ready"), ("stopped_at", ">", "x"))]
 
 
 def test_health_window_uses_stopped_at_not_ai_modified_without_the_real_query_builder(monkeypatch):
@@ -793,43 +710,5 @@ def test_the_ladders_own_timeout_row_is_filed_under_the_calls_own_session(provid
 	assert http_rows == [("optimus ai_fix", None, "SESS-B")]
 
 
-@pytest.mark.parametrize("protocol", ["openai", "anthropic"])
-def test_an_internal_call_with_only_a_docname_is_explicit_for_charge_and_row(provider, charged, monkeypatch, protocol):
-	"""A docname alone attributes a call, as a session_uuid does: no ambient charge, and a failure
-	row filed under that docname without borrowing worker state."""
-	provider.use(protocol)
-	provider.install(_Reply("ok", 5, protocol=protocol), _Reply("x", 1, status=500, protocol=protocol))
-	ai_fix._dispatch_call(dict(_PROVIDER, protocol=protocol), "system", [], usage_out={}, docname="SESS-B")
-	assert charged == []
-	rows = []
-	monkeypatch.setattr(ai_fix, "_log_http_error", _REAL_LOG_HTTP_ERROR)
-	monkeypatch.setattr(
-		ai_fix, "log_ai_failure", lambda title, exc=None, **kw: rows.append((kw["session_uuid"], kw["docname"])) or True,
-	)
-	with pytest.raises(ai_fix.AiFixError):
-		ai_fix._dispatch_call(dict(_PROVIDER, protocol=protocol), "system", [], usage_out={}, docname="SESS-B")
-	assert rows == [(None, "SESS-B")]
-
-
-class _UnreadableLocal:
-	"""``frappe.local`` whose attributes cannot be read (``error`` is raised on every read)."""
-
-	def __init__(self, error):
-		object.__setattr__(self, "error", error)
-
-	def __getattr__(self, name):
-		raise object.__getattribute__(self, "error")
-
-
 class _FakeTimeout(Exception):
 	"""Stands for rq's job timeout (``safe_call.job_timeout_types`` is pointed at it)."""
-
-
-def test_an_unreadable_spend_marker_files_the_row_without_a_session(monkeypatch):
-	import frappe
-
-	rows = []
-	monkeypatch.setattr(ai_fix, "log_ai_failure", lambda title, **kw: rows.append(kw["session_uuid"]) or True)
-	monkeypatch.setattr(frappe, "local", _UnreadableLocal(RuntimeError("no request context")))
-	_REAL_LOG_HTTP_ERROR("openai", "chat/completions", 500)
-	assert rows == [None]

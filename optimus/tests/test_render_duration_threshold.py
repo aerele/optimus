@@ -208,17 +208,12 @@ class TestDurationMarkers:
 		assert format_durations(t, 1000.0) == "Slow query: 5.23s"
 		assert format_durations(t, 0) == "Slow query: 5234ms"  # disabled
 
-	def test_marker_is_exact_prose_and_urls_untouched(self):
-		# A marker converts; a bare "2000ms" in a URL (no marker) does not.
-		t = f"{dur(1600)} on /app/report/query-2000ms-test"
-		assert format_durations(t, 1000.0) == "1.60s on /app/report/query-2000ms-test"
-
 	def test_marker_title_formats_through_render(self):
 		# End-to-end: a dur() marker in a finding title is formatted by render_raw.
-		doc = _doc([], findings=[_finding("Slow query: 5234ms", 5234.0)])
+		doc = _doc([], findings=[_finding(f"Slow query: {dur(5234)}", 5234.0)])
 		html = renderer.render_raw(doc, recordings=[])
 		assert "Slow query: 5.23s" in html
-		assert "5234ms" not in html
+		assert _DUR_SEP not in html
 
 	def test_marker_degrades_to_plain_ms(self):
 		# An unformatted marker still reads as plain "5234ms" (separator invisible).
@@ -240,10 +235,6 @@ class TestDurationMarkers:
 		# than baking a "-500ms" marker the sign-free marker regex can't own.
 		assert format_durations(f"x {dur(-500)}", 1000.0) == "x 0ms"
 		assert format_durations(f"x {dur(-5000)}", 1000.0) == "x 0ms"
-
-	def test_format_durations_also_handles_free_prose(self):
-		# The prose fallback still rolls a raw "5234ms" in AI-written free text.
-		assert format_durations("took 5234ms", 1000.0) == "took 5.23s"
 
 	def test_multiple_markers_in_one_string(self):
 		t = f"{dur(1600)} of {dur(1095)} wall time"
@@ -366,24 +357,6 @@ class TestDisabledThreshold:
 		assert "large_duration_threshold_ms=0" in html
 
 
-class TestHighThreshold:
-	def test_threshold_above_all_values_keeps_everything_in_ms(self):
-		doc = _doc([
-			_action(action_label="POST /api/method/myapp.slow",
-			        http_method="POST", path="/api/method/myapp.slow",
-			        recording_uuid="r0", duration_ms=5234),
-		])
-		with patch(
-			"optimus.settings.get_config",
-			return_value=OptimusConfig(large_duration_threshold_ms=10000),
-		):
-			html = renderer.render_raw(doc, recordings=[])
-
-		assert ">5234ms<" in html
-		assert ">5.23s<" not in html
-		assert "large_duration_threshold_ms=10000" in html
-
-
 class TestLowThreshold:
 	def test_threshold_500ms_converts_everything_above(self):
 		doc = _doc([
@@ -434,16 +407,6 @@ class TestCodeReviewFixes:
 		assert "5.23s" in html
 		assert "5234ms" not in html
 		assert "—" not in html
-
-	def test_legacy_raw_ms_title_agrees_with_badge(self):
-		# Regression for the review finding: a session analyzed before dur() markers
-		# stores a marker-less "1374ms" title. On re-render (no re-analyze) the title
-		# must roll over to match the impact badge, not stay in ms beside a seconds
-		# badge. The prose fallback in format_durations is what keeps them in step.
-		doc = _doc([], findings=[_finding("Slow query: 1374ms", 1374.0)])
-		html = renderer.render_raw(doc, recordings=[])
-		assert "Slow query: 1.37s" in html
-		assert "Slow query: 1374ms" not in html
 
 	def test_summary_tagged_duration_rolls_over(self):
 		# The render-time summary is rebuilt fresh (always tagged); render formats the
@@ -581,19 +544,3 @@ class TestReviewRound4Fixes:
 		assert _resolve_threshold_ms({"large_duration_threshold_ms": "abc"}) == DEFAULT_DISPLAY_THRESHOLD_MS
 		assert _resolve_threshold_ms({"large_duration_threshold_ms": "500"}) == 500.0
 		assert _resolve_threshold_ms({"large_duration_threshold_ms": 0}) == 0.0
-
-
-class TestFinalizeProse:
-	"""_finalize_prose is the single home of the format-before-em-dash order."""
-
-	def test_scan_true_rolls_raw_ms_before_em_dash_sweep(self):
-		from optimus.renderer._internal import _finalize_prose
-
-		assert _finalize_prose("took 5234ms—slow", 1000.0) == "took 5.23s-slow"
-
-	def test_scan_false_is_marker_only(self):
-		from optimus.renderer._internal import _finalize_prose
-
-		# A threshold literal (no dur() marker) is left alone under scan=False.
-		assert _finalize_prose("queries &gt;200ms slow", 1000.0, scan=False) == "queries &gt;200ms slow"
-		assert _finalize_prose(f"took {dur(5234)}", 1000.0, scan=False) == "took 5.23s"

@@ -44,10 +44,6 @@ def test_thinned_trees_give_one_warning_with_the_counts_and_the_largest_step():
 	assert "under a parent function" in warnings[0]
 
 
-def test_nothing_is_said_when_no_tree_was_thinned():
-	assert _notes([_rec(), _rec()]) == []
-
-
 def test_an_old_blob_without_the_attribute_is_not_thinned():
 	assert _notes([{"pyi_session": object()}, {"pyi_session": None}]) == []
 

@@ -1,85 +1,93 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests the ``wrap_value`` / ``unwrap_value`` envelope on ``explain_cache``
-(the cross-session EXPLAIN-result cache in ``analyze.py``), whose payload is a
-list of dicts, to confirm ``unwrap_value`` preserves nested structure."""
+"""The cross-session EXPLAIN-result cache in ``analyze._enrich_recordings`` stores a list of
+dicts in the ``wrap_value`` envelope and reads both the envelope and the legacy bare list
+(docs/REDIS-SCHEMA.md). Each test runs the real enrichment against a dict-backed cache."""
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 
-class TestExplainCacheEnvelopeRoundTrip:
-	"""Round-trip tests on the envelope helpers alone (the analyze.py call site
-	uses the same wrap-on-write / unwrap-on-read pattern)."""
+import frappe
+import pytest
+import sqlparse
 
-	def test_list_of_dicts_roundtrip(self):
-		"""wrap + unwrap must preserve a list[dict] EXPLAIN payload, including
-		inner value types."""
-		from optimus import redis_schema
+from optimus import analyze, redis_keys, redis_schema
+from optimus.dbdialect.base import NormalizedPlan, PlanTable
 
-		payload = [
-			{"id": 1, "select_type": "SIMPLE", "table": "tabUser", "rows": 100},
-			{"id": 2, "select_type": "SIMPLE", "table": "tabSession", "rows": 5},
-		]
-		wrapped = redis_schema.wrap_value(payload)
-		unwrapped, version = redis_schema.unwrap_value(wrapped)
-		assert unwrapped == payload, f"list-of-dicts payload should round-trip unchanged; got: {unwrapped!r}"
-		assert version == redis_schema.SCHEMA_VERSION
+QUERY = "SELECT name FROM tabUser WHERE name = 'a'"
 
-	def test_empty_list_roundtrip(self):
-		"""A failed EXPLAIN returns []; the empty-list shape must round-trip."""
-		from optimus import redis_schema
 
-		wrapped = redis_schema.wrap_value([])
-		unwrapped, version = redis_schema.unwrap_value(wrapped)
-		assert unwrapped == []
-		assert version == redis_schema.SCHEMA_VERSION
+class _DictCache:
+	"""Dict-backed ``frappe.cache`` substitute that keeps what was written."""
 
-	def test_legacy_bare_list_passes_through(self):
-		"""A legacy bare list[dict] with no envelope must pass through
-		``unwrap_value`` unchanged (version None)."""
-		from optimus import redis_schema
+	def __init__(self, store=None):
+		self.store = dict(store or {})
 
-		legacy_payload = [
-			{"select_type": "SIMPLE", "table": "tabRole", "rows": 50},
-		]
-		unwrapped, version = redis_schema.unwrap_value(legacy_payload)
-		assert unwrapped == legacy_payload, (
-			"legacy bare-list shape must pass through unchanged so "
-			"new readers don't drop pre-v0.12.17 cached EXPLAIN results"
+	def get_value(self, key):
+		return self.store.get(key)
+
+	def set_value(self, key, value, **_):
+		self.store[key] = value
+
+
+@pytest.fixture
+def enrich(monkeypatch):
+	"""Run ``_enrich_recordings`` on one SELECT; return (call, cache, explains_issued)."""
+
+	def run(cache):
+		explains = []
+
+		def run_explain(query):
+			explains.append(query)
+			return NormalizedPlan(tables=[PlanTable(table="tabUser", rows_examined=7)])
+
+		monkeypatch.setattr(analyze, "safe_commit", lambda: None)
+		monkeypatch.setattr(
+			analyze, "is_query_type", lambda query, _types: query.lstrip().upper().startswith("SELECT")
 		)
-		assert version is None, f"legacy un-wrapped value should report version=None; got: {version!r}"
-
-
-class TestAnalyzeSourceUsesEnvelope:
-	"""Source-grep canary: confirm analyze.py's explain_cache write and read both
-	use the envelope helpers, catching a refactor that reverts wrap / unwrap."""
-
-	def test_explain_cache_write_wraps_via_redis_schema(self):
-		import os
-
-		path = os.path.join(os.path.dirname(__file__), "..", "analyze.py")
-		with open(path) as f:
-			src = f.read()
-		# Locate the explain_cache shared-cache write block. Anchor on
-		# the shared_key variable that the explain branch builds, then
-		# look for wrap_value nearby.
-		assert "_redis_keys.explain_cache(" in src, (
-			"analyze.py should reference _redis_keys.explain_cache for the shared-cache key"
+		monkeypatch.setattr(analyze, "get_dialect", lambda: SimpleNamespace(run_explain=run_explain))
+		monkeypatch.setattr(frappe, "conf", {"optimus_explain_cache_ttl_seconds": 60}, raising=False)
+		monkeypatch.setattr(frappe, "cache", cache, raising=False)
+		monkeypatch.setattr(
+			"optimus.settings.get_config", lambda: SimpleNamespace(max_queries_per_recording=100)
 		)
-		# The set_value call must wrap its payload via _redis_schema.
-		assert "_redis_schema.wrap_value(result)" in src, (
-			"explain_cache write must wrap the EXPLAIN result via _redis_schema.wrap_value before set_value"
-		)
+		call = {"query": QUERY}
+		analyze._enrich_recordings([{"calls": [call]}])
+		return call, explains
 
-	def test_explain_cache_read_unwraps_via_redis_schema(self):
-		import os
+	return run
 
-		path = os.path.join(os.path.dirname(__file__), "..", "analyze.py")
-		with open(path) as f:
-			src = f.read()
-		assert "_redis_schema.unwrap_value(raw_cached)" in src, (
-			"explain_cache read must unwrap the cached value via "
-			"_redis_schema.unwrap_value so both new envelopes and legacy "
-			"bare lists resolve consistently"
-		)
+
+def _shared_key():
+	"""The shared-cache key of QUERY: enrichment formats the SQL before it builds the key."""
+	formatted = sqlparse.format(QUERY.strip(), keyword_case="upper", reindent=True, strip_comments=True)
+	return redis_keys.explain_cache(analyze._shape_key(formatted))
+
+
+def test_a_fresh_explain_result_is_written_as_a_versioned_envelope(enrich):
+	cache = _DictCache()
+	call, explains = enrich(cache)
+
+	assert len(explains) == 1
+	assert call["explain_result"][0]["table"] == "tabUser"
+	assert cache.store[_shared_key()] == {
+		"_v": redis_schema.SCHEMA_VERSION,
+		"data": call["explain_result"],
+	}
+
+
+@pytest.mark.parametrize(
+	"stored",
+	[
+		redis_schema.wrap_value([{"table": "tabCached", "rows_examined": 3}]),
+		[{"table": "tabCached", "rows_examined": 3}],
+	],
+	ids=["envelope", "legacy-bare-list"],
+)
+def test_a_cached_envelope_or_legacy_bare_list_is_read_without_a_new_explain(enrich, stored):
+	call, explains = enrich(_DictCache({_shared_key(): stored}))
+
+	assert explains == []
+	assert call["explain_result"] == [{"table": "tabCached", "rows_examined": 3}]

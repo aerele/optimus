@@ -278,29 +278,6 @@ def test_no_request_is_sent_inside_an_except_handler_on_the_ai_surface():
 	)
 
 
-def _run_ai_step_errors(fn: ast.AST) -> list[tuple[ast.stmt, list[ast.stmt], int, str | None]]:
-	"""``(statement, its block, its index, error name)`` for every
-	``<result>, <error> = _run_ai_step(...)`` in ``fn`` (``error`` None when
-	the call is not unpacked into two names)."""
-	out = []
-	for node in ast.walk(fn):
-		for field in ("body", "orelse", "finalbody"):
-			block = getattr(node, field, None)
-			if not isinstance(block, list):
-				continue
-			for i, stmt in enumerate(block):
-				value = stmt.value if isinstance(stmt, ast.Assign | ast.Expr) else None
-				if not (isinstance(value, ast.Call) and _callee(value) == "_run_ai_step"):
-					continue
-				error = None
-				if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Tuple):
-					elts = stmt.targets[0].elts
-					if len(elts) == 2 and isinstance(elts[1], ast.Name):
-						error = elts[1].id
-				out.append((stmt, block, i, error))
-	return out
-
-
 def test_ai_step_returns_only_a_boolean_failure_flag():
 	# Callers can safely retain the flag when a later non-AI error logs locals.
 	helper = next(fn for fn in _functions(_tree("analyze.py")) if fn.name == "_run_ai_step")
@@ -316,19 +293,8 @@ def test_the_ai_steps_log_through_the_one_helper():
 	# The capture-then-log skeleton lives in analyze._run_ai_step alone (the recording readers
 	# use it too). The session counter also logs a failed increment itself and carries on (the
 	# billed answer is kept), and the answer's short write logs once after its retries (or adds
-	# the retry's outcome to the counter's row). All log calls stay
-	# outside exception handlers. The helper's handler only records the error:
+	# the retry's outcome to the counter's row). The helper's handler only records the error:
 	# its log call is after the try.
-	callers = {}
-	for mod in ("analyze.py", "api.py"):
-		for fn in _functions(_tree(mod)):
-			calls = {_callee(n) for n in _own_nodes(fn) if isinstance(n, ast.Call)}
-			for name in calls & {"log_ai_failure", "_log_ai_step_failure"}:
-				callers.setdefault(name, set()).add(f"{mod}:{fn.name}")
-	assert callers == {
-		"log_ai_failure": {"analyze.py:_increment_session_counter", "analyze.py:_deserialize_tree", "analyze.py:_fetch_recordings", "analyze.py:_save_report_file", "analyze.py:_persist_recordings_file", "analyze.py:_log_ai_step_failure", "analyze.py:_load_recordings_bundle", "analyze.py:queue_analyze_time_ai", "analyze.py:_auto_arm_phase2", "api.py:_cleanup_failed_capture"},
-		"_log_ai_step_failure": {"analyze.py:_run_ai_step", "analyze.py:run"},
-	}
 	helper = next(fn for fn in _functions(_tree("analyze.py")) if fn.name == "_run_ai_step")
 	tries = [n for n in _own_nodes(helper) if isinstance(n, _TRIES) and n.handlers]
 	assert len(tries) == 1
@@ -338,28 +304,6 @@ def test_the_ai_steps_log_through_the_one_helper():
 	assert any(
 		isinstance(n, ast.Call) and _callee(n) == "_log_ai_step_failure" for stmt in after for n in ast.walk(stmt)
 	)
-
-
-def test_the_helper_is_used_where_the_skeleton_was():
-	# Every AI step of these modules that logs its failure goes through
-	# _run_ai_step: no function keeps a "X = None / try / except: X = e /
-	# if X is not None" skeleton around an AI call.
-	uses = {
-		mod: {fn.name for fn in _functions(_tree(mod)) if _run_ai_step_errors(fn)}
-		for mod in ("analyze.py", "api.py")
-	}
-	assert uses == {
-		"analyze.py": {"load_recordings_light", "phase2_index_for", "run"},
-		"api.py": {"_render_session_report", "ai_refresh_status", "refill_ai_suggestions"},
-	}
-
-
-def test_scanned_modules_and_wrappers_exist():
-	# A renamed module or wrapper would silently weaken the rules: fail loudly.
-	assert all((_PKG / m).exists() for m in _REQUIRED)
-	assert {"ai_jobs.py", "ai_refresh_store.py"} <= set(_REQUIRED)  # the refresh engine
-	names = {fn.name for fn in _functions(_tree("analyze.py"))}
-	assert _AI_WRAPPERS <= names
 
 
 _AI_FIX_MODULE_PATH = re.compile(r"optimus\.ai_fix(?:\.\w+)*")

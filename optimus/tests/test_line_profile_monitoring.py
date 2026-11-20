@@ -242,26 +242,26 @@ def test_startup_probe_silent_on_python_without_sys_monitoring(monkeypatch):
 def test_per_request_pre_arm_logs_when_reclaiming_orphan(monkeypatch):
 	"""The per-request self-heal in line_profile.hooks must log a WARN when it
 	reclaims an orphan (a silent reclaim would hide the leak)."""
-	cap = _patch_logger(monkeypatch)
+	logged: list[str] = []
+	monkeypatch.setattr(lp_hooks.safe_call, "log_error_line", logged.append)
+	monkeypatch.setattr(frappe, "session", types.SimpleNamespace(user="u@x.com"), raising=False)
+	monkeypatch.setattr(frappe, "local", types.SimpleNamespace(), raising=False)
+	monkeypatch.setattr(cap, "is_active", lambda user: "run-1")
+	monkeypatch.setattr(lp_hooks.hooks_callbacks, "_should_skip_request", lambda: False)
+	monkeypatch.setattr(cap, "make_profiler", lambda run_uuid: types.SimpleNamespace(
+		enable_by_count=lambda: None, disable_by_count=lambda: None))
+	monkeypatch.setattr(cap, "active_profiler_count", lambda: 0)
+	monkeypatch.setattr(cap, "incr_active_profilers", lambda: 1)
+	monkeypatch.setattr(cap, "start_overhead_watchdog", lambda run_uuid, budget: None)
+	monkeypatch.setattr(lp_hooks, "_renew_active", lambda user: None)
 
-	# Simulate the worker-respawn state: tool 2 owned by line_profiler,
-	# no profiler on frappe.local.
+	# The worker-respawn state: tool 2 owned by line_profiler, no profiler on frappe.local.
 	_leak_tool()
-	# Drive just the self-heal block. We don't need a full before_request
-	# call (which would also need an active session) exercising the
-	# inline check + log is sufficient for the regression invariant.
-	mon = sys.monitoring
-	if mon is not None and mon.get_tool(mon.PROFILER_ID) == "line_profiler":
-		frappe.logger().error(
-			"optimus.line_profile.before_request: reclaiming orphan tool 2 "
-			"from a prior request that skipped teardown."
-		)
-	cap_mod = lp_hooks.capture
-	cap_mod.release_monitoring_tool()
+	lp_hooks.before_request_line_profile()
 
 	assert sys.monitoring.get_tool(PID) is None  # reclaimed
-	assert any("reclaiming orphan" in m for m in cap.warnings), (
-		f"expected pre-arm reclaim warning; got: {cap.warnings!r}"
+	assert any("reclaiming orphan" in line for line in logged), (
+		f"expected pre-arm reclaim warning; got: {logged!r}"
 	)
 
 

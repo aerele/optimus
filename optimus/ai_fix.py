@@ -409,11 +409,6 @@ _TEMPERATURE = 0.1
 
 _ANTHROPIC_VERSION = "2023-06-01"
 
-# Compact "what this finding type means + how it's usually fixed in Frappe"
-# line, injected into the user message. Keeps the system prompt general and
-# gives the model a strong, type-specific starting point.
-_FINDING_TYPE_HINTS = ai_prompts.FINDING_TYPE_HINTS
-
 
 def _finding_type_hint(ftype):
 	"""Per-finding-type hint for the LLM prompt (dialect-neutral: the EXPLAIN
@@ -1398,14 +1393,6 @@ def _build_steps_messages(
 		text = ai_budget.clip(text, limit - 80) + "\n…(truncated)"
 	content = ai_budget.data_block("actions", text)
 	return system, [{"role": "user", "content": content}]
-
-
-def _build_messages(
-	finding: dict, *, threshold_ms: float = 1000.0, context_tokens: int = 200000
-) -> tuple[str, list[dict]]:
-	"""``(system, [user_message])`` for ``finding``; see ``_build_fix_request``."""
-	system, messages, _shown = _build_fix_request(finding, threshold_ms=threshold_ms, context_tokens=context_tokens)
-	return system, messages
 
 
 _REASONING_MODEL_RE = re.compile(r"^(?:[\w.-]+/)*(?:o\d|gpt-5)")

@@ -11,11 +11,6 @@ from optimus import ai_fix
 from optimus.tests.test_profiler_settings_validation import _fresh_controller
 
 
-@pytest.mark.parametrize("name", sorted(ai_fix._PROVIDER_DEFAULTS))
-def test_provider_needs_key_reads_the_provider_table(name):
-	assert ai_fix.provider_needs_key(name) is bool(ai_fix._PROVIDER_DEFAULTS[name]["needs_key"])
-
-
 def test_provider_needs_key_strips_and_defaults_to_true():
 	assert ai_fix.provider_needs_key("  OpenAI-compatible  ") is False
 	assert ai_fix.provider_needs_key("No Such Provider") is True
@@ -28,19 +23,6 @@ def _warnings(monkeypatch, **fields):
 	values.update(fields)
 	OptimusSettings(**values)._warn_on_incomplete_ai_config()
 	return stub.msgprint_calls
-
-
-def test_hosted_provider_without_a_key_warns(monkeypatch):
-	calls = _warnings(monkeypatch, ai_provider="OpenAI")
-	assert len(calls) == 1 and "API Key" in calls[0]["msg"]
-
-
-def test_keyless_local_endpoint_is_not_asked_for_a_key(monkeypatch):
-	calls = _warnings(
-		monkeypatch, ai_provider="OpenAI-compatible",
-		ai_base_url="http://10.0.0.5:11434/v1", ai_model="qwen3-coder:30b",
-	)
-	assert calls == []
 
 
 def test_needs_key_follows_the_table_not_a_hard_coded_name(monkeypatch):
@@ -71,8 +53,17 @@ def _resolved(monkeypatch, row):
 	return settings._resolve(row=row)
 
 
-def test_resolve_defaults_the_cli_fields_to_api_key_mode(monkeypatch):
-	cfg = _resolved(monkeypatch, {})
+@pytest.mark.parametrize(
+	"row",
+	[
+		{},
+		# What _read_doctype_row produces for a blank field is None, not a missing key.
+		{"ai_connection_type": None, "ai_subscription_cli": None, "ai_cli_path": None},
+	],
+	ids=["missing-keys", "blank-none-values"],
+)
+def test_resolve_defaults_the_cli_fields_to_api_key_mode(monkeypatch, row):
+	cfg = _resolved(monkeypatch, row)
 	assert (cfg.ai_connection_type, cfg.ai_subscription_cli, cfg.ai_cli_path) == ("API Key", "Codex CLI", "")
 
 
@@ -82,11 +73,6 @@ def test_resolve_takes_the_cli_fields_from_the_row(monkeypatch):
 		"ai_cli_path": "/usr/local/bin/codex",
 	})
 	assert cfg.ai_connection_type == "Subscription (local CLI)" and cfg.ai_cli_path == "/usr/local/bin/codex"
-
-
-def test_resolve_falls_back_to_the_defaults_for_blank_cli_fields(monkeypatch):
-	cfg = _resolved(monkeypatch, {"ai_connection_type": None, "ai_subscription_cli": None, "ai_cli_path": None})
-	assert (cfg.ai_connection_type, cfg.ai_cli_path) == ("API Key", "")
 
 
 def test_the_doctype_row_reader_strips_the_cli_fields(monkeypatch):

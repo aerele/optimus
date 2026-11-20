@@ -137,12 +137,6 @@ def test_a_newer_answer_is_never_rebilled_or_downgraded():
 	assert pick(rows, regenerate_all=True) == ["newer"]
 
 
-@pytest.mark.parametrize("version", [float(V), True, str(V), None])
-def test_a_version_is_current_does_not_accept_is_outdated(version):
-	assert not ai_prompts.is_current({"prompt_version": version})
-	assert pick([row("x", answer(prompt_version=version))]) == ["x"]
-
-
 def test_empty_records_are_retried_but_a_fallback_or_error_keyed_answer_is_not():
 	rows = [
 		row("empty", answer(suggestion="")),
@@ -226,7 +220,11 @@ def test_a_bigger_impact_goes_first_and_a_bad_impact_counts_as_zero():
 
 
 # ---- selection counts -----------------------------------------------------------------------------
-def test_the_selection_carries_the_gated_and_excluded_counts():
+def test_the_selection_carries_the_gated_and_excluded_counts(monkeypatch):
+	def forbidden_config_read():
+		raise AssertionError("selection must reuse its config")
+
+	monkeypatch.setattr("optimus.settings.get_config", forbidden_config_read)
 	rows = [
 		row("ok"),
 		row("excluded", finding_type="Slow Query"),
@@ -463,14 +461,6 @@ def test_a_legacy_bare_uuid_map_keeps_only_json_recordings(light, monkeypatch):
 	assert all("pyi_session" not in r and "sidecar" not in r for r in analyze.load_recordings_light(light.doc))
 
 
-def test_light_recordings_use_the_shared_shape_reader(light, monkeypatch):
-	seen = []
-	real = analyze._bundle_entries
-	monkeypatch.setattr(analyze, "_bundle_entries", lambda bundle: seen.append(bundle) or real(bundle))
-	analyze.load_recordings_light(light.doc)
-	assert len(seen) == 1
-
-
 @pytest.mark.parametrize("bundle", [None, [], "x", {"recordings": []}, {"recordings": {"u": None}}, {"u": {"rec": []}}])
 def test_a_bundle_of_any_other_shape_yields_nothing(light, monkeypatch, bundle):
 	monkeypatch.setattr(analyze, "_load_recordings_bundle", lambda doc: bundle)
@@ -480,7 +470,6 @@ def test_a_bundle_of_any_other_shape_yields_nothing(light, monkeypatch, bundle):
 
 # ---- the shared row accessor ---------------------------------------------------------------------
 def test_there_is_one_row_accessor():
-	assert not hasattr(analyze, "_row_get")
 	from optimus.analyzers.base import row_get
 
 	assert row_get({"a": 1}, "a") == 1 and row_get(SimpleNamespace(a=2), "a") == 2

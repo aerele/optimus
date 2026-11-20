@@ -99,11 +99,15 @@ def test_missing_expected_inputs_never_finalize_or_delete_last_input(delivery, k
 		"_finalize_with_empty_session", "_render_and_attach_reports", "delete_session_state"}]
 
 
-def test_genuine_empty_capture_still_finalizes(delivery):
+def test_run_waits_for_the_background_jobs_and_yields_when_the_wait_re_enqueued_it(delivery, monkeypatch):
 	state = delivery
-	state.requested, state.recordings = [], []
+	waits, acquired = [], []
+	monkeypatch.setattr(analyze, "_bg_wait_for_pending_jobs", lambda *a: waits.append(a))  # None: re-enqueued
+	state.on_acquire = lambda: acquired.append(True)
 	analyze.run("s")
-	assert ("_finalize_with_empty_session",) in state.events
+	assert waits == [("s", "doc", None)]
+	assert acquired == [] and state.status == "Stopping"
+	assert not [e for e in state.events if e[0] in {"write", "_persist", "cleanup", "delete_session_state"}]
 
 
 def test_run_drops_own_queries_from_the_fetched_recordings_for_its_session(delivery, monkeypatch):
@@ -125,6 +129,8 @@ def test_empty_capture_publishes_ready_event_flagged_empty(delivery, monkeypatch
 	assert published[-1] == (
 		("optimus_session_ready",), {"session_uuid": "s", "docname": "doc", "empty": True}
 	)
+	# One ready event only: a duplicate would make the widget open the report twice.
+	assert [a[0] for a, _ in published].count("optimus_session_ready") == 1
 
 
 def test_empty_capture_renders_report_before_ready(delivery):
@@ -137,13 +143,45 @@ def test_empty_capture_renders_report_before_ready(delivery):
 	assert state.status == "Ready"
 
 
-def test_empty_capture_publishes_ready_event(delivery, monkeypatch):
-	state = delivery
-	state.requested, state.recordings = [], []
+@pytest.mark.parametrize("failing, last", [(False, "optimus_session_ready"), (True, "optimus_session_failed")])
+def test_a_run_tells_the_widget_it_is_analyzing_and_then_how_it_ended(delivery, monkeypatch, failing, last):
+	# Without these events the open widgets hang on "Stopping" or "Analyzing" until a reload.
 	sent = []
-	monkeypatch.setattr(analyze, "_publish_session_event", lambda name, **kw: sent.append(name))
+	monkeypatch.setattr(analyze, "_publish_session_event", lambda name, **kw: sent.append((name, kw["session_uuid"])))
+	if failing:
+		def boom(*a, **kw):
+			raise KeyError("detail")
+		monkeypatch.setattr(analyze, "_persist", boom)
+		with pytest.raises(KeyError):
+			analyze.run("s")
+	else:
+		analyze.run("s")
+	assert sent == [("optimus_session_analyzing", "s"), (last, "s")]
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_run_attaches_infra_and_frontend_data_before_the_analyzers(delivery, monkeypatch, legacy):
+	import frappe
+
+	from optimus.analyzers.base import AnalyzerResult
+
+	infra = {"cpu_percent": 71}
+	current = {"xhr": [{"url": "/api/a"}], "vitals": []}
+	older = {"xhr": [{"url": "/api/older"}], "vitals": [{"name": "LCP"}]}
+	blobs = {analyze._redis_keys.infra("r"): infra, analyze._redis_keys.frontend_legacy("s"): older}
+	monkeypatch.setattr(frappe, "cache", SimpleNamespace(get_value=lambda key, *a: blobs.get(key)), raising=False)
+	# A session captured just before the two-list format has only the single legacy blob.
+	monkeypatch.setattr("optimus.api._read_frontend_data",
+		lambda uuid: {"xhr": [], "vitals": []} if legacy else current)
+	seen = []
+
+	def spy(recordings, context):
+		seen.append((context.frontend_data, [rec.get("infra") for rec in recordings]))
+		return AnalyzerResult()
+
+	monkeypatch.setattr(analyze, "_get_analyzers", lambda: [spy])
 	analyze.run("s")
-	assert sent.count("optimus_session_ready") == 1
+	assert seen == [(older if legacy else current, [infra])]
 
 
 def test_empty_capture_render_failure_marks_failed_never_ready(delivery, monkeypatch):

@@ -21,7 +21,6 @@ import re
 # The exact safe-exec prefix Frappe writes into the compiled filename. Kept
 # explicit so a future Frappe rename surfaces as a test failure here rather
 # than silent degradation across the report.
-_SERVER_SCRIPT_PREFIX = "<serverscript>"
 _SERVER_SCRIPT_FILENAME_RE = re.compile(r"^<serverscript>(?:\s*:\s*(?P<name>[^<>]+?))?\s*$")
 
 
@@ -37,13 +36,6 @@ def extract_script_name(filename) -> str | None:
 		return None
 	name = (m.group("name") or "").strip()
 	return name or None
-
-
-def is_server_script_filename(filename) -> bool:
-	"""``True`` for any ``<serverscript>`` filename (named or bare), so callers can branch before extracting a name."""
-	if not filename or not isinstance(filename, str):
-		return False
-	return filename.strip().startswith(_SERVER_SCRIPT_PREFIX)
 
 
 def get_server_script_record(scrubbed_name: str, *, cache: dict | None = None) -> dict | None:

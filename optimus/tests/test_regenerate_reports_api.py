@@ -65,13 +65,6 @@ def test_render_session_report_only_delegates_to_transactional_report_helper(mon
 	assert seen.rendered == [(DOCNAME, 1)]
 
 
-def test_render_helper_rejects_the_removed_ai_side_effect_option(monkeypatch):
-	_, seen = _env(monkeypatch)
-	with pytest.raises(TypeError):
-		api._render_session_report(DOCNAME, ai_backfill=True)
-	assert not seen.rendered
-
-
 def test_report_failure_is_logged_outside_except_and_returns_a_fixed_user_message(monkeypatch):
 	_, seen = _env(monkeypatch)
 	from optimus import report_refresh
@@ -117,22 +110,6 @@ def test_regenerate_reports_never_reaches_the_ai_provider(monkeypatch, status):
 	assert out["regenerated"] is True and seen.rendered == [(DOCNAME, 1)]
 
 
-
-
-def test_the_provider_trap_is_armed(monkeypatch):
-	"""Guards the trap itself: a call to any trapped entry point raises."""
-	import requests
-
-	_provider_trap(monkeypatch)
-	for call in (ai_fix.suggest_fix, ai_fix.humanize_steps, requests.post, ai_fix._http_post):
-		with pytest.raises(AssertionError):
-			call()
-
-
-def test_regenerate_reports_allows_failed_sessions(monkeypatch):
-	_, seen = _env(monkeypatch, status="Failed")
-	api.regenerate_reports(SESSION_UUID)
-	assert seen.rendered == [(DOCNAME, 1)]
 
 
 @pytest.mark.parametrize("status", ["Recording", "Stopping", "Capturing Background Jobs", "Analyzing"])

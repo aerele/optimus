@@ -54,26 +54,32 @@ def test_redis_source_uses_frappe_cache_directly(monkeypatch):
 	assert out["redis_instantaneous_ops_per_sec"] == 99
 
 
-def test_rq_source_uses_frappe_cache_directly():
-	"""Companion guard for _read_rq it must pass frappe.cache as the
-	rq.Queue connection, not getattr(frappe.cache, 'redis', None) which
-	would pass None and fall through to rq's default connection logic."""
-	import inspect
+def test_rq_queues_use_frappe_cache_as_their_connection(monkeypatch):
+	"""Companion guard for _read_rq: it must pass frappe.cache as the rq.Queue
+	connection, not getattr(frappe.cache, 'redis', None), which would pass None and
+	fall through to rq's default connection logic."""
+	import frappe
 
 	from optimus import infra_capture
 
-	read_rq_src = inspect.getsource(infra_capture._read_rq)
-	# Strip docstring + comments for a more robust code-only check.
-	code_lines = [
-		ln for ln in read_rq_src.splitlines()
-		if ln.strip() and not ln.strip().startswith("#")
-	]
-	code_only = "\n".join(code_lines)
+	cache = object()
+	seen = []
 
-	# Must pass frappe.cache directly as the connection arg.
-	assert "connection=frappe.cache" in code_only, (
-		"_read_rq must pass frappe.cache as rq.Queue(connection=...)"
-	)
+	class FakeQueue:
+		def __init__(self, name, connection=None):
+			seen.append((name, connection))
+			self.count = 3
+
+	rq = types.ModuleType("rq")
+	rq.Queue = FakeQueue
+	monkeypatch.setitem(sys.modules, "rq", rq)
+	monkeypatch.setattr(frappe, "cache", cache, raising=False)
+
+	out = {}
+	infra_capture._read_rq(out)
+
+	assert seen == [("default", cache), ("short", cache), ("long", cache)]
+	assert out == {"rq_queue_default": 3, "rq_queue_short": 3, "rq_queue_long": 3}
 
 
 def test_snapshot_returns_expected_keys(monkeypatch):
