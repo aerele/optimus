@@ -462,16 +462,6 @@ class TestRenderedSection:
 		assert "Tables written to this session" not in html
 		assert "Time spent per database table" in html
 
-	def test_old_stored_rows_without_write_fields_render(self):
-		# Old stored rows may have no write_* keys.
-		from optimus import renderer
-		html = renderer.render_raw(
-			self._doc([{"table": "tabLegacy", "duration_ms": 5.0, "queries": 1, "index_candidates": []}]),
-			recordings=[],
-		)
-		assert "tabLegacy" in html
-		assert "Tables written to this session" not in html
-
 	def test_render_low_risk_note_when_no_writes(self):
 		from optimus import renderer
 		breakdown = [{

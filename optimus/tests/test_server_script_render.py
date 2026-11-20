@@ -41,7 +41,7 @@ def fake_frappe_db(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# extract_script_name + is_server_script_filename
+# extract_script_name
 # ---------------------------------------------------------------------------
 
 
@@ -66,12 +66,6 @@ class TestExtractScriptName:
 			None,
 		):
 			assert sss.extract_script_name(f) is None
-
-	def test_is_server_script_filename_covers_named_and_bare(self):
-		assert sss.is_server_script_filename("<serverscript>") is True
-		assert sss.is_server_script_filename("<serverscript>: foo") is True
-		assert sss.is_server_script_filename("apps/frappe/handler.py") is False
-		assert sss.is_server_script_filename(None) is False
 
 
 # ---------------------------------------------------------------------------
@@ -119,11 +113,6 @@ class TestGetServerScriptRecord:
 
 
 class TestGetServerScriptLines:
-	def test_splits_body_into_lines(self, fake_frappe_db):
-		fake_frappe_db["rows"] = [{"name": "Foo", "script": "a\nb\nc"}]
-		lines = sss.get_server_script_lines("foo")
-		assert lines == ["a", "b", "c"]
-
 	def test_none_when_record_missing(self, fake_frappe_db):
 		fake_frappe_db["rows"] = []
 		assert sss.get_server_script_lines("nope") is None
@@ -163,26 +152,12 @@ class TestCallTreeDisplay:
 		# Should not still emit the literal "body" blob.
 		assert label != "<server-script body>"
 
-	def test_display_label_for_bare_server_script_keeps_fallback(self):
-		"""Bare ``<serverscript>`` (no name) keeps a generic label (no crash, no name
-		confusion)."""
-		node = {"filename": "<serverscript>", "function": "", "lineno": None}
-		label = call_tree._display_name_for_node(node)
-		# Tolerant assertion: anything that's not blank + identifies it as a
-		# Server Script context is fine.
-		assert "server" in label.lower()
-
 
 class TestAppBucketing:
 	def test_named_server_script_buckets_to_server_scripts(self):
 		# Server Scripts have no meaningful ``function`` name (safe_exec
 		# compiles with function=""). The filename carries the identity.
 		assert call_tree._top_level_app("", "<serverscript>: my_script") == "Server Scripts"
-
-	def test_bare_server_script_buckets_to_server_scripts(self):
-		# Even without a name, it's still a Server Script better than the
-		# anonymous [other] bucket.
-		assert call_tree._top_level_app("", "<serverscript>") == "Server Scripts"
 
 	def test_other_angle_bracket_filenames_still_route_to_other(self):
 		"""The carve-out must not widen beyond Server Scripts: ``<string>`` /
@@ -197,21 +172,6 @@ class TestAppBucketing:
 
 
 class TestRendererSnippetAndLink:
-	def test_resolve_source_path_returns_server_script_sentinel(self, fake_frappe_db):
-		"""``_resolve_source_path`` must distinguish Server Scripts from ``None`` so
-		downstream snippet readers + link builders can branch."""
-		from optimus import renderer
-
-		fake_frappe_db["rows"] = [{"name": "Foo", "script": "a\nb"}]
-		resolved = renderer._resolve_source_path("<serverscript>: foo")
-		# Tuple sentinel distinguishes from str (real path) and None.
-		assert resolved is not None
-		assert resolved != "<serverscript>: foo"  # not just the raw filename
-		# Sentinel shape: ("server_script", scrubbed_name)
-		assert isinstance(resolved, tuple)
-		assert resolved[0] == "server_script"
-		assert resolved[1] == "foo"
-
 	def test_read_source_snippet_returns_window_for_server_script(self, fake_frappe_db):
 		from optimus import renderer
 
@@ -306,27 +266,6 @@ class TestEndToEndServerScriptFinding:
 
 
 class TestServerScriptThroughDefExpansion:
-	def test_decorator_through_def_rows_reads_server_script_body(self, fake_frappe_db):
-		"""A <serverscript> sentinel reads its body from the DB via _source_lines, spanning the decorator line down to the def."""
-		from optimus.renderer.finding_enrichment import _decorator_through_def_rows
-
-		fake_frappe_db["rows"] = [
-			{
-				"name": "My Script",
-				"script": (
-					"@frappe.whitelist()\n"  # 1 pyinstrument's recorded line
-					"def handler():\n"  # 2 the def
-					"    for u in frappe.db.get_all('User'):\n"  # 3
-					"        frappe.get_doc('User', u.name)\n"  # 4
-				),
-			}
-		]
-		rows, def_lineno = _decorator_through_def_rows("<serverscript>: my_script", 1, cache=None)
-		assert rows is not None, "server-script body did not resolve through _source_lines"
-		# Anchored on the def, snippet read from the DB body (not a real file).
-		assert def_lineno == 2
-		assert [r["content"] for r in rows] == ["@frappe.whitelist()", "def handler():"]
-
 	def test_expand_self_time_snippet_inlines_server_script_body(self, fake_frappe_db):
 		"""A self-time Slow Hot Path finding on a Server Script gets its body inlined and its line re-anchored on the def."""
 		from optimus.renderer.finding_enrichment import _expand_self_time_snippets

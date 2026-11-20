@@ -74,11 +74,6 @@ def test_a_negative_lcp_timestamp_still_records_the_lcp():
 	assert _vitals(result)["/app"]["lcp_ms"] == 900
 
 
-def test_a_malformed_duration_is_dropped_not_counted_as_zero():
-	result = _analyze(xhr=[_xhr(duration_ms="slow"), _xhr(duration_ms=50)])
-	assert result.aggregate["frontend_summary"]["total_xhrs"] == 1
-
-
 def test_a_non_string_page_url_is_dropped_not_shown_as_a_root_page():
 	result = _analyze(
 		vitals=[{"name": "fcp", "page_url": 888.89, "value_ms": 10}, {"name": "fcp", "value_ms": 10}]

@@ -1,26 +1,19 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Operability, deployment and docs fixes. The failure lines still
-go through ``safe_call.log_error_line``, the texts point at the log line to send, and the
-docs and the file map say what the code does."""
+"""Operability fixes. The failure lines still go through ``safe_call.log_error_line``
+and the texts point at the log line to send."""
 
-import os
+import json
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
-from optimus import ai_fix, ai_grounding, analyze, safe_call
+from optimus import ai_fix, ai_grounding, analyze, api, renderer, safe_call
 from optimus.analyzers import base as analyzer_base
 from optimus.analyzers import redundant_calls
 from optimus.renderer import recipe_enrichment
-
-_ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
-
-
-def _read(*parts):
-	with open(os.path.join(_ROOT, *parts), encoding="utf-8") as f:
-		return f.read()
 
 
 @pytest.fixture
@@ -51,39 +44,62 @@ def test_the_gate_note_names_the_log_line_to_send():
 
 
 
-def test_evidence_failures_past_the_cap_get_one_summary_line(lines, monkeypatch):
+@pytest.mark.parametrize("failed, summary", [
+	(13, "optimus: evidence read failed for 3 more tables (only the first 10 are listed above)"),
+	(11, "optimus: evidence read failed for 1 more table (only the first 10 are listed above)"),
+	(1, None),
+])
+def test_evidence_failures_past_the_cap_get_one_summary_line(lines, monkeypatch, failed, summary):
 	monkeypatch.setattr(recipe_enrichment, "_read_table_evidence", _boom)
 	lookup = recipe_enrichment.make_evidence_lookup()
-	for i in range(13):
+	for i in range(failed):
 		lookup(f"tabT{i}")
-	assert len(lines) == recipe_enrichment.MAX_LOGGED_EVIDENCE_FAILURES
+	assert len(lines) == min(failed, recipe_enrichment.MAX_LOGGED_EVIDENCE_FAILURES)
 	lookup.log_unlisted_failures()
 	lookup.log_unlisted_failures()  # deduped
-	assert lines[recipe_enrichment.MAX_LOGGED_EVIDENCE_FAILURES:] == [
-		"optimus: evidence read failed for 3 more tables (only the first 10 are listed above)",
+	listed = min(failed, recipe_enrichment.MAX_LOGGED_EVIDENCE_FAILURES)
+	assert lines[listed:] == ([summary] if summary else [])
+
+
+_SUMMARY = "optimus: evidence read failed for 1 more table (only the first 10 are listed above)"
+
+
+def _missing_index_finding(i):
+	return {"finding_type": "Missing Index", "technical_detail": {
+		"table": f"tabT{i}", "column": "po_no", "suggested_ddl": f"ALTER TABLE `tabT{i}` ADD INDEX (po_no);",
+	}}
+
+
+def test_the_render_and_the_export_log_the_unlisted_failures(lines, monkeypatch):
+	monkeypatch.setattr(recipe_enrichment, "_read_table_evidence", _boom)
+	over_the_cap = recipe_enrichment.MAX_LOGGED_EVIDENCE_FAILURES + 1
+	rows = [
+		SimpleNamespace(
+			finding_type="Missing Index", severity="High", title=f"Missing Index {i}", customer_description="d",
+			estimated_impact_ms=300.0, affected_count=5, action_ref="", llm_fix_json=None,
+			technical_detail_json=json.dumps({
+				"table": f"tabT{i}", "column": "po_no",
+				"callsite": {"filename": "apps/myapp/myapp/api.py", "lineno": 12, "function": "load"},
+			}),
+		)
+		for i in range(over_the_cap)
 	]
+	doc = SimpleNamespace(
+		name="PS-1", session_uuid="u", title="t", user="a@example.com", status="Ready",
+		started_at="2026-10-08T00:00:00", stopped_at="2026-10-08T00:00:05", notes=None, top_severity="High",
+		summary_html=None, total_duration_ms=1, total_query_time_ms=1, total_queries=1, total_requests=1,
+		top_queries_json="[]", table_breakdown_json="[]", hot_frames_json=None, session_time_breakdown_json=None,
+		total_python_ms=None, total_sql_ms=None, analyzer_warnings=None, v5_aggregate_json="{}", actions=[],
+		findings=rows, phase_2_runs=[],
+	)
+	with patch("optimus.settings.get_ignored_apps", return_value=()):
+		renderer.render_raw(doc, recordings=[])
+	assert lines.count(_SUMMARY) == 1
 
-
-def test_the_summary_line_says_one_more_table_for_one(lines, monkeypatch):
-	monkeypatch.setattr(recipe_enrichment, "_read_table_evidence", _boom)
-	lookup = recipe_enrichment.make_evidence_lookup()
-	for i in range(recipe_enrichment.MAX_LOGGED_EVIDENCE_FAILURES + 1):
-		lookup(f"tabT{i}")
-	lookup.log_unlisted_failures()
-	assert lines[-1] == "optimus: evidence read failed for 1 more table (only the first 10 are listed above)"
-
-
-def test_no_summary_line_when_every_failure_was_listed(lines, monkeypatch):
-	monkeypatch.setattr(recipe_enrichment, "_read_table_evidence", _boom)
-	lookup = recipe_enrichment.make_evidence_lookup()
-	lookup("tabA")
-	lookup.log_unlisted_failures()
-	assert len(lines) == 1
-
-
-def test_the_render_and_the_export_log_the_unlisted_failures():
-	assert "log_unlisted_failures()" in _read("optimus", "renderer", "_internal.py")
-	assert "log_unlisted_failures()" in _read("optimus", "api.py")
+	lines.clear()
+	safe_call._RECENT_LINES.clear()
+	api._export_index_advice([_missing_index_finding(i) for i in range(over_the_cap)], [])
+	assert lines.count(_SUMMARY) == 1
 
 
 def test_a_loop_facts_crash_leaves_one_deduped_line(lines, monkeypatch):
@@ -114,26 +130,12 @@ def test_the_heartbeat_note_goes_through_log_error_line(lines):
 	safe_call._RECENT_LINES.clear()
 	analyze._note_heartbeat_problem("s2", "x")
 	assert lines == ["optimus: analyze s1: x", "optimus: analyze s2: x"]
-	assert "frappe.logger" not in _source_of(analyze._note_heartbeat_problem)
 
 
 def test_recipe_failures_go_through_log_error_line(lines):
 	recipe_enrichment.log_recipe_failures(2)
 	recipe_enrichment.log_recipe_failures(2)
 	assert lines == ["optimus: index advice failed for 2 finding(s) or table(s) in one render"]
-	assert "frappe.logger" not in _source_of(recipe_enrichment.log_recipe_failures)
-
-
-def _source_of(fn):
-	import inspect
-
-	return inspect.getsource(fn)
-
-
-def test_a_run_that_never_held_the_flag_does_not_say_it_no_longer_holds_it():
-	src = _read("optimus", "analyze.py")
-	assert "no longer holds" not in src
-	assert "this run does not hold it" in src
 
 
 @pytest.mark.parametrize("path", [
@@ -152,33 +154,6 @@ def test_one_shared_cut_at_bench_apps_helper(path):
 def test_the_cut_helper_falls_back_to_the_last_apps_dir():
 	assert analyzer_base.cut_at_bench_apps("/b/apps/pkg/mod.py") == "pkg/mod.py"
 	assert analyzer_base.cut_at_bench_apps("/b/apps/a/apps/pkg/mod.py") == "pkg/mod.py"
-
-
-def test_uninstall_text_names_the_right_bench_commands():
-	for text in (_read("docs", "AI-FIXING.md"), _read("CHANGELOG.md")):
-		flat = " ".join(text.split())
-		assert "`bench --site <site> uninstall-app` (and later `bench remove-app`) removes neither" in flat
-		assert "`bench remove-app` removes neither" not in flat
-	assert "before_uninstall" in _read("docs", "AI-FIXING.md")
-
-
-def test_the_file_map_lists_the_split_modules():
-	text = _read("docs", "AI-FIXING.md")
-	section = text[text.index("## 9. Where the code lives"):text.index("## 10.")]
-	for needle in ("where_scan.py", "ensure_indexes_template.py", "index_evidence.py"):
-		assert needle in section, needle
-
-
-def test_the_runbook_names_the_lock_wait_cause_and_the_console_line():
-	text = _read("docs", "AI-FIXING.md")
-	section = text[text.index("### 6.5 Troubleshooting"):text.index("## 7. Threat model")]
-	assert "300 s" in section and "quiet window" in section
-	assert "could not be written either" in section
-
-
-def test_the_docs_say_the_postgres_restore_is_committed():
-	flat = " ".join(_read("docs", "AI-FIXING.md").split())
-	assert "commits right after it puts the old lock setting back" in flat
 
 
 def test_a_leading_apps_dir_counts_as_the_bench_dir():

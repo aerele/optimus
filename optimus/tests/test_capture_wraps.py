@@ -109,14 +109,6 @@ def test_wrap_caps_sidecar_at_50000_entries(fake_local):
 	assert getattr(fake_local, "optimus_sidecar_truncated", False) is True
 
 
-def test_wrap_preserves_original_via_attribute(fake_local):
-	def orig(doctype, name):
-		return "ok"
-
-	wrapped = capture._make_wrap(orig, "get_doc", local_proxy=fake_local)
-	assert wrapped._profiler_original is orig
-
-
 def test_wrap_chains_preexisting_wrap(fake_local):
 	"""If orig has _profiler_original, our wrap chains via it (no double-wrap)."""
 	def true_orig(doctype, name):
@@ -223,20 +215,4 @@ def test_install_wraps_idempotent():
 
 	# Re-install so the rest of the test session has the wraps in place
 	# (matches the state set up by optimus/__init__.py).
-	capture.install_wraps()
-
-
-def test_uninstall_wraps_restores_originals():
-	import frappe
-
-	# Reset to clean state first (see comment in test_install_wraps_idempotent)
-	capture.uninstall_wraps()
-
-	orig_get_doc = frappe.get_doc
-	capture.install_wraps()
-	assert frappe.get_doc is not orig_get_doc
-	capture.uninstall_wraps()
-	assert frappe.get_doc is orig_get_doc
-
-	# Re-install so the rest of the test session has the wraps in place
 	capture.install_wraps()

@@ -1007,16 +1007,6 @@ def render(
 	hot_frames_rows = build_hot_frames_table(_hf_raw_custom, is_hot=True)
 	hot_frames_rows_framework = build_hot_frames_table(_hf_raw_framework, is_hot=False)
 
-	# v0.5.2 round 3: executive summary top 3 most-impactful findings
-	# stated in plain English, rendered in a card at the top of the
-	# report. A non-developer (e.g. a project manager) reading this
-	# should be able to decide "do we have a problem" in 30 seconds
-	# without scrolling past the first screen.
-	# v0.7.x Phase H: the v0.5.2 `executive_summary` data layer was
-	# orphaned after the TL;DR hero (Phase B) + Action plan (Phase C)
-	# took over its on-page responsibilities. The function is left in
-	# the module for back-compat (existing test fixtures call it
-	# directly) but is no longer wired into render_raw's context.
 	tldr = _compose_tldr(
 		all_findings,
 		session_doc,
@@ -1570,11 +1560,8 @@ def build_background_jobs(actions, recordings_by_uuid, findings=None, tracked_jo
 # (3) how much of the time it accounts for. Surfaces the top 3 most-
 # impactful actionable findings as plain-English bullets.
 #
-# v0.7.x: ``_build_executive_summary`` stays as the data layer (pace,
-# top-3 bullets, infra_note feeds the upcoming Action plan section);
-# the *headline* portion of the original "At a glance" card was
-# replaced template-side by ``_compose_tldr`` below a hero block
-# composing one sentence keyed on the single highest-impact finding.
+# The headline is composed by ``_compose_tldr`` below: a hero block with
+# one sentence keyed on the single highest-impact finding.
 
 
 # Mapping from analyzer finding_type to a short category slug used by
@@ -2091,102 +2078,6 @@ def _compose_tldr(
 		"label": "The headline",
 		"headline_markup": headline,
 		"sub_markup": sub,
-	}
-
-
-def _build_executive_summary(
-	*,
-	findings: list[dict],
-	session_doc: Any,
-	v5: dict,
-	large_duration_threshold_ms: float = DEFAULT_DISPLAY_THRESHOLD_MS,
-) -> dict:
-	"""Return a dict shaped for the template's exec-summary card:
-	``{"headline": Markup, "bullets": list[str], "show": bool}``. ``show`` is
-	False (card hidden) when there's nothing to summarize, e.g. a clean session.
-	"""
-	total_ms = getattr(session_doc, "total_duration_ms", 0) or 0
-	total_queries = getattr(session_doc, "total_queries", 0) or 0
-	total_actions = getattr(session_doc, "total_requests", 0) or 0
-
-	# Headline describes the session at a glance.
-	if total_ms >= 5000:
-		pace = "slow"
-	elif total_ms >= 2000:
-		pace = "moderate"
-	else:
-		pace = "fast"
-
-	queries_per_action = (
-		round(total_queries / total_actions, 1) if total_actions else 0
-	)
-	# v0.7.x: honour the timing rule for the headline duration. The
-	# helper returns Markup (always for ms / s / "0ms" branches), so
-	# we build the headline as Markup.format(...) that escapes the
-	# plain-string args while passing the Markup duration through
-	# unchanged, keeping the <span class="time-high">…</span> intact
-	# under Jinja autoescape.
-	duration_html = _format_duration_ms(total_ms, large_duration_threshold_ms)
-	headline = Markup(
-		"This session took {duration} across {actions} operation{plural} "
-		" {queries} database queries, ~{qpa} per operation."
-	).format(
-		duration=duration_html,
-		actions=total_actions,
-		plural="s" if total_actions != 1 else "",
-		queries=int(total_queries),
-		qpa=queries_per_action,
-	)
-
-	# Pull the top 3 findings by estimated_impact_ms (already sorted
-	# globally by severity+impact, but we want PURE impact order for
-	# the exec view). No finding = no bullet = no card.
-	top_findings = sorted(
-		findings,
-		key=lambda f: -(f.get("estimated_impact_ms") or 0),
-	)[:3]
-
-	bullets = []
-	total_impact = sum(f.get("estimated_impact_ms") or 0 for f in top_findings)
-	for f in top_findings:
-		impact = f.get("estimated_impact_ms") or 0
-		title = f.get("title") or "Finding"
-		# v0.6.x: append the target document and the doc-event lifecycle hook
-		# when known, so the bullet says e.g. "… Sales Invoice SINV-1
-		# (during the validate hook)" instead of just the action name.
-		_detail = f.get("technical_detail") or {}
-		_td = _detail.get("target_doc") or {}
-		_hevs = _detail.get("hook_events") or []
-		if _td.get("doctype"):
-			title += ": " + _td["doctype"] + (" " + _td["name"] if _td.get("name") else "")
-		if _hevs:
-			title += " (during the " + str(_hevs[0].get("event") or "") + " hook)"
-		bullets.append({
-			"text": title,
-			"impact_ms": round(impact, 0),
-			"severity": f.get("severity") or "Low",
-		})
-
-	# Infra signal if swap was active or memory grew >50MB, call it out.
-	infra_summary = v5.get("infra_summary") or {}
-	rss_delta_mb = round((infra_summary.get("rss_delta") or 0) / 1_000_000, 0)
-	swap_mb = infra_summary.get("swap_peak_mb") or 0
-	infra_note = None
-	if rss_delta_mb and abs(rss_delta_mb) >= 50:
-		direction = "grew" if rss_delta_mb > 0 else "shrank"
-		infra_note = f"Worker memory {direction} by {abs(int(rss_delta_mb))}MB during the session."
-	if swap_mb and swap_mb >= 100:
-		s = f"Swap was active ({int(swap_mb)}MB)"
-		infra_note = f"{infra_note} {s}." if infra_note else s + "."
-
-	show = bool(bullets or infra_note)
-	return {
-		"headline": headline,
-		"bullets": bullets,
-		"infra_note": infra_note,
-		"total_impact_ms": round(total_impact, 0),
-		"pace": pace,
-		"show": show,
 	}
 
 

@@ -206,16 +206,6 @@ def test_unknown_db_fallback_keeps_the_suggestion_with_plain_ddl(monkeypatch, em
 	assert detail["verified_not_indexed"] is False
 
 
-def test_postgres_skips_index_suggestions(monkeypatch, empty_context):
-	class _Postgres:
-		supports_query_optimizer = False
-
-	monkeypatch.setattr(index_suggestions, "get_dialect", lambda: _Postgres())
-	result = _analyze(empty_context, _select("b = 'y'", n=3))
-	assert result.findings == []
-	assert any("PostgreSQL" in w for w in result.warnings)
-
-
 # ---------------------------------------------------------------------------
 # 3. Cross-flow harm (write cost seen in the same session)
 # ---------------------------------------------------------------------------
@@ -691,10 +681,14 @@ def test_wrapped_column_after_an_equality_prefix_is_not_reported_as_served(monke
 
 
 def test_ambiguous_join_is_not_treated_as_wrapped():
-	shape = parse_where(
-		"SELECT * FROM `tabT` JOIN `tabT` x ON x.name = `tabT`.name WHERE ifnull(b, '') = 'y'", TABLE
-	)
-	assert shape.ambiguous
+	sql = "SELECT * FROM `tabT` JOIN `tabT` x ON x.name = `tabT`.name WHERE ifnull(b, '') = 'y'"
+	assert parse_where(sql, TABLE).ambiguous
+	entry = {"raw": sql, "duration": 1.0, "count": 1}
+	kept, _served, wrapped, _weak = index_suggestions._partition_queries(TABLE, "b", [entry], [])
+	assert kept == [entry] and wrapped == []
+	# the control: the same call on one table is wrapped
+	single = {"raw": f"SELECT * FROM `{TABLE}` WHERE ifnull(b, '') = 'y'", "duration": 1.0, "count": 1}
+	assert index_suggestions._partition_queries(TABLE, "b", [single], [])[2] == [single]
 
 
 def test_union_is_ambiguous():

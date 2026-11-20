@@ -128,7 +128,7 @@ ALLOWED = (
 	Row(
 		"test_ai_spend.py",
 		r"frappe\.query_builder\.utils",
-		5,
+		3,
 		"pypika SQL quoting per dialect (MariaDB has a string twin, the health window has a recording twin)",
 	),
 	Row(

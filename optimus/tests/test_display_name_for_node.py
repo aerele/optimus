@@ -127,25 +127,6 @@ class TestLastResort:
 		) == "<lambda>"
 
 
-class TestProductionBug:
-	"""The exact production scenario that motivated this fix
-	Server Script containing for-loop, surfaced as empty title."""
-
-	def test_empty_function_with_serverscript_filename(self):
-		node = _node(
-			function="",
-			filename="<serverscript-123>",
-			lineno=None,
-			cumulative_ms=1850,
-		)
-		name = _display_name_for_node(node)
-		# Must NOT be empty or "<module>".
-		assert name
-		assert name != "<module>"
-		# Must be something that READS AS A LOCATION.
-		assert "server-script" in name.lower()
-
-
 class TestIntegrationThroughFindingTitle:
 	"""End-to-end: the Slow Hot Path title rendered from a
 	server-script-body node produces a human-readable string."""

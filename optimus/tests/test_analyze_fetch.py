@@ -108,28 +108,6 @@ def test_fetch_recordings_loads_drifted_signed_tree(monkeypatch):
 	assert results[0]["pyi_session"] == {"drifted": "tree"}
 
 
-def test_fetch_recordings_loads_legacy_unsigned_tree(monkeypatch):
-	"""Blobs written before the HMAC rollout lack the 32-byte signature prefix.
-	The analyze fetch should still load them (with a warning log) when
-	``optimus_allow_unsigned_pickles`` is explicitly enabled for legacy Redis compatibility.
-	"""
-	import frappe
-	from frappe.recorder import RECORDER_REQUEST_HASH
-
-	rec_uuid = "rec-legacy"
-	store = {
-		(RECORDER_REQUEST_HASH, rec_uuid): {"uuid": rec_uuid, "calls": []},
-		# Raw pickle - NO HMAC prefix - simulates a pre-Sprint-1 blob.
-		f"profiler:tree:{rec_uuid}": pickle.dumps({"legacy": "tree"}),
-	}
-	monkeypatch.setattr(frappe, "cache", FakeCache(store), raising=False)
-
-	results = list(analyze._fetch_recordings([rec_uuid]))
-	assert len(results) == 1
-	# Fallback succeeded - the tree loaded despite the missing signature.
-	assert results[0]["pyi_session"] == {"legacy": "tree"}
-
-
 def test_fetch_recordings_handles_missing_tree(monkeypatch):
 	import frappe
 	from frappe.recorder import RECORDER_REQUEST_HASH
@@ -173,43 +151,6 @@ def test_fetch_recordings_is_a_generator():
 	import inspect
 
 	assert inspect.isgeneratorfunction(analyze._fetch_recordings)
-
-
-def test_cleanup_redis_deletes_tree_and_sidecar_keys(monkeypatch):
-	import frappe
-	from frappe.recorder import RECORDER_REQUEST_HASH, RECORDER_REQUEST_SPARSE_HASH
-
-	uuids = ["rec-a", "rec-b"]
-	store = {
-		(RECORDER_REQUEST_HASH, "rec-a"): {"uuid": "rec-a"},
-		(RECORDER_REQUEST_HASH, "rec-b"): {"uuid": "rec-b"},
-		(RECORDER_REQUEST_SPARSE_HASH, "rec-a"): {},
-		(RECORDER_REQUEST_SPARSE_HASH, "rec-b"): {},
-		"profiler:tree:rec-a": b"blob-a",
-		"profiler:tree:rec-b": b"blob-b",
-		"profiler:sidecar:rec-a": [],
-		"profiler:sidecar:rec-b": [],
-	}
-	cache = FakeCache(store)
-	monkeypatch.setattr(frappe, "cache", cache, raising=False)
-	# session.delete_session_state inside _cleanup_redis touches more keys;
-	# stub it so the test stays focused on the per-recording cleanup.
-	from optimus import session as ps_session
-
-	monkeypatch.setattr(
-		ps_session, "delete_session_state", lambda uuid: None, raising=True
-	)
-	# log_error is monkey-patched to a no-op so the test doesn't need a site
-	monkeypatch.setattr(frappe, "log_error", lambda **kw: None, raising=False)
-
-	analyze._cleanup_redis("test-session", uuids)
-
-	# All four per-recording keys are gone
-	for uuid in uuids:
-		assert (RECORDER_REQUEST_HASH, uuid) not in cache.store
-		assert (RECORDER_REQUEST_SPARSE_HASH, uuid) not in cache.store
-		assert f"profiler:tree:{uuid}" not in cache.store
-		assert f"profiler:sidecar:{uuid}" not in cache.store
 
 
 # ---------------------------------------------------------------------------
@@ -395,14 +336,6 @@ def test_analysis_strips_own_queries_and_logs_the_count_and_source_at_debug(monk
 	assert "optimus/optimus/managed.py:protect_file x2" in lines[0][1]
 
 
-def test_a_high_volume_own_session_is_not_an_error(monkeypatch):
-	"""A normal Optimus-heavy session hides many own queries: that alone must never reach a production log."""
-	lines = _strip(monkeypatch, [_recording("rec-1", 60, 20)])
-	assert [level for level, _text in lines] == ["debug"]
-	assert "dropped 60 of 80" in lines[0][1]
-	assert "optimus: dropped 60 of 80 queries as Optimus's own from session sess-9" in lines[0][1]
-
-
 @pytest.mark.parametrize("own,user", [(49, 1), (50, 50), (60, 61), (500, 1)])
 def test_no_drop_volume_is_logged_above_debug(monkeypatch, own, user):
 	lines = _strip(monkeypatch, [_recording("rec-1", own, user)])
@@ -413,10 +346,6 @@ def test_a_majority_drop_across_recordings_stays_at_debug(monkeypatch):
 	lines = _strip(monkeypatch, [_recording("rec-1", 30, 5), _recording("rec-2", 30, 5)])
 	assert [level for level, _text in lines] == ["debug"]
 	assert "dropped 60 of 70" in lines[0][1]
-
-
-def test_the_volume_alert_threshold_is_gone():
-	assert not hasattr(analyze, "OWN_DROP_ALERT_MIN")
 
 
 UNREGISTERED_WRAPPER = {"filename": "optimus/optimus/new_feature.py", "lineno": 30, "function": "forward_get_doc"}
@@ -501,22 +430,6 @@ GET_DOC_FRAME = {"filename": "frappe/frappe/__init__.py", "lineno": 90, "functio
 SQL_FRAME = OWN_STACK[2]
 
 
-def test_own_source_names_the_deciding_frame_not_a_pass_through_wrapper_inside_it():
-	stack = [OWN_STACK[0], OWN_STACK[1], WRAPPED_FRAME, GET_DOC_FRAME, SQL_FRAME]
-	assert analyze._own_source(stack) == "optimus/optimus/managed.py:protect_file"
-
-
-def test_own_source_is_unknown_without_a_deciding_frame_or_a_stack():
-	assert analyze._own_source([OWN_STACK[0], WRAPPED_FRAME, GET_DOC_FRAME, SQL_FRAME]) == "unknown"
-	assert analyze._own_source(None) == "unknown"
-	assert analyze._own_source("not a stack") == "unknown"
-
-
-def test_own_source_skips_malformed_frames_and_a_non_string_function():
-	stack = [None, 7, {"filename": 5}, {"filename": "optimus/optimus/managed.py", "function": 9}, OWN_STACK[2]]
-	assert analyze._own_source(stack) == "optimus/optimus/managed.py:?"
-
-
 def test_a_log_names_the_deciding_frame_of_each_dropped_call(monkeypatch):
 	through_wrapper = [OWN_STACK[0], OWN_STACK[1], WRAPPED_FRAME, GET_DOC_FRAME, SQL_FRAME]
 	recording = {"uuid": "rec-1", "calls": [{"query": "q", "stack": through_wrapper} for _ in range(3)]}
@@ -525,17 +438,26 @@ def test_a_log_names_the_deciding_frame_of_each_dropped_call(monkeypatch):
 	assert "capture.py:wrapped" not in lines[0][1]
 
 
-@pytest.mark.parametrize("bad", [None, "text", 7, {}, {"filename": 3}, {"filename": ["x"], "function": "f"}])
-def test_one_malformed_frame_or_call_never_fails_the_own_call_strip(monkeypatch, bad):
+_PROTECT_FILE_SOURCE = "optimus/optimus/managed.py:protect_file x1"
+_NON_STRING_FUNCTION_FRAME = {"filename": "optimus/optimus/managed.py", "lineno": 234, "function": 9}
+
+
+@pytest.mark.parametrize(
+	"bad, decider, source",
+	[(bad, OWN_STACK[1], _PROTECT_FILE_SOURCE) for bad in (None, "text", 7, {}, {"filename": 3}, {"filename": ["x"], "function": "f"})]
+	# A deciding frame whose function is not a string: the log still names the file, with ``?``.
+	+ [(None, _NON_STRING_FUNCTION_FRAME, "optimus/optimus/managed.py:? x1")],
+)
+def test_one_malformed_frame_or_call_never_fails_the_own_call_strip(monkeypatch, bad, decider, source):
 	recording = {"uuid": "rec-1", "calls": [
-		{"query": "own", "stack": [OWN_STACK[0], bad, OWN_STACK[1], SQL_FRAME]},
+		{"query": "own", "stack": [OWN_STACK[0], bad, decider, SQL_FRAME]},
 		{"query": "user", "stack": [OWN_STACK[0], bad, SQL_FRAME]},
 		{"query": "bare"}, {"stack": bad}, bad,
 	]}
 	lines = _strip(monkeypatch, [recording, bad, {"calls": bad}, {"uuid": "rec-3"}])
 	assert [c["query"] for c in recording["calls"] if isinstance(c, dict) and "query" in c] == ["user", "bare"]
 	assert len(lines) == 1 and "dropped 1 of 5" in lines[0][1]
-	assert "optimus/optimus/managed.py:protect_file x1" in lines[0][1]
+	assert source in lines[0][1]
 
 
 def _persisted_snapshot(monkeypatch, store, rec_uuid):

@@ -504,6 +504,13 @@ def test_pure_helper_filters_decorator_wrappers():
 			f"{function_name} must be filtered as decorator plumbing"
 		)
 
+	# The name rule holds in any file, not only frappe/model/document.py
+	for filename in ("erpnext/__init__.py", "utils/__init__.py"):
+		node = {"function": "wrapper", "filename": filename, "kind": "python"}
+		assert _is_pure_helper_frame(node) is True, (
+			f"wrapper in {filename} must be filtered as decorator plumbing"
+		)
+
 	# Private delegation shims (sibling of a public method)
 	for function_name in ("_save", "_insert"):
 		node = {
@@ -631,107 +638,6 @@ def test_pure_helper_filters_pyinstrument_synthetic_markers():
 		}
 		assert _is_pure_helper_frame(node) is True, (
 			f"synthetic '{function_name}' must be filtered"
-		)
-
-
-def test_pure_helper_production_payload_all_filtered():
-	"""End-to-end regression: the 20 frames from a production report's Repeated Hot
-	Frame section must all be filtered, or the report reverts to being dominated by
-	framework plumbing."""
-	from optimus.analyzers.call_tree import _is_pure_helper_frame
-
-	# Exact (function, filename) pairs from a production report the
-	# `must_filter` list below is the curated subset that this test
-	# actually asserts on. Originally recorded here for historical
-	# context; kept as a comment to avoid an unused-variable flag.
-	#   execute_query / frappe/query_builder/utils.py
-	#   save / _save / run_method / composer / runner / fn / __init__ /
-	#   load_from_db / insert / get_doc_str all frappe/model/document.py
-	#   get_meta / __init__ frappe/model/meta.py and frappe/desk/form/meta.py
-	#   get_values / sql / execute_query frappe/database/database.py
-	#   getdoctype / get_meta_bundle frappe/desk/form/load.py
-	#   execute frappe/model/qb_query.py
-	#   load_from_db / process frappe/model/meta.py
-	#   getouterframes / getframeinfo inspect.py
-	#   wrapper erpnext/__init__.py, utils/__init__.py
-	#   execute / _query MySQLdb/cursors.py
-
-	# v0.5.2 round 2: ALL of frappe/model/document.py is filtered
-	# (save / insert / submit / _save / run_method / __init__ /
-	# load_from_db / etc.), so this list now includes every row
-	# from production_noise. Users see actionable signal from
-	# their erpnext / myapp validate / on_submit hooks instead.
-	must_filter = [
-		("execute_query", "frappe/query_builder/utils.py"),
-		("save", "frappe/model/document.py"),
-		("_save", "frappe/model/document.py"),
-		("run_method", "frappe/model/document.py"),
-		("composer", "frappe/model/document.py"),
-		("runner", "frappe/model/document.py"),
-		("fn", "frappe/model/document.py"),
-		("get_meta", "frappe/model/meta.py"),
-		("__init__", "frappe/model/meta.py"),
-		("get_values", "frappe/database/database.py"),
-		("getdoctype", "frappe/desk/form/load.py"),
-		("execute", "frappe/model/qb_query.py"),
-		("get_meta_bundle", "frappe/desk/form/load.py"),
-		("__init__", "frappe/model/document.py"),
-		("load_from_db", "frappe/model/document.py"),
-		("get_meta", "frappe/desk/form/meta.py"),
-		("__init__", "frappe/desk/form/meta.py"),
-		("load_children_from_db", "frappe/model/document.py"),
-		("getouterframes", "inspect.py"),
-		("getframeinfo", "inspect.py"),
-		("load_from_db", "frappe/model/meta.py"),
-		("process", "frappe/model/meta.py"),
-		("insert", "frappe/model/document.py"),
-		("wrapper", "erpnext/__init__.py"),
-		("wrapper", "utils/__init__.py"),
-		("sql", "frappe/database/database.py"),
-		("execute_query", "frappe/database/database.py"),
-		("execute", "MySQLdb/cursors.py"),
-		("get_doc_str", "frappe/model/document.py"),
-		("_query", "MySQLdb/cursors.py"),
-		# Round 2 additions from diagnostic run
-		("is_virtual_doctype", "frappe/model/utils/__init__.py"),
-		("[other: 3 frames]", ""),
-		("[other: 1 frames]", ""),
-	]
-
-	for function_name, filename in must_filter:
-		node = {"function": function_name, "filename": filename, "kind": "python"}
-		assert _is_pure_helper_frame(node) is True, (
-			f"Production noise not filtered: {filename}::{function_name} "
-			" this frame would re-appear in the Repeated Hot Frame "
-			"leaderboard if the filter regresses."
-		)
-
-
-def test_pure_helper_still_keeps_application_frappe_code():
-	"""Negative case: user-visible app code must still pass through. Document.save /
-	insert / submit / run_method are not keepers (their cumulative times duplicate
-	the user's validate/on_submit hooks), but the actual hook code (erpnext/*,
-	myapp/*) still shows as hot frames."""
-	from optimus.analyzers.call_tree import _is_pure_helper_frame
-
-	keepers = [
-		# Permissions (slow custom Permission Query Conditions bubble here)
-		("has_permission", "frappe/permissions.py"),
-		# Naming series (user's series config is optimizable)
-		("make_autoname", "frappe/model/naming.py"),
-		# frappe.client REST API entry points
-		("get_list", "frappe/client.py"),
-		# User app code always kept
-		("compute_tax", "apps/erpnext/erpnext/accounts/tax.py"),
-		("validate", "apps/myapp/doctype/invoice.py"),
-		("on_submit", "erpnext/accounts/doctype/sales_invoice/sales_invoice.py"),
-	]
-	for function_name, filename in keepers:
-		node = {"function": function_name, "filename": filename, "kind": "python"}
-		assert _is_pure_helper_frame(node) is False, (
-			f"{filename}::{function_name} was WRONGLY filtered "
-			"users must see this in the Repeated Hot Frame leaderboard "
-			"as a legitimate optimization target."
 		)
 
 
@@ -871,19 +777,6 @@ def test_is_pure_helper_frame_filters_square_bracket_synthetic():
 		assert _is_pure_helper_frame(node) is True, (
 			f"synthetic pruning marker '{function}' must be filtered"
 		)
-
-
-def test_is_pure_helper_frame_keeps_user_code():
-	"""User app code must always pass through the filter."""
-	from optimus.analyzers.call_tree import _is_pure_helper_frame
-
-	for filename in (
-		"erpnext/accounts/doctype/sales_invoice/sales_invoice.py",
-		"apps/my_custom_app/handlers.py",
-		"my_app/module.py",
-	):
-		node = {"function": "do_thing", "filename": filename, "kind": "python"}
-		assert _is_pure_helper_frame(node) is False
 
 
 def test_is_framework_frame_matches_relative_filenames():

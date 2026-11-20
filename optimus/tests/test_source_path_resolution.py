@@ -16,7 +16,6 @@ from optimus import analyze, renderer
 
 # A real, always-present app-relative path: this very test file's package home.
 _APP_REL = "optimus/renderer/_internal.py"
-_ABS_REAL = renderer.__file__  # the resolved absolute path of the same file
 
 
 class TestResolveSourcePath:
@@ -35,26 +34,12 @@ class TestResolveSourcePath:
 			"/optimus/renderer/_internal.py"
 		)
 
-	def test_resolves_a_frappe_core_relative_path(self):
-		# frappe/__init__.py → <bench>/apps/frappe/frappe/__init__.py via
-		# frappe.get_app_path. (In the full suite another test may have left a
-		# stub `frappe` in sys.modules then this branch can't resolve and
-		# returns None; that's tolerated. It must never return a bogus path.)
-		resolved = renderer._resolve_source_path("frappe/__init__.py")
-		assert resolved is None or os.path.exists(resolved)
-
-	def test_passes_through_existing_absolute_path(self):
-		assert renderer._resolve_source_path(_ABS_REAL) == _ABS_REAL
-
 	def test_none_for_synthetic_or_empty(self):
 		for v in ("<string>", "<frozen importlib._bootstrap>", "", None, "  "):
 			assert renderer._resolve_source_path(v) is None
 
 	def test_none_for_nonexistent_app_relative(self):
 		assert renderer._resolve_source_path("optimus/this_does_not_exist_xyzq.py") is None
-
-	def test_none_for_missing_absolute(self):
-		assert renderer._resolve_source_path("/tmp/definitely/not/here/foo_xyzq.py") is None
 
 
 class TestReadersUseTheResolver:

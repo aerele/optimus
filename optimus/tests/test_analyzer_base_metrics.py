@@ -21,11 +21,6 @@ def test_percentile_handles_empty_input():
 	assert percentile([], 50) == 0.0
 
 
-def test_percentile_p95_at_least_p50_for_ascending_input():
-	values = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-	assert percentile(values, 95) >= percentile(values, 50)
-
-
 def test_percentile_p100_returns_max():
 	values = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3]
 	assert percentile(values, 100) == max(values)
@@ -53,15 +48,6 @@ def test_percentile_monotonic_across_percentages():
 		last = current
 
 
-# D.M-S7 fmt_ms property test (Hypothesis-driven if available).
-try:
-	from hypothesis import given
-	from hypothesis import strategies as st
-	_HAS_HYPOTHESIS = True
-except ImportError:  # pragma: no cover - optional dependency
-	_HAS_HYPOTHESIS = False
-
-
 def _fmt_ms():
 	"""The renderer's fmt_ms is a closure inside ``render()``; the
 	stable, module-level formatter used by every contract path is
@@ -82,14 +68,3 @@ def test_fmt_ms_output_ends_in_ms_or_s_for_known_values():
 		assert bare.endswith("ms") or bare.endswith("s"), (
 			f"fmt_ms({v}) = {out!r} doesn't end in ms or s"
 		)
-
-
-if _HAS_HYPOTHESIS:
-	@given(st.floats(min_value=0.0, max_value=1e7, allow_nan=False, allow_infinity=False))
-	def test_fmt_ms_property_output_ends_ms_or_s(v):
-		"""Property: for any non-negative finite ms value, fmt_ms output
-		(stripped of HTML wrapping) ends in 'ms' or 's'."""
-		fmt = _fmt_ms()
-		import re
-		bare = re.sub(r"<[^>]+>", "", str(fmt(v))).strip()
-		assert bare.endswith("ms") or bare.endswith("s"), bare

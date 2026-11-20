@@ -3,11 +3,9 @@
 
 """Optimus-own queries stay out of the report; Queries per action follows Tracked Apps."""
 
-import copy
-
 import pytest
 
-from optimus.analyzers import per_action, table_breakdown, top_queries
+from optimus.analyzers import per_action
 from optimus.analyzers.base import (
 	is_frappe_path,
 	is_optimus_path,
@@ -95,22 +93,9 @@ def test_frappe_path_matches_on_boundary_only():
 	assert walk_callsite_str(stack) == "myfrappe/api.py:3"
 
 
-def test_user_frame_outside_an_optimus_frame_is_still_own():
-	# Optimus's code decides: its query inside a user's flow is not the user's.
-	stack = [_frame("apps/myapp/myapp/a.py"), *OWN_STACK]
-	assert is_profiler_own_query(stack)
-
-
 def test_user_frame_inside_an_optimus_frame_keeps_query():
 	stack = [*OWN_STACK[:1], _frame("apps/myapp/myapp/a.py"), OWN_STACK[1]]
 	assert not is_profiler_own_query(stack)
-
-
-def test_strip_removes_only_own_calls_and_counts():
-	rec = _recording()
-	assert strip_profiler_own_calls(rec) == 1
-	assert len(rec["calls"]) == 3
-	assert strip_profiler_own_calls(rec) == 0  # idempotent
 
 
 def test_per_action_totals_exclude_optimus_queries():
@@ -120,15 +105,6 @@ def test_per_action_totals_exclude_optimus_queries():
 	assert action["queries_count"] == 3
 	assert action["query_time_ms"] == 60.0  # the 900ms SHOW GLOBAL STATUS is gone
 	assert action["slowest_query_ms"] == 30.0
-
-
-def test_other_analyzers_never_see_optimus_queries(empty_context):
-	rec = _recording()
-	strip_profiler_own_calls(rec)
-	top = top_queries.analyze([rec], empty_context).aggregate["top_queries"]
-	assert all("SHOW GLOBAL" not in q["normalized_query"] for q in top)
-	tables = table_breakdown.analyze([copy.deepcopy(rec)], empty_context)
-	assert "SHOW GLOBAL" not in str(tables.aggregate)
 
 
 def test_section_exclusion_mode_hides_only_optimus():
@@ -149,12 +125,6 @@ def test_section_never_shows_optimus_even_if_it_is_tracked():
 	out = _rows(_recording(), tracked=("optimus", "myapp"))
 	assert all("optimus" not in r["callsite"] for r in out["rows"])
 	assert 900 not in [r["duration"] for r in out["rows"]]
-
-
-def test_section_callsite_is_user_frame_not_innermost_framework_frame():
-	out = _rows(_recording())
-	callsites = {r["duration"]: r["callsite"] for r in out["rows"]}
-	assert callsites[30] == "apps/myapp/myapp/api.py:42"
 
 
 def test_section_handles_missing_recording_and_empty_calls():
@@ -197,13 +167,6 @@ def _render(recordings, tracked, monkeypatch):
 	return renderer.render(doc, recordings=recordings)
 
 
-def test_rendered_report_has_no_optimus_query_exclusion_mode(monkeypatch):
-	html = _render([_recording()], (), monkeypatch)
-	assert "infra_capture.py" not in html
-	assert "SHOW GLOBAL STATUS" not in html
-	assert "myapp/api.py:42" in html
-
-
 def test_rendered_report_inclusion_mode_hides_untracked_apps(monkeypatch):
 	html = _render([_recording()], ("myapp",), monkeypatch)
 	assert "infra_capture.py" not in html
@@ -223,14 +186,6 @@ def test_rendered_report_says_no_tracked_queries_when_all_hidden(monkeypatch):
 	html = _render([_recording()], ("nothere",), monkeypatch)
 	assert "No queries from tracked apps." in html
 	assert "not shown" in html
-
-
-def test_callsite_treats_myoptimus_app_as_user_code():
-	from optimus.analyzers.base import walk_callsite_str
-
-	stack = [_frame("apps/myoptimus/myoptimus/a.py", 5), OWN_STACK[1]]
-	assert not is_profiler_own_query(stack)
-	assert walk_callsite_str(stack) == "apps/myoptimus/myoptimus/a.py:5"
 
 
 @pytest.mark.parametrize("value", [None, "", 7, ["frappe/x.py"], b"frappe/x.py"])

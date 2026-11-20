@@ -431,30 +431,6 @@ class TestSortLeads:
 		assert not advice.sort_stays
 
 
-def test_the_docs_and_changelog_quote_these_texts():
-	from pathlib import Path
-
-	from optimus.renderer import recipe_enrichment
-
-	root = Path(ir.__file__).resolve().parents[2]
-	doc = " ".join((root / "docs" / "AI-FIXING.md").read_text(encoding="utf-8").split())
-	log = " ".join((root / "CHANGELOG.md").read_text(encoding="utf-8").split())
-	title = recipe_enrichment.NO_INDEX_UNKNOWN_TITLE.format(table="<table>", column="<column>")
-	for text in (doc, log):
-		assert title in text and ir._NARROWS.strip() in text and "EmptyIndexList" in text
-		assert "`sort_stays`" in text and "if the rows this query looks for are rare" in text
-		assert "`is_return = ? ORDER BY creation DESC LIMIT ?`" in text
-	assert recipe_enrichment.SORT_STAYS_NOTES["Filesort"] in doc
-	# export keys, the timeout claim, the self-join, the join-bound sort, "may not"
-	assert "`code`, `unknown`: no verdict" in doc and '`"may stay"` when it may' in doc
-	assert "it escapes the report render (`render_raw`) and the export (`export_session`)" in doc
-	assert "analyzer loop and its report step" in log and "escapes the report render and the export" in log
-	assert "reads the table more than once (a self-join" in doc and "self-join (the table read more than once" in log
-	assert "only a join binds" in doc and "only a join binds" in log
-	assert '"may not remove"' in doc and "a bare `NOT col = ?`" in doc and "a bare `NOT col = ?`" in log
-	assert "if the slow queries look for the rare value" in doc and "WHERE c.name IS NULL" in doc
-
-
 # --- the Check note needs an equality, not a collapsed IN (?) ---------------------------
 
 

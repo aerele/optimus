@@ -125,13 +125,9 @@ def test_ai_fix_unverified_badge_present():
 # Back-to-top links removed (per user request); find-in-page note kept
 # --------------------------------------------------------------------------
 
-def test_back_to_top_links_removed_find_in_page_note_kept():
+def test_find_in_page_note_kept_in_how_to_read():
 	html = _render(findings=[_finding()])
-	# The "↑ top" links + their anchor/CSS are gone.
-	assert 'href="#top"' not in html
-	assert 'id="top"' not in html
-	assert 'class="to-top"' not in html
-	# …but the find-in-page guidance in "How to read" stays.
+	# The find-in-page guidance in "How to read" (the "↑ top" links are gone).
 	assert "find (Ctrl/Cmd-F)" in html
 
 

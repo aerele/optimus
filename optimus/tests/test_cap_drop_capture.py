@@ -159,6 +159,7 @@ def test_a_request_that_borrowed_frappes_recorder_is_never_suppressed_or_purged(
 	hc.after_job()
 
 	assert env.recorder._recording is True
+	assert env.recorder.cleaned == 0
 	assert env.cache.hdels == []
 
 
@@ -239,14 +240,6 @@ def test_an_over_cap_job_cleans_up_the_recorder_too(make_env):
 	hc.after_job()
 
 	assert env.recorder.cleaned == 1
-
-
-def test_a_borrowed_recorder_is_not_cleaned_up(make_env):
-	env = make_env(cap_hit=True)
-
-	hc.after_request()
-
-	assert env.recorder.cleaned == 0
 
 
 def test_the_drop_flag_is_set_even_when_the_recorder_import_fails(make_env, monkeypatch):

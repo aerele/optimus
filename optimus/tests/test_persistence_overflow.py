@@ -127,7 +127,7 @@ def test_hard_truncate_tree_keeps_top_n_frames():
 				"kind": "python",
 				"children": [],
 			}
-			for i in range(150)
+			for i in range(400)
 		],
 	}
 	tree_json = json.dumps(tree)
@@ -135,13 +135,9 @@ def test_hard_truncate_tree_keeps_top_n_frames():
 	truncated = json.loads(truncated_str)
 
 	assert truncated["_truncated"] is True
-	# Phase K hardening: kept-frames cap raised from 100 → 300 so
-	# typical Frappe + middleware stacks aren't decapitated. The
-	# fixture only synthesises 150 children + the root, so the entire
-	# list (151 nodes) survives - none should be dropped under the new
-	# cap.
-	assert len(truncated["children"]) <= 301
+	# 401 nodes (400 children and the root) go in; only the CALL_TREE_HARD_TRUNCATE_KEEP_FRAMES
+	# with the largest cumulative_ms stay, so the slowest frames survive and the cheapest go.
+	assert len(truncated["children"]) == analyze.CALL_TREE_HARD_TRUNCATE_KEEP_FRAMES
 	functions = [c["function"] for c in truncated["children"]]
-	# Both highest and lowest cumulative survive under the wider cap.
-	assert "f149" in functions
-	assert "f0" in functions
+	assert "f399" in functions
+	assert "f0" not in functions

@@ -38,6 +38,22 @@ The `test_pdf_export.py` 3-test module requires a writable
 `--ignore=apps/optimus/optimus/tests/test_pdf_export.py`. Adjust as
 needed for your bench setup.
 
+The suite also holds a lint gate against tests that read a file of the repository
+(`optimus/tests/test_lint_repo_reads.py`). The gate counts any read of a repo file, JSON
+and data files too, not only source, JS, Markdown, HTML or CHANGELOG text, and a new read
+fails it with the file and line. Test the behaviour instead; docs and CHANGELOG pins belong
+only in `test_docs_truth.py`. A read that is correct (a data file the code reads, a
+contract between a data file and the code) carries
+`# test-lint: repo-read-ok <reason of at least 3 words>` after the read on its line, or on
+a line of its own just above it, and the same PR raises `MARKED_TOTAL` in
+`optimus/tests/repo_reads_baseline.py`, so each new waiver is a visible line for the
+reviewer. Security and redaction tests stay protected, including source-level audits (API
+gate, Redis, log, mask); a new audit of that kind takes a marker with a reason. Existing
+reads are counted per file in that module's `BASELINE`; removing a read means lowering its
+count, and the failure message prints the line to paste or delete. After a rebase, a red
+baseline may need the baseline owner to re-run the scan and update the counts; never raise
+a count to hide a new read.
+
 ## Integration tests (real bench)
 
 The unit suite above runs in seconds against a Frappe stub. The

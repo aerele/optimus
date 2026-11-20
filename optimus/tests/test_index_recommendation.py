@@ -169,17 +169,6 @@ def evidence(monkeypatch):
 
 
 class TestRenderedIndexCandidatePanel:
-	def test_renders_recommendation_without_installation_code(self, evidence):
-		from optimus import renderer
-
-		html = renderer.render_raw(_doc([_table_entry()]), recordings=[])
-		assert "Index candidate" in html
-		assert "(customer, posting_date)" in html
-		assert "EXPLAIN" in html and "existing indexes" in html
-		assert "ensure_indexes" not in html
-		assert "hooks.py" not in html
-		assert "Other columns this session filtered on" in html and "status" in html
-
 	def test_write_hot_warning(self, evidence):
 		from optimus import renderer
 
@@ -198,29 +187,3 @@ class TestRenderedIndexCandidatePanel:
 		html = renderer.render_raw(_doc([entry]), recordings=[])
 		assert "Index candidates - to speed up reads" in html
 		assert ">customer</code>" in html
-
-	def test_ai_index_block_is_never_rendered(self):
-		from optimus import renderer
-
-		entry = _table_entry()
-		entry["ai_index"] = {
-			"suggestion": "**Recommendation**\n\nNothing `idx_customer_date` already covers it.",
-			"model": "claude-sonnet-4-6", "provider": "Anthropic",
-			"generated_at": "2026-05-12T00:00:00+00:00",
-		}
-		html = renderer.render_raw(_doc([entry]), recordings=[])
-		assert "Index advice" not in html
-		assert "claude-sonnet-4-6" not in html and "already covers it" not in html
-
-	def test_single_column_recommendation_keeps_its_card(self, evidence):
-		from optimus import renderer
-
-		entry = _table_entry(recommended_index={
-			"columns": ["customer"], "doctype": "Sales Invoice",
-			"together_count": 3, "read_count": 4, "also_filtered": [],
-		})
-		html = renderer.render_raw(_doc([entry]), recordings=[])
-		assert "Index candidate" in html
-		assert "(customer)" in html
-		assert "existing indexes" in html
-		assert "ensure_indexes" not in html

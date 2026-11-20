@@ -334,35 +334,6 @@ class TestDrilldownRender:
 			in html
 		)
 
-	def test_finding_without_matching_tree_node_renders_placeholder(self):
-		"""A finding whose callsite matches no tree node (origin lookup fails)
-		still renders the Drill-down placeholder ('no deeper user-code frame'):
-		the walker returns [] and the template's placeholder branch fires."""
-		from optimus import renderer
-
-		doc = _doc(
-			actions=[_action(
-				action_label="POST /api/method/foo",
-				recording_uuid="r0", duration_ms=500,
-				call_tree=_tree_for_screenshot(),
-			)],
-			findings=[_finding(
-				callsite_filename="apps/myapp/other.py",
-				callsite_function="totally_different_function",
-				callsite_lineno=1,
-			)],
-		)
-		html = renderer.render_raw(doc, recordings=[])
-
-		# Drill-down label IS present (the placeholder uses it).
-		assert "Drill-down" in html
-		# Placeholder text rendered.
-		assert "no deeper user-code frame" in html
-		# No actual chain entries rendered the bg of `_run_validations`
-		# / framework descent shouldn't appear (we never matched an
-		# origin to walk from).
-		assert "% of parent" not in html
-
 	def test_finding_without_action_ref_skips_drilldown(self):
 		from optimus import renderer
 

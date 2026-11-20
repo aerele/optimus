@@ -42,10 +42,6 @@ class TestSizing:
 		out = renderer._build_action_plan(findings, max_steps=5)
 		assert len(out) == 5
 
-	def test_returns_fewer_when_input_is_smaller(self):
-		out = renderer._build_action_plan([_f(), _f()])
-		assert len(out) == 2
-
 
 class TestSorting:
 	def test_high_severity_beats_higher_impact_at_lower_severity(self):

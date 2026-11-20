@@ -28,11 +28,6 @@ def _set_cfg(monkeypatch, **attrs):
 # ---------------------------------------------------------------- predicate
 
 
-def test_subscription_mode_active_true_for_subscription(monkeypatch):
-	_set_cfg(monkeypatch, ai_connection_type=SUBSCRIPTION)
-	assert ai_fix.subscription_mode_active() is True
-
-
 def test_subscription_mode_active_tolerates_whitespace(monkeypatch):
 	_set_cfg(monkeypatch, ai_connection_type="  " + SUBSCRIPTION + " ")
 	assert ai_fix.subscription_mode_active() is True

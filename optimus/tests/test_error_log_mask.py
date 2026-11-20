@@ -593,12 +593,6 @@ class TestStaleProcess:
 		assert _one_line(env).endswith(_STALE_LINE)
 		assert env.inserts == []
 
-	def test_the_placeholder_is_the_masking_s_own(self, env):
-		from optimus.redaction import SECRET_PLACEHOLDER
-
-		assert error_log_mask._PLACEHOLDER == SECRET_PLACEHOLDER
-		assert error_log_mask._MIN_KEY_LEN == maintenance._MIN_KEY_LEN
-
 	@pytest.mark.parametrize("field", ["error", "method", "metadata"])
 	def test_the_key_is_masked_in_each_field_that_holds_it(self, env, stale, field):
 		fields = {"error": "Traceback ...", "method": "Stock Entry failed", "metadata": "{}"}

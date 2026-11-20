@@ -210,25 +210,6 @@ class TestPerActionSplit:
 		assert "framework actions (click to expand)" not in html
 		assert "framework action (click to expand)" not in html
 
-	def test_tracked_apps_routes_erpnext_to_framework(self):
-		# With tracked_apps=("myapp",): even erpnext is "framework". The
-		# erpnext action should land in the collapsed sub-block.
-		doc = _doc(actions=[
-			_action_ns(action_label="POST /api/method/myapp.handlers.x",
-			           event_type="HTTP Request", path="/api/method/myapp.handlers.x",
-			           recording_uuid="r0", duration_ms=200),
-			_action_ns(action_label="POST /api/method/erpnext.accounts.utils.recompute",
-			           event_type="HTTP Request", path="/api/method/erpnext.accounts.utils.recompute",
-			           recording_uuid="r1", duration_ms=400),
-		])
-		with patch(
-			"optimus.settings.get_config",
-			return_value=OptimusConfig(tracked_apps=("myapp",)),
-		):
-			html = renderer.render_raw(doc, recordings=[])
-		assert "<strong>1</strong> framework action " in html
-		assert "erpnext.accounts.utils.recompute" in html
-
 
 class TestTopQueriesSplit:
 	def test_framework_callsite_query_routes_to_collapsed_block(self):

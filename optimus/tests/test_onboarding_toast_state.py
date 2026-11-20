@@ -53,9 +53,18 @@ def test_check_onboarding_seen_returns_false_initially(fake_env):
 
 
 def test_mark_onboarding_seen_persists(fake_env):
+	cache, _ = fake_env
 	api.mark_onboarding_seen()
 	result = api.check_onboarding_seen()
 	assert result == {"seen": True}
+	# The stored value is a versioned envelope, not a bare string: operator
+	# tooling reads it from Redis (docs/REDIS-SCHEMA.md).
+	from optimus import redis_keys, redis_schema
+
+	assert cache.store[redis_keys.onboarding_seen("alice@example.com")] == {
+		"_v": redis_schema.SCHEMA_VERSION,
+		"data": "1",
+	}
 
 
 def test_check_onboarding_seen_suppressed_when_user_has_existing_sessions(fake_env):

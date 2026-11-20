@@ -184,6 +184,11 @@ assert.equal(messages.at(-1),"Busy &lt;retry&gt;","escape cancellation refusal t
 assert.equal(requests[0].method,"optimus.api.ai_refresh_status","refusal still polls authoritative state");
 requests.shift().callback({message:{status:"ok",refresh:{...active,run_id:"run-b"},can_act:false,plan}});
 assert.equal(frm._optimus_ai_enabled,false,"read-only users cannot be offered AI spend from Regenerate Reports");
+// With nothing to refresh (no plan total, no steps) the switch stays off even for a user who can act.
+ctx.render_ai_buttons(frm);
+requests.shift().callback({message:{status:"ok",refresh:{...active,run_id:"run-b",state:"complete",seq:4},can_act:true,
+ plan:{...plan,total:0,selected_all:0,steps:false}}});
+assert.equal(frm._optimus_ai_enabled,false,"an empty plan must not offer AI spend from Regenerate Reports");
 // An incomplete current answer is included without opting in to replace good answers.
 ctx.render_ai_buttons(frm);
 requests.shift().callback({message:{status:"ok",refresh:{...active,run_id:"run-b",state:"complete",seq:4},can_act:true,

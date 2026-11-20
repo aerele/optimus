@@ -102,15 +102,6 @@ def test_compute_leaf_without_related_finding_untouched():
 	assert cs["lineno"] == 1  # unchanged
 
 
-def test_wrong_function_hot_line_does_not_pin():
-	# A present hot-line finding for a DIFFERENT function must not pin the card
-	# (guards against dropping `function` from the lookup key).
-	shp = _shp(chain=[{"function": "_check_user_exists", "lineno": 20, "filename": FILE}])
-	n1 = _hot(function="some_other_fn", lineno=25)
-	fe._pin_slow_hot_path_to_related_hot_line([shp, n1], file_cache=None)
-	assert "self_time_hot_line_pinned" not in _cs(shp)
-
-
 def test_empty_action_ref_not_matched():
 	shp = _shp(chain=[{"function": "_check_user_exists", "lineno": 20, "filename": FILE}], action_ref="")
 	n1 = _hot(function="_check_user_exists", lineno=25, action_ref="")

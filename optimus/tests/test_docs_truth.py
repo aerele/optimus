@@ -12,7 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from optimus import settings
+from optimus import hooks, settings
+from optimus.tests.test_line_profiling_wording import DOCTYPE_NAME, PHASE_RE
 
 _APP = Path(__file__).resolve().parents[2]
 _SETTINGS_JSON = _APP / "optimus" / "optimus" / "doctype" / "optimus_settings" / "optimus_settings.json"
@@ -34,6 +35,11 @@ _REMOVED_FEATURE_PATTERNS = {
 	"partner-shop handoff": r"partner shop",
 	"archived line-profile runs": r"moved to a private file|archived to a private",
 }
+
+
+_NO_PHASE_WORDING_DOCS = (
+	"README.md", "SECURITY.md", "docs/AI-FIXING.md", "docs/AI-REFRESH.md", "docs/REDIS-SCHEMA.md",
+)
 
 
 def _doc_paths():
@@ -167,3 +173,56 @@ def test_readme_no_pdf_button_claim_matches_code():
 	assert "download_pdf" in _readme()
 	js = "".join(p.read_text() for p in (_APP / "optimus" / "public" / "js").glob("*.js"))
 	assert "download_pdf" not in js
+
+
+@pytest.mark.parametrize("document", ["CHANGELOG.md", "SECURITY.md"])
+def test_documented_hook_check_command_matches_the_registered_hook(document):
+	text = (_APP / document).read_text()
+	checks = re.findall(r"bench --site <site> execute frappe\.get_\w+[^`\n]*", text)
+	assert checks
+	command = 'bench --site <site> execute frappe.get_doc_hooks | grep -o \'"Error Log": {[^}]*}\''
+	assert all(check == command for check in checks)
+	assert hooks.doc_events["Error Log"]["before_insert"] == "optimus.error_log_mask.mask_error_log"
+
+
+@pytest.mark.parametrize("document", _NO_PHASE_WORDING_DOCS)
+def test_docs_have_no_phase_wording(document):
+	"""The docs say "line profiling", not "Phase 1/2" (the doctype name is the one exception)."""
+	for n, line in enumerate((_APP / document).read_text().splitlines(), 1):
+		assert not PHASE_RE.search(line.replace(DOCTYPE_NAME, "")), (document, n, line)
+
+
+def test_the_changelog_has_an_entry_for_the_current_version():
+	"""A user-visible change bumps ``__version__``; the changelog then needs its entry."""
+	import optimus
+
+	changelog = " ".join((_APP / "CHANGELOG.md").read_text(encoding="utf-8").split())
+	assert f"## [{optimus.__version__}]" in changelog
+
+
+def _index_advice_text(key):
+	from optimus.renderer import index_recipes, recipe_enrichment
+
+	return {
+		"NO_INDEX_TITLE": recipe_enrichment.NO_INDEX_TITLE.format(table="<table>", column="<column>"),
+		"NO_INDEX_UNKNOWN_TITLE": recipe_enrichment.NO_INDEX_UNKNOWN_TITLE.format(table="<table>", column="<column>"),
+		"NO_VERDICT": index_recipes.NO_VERDICT,
+		"_NARROWS": index_recipes._NARROWS.strip(),
+		"NO_INDEX_ACTION_TITLE": recipe_enrichment.NO_INDEX_ACTION_TITLE,
+		"SORT_STAYS_NOTES[Filesort]": recipe_enrichment.SORT_STAYS_NOTES["Filesort"],
+		"failed-advice log line": '"optimus: index advice failed"',
+	}[key]
+
+
+@pytest.mark.parametrize("document,key", [
+	*((document, key) for document in ("docs/AI-FIXING.md", "CHANGELOG.md") for key in (
+		"NO_INDEX_TITLE", "NO_INDEX_UNKNOWN_TITLE", "NO_VERDICT", "_NARROWS", "failed-advice log line",
+	)),
+	# the CHANGELOG never quoted these two
+	("docs/AI-FIXING.md", "NO_INDEX_ACTION_TITLE"),
+	("docs/AI-FIXING.md", "SORT_STAYS_NOTES[Filesort]"),
+])
+def test_the_doc_quotes_the_index_advice_text_the_code_shows(document, key):
+	"""The docs quote the index-advice texts the report shows, so they stay in step with the code."""
+	text = " ".join((_APP / document).read_text(encoding="utf-8").split())
+	assert _index_advice_text(key) in text, (document, key)

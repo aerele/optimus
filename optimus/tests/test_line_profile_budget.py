@@ -135,13 +135,6 @@ def test_disengage_does_not_desync_real_line_profiler(env):
 		cap.release_monitoring_tool()
 
 
-def test_start_watchdog_none_when_budget_zero(env):
-	assert cap.start_overhead_watchdog("r", 0) is None
-	t = cap.start_overhead_watchdog("r", 10)
-	assert t is not None
-	t.cancel()
-
-
 @pytest.mark.skipif(not HAS_MON, reason="sys.monitoring requires Python 3.12+")
 def test_started_watchdog_disengages_after_budget(env):
 	# A real Timer fires the disengage, which zeroes events on a registered

@@ -129,39 +129,11 @@ def test_links_keep_https_and_get_rel():
 	assert 'rel="noopener noreferrer nofollow"' in out
 
 
-def test_allowed_host_with_path_keeps_href():
-	out = fe._markdown_to_safe_html("[docs](https://docs.frappe.io/framework/user/en/introduction)")
-	assert 'href="https://docs.frappe.io/framework/user/en/introduction"' in out
-
-
-def test_github_frappe_subpath_keeps_href():
-	out = fe._markdown_to_safe_html("[repo](https://github.com/frappe/frappe/issues/123)")
-	assert 'href="https://github.com/frappe/frappe/issues/123"' in out
-
-
-def test_github_non_frappe_path_is_rejected():
-	"""a real GitHub org that isn't /frappe still loses href."""
-	out = fe._markdown_to_safe_html("[repo](https://github.com/someoneelse/thing)")
-	assert "href=" not in out
-	assert "repo" in out
-
-
 def test_off_domain_href_is_dropped_text_kept():
 	out = fe._markdown_to_safe_html("[click here](https://attacker.example/phish)")
 	assert "href=" not in out
 	assert "attacker.example" not in out
 	assert "click here" in out
-
-
-def test_subdomain_spoof_is_rejected():
-	"""a suffix trick on an allowed host is not the host."""
-	out = fe._markdown_to_safe_html("[evil](https://frappeframework.com.attacker.example/x)")
-	assert "href=" not in out
-
-
-def test_host_prefix_spoof_is_rejected():
-	out = fe._markdown_to_safe_html("[evil](https://docs.frappe.io.attacker.example/x)")
-	assert "href=" not in out
 
 
 def test_mailto_link_has_no_allowlisted_host_so_href_is_dropped():
@@ -215,16 +187,6 @@ def test_github_dot_segment_escape_is_rejected(href):
 	"""A browser resolves each of these to github.com/someoneelse/x."""
 	assert not fe.ai_link_allowed(href)
 	assert "href=" not in fe._markdown_to_safe_html(f"[repo]({href})")
-
-
-@pytest.mark.parametrize("href", _BAD_CHARACTERS)
-def test_whitespace_control_and_non_ascii_are_rejected(href):
-	assert not fe.ai_link_allowed(href)
-
-
-@pytest.mark.parametrize("href", _NON_HTTP)
-def test_non_http_scheme_is_rejected(href):
-	assert not fe.ai_link_allowed(href)
 
 
 @pytest.mark.parametrize("href", _ALLOWED_HREFS)

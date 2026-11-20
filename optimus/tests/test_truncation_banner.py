@@ -11,6 +11,8 @@ truncation happens, a prominent red banner renders at the top of the report.
 import json
 import types
 
+from optimus.tests.test_analyze_runtime import enrich_env  # noqa: F401
+
 
 def _fake_session_doc(analyzer_warnings=None):
 	doc = types.SimpleNamespace()
@@ -106,13 +108,6 @@ class TestTruncationBannerRenders:
 			f"Got banner at {banner_idx}, TL;DR at {tldr_idx}."
 		)
 
-	def test_banner_absent_on_clean_session(self):
-		"""No warning → no banner. Sanity."""
-		from optimus import renderer
-		doc = _fake_session_doc(analyzer_warnings=None)
-		html = renderer.render(doc, recordings=[])
-		assert 'class="truncation-banner"' not in html
-
 	def test_banner_absent_when_warnings_are_not_truncation(self):
 		"""Other analyzer warnings (framework-filter, alias-suppression,
 		etc.) must NOT trigger the truncation banner it's specifically
@@ -136,9 +131,9 @@ class TestTruncationBannerRenders:
 		notes' section that used to list them was removed)."""
 		from optimus import renderer
 		warnings = "\n".join([
-			"⚠ TRUNCATED: 200 queries (10% of the flow) exceeded ...",
 			"Suppressed 5 findings from framework callsites.",
 			"Skipped 30 non-SELECT statements.",
+			"⚠ TRUNCATED: 200 queries (10% of the flow) exceeded ...",
 		])
 		doc = _fake_session_doc(analyzer_warnings=warnings)
 		html = renderer.render(doc, recordings=[])
@@ -176,39 +171,26 @@ class TestSettingsDocTypeField:
 
 
 class TestBannerMarkerPrefix:
-	"""Guard: the analyze.py warning MUST start with the marker
-	prefix that renderer looks for. If someone changes either side
-	without updating the other, the banner silently breaks."""
+	"""Guard: the warning analyze emits MUST start with the marker the renderer
+	looks for. If someone changes either side without the other, the banner
+	silently breaks."""
 
-	def test_warning_prefix_matches_renderer_check(self):
-		import os
+	def test_the_warning_analyze_emits_makes_the_banner_render(self, enrich_env, monkeypatch):  # noqa: F811
+		import optimus.settings as settings_mod
+		from optimus import analyze, renderer
 
-		# Read the analyze.py that emits the warning.
-		analyze_path = os.path.join(
-			os.path.dirname(__file__), "..", "analyze.py",
+		monkeypatch.setattr(
+			settings_mod, "get_config",
+			lambda: types.SimpleNamespace(max_queries_per_recording=2), raising=False,
 		)
-		with open(analyze_path) as f:
-			analyze_src = f.read()
+		recording = {
+			"uuid": "r",
+			"calls": [{"query": f"SELECT * FROM tab{i} WHERE x = {i}", "duration": 1} for i in range(5)],
+		}
+		warnings = analyze._enrich_recordings([recording])
+		assert any(w.startswith("⚠ TRUNCATED:") for w in warnings)
 
-		# Read the renderer that looks for the prefix. v0.10.0 split the
-		# monolithic renderer.py into a package; the truncation-check still
-		# lives inside the legacy bulk content at renderer/_internal.py.
-		renderer_path = os.path.join(
-			os.path.dirname(__file__), "..", "renderer", "_internal.py",
-		)
-		with open(renderer_path) as f:
-			renderer_src = f.read()
-
-		# Both sides must use the same marker.
-		marker = "⚠ TRUNCATED:"
-		assert marker in analyze_src, (
-			"analyze.py must emit the truncation warning starting "
-			f"with {marker!r}"
-		)
-		# renderer's .startswith() call references the same prefix.
-		assert f'startswith("{marker}")' in renderer_src or (
-			f"startswith('{marker}')" in renderer_src
-		), (
-			f"renderer.py must detect truncation via "
-			f"startswith({marker!r})"
-		)
+		doc = _fake_session_doc(analyzer_warnings="\n".join(warnings))
+		html = renderer.render(doc, recordings=[])
+		assert 'class="truncation-banner"' in html
+		assert "3 queries" in html

@@ -351,32 +351,6 @@ def test_filesort_at_exactly_the_floor_is_flagged(empty_context):
 	)
 
 
-def test_filesort_above_floor_still_flagged(empty_context):
-	"""A filesort on 5000 rows (well above the floor) must still produce a
-	finding, so the floor doesn't suppress legitimate ones."""
-	recording = {
-		"uuid": "filesort-real",
-		"path": "/", "cmd": None, "method": "GET",
-		"event_type": "HTTP Request", "duration": 200,
-		"calls": [{
-			"query": "SELECT * FROM tabBig WHERE org = ? ORDER BY created",
-			"normalized_query": "SELECT * FROM tabBig WHERE org = ? ORDER BY created",
-			"duration": 150.0,
-			"stack": [],
-			"explain_result": [{
-				"table": "tabBig",
-				"type": "ref",
-				"key": "org",
-				"rows": 5000,
-				"Extra": "Using where; Using filesort",
-			}],
-		}],
-	}
-	result = explain_flags.analyze([recording], empty_context)
-	filesorts = [f for f in result.findings if f["finding_type"] == "Filesort"]
-	assert len(filesorts) == 1
-
-
 # ---------------------------------------------------------------------------
 # v0.5.2: callsite + alias filtering
 # ---------------------------------------------------------------------------

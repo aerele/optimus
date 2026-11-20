@@ -1,8 +1,8 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""The system prompt no longer teaches its own index recipe; a Slow Query prompt
-carries the profiler's deterministic advice instead, inside a data block."""
+"""A Slow Query prompt carries the profiler's deterministic index advice inside a data
+block (the system prompt has no index recipe of its own: test_ai_prompts.py)."""
 
 import json
 from types import SimpleNamespace
@@ -13,14 +13,6 @@ from optimus.renderer.recipe_enrichment import FieldEvidence, TableEvidence
 _QUERY = "SELECT name FROM `tabSales Invoice` WHERE customer = ? AND status = ?"
 
 
-def test_index_advice_comes_from_the_profiler_not_the_system_prompt():
-	assert not hasattr(ai_prompts, "INDEX_RULES")
-	for gone in ("INDEXES", "on_doctype_update", "in a patch", "search_index = 1"):
-		assert gone not in ai_prompts.SYSTEM_PROMPT, gone
-	assert "profiler's index advice" in ai_prompts._OUTPUT
-	assert "profiler's index advice" in ai_prompts.FINDING_TYPE_HINTS["Slow Query"]
-
-
 def test_slow_query_prompt_carries_the_advice_inside_a_data_block():
 	finding = {
 		"finding_type": "Slow Query", "title": "Slow query", "technical_detail": {"normalized_query": _QUERY},
@@ -29,14 +21,14 @@ def test_slow_query_prompt_carries_the_advice_inside_a_data_block():
 			"text": "Your app's ensure_indexes() function creates the index \"idx_sales_invoice_1a2b3c4d\".",
 		},
 	}
-	content = ai_fix._build_messages(finding)[1][-1]["content"]
+	content = ai_fix._build_fix_request(finding, threshold_ms=1000.0, context_tokens=200000)[1][-1]["content"]
 	assert ai_fix._INDEX_ADVICE_HEAD in content
 	after = content.split(ai_fix._INDEX_ADVICE_HEAD, 1)[1]
 	assert after.split("\n", 2)[1].startswith("<data-")
 	assert "Route: ensure_indexes. DocType: Sales Invoice. Columns: customer, status." in after
 	assert "idx_sales_invoice_1a2b3c4d" in after
 	other = dict(finding, finding_type="N+1 Query")
-	assert ai_fix._INDEX_ADVICE_HEAD not in ai_fix._build_messages(other)[1][-1]["content"]
+	assert ai_fix._INDEX_ADVICE_HEAD not in ai_fix._build_fix_request(other, threshold_ms=1000.0, context_tokens=200000)[1][-1]["content"]
 
 
 def test_the_payload_builder_attaches_the_advice_for_slow_query():

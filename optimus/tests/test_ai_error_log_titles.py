@@ -12,8 +12,6 @@ import ast
 import re
 from pathlib import Path
 
-from optimus import ai_fix
-
 _PKG = Path(__file__).resolve().parents[1]
 _DOCS = _PKG.parent / "docs" / "AI-FIXING.md"
 _JS = _PKG / "optimus" / "doctype" / "optimus_session" / "optimus_session.js"
@@ -63,12 +61,6 @@ def test_the_docs_list_exactly_the_titles_the_code_writes():
 	assert _documented_titles() == set(_code_titles())
 
 
-def test_the_docs_say_to_search_for_the_prefix():
-	text = _DOCS.read_text(encoding="utf-8")
-	section = text[text.index("### 5.3 Request failures and retries"):text.index("## 6. Keep data on-box")]
-	assert f"a title that starts with `{PREFIX}`" in section and f"search the Error Log for `{PREFIX}`" in section
-
-
 def test_every_pointer_names_the_prefix():
 	"""A pointer that named only one title (``optimus ai_fix``, ``optimus ai backfill``) found
 	only some rows: the Steps rewrite, the recording reads and the re-renders have their own."""
@@ -80,14 +72,5 @@ def test_every_pointer_names_the_prefix():
 	assert pointers
 	for pointer in pointers:
 		assert f"titles starting with {PREFIX}" in pointer or f'titles starting with \\"{PREFIX}\\"' in pointer, pointer
-
-
-def test_the_runbook_spells_fatal_as_the_rows_do():
-	"""The rows say ``fatal=True`` / ``fatal=False``; the runbook used to say yes and no."""
-	text = _DOCS.read_text(encoding="utf-8")
-	cells = re.findall(r"^\| `kind=([a-z_]+)` \| ([^|]+) \|", text, re.M)
-	assert cells
-	for kind, fatal in cells:
-		assert fatal.strip() == str(kind in ai_fix.AI_FATAL_KINDS), kind
-	section = text[text.index("### 6.5 Troubleshooting"):text.index("## 7. Threat model")]
-	assert "`fatal=True`" in section and "is `yes`" not in section
+	# The Refresh toast sends the operator to an administrator rather than to the log itself.
+	assert "Ask your administrator" in (_PKG / "ai_refresh_view.py").read_text(encoding="utf-8")

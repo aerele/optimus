@@ -91,15 +91,16 @@ def test_primary_actionable_sections_render():
 		"Server Resource",
 		"Frontend",
 		"Hot frames",
-		"Top",               # "Top {{ top_queries|length }} slowest queries"
 		"Queries per action",
 		"Time spent per database table",
 		"Doc-event lifecycle",
 		"RQ Jobs",
 	):
-		assert section_heading in template, (
+		assert f"<h2>{section_heading}</h2>" in template, (
 			f"section heading {section_heading!r} missing from template"
 		)
+	# "Top {{ n }} slowest queries" is conditional, so match its template prefix.
+	assert "<h2>{% if report_data.slow_queries %}Top {{ report_data.slow_queries|length }} slowest queries" in template
 	# "Full recordings" was permanently removed (raw SQL literals / headers /
 	# form data / stack traces sensitive, per user request).
 	assert "Full recordings" not in template
@@ -160,22 +161,6 @@ def test_phase2_id_is_unique():
 	assert count <= 1, (
 		f'<a id="phase2"... must appear at most once in the template; '
 		f"found {count} occurrences."
-	)
-
-
-def test_observations_subsection_exists():
-	"""Framework-level observations live in a distinct ``<section
-	class="subsection">`` inside the Findings section, whose visual
-	separation still serves the actionable-vs-context split."""
-	template = _read_template()
-	assert '<section class="subsection">' in template, (
-		"Framework-level observations must live in a "
-		"<section class='subsection'> block (visual containment "
-		"separator, even though no longer collapsible)."
-	)
-	assert "<h3>Framework-level observations" in template, (
-		"Observations subsection must carry an <h3> heading "
-		"naming it 'Framework-level observations'."
 	)
 
 

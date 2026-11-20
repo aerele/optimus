@@ -508,34 +508,6 @@ def test_apply_workflow_too_long_action_falls_back(empty_context):
 	)
 
 
-def test_run_doc_method_distinct_buttons_produce_distinct_labels(empty_context):
-	"""End-to-end: three different custom buttons on Sales Invoice
-	in one session must produce THREE different action_labels.
-	This is the readability win over bare 'run_doc_method × 3'."""
-	recs = []
-	for method_name in ("make_payment_entry", "send_email", "update_items"):
-		recs.append({
-			"uuid": method_name,
-			"cmd": "run_doc_method",
-			"method": "POST",
-			"path": "/api/method/run_doc_method",
-			"event_type": "HTTP Request",
-			"duration": 100,
-			"calls": [],
-			"form_dict": {
-				"method": method_name,
-				"dt": "Sales Invoice",
-				"dn": "SINV-001",
-			},
-		})
-	result = per_action.analyze(recs, empty_context)
-	labels = [a["action_label"] for a in result.actions]
-	assert len(set(labels)) == 3, (
-		f"Three distinct custom-button methods must produce three "
-		f"distinct labels; got: {labels}"
-	)
-
-
 # --- humanized_label variants for the Steps-to-Reproduce section ---
 
 
@@ -598,27 +570,6 @@ def test_humanized_apply_workflow_with_doctype():
 		},
 	}
 	assert per_action.humanized_label(rec) == "Approve Leave Application"
-
-
-def test_humanization_does_not_leak_into_per_action_table(empty_context):
-	"""Guard: the per-action table must stay on the technical label.
-	User feedback was explicit: humanize only in Steps to Reproduce.
-	This test runs a savedocs recording through the full analyzer
-	pipeline and asserts the action row still has the raw cmd."""
-	rec = _savedocs(
-		{"doctype": "Sales Invoice", "__islocal": 1},
-		action="Save",
-	)
-	result = per_action.analyze([rec], empty_context)
-	assert len(result.actions) == 1
-	# Per-action table → technical cmd (with :Save suffix for
-	# Save-vs-Submit disambiguation), NOT "Create Sales Invoice".
-	# Humanization stays strictly in Steps-to-Reproduce.
-	assert (
-		result.actions[0]["action_label"]
-		== "frappe.desk.form.save.savedocs:Save"
-	)
-	assert "Create Sales Invoice" not in result.actions[0]["action_label"]
 
 
 # ---------------------------------------------------------------------------

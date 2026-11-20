@@ -61,64 +61,6 @@ def test_actionable_finding_types_has_concrete_fixes_only():
 		)
 
 
-def test_render_splits_findings_into_actionable_and_observational():
-	"""Source-inspection guard: renderer.render must partition findings into
-	actionable vs observational_findings via _ACTIONABLE_FINDING_TYPES and expose
-	observational_findings separately in the template context."""
-	src = inspect.getsource(renderer.render)
-
-	# The partition must use _ACTIONABLE_FINDING_TYPES.
-	assert "_ACTIONABLE_FINDING_TYPES" in src, (
-		"render() must reference _ACTIONABLE_FINDING_TYPES to split "
-		"findings into actionable + observational buckets."
-	)
-
-	# Both bucket variable names must appear.
-	assert "actionable_findings" in src
-	assert "observational_findings" in src
-
-	# Template context must expose the observations separately.
-	assert '"observational_findings": observational_findings' in src, (
-		"render()'s template context must pass observational_findings "
-		"as a separate key so the template can render the Observations "
-		"section independently."
-	)
-
-
-def test_template_has_observations_subsection_inside_findings():
-	"""The report template must render Observations as a non-collapsible
-	<section class="subsection"> nested inside the Findings section, looping over
-	observational_findings."""
-	import os
-	here = os.path.dirname(__file__)
-	tpath = os.path.join(here, "..", "templates", "report.html")
-	with open(tpath) as f:
-		template = f.read()
-
-	# The Framework-level observations heading must exist as a subsection.
-	assert "Framework-level observations" in template, (
-		"report.html must have a Framework-level observations subsection heading"
-	)
-	# It must loop over observational_findings.
-	assert "observational_findings" in template, (
-		"report.html must iterate observational_findings"
-	)
-	# Observations lives as a <section class="subsection"> inside Findings.
-	findings_idx = template.find("Findings - what to fix")
-	obs_idx = template.find("Framework-level observations")
-	assert findings_idx > 0 and obs_idx > 0
-	assert obs_idx > findings_idx, (
-		"Framework-level observations subsection must live inside the "
-		"Findings section (between its <h2> and closing </section>)"
-	)
-	# The subsection is a plain <section> block (non-collapsible).
-	subsection_marker = '<section class="subsection">'
-	assert subsection_marker in template, (
-		"Framework-level observations must be a <section class='subsection'> "
-		"block non-collapsible by user request"
-	)
-
-
 def test_render_drops_function_not_invoked_findings():
 	"""render() must filter "Function Not Invoked" out of ``all_findings`` (not
 	merely re-bucket it), doing so BEFORE the severity-count and actionable-split

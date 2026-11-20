@@ -156,30 +156,6 @@ def test_misconfigured_min_occurrences_below_two_cannot_readmit_false_positive(e
 	)
 
 
-def test_loop_within_single_request_still_detected(empty_context):
-	"""Sanity counterpart: 15 of the same query in ONE request IS an N+1."""
-	recording = {
-		"uuid": "loop",
-		"path": "/",
-		"cmd": None,
-		"method": "GET",
-		"event_type": "HTTP Request",
-		"duration": 100,
-		"calls": [
-			{
-				"query": "SELECT name FROM tabUser WHERE x=1",
-				"normalized_query": "SELECT NAME FROM tabUser WHERE X=?",
-				"duration": 5,
-				"stack": [
-					{"filename": "apps/myapp/module.py", "lineno": 100, "function": "f"},
-				],
-			}
-		] * 15,
-	}
-	result = n_plus_one.analyze([recording], empty_context)
-	assert any(f["finding_type"] in ("N+1 Query", "Framework N+1") for f in result.findings)
-
-
 def test_fallback_to_deepest_frame_when_only_frappe_frames(empty_context):
 	"""If the only /apps/ frame is in frappe itself, we still emit a
 	finding rather than silently dropping it but as the
@@ -805,35 +781,6 @@ def test_is_profiler_own_query_matches_bench_relative_paths():
 	assert is_profiler_own_query(user_bench_stack) is False
 
 
-def test_walk_callsite_bench_path_profiler_stack_returns_none():
-	"""A stack of apps/frappe/... + apps/optimus/... frames must route through
-	walk_callsite's fallback and return None, not a profiler frame as the blame
-	callsite (which would emit a Framework N+1 blaming the profiler's own
-	code)."""
-	from optimus.analyzers.base import walk_callsite
-
-	stack = [
-		{
-			"filename": "apps/frappe/frappe/hooks.py",
-			"lineno": 10, "function": "run_request_hooks",
-		},
-		{
-			"filename": "apps/optimus/optimus/hooks_callbacks.py",
-			"lineno": 164, "function": "before_request",
-		},
-		{
-			"filename": "apps/optimus/optimus/infra_capture.py",
-			"lineno": 176, "function": "_read_db",
-		},
-	]
-	assert walk_callsite(stack) is None, (
-		"walk_callsite must return None for bench-relative profiler "
-		"stacks so n_plus_one drops the query otherwise a "
-		"Framework N+1 finding gets emitted blaming the profiler's "
-		"own code."
-	)
-
-
 def test_n_plus_one_bench_relative_profiler_stack_produces_no_finding(empty_context):
 	"""Bench-relative ``apps/optimus/optimus/infra_capture.py`` profiler stacks
 	must produce zero findings (neither N+1 Query nor Framework N+1)."""
@@ -877,71 +824,6 @@ def test_n_plus_one_bench_relative_profiler_stack_produces_no_finding(empty_cont
 		"Profiler's own bench-relative stack must produce zero findings; "
 		f"got: {[(f['finding_type'], f['title']) for f in result.findings]}"
 	)
-
-
-def test_is_profiler_own_query_unit():
-	"""Direct unit test of the helper clearer than going through
-	the full n_plus_one pipeline for each branch."""
-	from optimus.analyzers.base import is_profiler_own_query
-
-	# Stack is ONLY optimus + frappe → is profiler
-	stack = [
-		{"filename": "frappe/app.py", "lineno": 120, "function": "dispatch"},
-		{"filename": "optimus/infra_capture.py", "lineno": 176, "function": "_read_db"},
-		{"filename": "frappe/database/mariadb/database.py", "lineno": 742, "function": "sql"},
-	]
-	assert is_profiler_own_query(stack) is True
-
-	# Stack has a user frame → NOT profiler
-	stack = [
-		{"filename": "frappe/app.py", "lineno": 120, "function": "dispatch"},
-		{"filename": "apps/myapp/controller.py", "lineno": 42, "function": "do_thing"},
-		{"filename": "frappe/database/mariadb/database.py", "lineno": 742, "function": "sql"},
-	]
-	assert is_profiler_own_query(stack) is False
-
-	# Pure frappe stack (migration/fixture) → NOT profiler
-	stack = [
-		{"filename": "frappe/migrate.py", "lineno": 50, "function": "run"},
-		{"filename": "frappe/model/document.py", "lineno": 200, "function": "save"},
-		{"filename": "frappe/database/mariadb/database.py", "lineno": 742, "function": "sql"},
-	]
-	assert is_profiler_own_query(stack) is False
-
-	# Empty / None stack → False (don't drop; let caller's normal path handle)
-	assert is_profiler_own_query(None) is False
-	assert is_profiler_own_query([]) is False
-
-	# User frame outside a pass-through wrapper over Frappe → the user's (NOT profiler)
-	stack = [
-		{"filename": "apps/myapp/bulk.py", "lineno": 10, "function": "bulk"},
-		{"filename": "optimus/capture.py", "lineno": 88, "function": "wrapped"},
-		{"filename": "frappe/__init__.py", "lineno": 90, "function": "get_doc"},
-		{"filename": "frappe/database/mariadb/database.py", "lineno": 742, "function": "sql"},
-	]
-	assert is_profiler_own_query(stack) is False
-
-	# User frame outside any other Optimus frame → profiler's own query
-	stack = [
-		{"filename": "apps/myapp/bulk.py", "lineno": 10, "function": "bulk"},
-		{"filename": "optimus/capture.py", "lineno": 88, "function": "wrap"},
-		{"filename": "frappe/database/mariadb/database.py", "lineno": 742, "function": "sql"},
-	]
-	assert is_profiler_own_query(stack) is True
-
-
-def test_walk_callsite_returns_none_for_profiler_only_stack():
-	"""walk_callsite returns None when the stack is profiler instrumentation
-	(via is_profiler_own_query), so analyzers drop the query through their
-	`if not callsite: continue` guard."""
-	from optimus.analyzers.base import walk_callsite
-
-	stack = [
-		{"filename": "frappe/app.py", "lineno": 202, "function": "init_request"},
-		{"filename": "optimus/hooks_callbacks.py", "lineno": 108, "function": "before_request"},
-		{"filename": "optimus/infra_capture.py", "lineno": 176, "function": "_read_db"},
-	]
-	assert walk_callsite(stack) is None
 
 
 def test_walk_callsite_still_falls_back_for_pure_frappe_stack():

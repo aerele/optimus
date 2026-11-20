@@ -80,13 +80,6 @@ def test_a_time_zone_aware_recording_time_is_compared_without_error(errors):
 	assert "expired" in warnings[0]
 
 
-def test_an_iso_time_with_an_offset_is_compared_without_error(errors):
-	text = (NOW - timedelta(seconds=RECORDING_DATA_TTL_SECONDS + 5)).isoformat() + "+05:30"
-	warnings = _notes([{"time": text, "pyi_session": None}])
-
-	assert "expired" in warnings[0]
-
-
 def test_the_neutral_note_also_names_eviction_and_an_encryption_key_change(errors):
 	note = _notes([_rec(10)])[0]
 

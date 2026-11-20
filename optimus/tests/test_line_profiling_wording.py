@@ -6,7 +6,6 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-REPO = ROOT.parent
 PHASE_RE = re.compile(r"phase(?:[ -]|&nbsp;)(1|2|one|two)\b", re.IGNORECASE)
 DOCTYPE_NAME = "Optimus Phase Two Run"
 JS_STRING_RE = re.compile(r"\"([^\"\n]*)\"|'([^'\n]*)'|`([^`]*)`")
@@ -16,7 +15,6 @@ JS_FILES = (
 	"public/js/floating_widget.js",
 	"public/js/optimus_pill_state.js",
 )
-DOC_FILES = ("README.md", "SECURITY.md", "docs/AI-FIXING.md", "docs/AI-REFRESH.md", "docs/REDIS-SCHEMA.md")
 
 
 def _js_strings(path: Path) -> list[str]:
@@ -67,12 +65,6 @@ def test_doctype_labels_and_descriptions_have_no_phase_wording():
 				assert not PHASE_RE.search(val), (rel, field["fieldname"], key)
 
 
-def test_docs_have_no_phase_wording():
-	for rel in DOC_FILES:
-		for n, line in enumerate((REPO / rel).read_text().splitlines(), 1):
-			assert not PHASE_RE.search(line.replace(DOCTYPE_NAME, "")), (rel, n, line)
-
-
 def _template_visible_text() -> str:
 	html = (ROOT / "templates/report.html").read_text()
 	html = re.sub(r"\{#.*?#\}", "", html, flags=re.DOTALL)
@@ -94,11 +86,3 @@ def test_wording_regex_catches_variants():
 	for text in ("phase 2", "Phase-1", "phase&nbsp;2", "phase two", "Phase-One"):
 		assert PHASE_RE.search(text), text
 	assert not PHASE_RE.search("phase20")
-
-
-def test_line_profiling_js_messages_use_placeholders_not_concatenation():
-	concat = re.compile(r"__\(\s*(?:\"[^\"]*\"|'[^']*')\s*\+")
-	for rel in JS_FILES:
-		text = (ROOT / rel).read_text()
-		for m in concat.finditer(text):
-			assert "ine profiling" not in text[m.start():m.end() + 80], (rel, m.group(0))

@@ -103,11 +103,6 @@ class TestProfileTable:
 			# Each named profile defines all nine sensitivity knobs.
 			assert set(settings._PROFILES[name]) == set(SENSITIVITY_KEYS)
 
-	def test_custom_is_not_a_named_profile(self):
-		# Custom means "use stored field values", so it must NOT be in
-		# the preset table _resolve keys off `_PROFILES.get(profile)`.
-		assert "Custom" not in settings._PROFILES
-
 	def test_recommended_equals_defaults(self):
 		"""Drift guard: Recommended must mirror the shipped _DEFAULTS for
 		every sensitivity key, or the 'Recommended tracks defaults'
@@ -189,21 +184,6 @@ class TestProfileTable:
 		for key in self._STRICT_UNBOUNDED_KEYS:
 			assert settings._PROFILES["Strict"][key] == 0, f"{key} Strict must be 0"
 			assert settings._PROFILES["Relaxed"][key] > 0, f"{key} Relaxed must be > 0"
-
-	def test_every_sensitivity_key_is_categorised(self):
-		"""Drift guard: a newly-added sensitivity key must land in one of
-		the three ordering groups above, or the test stops being meaningful."""
-		categorised = (
-			set(self._STRICT_LOWER_KEYS)
-			| set(self._STRICT_HIGHER_KEYS)
-			| set(self._STRICT_UNBOUNDED_KEYS)
-		)
-		uncategorised = set(SENSITIVITY_KEYS) - categorised
-		assert not uncategorised, (
-			f"new sensitivity key(s) need to join _STRICT_LOWER_KEYS, "
-			f"_STRICT_HIGHER_KEYS, or _STRICT_UNBOUNDED_KEYS in this "
-			f"test: {uncategorised}"
-		)
 
 	def test_profiles_match_doctype_reference_values(self):
 		"""_PROFILES must equal the 'Reference values: Strict/Recommended/

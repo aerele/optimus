@@ -276,29 +276,3 @@ def test_missing_action_label_falls_back_to_generic_count():
 	assert "Also affects 1 other action" in dom["customer_description"]
 	# No label list ("**...**") since the only "other" is unlabeled.
 	assert "**" not in dom["customer_description"]
-
-
-def test_empty_findings_list_is_safe():
-	findings = []
-	_dedupe_findings_across_actions(findings, [])
-	assert findings == []
-
-
-def test_dedup_dropped_findings_actually_removed_from_list():
-	"""Sanity check: the dropped findings should not appear in the
-	output list at all."""
-	original_titles = [
-		"In Save, 54% of the time was spent in looped_validate",
-		"In Submit, 48% of the time was spent in looped_validate",
-	]
-	findings = [
-		_shp(action_ref="0", impact_ms=699.0, title=original_titles[0]),
-		_shp(action_ref="1", impact_ms=771.0, title=original_titles[1]),
-	]
-
-	_dedupe_findings_across_actions(findings, [_action(0, "Save"), _action(1, "Submit")])
-
-	assert len(findings) == 1
-	titles_remaining = [f["title"] for f in findings]
-	assert original_titles[0] not in titles_remaining
-	assert original_titles[1] in titles_remaining  # Submit was dominant

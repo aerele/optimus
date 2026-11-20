@@ -3,6 +3,7 @@
 
 """Expensive session actions count per-user limits before doing any work."""
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -52,6 +53,7 @@ def test_batch_deduplicates_runs(monkeypatch):
     monkeypatch.setattr(api, "retry_phase2_analyze", retry)
     result = api.retry_phase2_analyzes_batch(["fake-run", "fake-run"])
     assert called == ["fake-run"] and result["count"] == 1
+    assert result["tallies"] == {"Ready": 1, "Failed": 0, "Analyzing": 0, "Skipped": 0}
 
 
 def test_batch_cannot_swallow_the_per_user_limit(monkeypatch):
@@ -63,7 +65,8 @@ def test_batch_cannot_swallow_the_per_user_limit(monkeypatch):
         api.retry_phase2_analyzes_batch(["fake-run"])
 
 
-def test_batch_accepts_five_runs(monkeypatch):
+@pytest.mark.parametrize("as_json", [False, True], ids=["list", "json-string"])
+def test_batch_accepts_five_runs(monkeypatch, as_json):
     _env(monkeypatch)
     called = []
     def retry(run_uuid):
@@ -71,8 +74,18 @@ def test_batch_accepts_five_runs(monkeypatch):
         return {"run_uuid": run_uuid, "status": "Ready"}
     monkeypatch.setattr(api, "retry_phase2_analyze", retry)
     runs = [f"fake-run-{i}" for i in range(5)]
-    assert api.retry_phase2_analyzes_batch(runs)["count"] == 5
+    assert api.retry_phase2_analyzes_batch(json.dumps(runs) if as_json else runs)["count"] == 5
     assert called == runs
+
+
+@pytest.mark.parametrize("payload", [[], "[]", "not json", "{}", 5])
+def test_batch_refuses_an_empty_or_malformed_payload(monkeypatch, payload):
+    _env(monkeypatch)
+    called = []
+    monkeypatch.setattr(api, "retry_phase2_analyze", lambda run_uuid: called.append(run_uuid))
+    with pytest.raises(FakeValidationError):
+        api.retry_phase2_analyzes_batch(payload)
+    assert called == []
 
 
 def test_batch_and_single_retry_share_the_same_limit(monkeypatch):

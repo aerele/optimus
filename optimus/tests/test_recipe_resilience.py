@@ -178,8 +178,11 @@ def _render_doc(findings=(), tables=()):
 
 def test_the_render_parses_each_query_once(monkeypatch):
 	parsed = []
+	aliased = []
 	real = index_recipes.parse_query
+	real_aliases = index_recipes.table_aliases
 	monkeypatch.setattr(index_recipes, "parse_query", lambda q: parsed.append(q) or real(q))
+	monkeypatch.setattr(index_recipes, "table_aliases", lambda q: aliased.append(q) or real_aliases(q))
 	query = "SELECT name FROM `tabSales Invoice` WHERE customer = ?"
 	rows = [
 		SimpleNamespace(
@@ -195,6 +198,7 @@ def test_the_render_parses_each_query_once(monkeypatch):
 	with patch("optimus.settings.get_ignored_apps", return_value=()):
 		renderer.render_raw(_render_doc(findings=rows), recordings=[])
 	assert parsed == [query]
+	assert aliased == [query]
 
 
 def test_a_failed_card_recipe_is_shown_and_logged(monkeypatch):
@@ -211,7 +215,10 @@ def test_a_failed_card_recipe_is_shown_and_logged(monkeypatch):
 	}
 	with patch("optimus.settings.get_ignored_apps", return_value=()):
 		html = renderer.render_raw(_render_doc(tables=[table]), recordings=[])
-	assert recipe_enrichment.RECIPE_FAILED_CARD_NOTE in _html.unescape(html)  # the note quotes the log line
+	note = recipe_enrichment.RECIPE_FAILED_CARD_NOTE
+	assert note in _html.unescape(html)  # the note quotes the log line
+	assert note.startswith(index_recipes.NO_VERDICT) and "Do not add this index" not in note
+	assert ">Index review</div>" in html
 	assert lines == ["optimus: index advice failed for 1 finding(s) or table(s) in one render (tabSales Invoice: RuntimeError)"]
 
 
@@ -269,18 +276,6 @@ def _row(name, ftype, detail):
 		estimated_impact_ms=100.0, affected_count=1, action_ref="0", llm_fix_json=None,
 		technical_detail_json=json.dumps(detail),
 	)
-
-
-def _record_suggest(sent):
-	def suggest(payload, **kwargs):
-		sent.append(payload["finding_type"])
-		return {"suggestion": "x", "model": "m"}
-
-	return suggest
-
-
-
-
 
 
 def test_a_broken_gate_never_offers_a_refresh(monkeypatch):

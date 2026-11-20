@@ -8,74 +8,10 @@ The `notes` field on Optimus Session is a Text Editor so users can include rich
 report above findings.
 """
 
-import inspect
 import json
 import os
 
 HERE = os.path.dirname(__file__)
-
-
-def _load_doctype_json():
-	# Frappe's on-disk layout is <app>/<app>/<module>/doctype/<dt>/<dt>.json.
-	# For this app the module name matches the app name ("optimus")
-	# so the resolved path from optimus/tests/ is
-	# ../optimus/doctype/optimus_session/optimus_session.json.
-	jpath = os.path.join(
-		HERE,
-		"..",
-		"optimus",
-		"doctype",
-		"optimus_session",
-		"optimus_session.json",
-	)
-	with open(jpath) as f:
-		return json.load(f)
-
-
-def test_notes_field_is_text_editor():
-	"""The notes field must be Text Editor (rich HTML), not plain Text,
-	so users can include formatting / links / lists in the steps they
-	document."""
-	meta = _load_doctype_json()
-	fields = meta.get("fields") or []
-	target = [f for f in fields if f.get("fieldname") == "notes"]
-	assert len(target) == 1, "notes field missing from Optimus Session"
-	assert target[0]["fieldtype"] == "Text Editor"
-
-
-def test_notes_label_reflects_steps_purpose():
-	"""The label must make the field's purpose clear to users the
-	description alone isn't enough because the field header in the
-	form view only shows the label."""
-	meta = _load_doctype_json()
-	notes = next(
-		(f for f in meta["fields"] if f.get("fieldname") == "notes"), None
-	)
-	assert notes is not None
-	assert "Reproduce" in notes["label"] or "Steps" in notes["label"]
-
-
-def test_api_start_accepts_notes():
-	"""api.start must accept an optional notes kwarg and persist it
-	into the Optimus Session row."""
-	from optimus import api
-
-	sig = inspect.signature(api.start)
-	assert "notes" in sig.parameters
-	# Default should be empty string keeping start() backward compatible
-	# with callers that don't pass notes.
-	assert sig.parameters["notes"].default == ""
-
-
-def test_api_start_writes_notes_to_doc():
-	"""Source check: api.start must include notes in the doc_fields dict
-	passed to get_doc, or the value will be silently dropped."""
-	from optimus import api
-
-	src = inspect.getsource(api.start)
-	assert "notes" in src
-	# The field must land in doc_fields, not just be parsed and forgotten.
-	assert 'doc_fields["notes"]' in src or "doc_fields['notes']" in src
 
 
 def test_report_template_renders_notes():
@@ -86,11 +22,8 @@ def test_report_template_renders_notes():
 	with open(tpath) as f:
 		template = f.read()
 
-	# XSS guard: the template must NEVER pipe the raw doc field through
-	# |safe. The sanitized version is mandatory.
-	assert "session.notes | safe" not in template
-	assert "session.notes|safe" not in template
-
+	# (A template that rendered the raw doc field through |safe is caught by
+	# test_notes_sanitizer_compat, which renders a script canary through render_raw.)
 	# The repro section reads from the contract-shaped report_data.repro.
 	assert "report_data.repro" in template
 	# "Steps to Reproduce" heading must appear so users know the purpose.
@@ -104,84 +37,6 @@ def test_report_template_renders_notes():
 	assert findings_heading_idx > repro_idx, (
 		"repro section must appear above 'Findings what to fix'"
 	)
-
-
-def test_notes_are_bleach_sanitized_before_render():
-	"""XSS regression guard: a notes field containing <script> must NOT
-	produce an executable <script> in the rendered report. This test
-	loads the sanitize function directly (not a full render) because
-	the test environment doesn't have a real Frappe site. MUST call
-	with always_sanitize=True so the JSON/no-tag fast-paths don't bypass."""
-	try:
-		from frappe.utils.html_utils import sanitize_html
-	except Exception:
-		# If Frappe isn't importable at test time for some reason, the
-		# renderer falls back to html.escape which also neutralizes.
-		import html as html_mod
-		cleaned = html_mod.escape('<script>alert(1)</script>')
-		assert "<script>" not in cleaned
-		return
-
-	malicious = '<p>ok</p><script>alert(1)</script>'
-	cleaned = sanitize_html(malicious, always_sanitize=True)
-	# Harmless tags preserved:
-	assert "<p>" in cleaned
-	# Script tags removed (nh3/bleach strips or escapes):
-	assert "<script>" not in cleaned
-
-
-def test_json_shaped_xss_payload_is_sanitized():
-	"""sanitize_html has a fast-path that skips bleach for input detected as
-	valid JSON, so ``notes = '{"x": "<script>...</script>"}'`` (valid JSON) would
-	pass through unchanged and the template's |safe would render a live <script>.
-	``always_sanitize=True`` closes this bypass.
-	"""
-	try:
-		from frappe.utils.html_utils import sanitize_html
-	except Exception:
-		import html as html_mod
-		cleaned = html_mod.escape('{"x": "<script>alert(1)</script>"}')
-		assert "<script>" not in cleaned
-		return
-
-	json_payload = '{"x": "<script>alert(1)</script>"}'
-
-	# Without always_sanitize=True the JSON fast-path would kick in.
-	# With always_sanitize=True the script tag must be neutralized.
-	cleaned = sanitize_html(json_payload, always_sanitize=True)
-	assert "<script>" not in cleaned, (
-		"sanitize_html(always_sanitize=True) must strip script tags "
-		"from JSON-shaped input. If this fails, the renderer's |safe "
-		"render path leaks XSS to anyone viewing a Optimus Session report."
-	)
-
-
-def test_renderer_passes_always_sanitize_true():
-	"""Source-inspection guard: the renderer must pass always_sanitize=True
-	to sanitize_html, or the JSON / no-tag fast-paths will bypass bleach
-	and leak XSS through |safe in the template."""
-	import inspect
-
-	from optimus import renderer
-
-	src = inspect.getsource(renderer.render)
-	assert "always_sanitize=True" in src, (
-		"renderer.render must call sanitize_html(..., always_sanitize=True). "
-		"Without it, valid JSON or no-tag input bypasses sanitization "
-		"entirely stored XSS regression."
-	)
-
-
-def test_renderer_sanitizes_notes_before_template_context():
-	"""The render function must run session.notes through sanitize_html
-	and pass the result as notes_html, not as session.notes directly."""
-	import inspect
-
-	from optimus import renderer
-
-	src = inspect.getsource(renderer.render)
-	assert "sanitize_html" in src or "html.escape" in src or "html_mod.escape" in src
-	assert "notes_html" in src
 
 
 # ---------------------------------------------------------------------------
@@ -298,24 +153,6 @@ def test_auto_notes_unnamed_action_falls_back_gracefully():
 	assert label, f"Auto-notes emitted blank label: {html_out!r}"
 
 
-def test_persist_auto_fills_notes_when_field_is_empty():
-	"""Source-inspection guard: _persist must check doc.notes and
-	populate it with _build_auto_notes_html when empty, otherwise the
-	whole feature is a dead path."""
-	import inspect
-
-	from optimus import analyze
-
-	src = inspect.getsource(analyze._persist)
-	# The guard condition.
-	assert "doc.notes" in src
-	# Must call the helper.
-	assert "_build_auto_notes_html" in src
-	# Must be gated on an emptiness check so existing notes aren't
-	# overwritten.
-	assert "strip()" in src or "not doc.notes" in src
-
-
 def test_auto_notes_filters_realtime_polling_noise():
 	"""Only genuine user actions belong in the reproducer: given savedocs plus
 	two ``frappe.realtime.has_permission`` polls, only the savedocs survives (the
@@ -420,114 +257,6 @@ def test_auto_notes_all_noise_returns_empty_string():
 	] * 20
 	html_out = _build_auto_notes_html(recordings)
 	assert html_out == ""
-
-
-def test_auto_notes_real_user_sequence_reads_naturally():
-	"""End-to-end: a realistic flow produces a human-readable
-	reproducer that reads like a story, not an HTTP log."""
-	import json as _json
-
-	from optimus.analyze import _build_auto_notes_html
-
-	recordings = [
-		# User searches for an item
-		{
-			"method": "GET",
-			"path": "/api/method/frappe.desk.search.search_link",
-			"cmd": "frappe.desk.search.search_link",
-			"duration": 28,
-			"calls": [],
-			"form_dict": {"doctype": "Item"},
-		},
-		# User opens a customer
-		{
-			"method": "GET",
-			"path": "/api/method/frappe.desk.form.load.getdoc",
-			"cmd": "frappe.desk.form.load.getdoc",
-			"duration": 62,
-			"calls": [],
-			"form_dict": {"doctype": "Customer", "name": "CUST-001"},
-		},
-		# (permission polling filtered)
-		{
-			"method": "GET",
-			"path": "/api/method/frappe.realtime.has_permission",
-			"cmd": "frappe.realtime.has_permission",
-			"duration": 4,
-			"calls": [],
-		},
-		# User creates a new Sales Invoice
-		{
-			"method": "POST",
-			"path": "/api/method/frappe.desk.form.save.savedocs",
-			"cmd": "frappe.desk.form.save.savedocs",
-			"duration": 320,
-			"calls": [],
-			"form_dict": {
-				"doc": _json.dumps({
-					"doctype": "Sales Invoice",
-					"__islocal": 1,
-				}),
-				"action": "Save",
-			},
-		},
-		# User submits it
-		{
-			"method": "POST",
-			"path": "/api/method/frappe.desk.form.save.savedocs",
-			"cmd": "frappe.desk.form.save.savedocs",
-			"duration": 410,
-			"calls": [],
-			"form_dict": {
-				"doc": _json.dumps({
-					"doctype": "Sales Invoice",
-					"name": "SINV-00042",
-				}),
-				"action": "Submit",
-			},
-		},
-	]
-	html_out = _build_auto_notes_html(recordings)
-
-	# The whole story shows up in order and reads like English.
-	for expected in (
-		"Search Item",
-		"Open Customer CUST-001",
-		"Create Sales Invoice",
-		"Submit Sales Invoice",
-	):
-		assert expected in html_out, (
-			f"Expected '{expected}' in reproducer; got: {html_out!r}"
-		)
-
-	# And the noise is gone.
-	assert "has_permission" not in html_out
-	assert "1 background / polling" in html_out
-
-
-def test_start_dialog_no_longer_asks_for_notes():
-	"""The 'Steps to reproduce' field has been removed from the start
-	dialog. Users can still see / edit the auto-generated notes on the
-	Optimus Session form after the session completes."""
-	wpath = os.path.join(
-		HERE, "..", "public", "js", "floating_widget.js"
-	)
-	with open(wpath) as f:
-		widget_src = f.read()
-
-	# The openStartDialog function must NOT define a field with
-	# fieldname: "notes" any more.
-	assert 'fieldname: "notes"' not in widget_src, (
-		"The start dialog still defines a 'notes' field. The v0.5.1 "
-		"design removed it notes is now auto-filled from captured "
-		"actions during analyze. Delete the dialog entry."
-	)
-	# And the frappe.call args must not pass notes either.
-	assert "notes: values.notes" not in widget_src, (
-		"The start call still passes a `notes` argument. Since the "
-		"dialog no longer collects it, values.notes is always undefined "
-		" drop the arg from the frappe.call."
-	)
 
 
 # --------------------------------------------------------------------------

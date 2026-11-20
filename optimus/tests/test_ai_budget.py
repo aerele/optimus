@@ -3,8 +3,6 @@
 
 """Tests for optimus.ai_budget: context sizing and fence-safe message assembly."""
 
-import re
-
 from optimus import ai_budget as B
 
 
@@ -16,6 +14,7 @@ def test_estimate_is_conservative_chars_over_3_3():
 
 def test_output_tokens_reserves_context_margin_without_quality_cap():
 	assert B.output_tokens(4096, input_tokens=3000) == 796
+	assert B.output_tokens(4096, input_tokens=4000, model_max=8192) == 0
 	assert B.output_tokens(200000, input_tokens=3000, model_max=32768) == 32768
 
 
@@ -49,14 +48,14 @@ def test_data_block_wraps_with_nonce_and_unbreakable_fence():
 	assert all(ln != "````" for ln in lines[2:-2])
 
 
-def test_data_block_without_lang_has_no_fence_and_fresh_nonce_per_call():
+def test_data_block_without_lang_has_no_fence_and_fresh_nonce_per_call(monkeypatch):
+	nonces = iter(["aaaaaa", "bbbbbb"])
+	monkeypatch.setattr(B.secrets, "token_hex", lambda n: next(nonces))
 	a = B.data_block("title", "Slow query")
 	b = B.data_block("title", "Slow query")
 	assert "```" not in a
-	tag_a = re.match(r"<data-([0-9a-f]{6}) ", a).group(1)
-	tag_b = re.match(r"<data-([0-9a-f]{6}) ", b).group(1)
-	assert a.endswith(f"</data-{tag_a}>")
-	assert tag_a != tag_b or a == b  # token_hex(3): collisions are 1 in 16.7M
+	assert a.startswith("<data-aaaaaa ") and a.endswith("</data-aaaaaa>")
+	assert b.startswith("<data-bbbbbb ") and b.endswith("</data-bbbbbb>")
 
 
 def test_assemble_drops_highest_priority_number_first_and_never_priority_0():

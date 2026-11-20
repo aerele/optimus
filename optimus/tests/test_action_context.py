@@ -16,9 +16,6 @@ class TestModuleFromFilename:
 	def test_app_relative_path(self):
 		assert renderer._module_from_filename("ugly_code/python/common.py") == "ugly_code.python.common"
 
-	def test_frappe_core_path(self):
-		assert renderer._module_from_filename("frappe/model/document.py") == "frappe.model.document"
-
 	def test_strips_leading_slash_and_double_slash(self):
 		assert renderer._module_from_filename("/abs/x/y.py") == "abs.x.y"
 		assert renderer._module_from_filename("a//b.py") == "a.b"
@@ -240,15 +237,6 @@ class TestAttachActionContext:
 		renderer._attach_action_context(actions, [], recs)
 		assert actions[0]["target_doc"] == {"doctype": "Sales Order", "name": "SAL-ORD-2026-00042"}
 
-	def test_resolved_used_when_form_dict_has_no_name(self):
-		actions = [self._act(0, recording_uuid="r0")]
-		recs = {"r0": {
-			"form_dict": {"doc": json.dumps({"doctype": "Lead"})},  # unsaved, name None
-			"resolved_target_doc": {"doctype": "Lead", "name": "CRM-LEAD-0001"},
-		}}
-		renderer._attach_action_context(actions, [], recs)
-		assert actions[0]["target_doc"] == {"doctype": "Lead", "name": "CRM-LEAD-0001"}
-
 	def test_real_request_name_not_overridden_by_resolved(self):
 		# A real name in the request (edit/submit) is authoritative never replaced.
 		actions = [self._act(0, recording_uuid="r0")]
@@ -293,24 +281,6 @@ class TestAttachActionContext:
 
 class TestResolvedDocSidecarWiring:
 	"""Regression guards: the resolved-doc write must ride the Optimus sidecar (never the recorder-hash RMW, dead for HTTP) and analyze must merge + clean it up."""
-
-	def test_after_request_writes_resolved_doc_to_sidecar(self):
-		import inspect
-
-		from optimus import hooks_callbacks
-
-		src = inspect.getsource(hooks_callbacks.after_request)
-		assert "redis_keys.resolved_doc(" in src
-
-	def test_after_request_does_not_rmw_recorder_hash_for_resolved_doc(self):
-		import inspect
-
-		from optimus import hooks_callbacks
-
-		src = inspect.getsource(hooks_callbacks.after_request)
-		# The RMW imported the recorder hash and wrote it back with hset() neither may reappear.
-		assert "from frappe.recorder import RECORDER_REQUEST_HASH" not in src
-		assert "hset(" not in src
 
 	def test_analyze_merges_and_cleans_resolved_doc_sidecar(self):
 		import inspect

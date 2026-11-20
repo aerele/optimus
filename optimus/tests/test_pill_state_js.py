@@ -31,16 +31,6 @@ def _need_node():
 	pytest.skip("node not installed (the pill tests run in node; install it to run them locally)")
 
 
-def test_a_missing_node_fails_in_ci_and_skips_elsewhere_with_a_reason(monkeypatch):
-	monkeypatch.setattr(shutil, "which", lambda name: None)
-	monkeypatch.setenv("CI", "true")
-	with pytest.raises(pytest.fail.Exception, match="required in CI"):
-		_need_node()
-	monkeypatch.delenv("CI")
-	with pytest.raises(pytest.skip.Exception, match="install it to run them locally"):
-		_need_node()
-
-
 def test_pill_state_js_syntax():
 	_need_node()
 	for path in (PILL_JS, WIDGET_JS):
@@ -75,14 +65,3 @@ def test_widget_resyncs_from_server_and_polls():
 	assert 'display === "analyzing"' not in body
 	for symbol in ("syncPoll", "pollTick", "reduceHardStop", "pollAction", "visibilitychange"):
 		assert symbol in src, symbol
-
-
-def test_widget_routes_phase_1_and_2_events_through_reducer():
-	src = _read(WIDGET_JS)
-	assert "Pill.EVENT_NAMES.forEach" in src
-	pill = _read(PILL_JS)
-	for name in (
-		"optimus_session_analyzing", "optimus_session_ready", "optimus_session_failed",
-		"phase_2_run_analyzing", "phase_2_run_ready", "phase_2_run_failed",
-	):
-		assert name in pill, name

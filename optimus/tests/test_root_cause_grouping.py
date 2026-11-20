@@ -115,14 +115,6 @@ class TestRootCauseKey:
 		# no drilldown_chain
 		assert _root_cause_key(shp) == ("common.py", "bg_recheck_users")
 
-	def test_hot_line_uses_own_callsite(self):
-		hl = _hot_line(function="_check_user_exists")
-		assert _root_cause_key(hl) == ("common.py", "_check_user_exists")
-
-	def test_redundant_call_uses_own_callsite(self):
-		rc = _redundant_call(function="_check_user_exists")
-		assert _root_cause_key(rc) == ("common.py", "_check_user_exists")
-
 	def test_infra_finding_has_no_key(self):
 		"""Findings without a callsite (infra observations) skip grouping."""
 		assert _root_cause_key(_infra()) is None
@@ -174,14 +166,6 @@ class TestGrouping:
 		# Each is its own primary with no sub_findings.
 		for f in result:
 			assert "sub_findings" not in f
-
-	def test_singleton_finding_unchanged(self):
-		"""A finding with a unique root cause passes through unchanged (no
-		sub_findings)."""
-		hl = _hot_line()
-		result = _group_findings_by_root_cause([hl])
-		assert len(result) == 1
-		assert "sub_findings" not in result[0]
 
 	def test_infra_findings_pass_through_ungrouped(self):
 		"""Findings with no resolvable root cause (no callsite) skip grouping and

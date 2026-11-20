@@ -21,6 +21,9 @@ _EXPECTED = {
 	),
 	"top_severity": ("Select", {"options": "\nHigh\nMedium\nLow\nNone"}),
 	"notes": ("Text Editor", {}),
+	# Stays a 32-bit Int: widening it rebuilds the Session table (MariaDB COPY, Postgres
+	# rewrite) for a count one reply cannot reach, and makes the column nullable. The engine
+	# clamps the value instead. ai_tokens_spent below is Long Int: it holds the cumulative sum.
 	"ai_steps_tokens": ("Int", {"default": "0", "no_copy": 1}),
 	"ai_tokens_spent": ("Long Int", {"default": "0", "no_copy": 1}),
 	"ai_refresh_count": ("Int", {"default": "0", "no_copy": 1}),
@@ -138,13 +141,6 @@ def test_most_used_information_comes_first():
 		("analyze_duration_ms", "top_queries_json"),
 	):
 		assert order.index(early) < order.index(late), (early, late)
-
-
-def test_json_blobs_stay_hidden_and_read_only():
-	fields = _data_fields()
-	for name in _EXPECTED:
-		if name.endswith("_json") or name == "analyzer_warnings":
-			assert fields[name].get("hidden") == 1 and fields[name].get("read_only") == 1, name
 
 
 def test_patch_registered_and_importable():

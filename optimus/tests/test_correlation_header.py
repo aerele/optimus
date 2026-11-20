@@ -13,7 +13,6 @@ import types
 
 import frappe
 
-from optimus import api, hooks_callbacks
 from optimus.hooks_callbacks import _inject_correlation_header
 
 
@@ -26,16 +25,6 @@ def _set_fake_local(headers=None):
         local.response_headers = headers
     frappe.local = local
     return local
-
-
-def test_inject_correlation_header_sets_both_headers():
-    headers = {}
-    _set_fake_local(headers)
-
-    _inject_correlation_header("rec-uuid-abc123")
-
-    assert headers["X-Optimus-Recording-Id"] == "rec-uuid-abc123"
-    assert "X-Optimus-Recording-Id" in headers.get("Access-Control-Expose-Headers", "")
 
 
 def test_inject_correlation_header_merges_with_existing_expose():
@@ -82,86 +71,15 @@ def test_inject_correlation_header_tokenwise_match_not_substring():
     assert "X-Optimus-Recording-Id" in tokens
 
 
-def test_correlation_header_gated_on_profiler_session_id():
-    """The correlation header must be injected only when an active profiler
-    session is present, not merely when there's a recording UUID. The standalone
-    Frappe Recorder UI sets frappe.local._recorder for non-session traffic;
-    leaking X-Optimus-Recording-Id there would make optimus_frontend.js buffer
-    XHR timings against a recording UUID with no session to flush to.
-    Source-inspection check on the after_request hook.
-    """
-    import inspect
-
-    src = inspect.getsource(hooks_callbacks.after_request)
-    # The correlation header injection must check optimus_session_id
-    # (from frappe.local), not just the recording UUID.
-    assert "optimus_session_id" in src
-    # And the check must guard _inject_correlation_header.
-    correlation_idx = src.find("_inject_correlation_header")
-    assert correlation_idx > 0
-    # Look for optimus_session_id reference within ~30 lines before
-    # the correlation header call.
-    preamble = src[:correlation_idx]
-    assert "optimus_session_id" in preamble, (
-        "_inject_correlation_header must be gated on optimus_session_id, "
-        "not just recording_uuid_for_dump otherwise non-session "
-        "traffic (e.g. from the standalone Recorder UI) leaks the header"
-    )
-
 def test_inject_correlation_header_case_insensitive_idempotency():
     """HTTP header names are case-insensitive, so the token check must be too:
     an existing lowercase expose entry shouldn't get a duplicate added in
     different casing."""
-    headers = {"Access-Control-Expose-Headers": "x-profiler-recording-id"}
+    headers = {"Access-Control-Expose-Headers": "x-optimus-recording-id"}
     _set_fake_local(headers)
 
     _inject_correlation_header("rec-uuid-abc123")
 
     expose = headers["Access-Control-Expose-Headers"]
     # Must not add a second entry just because our spelling differs.
-    assert expose.lower().count("x-profiler-recording-id") == 1
-
-
-def test_inject_correlation_header_noop_without_response_headers():
-    """If frappe.local has no response_headers attribute (non-HTTP context
-    like a script shell), the injector must no-op, not raise."""
-    _set_fake_local()  # no response_headers attribute
-
-    # Must not raise.
-    _inject_correlation_header("rec-uuid-abc123")
-
-
-def test_hooks_callbacks_invokes_snapshot():
-    """Source-inspection guard: the before/after request and job hooks must
-    call infra_capture."""
-    import inspect
-
-    before = inspect.getsource(hooks_callbacks.before_request)
-    after = inspect.getsource(hooks_callbacks.after_request)
-    before_job = inspect.getsource(hooks_callbacks.before_job)
-    after_job = inspect.getsource(hooks_callbacks.after_job)
-
-    assert "infra_capture" in before
-    assert "infra_capture" in after
-    assert "infra_capture" in before_job
-    assert "infra_capture" in after_job
-    # v0.12.0+: the Redis key is built through ``redis_keys.infra(uuid)``
-    # (the inline f-string ``"profiler:infra:<uuid>"`` was migrated to the
-    # centralized builder). Assert the canonical call appears in both
-    # request + job teardown paths.
-    assert "redis_keys.infra(" in after
-    assert "redis_keys.infra(" in after_job
-
-
-def test_stop_session_force_stops_infra_inflight():
-    import inspect
-
-    src = inspect.getsource(api._stop_session)
-    assert "infra_capture._force_stop_inflight" in src
-
-
-def test_after_request_injects_correlation_header():
-    import inspect
-
-    src = inspect.getsource(hooks_callbacks.after_request)
-    assert "_inject_correlation_header" in src
+    assert expose.lower().count("x-optimus-recording-id") == 1

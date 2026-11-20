@@ -14,7 +14,7 @@ from __future__ import annotations
 
 # Re-export EVERY symbol from the legacy monolithic module including
 # underscore-prefixed internals like ``_OTHER_APP_LABEL``,
-# ``_find_node_in_tree``, ``_build_executive_summary`` etc. that test files
+# ``_find_node_in_tree``, ``_compose_tldr`` etc. that test files
 # (and a few cross-module callers) import directly. ``from X import *``
 # can't do this because PEP 8 hides underscore names; instead we walk
 # ``dir(_internal)`` and copy each attribute into this module's globals.

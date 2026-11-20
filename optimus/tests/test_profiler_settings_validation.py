@@ -91,14 +91,6 @@ class TestFrameworkAppWarning:
 		assert "misconfiguration" in stub.msgprint_calls[0]["title"].lower()
 		assert stub.msgprint_calls[0]["indicator"] == "orange"
 
-	def test_warns_when_erpnext_added(self, monkeypatch):
-		OptimusSettings, stub = _fresh_controller(monkeypatch)
-		doc = OptimusSettings()
-		doc.tracked_apps = [_row("erpnext")]
-		doc._warn_on_framework_apps_in_tracked()
-		assert len(stub.msgprint_calls) == 1
-		assert "erpnext" in stub.msgprint_calls[0]["msg"]
-
 	def test_warns_once_for_both_framework_apps(self, monkeypatch):
 		"""frappe + erpnext + custom_app → single warning listing both
 		framework apps (not two separate warnings)."""
@@ -120,13 +112,6 @@ class TestFrameworkAppWarning:
 		doc.tracked_apps = [
 			_row("my_custom_app"), _row("jewellery_erpnext"),
 		]
-		doc._warn_on_framework_apps_in_tracked()
-		assert stub.msgprint_calls == []
-
-	def test_no_warning_for_empty_tracked_apps(self, monkeypatch):
-		OptimusSettings, stub = _fresh_controller(monkeypatch)
-		doc = OptimusSettings()
-		doc.tracked_apps = []
 		doc._warn_on_framework_apps_in_tracked()
 		assert stub.msgprint_calls == []
 
@@ -188,6 +173,10 @@ class TestNumericFloorClamp:
 		doc.pyinstrument_sampler_interval_ms = -1.0
 		doc._clamp_numeric_floors()
 		assert doc.pyinstrument_sampler_interval_ms == 0.1
+		# Fields that were never set stay None; only the bad value is floored.
+		for fieldname in OptimusSettings._NUMERIC_FLOORS:
+			if fieldname != "pyinstrument_sampler_interval_ms":
+				assert getattr(doc, fieldname, None) is None
 		# Silent clamp no warning.
 		assert stub.msgprint_calls == []
 
@@ -228,16 +217,6 @@ class TestNumericFloorClamp:
 		doc.min_action_duration_ms = 0
 		doc._clamp_numeric_floors()
 		assert doc.min_action_duration_ms == 0
-
-	def test_unset_fields_ignored(self, monkeypatch):
-		"""None / unset fields are skipped no AttributeError, no clamp."""
-		OptimusSettings, _stub = _fresh_controller(monkeypatch)
-		doc = OptimusSettings()
-		# Don't set anything all fields default to None on the stub.
-		doc._clamp_numeric_floors()  # should not raise
-		# Confirm nothing got mutated to a floor value.
-		for fieldname in OptimusSettings._NUMERIC_FLOORS:
-			assert getattr(doc, fieldname, None) is None
 
 	def test_non_numeric_input_left_alone(self, monkeypatch):
 		"""A non-numeric value (someone passing a string by mistake)

@@ -63,12 +63,6 @@ def test_a_user_picked_unreadable_function_still_refuses_naming_it(tmp_path, mon
 		capture.prepare_line_profile_picks(curated("bad", "good"))
 
 
-def test_server_chosen_with_nothing_readable_raises_the_no_function_error(tmp_path, monkeypatch):
-	pair(tmp_path, monkeypatch)
-	with pytest.raises(capture.CaptureError, match="No selected function has eligible source"):
-		capture.prepare_line_profile_picks(curated("bad"), server_chosen=True)
-
-
 def long_function(lines):
 	return "def f():\n" + "\tx = 1\n" * (lines - 1)
 
@@ -133,17 +127,6 @@ def test_byte_cap_skips_for_server_chosen_and_refuses_for_users(tmp_path, monkey
 	assert len(json.loads(prepared.source_json)) == 1
 	assert len(prepared.picks_json) + len(prepared.source_json) <= limit
 	with pytest.raises(capture.CaptureError, match="Select fewer functions"):
-		capture.prepare_line_profile_picks(picks)
-
-
-def test_prepared_size_is_counted_exactly(tmp_path, monkeypatch):
-	picks = many(tmp_path, monkeypatch, 3)
-	prepared = capture.prepare_line_profile_picks(picks)
-	exact = len(prepared.picks_json) + len(prepared.source_json)
-	monkeypatch.setattr(capture, "MAX_CAPTURE_BYTES", exact)
-	assert capture.prepare_line_profile_picks(picks).source_json == prepared.source_json
-	monkeypatch.setattr(capture, "MAX_CAPTURE_BYTES", exact - 1)
-	with pytest.raises(capture.CaptureError):
 		capture.prepare_line_profile_picks(picks)
 
 

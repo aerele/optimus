@@ -35,9 +35,8 @@ def test_masthead_shows_session_title_even_with_a_document():
 	title, not the doctype/name."""
 	rec = {"uuid": "u1", "form_dict": {"doctype": "Sales Order", "name": "SAL-ORD-2026-00042"}, "calls": []}
 	html = renderer.render(_doc([_action()]), recordings=[rec])
-	assert "Sales Order · 2026-08-27 21:55" in html  # composed session title
-	assert 'class="masthead-docname"' not in html
-	assert "<h1>Sales Order</h1>" not in html  # doctype is NOT the masthead heading
+	# the composed session title is the whole masthead heading (not just the doctype)
+	assert "<h1>Sales Order · 2026-08-27 21:55</h1>" in html
 	# (the document name may still appear in the per-action breadcrumb only the
 	#  masthead top-right display was reverted, not the per-action document line.)
 
@@ -45,8 +44,7 @@ def test_masthead_shows_session_title_even_with_a_document():
 def test_masthead_without_a_document_uses_session_title():
 	"""No touched document → the composed session title is used, no doctype line."""
 	html = renderer.render(_doc([]), recordings=[])
-	assert "Sales Order · 2026-08-27 21:55" in html
-	assert 'class="masthead-docname"' not in html
+	assert "<h1>Sales Order · 2026-08-27 21:55</h1>" in html
 
 
 def test_masthead_phone_number_is_plain_text_not_a_link():

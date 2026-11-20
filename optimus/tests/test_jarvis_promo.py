@@ -47,11 +47,6 @@ def _doc():
 
 
 class TestJarvisPromoRendering:
-	def test_block_renders_exactly_once(self):
-		"""Promo is hardcoded should appear on every report, exactly once."""
-		html = renderer.render_raw(_doc(), recordings=[])
-		assert html.count('class="section jarvis-promo"') == 1
-
 	def test_block_positioned_before_jump_to_nav(self):
 		"""The Jarvis block must sit BEFORE the Jump-to nav (`<nav
 		class="nav-pills">`); the check anchors on the class attribute since the

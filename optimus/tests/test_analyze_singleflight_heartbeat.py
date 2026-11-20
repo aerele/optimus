@@ -30,7 +30,6 @@ def _finding(i):
 	}
 
 
-_TTL = analyze._SINGLEFLIGHT_TTL_SECONDS
 _PAYLOAD_SECONDS = 30.0  # building one finding's payload (source window, evidence reads)
 _AI_CFG = SimpleNamespace(
 	ai_enabled=True, ai_suggest_findings=True, ai_auto_suggest=True, ai_auto_suggest_max=0,
@@ -92,22 +91,6 @@ def _quiet_heartbeat_log(monkeypatch):
 		warning=lines.append, info=lines.append, error=lines.append, debug=lines.append,
 	), raising=False)
 	return lines
-
-
-@pytest.mark.parametrize("holder,after", [
-	("A", ("A", _TTL)),  # ours: the TTL is refreshed
-	(None, ("A", _TTL)),  # lapsed and free: taken back
-	("B", ("B", 10)),  # another session's: left alone, TTL too
-])
-def test_a_touch_refreshes_only_a_flag_this_session_may_hold(monkeypatch, holder, after):
-	import frappe
-
-	cache = FlagCache(holder, ttl=10)
-	monkeypatch.setattr(frappe, "cache", cache, raising=False)
-	analyze._touch_singleflight("A")
-	assert (cache.holder, cache.ttl) == after
-
-
 
 
 def _drive_run(monkeypatch, *, cache, scheduler_disabled, deadline=None, configured=600, n=3, build=0.0, touch=None, snapshot=None, cleanup=None):
@@ -213,17 +196,6 @@ def test_a_job_timeout_in_the_redis_call_escapes_fresh(monkeypatch, where, holde
 		analyze._touch_singleflight("A")
 	assert caught.value is not original
 	assert caught.value.__context__ is None and caught.value.__cause__ is None
-
-
-def test_a_cache_hiccup_never_fails_the_touch(monkeypatch, _quiet_heartbeat_log):
-	import frappe
-
-	def broken(*args, **kwargs):
-		raise connection_error()("redis down")
-
-	monkeypatch.setattr(frappe, "cache", SimpleNamespace(get_value=broken, set_value=broken), raising=False)
-	analyze._touch_singleflight("A")  # no exception
-	assert len(_quiet_heartbeat_log) == 1 and "ConnectionError" in _quiet_heartbeat_log[0]
 
 
 @pytest.mark.parametrize("call,where,holder", [

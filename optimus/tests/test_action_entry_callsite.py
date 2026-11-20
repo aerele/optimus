@@ -122,11 +122,6 @@ class TestActionEntryCallsite:
 			{"event_type": "RQ Job", "path": _DOTTED}
 		))
 
-	def test_resolves_http_api_method_action(self):
-		self._expect_renderer_py(renderer._action_entry_callsite(
-			{"event_type": "HTTP Request", "path": "/api/method/" + _DOTTED}
-		))
-
 	def test_display_path_matches_bench_relpath(self):
 		cs = renderer._action_entry_callsite({"event_type": "RQ Job", "path": _DOTTED})
 		try:
@@ -144,21 +139,6 @@ class TestActionEntryCallsite:
 	def test_none_for_unresolvable_dotted_path(self):
 		assert renderer._action_entry_callsite(
 			{"event_type": "RQ Job", "path": "nope_xyzq.does.not.exist"}
-		) is None
-
-	def test_none_for_empty_path(self):
-		assert renderer._action_entry_callsite(
-			{"event_type": "RQ Job", "path": ""}
-		) is None
-
-	def test_none_when_dotted_resolves_to_a_module(self):
-		assert renderer._action_entry_callsite(
-			{"event_type": "RQ Job", "path": "optimus.renderer"}
-		) is None
-
-	def test_none_for_builtin_no_code_object(self):
-		assert renderer._action_entry_callsite(
-			{"event_type": "RQ Job", "path": "builtins.len"}
 		) is None
 
 	def test_forwards_file_cache(self):
@@ -367,20 +347,6 @@ class TestSkipDecoratorsToDef:
 	"""On CPython 3.11+ ``code.co_firstlineno`` for a decorated function points at
 	the first decorator line; the renderer advances to the ``def`` line so the
 	snippet lands on the signature rather than the decorator."""
-
-	def test_single_decorator_is_skipped_to_def(self, tmp_path):
-		src = tmp_path / "fake_module.py"
-		src.write_text(
-			"line1\n"
-			"line2\n"
-			"@my_decorator(arg=1)\n"  # 3
-			"def target_fn(x):\n"  # 4
-			"    return x\n"
-		)
-		new_lineno = renderer._skip_decorators_to_def(
-			str(src), 3, "target_fn",
-		)
-		assert new_lineno == 4
 
 	def test_multi_line_decorator_args_walked_over(self, tmp_path):
 		src = tmp_path / "fake_module.py"

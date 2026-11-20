@@ -9,8 +9,6 @@ analyze-time ``_capture_job_terminal_status`` fallback); these cover the
 authoritative hook-time path.
 """
 
-import os
-import re
 import time
 import types
 
@@ -283,90 +281,6 @@ class TestTrackBgJobFinished:
 
 
 # ---------------------------------------------------------------------------
-# Source-inspection: confirm before_job / after_job actually call the helpers
-# ---------------------------------------------------------------------------
-# Mirrors the existing ``test_before_job_honours_the_draining_window`` pattern
-# in test_background_job_capture.py these hooks have too much real-Frappe
-# dependency to call directly in a unit test, but we can prove the call site
-# is wired up correctly via source-inspection.
-
-
-def _src(rel_path: str) -> str:
-	here = os.path.dirname(__file__)
-	with open(os.path.join(here, "..", rel_path)) as f:
-		return f.read()
-
-
-def _fn_body(src: str, name: str) -> str:
-	start = src.index(f"def {name}(")
-	after = src.find("\n", start) + 1
-	nxt = re.search(r"\n(?:def |@frappe\.whitelist|class )", src[after:])
-	end = after + (nxt.start() if nxt else len(src) - after)
-	return src[start:end]
-
-
-class TestHookWiring:
-	def test_before_job_calls_track_bg_job_started_after_marker_pop(self):
-		"""The tracking call must come AFTER the marker pop (we need a valid
-		session_uuid) and BEFORE the user/active-session gates (so orphan
-		jobs whose recorder we won't activate still get tracked)."""
-		body = _fn_body(_src("hooks_callbacks.py"), "before_job")
-		assert "_track_bg_job_started(session_uuid" in body, (
-			"before_job must call _track_bg_job_started so jobs are recorded "
-			"in the session's jobs hash regardless of after_commit timing"
-		)
-		# Ordering: tracking comes after the marker pop, before the user/active
-		# checks. We assert the relative position of the substring matches.
-		pop_idx = body.index('kwargs.pop("_profiler_session_id"')
-		track_idx = body.index("_track_bg_job_started(session_uuid")
-		# The active-session check is the gate we want to be AFTER tracking.
-		gate_idx = body.index("session.get_active_session_for(user)")
-		assert pop_idx < track_idx < gate_idx, (
-			"_track_bg_job_started must fire after the marker pop and before "
-			"the active-session gate, so orphan jobs are still tracked"
-		)
-
-	def test_after_job_calls_track_bg_job_finished_in_finally(self):
-		"""after_job's existing finally block where clear_pending_job +
-		set_job_recording already fire must also call _track_bg_job_finished
-		so the worker writes terminal status while the RQ record is still
-		alive (covers the GC'd-record case)."""
-		body = _fn_body(_src("hooks_callbacks.py"), "after_job")
-		assert "_track_bg_job_finished(" in body, (
-			"after_job must call _track_bg_job_finished in its finally so "
-			"the terminal status is recorded while the worker is still running"
-		)
-		# Must be inside the same try block as clear_pending_job (read off
-		# get_current_job().id once, write all bg-tracking from one site).
-		clear_idx = body.index("session.clear_pending_job(")
-		track_idx = body.index("_track_bg_job_finished(")
-		# Tracking comes AFTER the recording link so we don't overwrite the
-		# recording_uuid stash with our status-only write.
-		recording_idx = body.index("session.set_job_recording(")
-		assert clear_idx < recording_idx < track_idx, (
-			"_track_bg_job_finished must come after set_job_recording so the recording_uuid link is preserved"
-		)
-
-	def test_before_job_stashes_bg_session_uuid_for_after_job(self):
-		"""after_job needs to find the session even when the recorder was
-		never activated (orphan case: ``active != session_uuid``). before_job
-		stashes the bg-session uuid on frappe.local so after_job can fall
-		back to it if optimus_session_id wasn't set."""
-		body = _fn_body(_src("hooks_callbacks.py"), "before_job")
-		assert "optimus_bg_session_uuid" in body, (
-			"before_job must stash optimus_bg_session_uuid so after_job can "
-			"track orphan jobs (active != session_uuid)"
-		)
-
-	def test_after_job_reads_bg_session_uuid_with_fallback(self):
-		body = _fn_body(_src("hooks_callbacks.py"), "after_job")
-		assert "optimus_bg_session_uuid" in body
-		# Falls back to optimus_session_id (the existing stash) for the
-		# normal happy-path job whose recorder did activate.
-		assert "optimus_session_id" in body
-
-
-# ---------------------------------------------------------------------------
 # End-to-end: analyze persist uses what the hooks wrote
 # ---------------------------------------------------------------------------
 # Proves the WHOLE chain works: data written by hooks via set_job_status →
@@ -513,6 +427,7 @@ class TestLateFinishDocTypeFallback:
 		hooks_callbacks._track_bg_job_finished("S1", "J1")
 
 		assert fake_db["set_value_calls"] == []
+		assert fake_db["commit_calls"] == 0
 
 	def test_late_finish_keeps_a_stopped_row_that_did_run(self, captures, fake_local, fake_rq_job, fake_db):
 		fake_db["session_status"] = "Ready"
@@ -538,21 +453,6 @@ class TestLateFinishDocTypeFallback:
 		# But the existing Redis path still fired sanity check.
 		assert len(captures["set_job_status"]) == 1
 		assert captures["set_job_status"][0][2]["status"] == "Completed"
-
-	def test_late_finish_does_not_clobber_already_completed_row(
-		self, captures, fake_local, fake_rq_job, fake_db
-	):
-		"""Idempotency guard: if some earlier path (analyze re-run, a retry's
-		earlier attempt) already filled the row with Completed, don't overwrite
-		only the Running placeholder is a candidate for backfill."""
-		fake_local.optimus_bg_job_start_mono = time.monotonic() - 0.1
-		fake_db["session_status"] = "Ready"
-		fake_db["child_status"] = "Completed"  # already filled
-
-		hooks_callbacks._track_bg_job_finished("S1", "J1")
-
-		assert fake_db["set_value_calls"] == []
-		assert fake_db["commit_calls"] == 0
 
 	def test_late_finish_noop_when_session_doc_missing(self, captures, fake_local, fake_rq_job, fake_db):
 		"""Session UUID has no persisted Optimus Session doc yet (analyze still

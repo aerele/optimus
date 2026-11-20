@@ -30,18 +30,6 @@ class TestAereleProviderDisabled:
 		not-yet-ready endpoint."""
 		assert "Aerele" not in ai_fix._PROVIDER_DEFAULTS
 
-	def test_aerele_not_in_provider_select_options(self):
-		"""The DocType's ``ai_provider`` Select must NOT offer Aerele while
-		it's disabled, so operators can't pick it."""
-		settings_json = (
-			pathlib.Path(__file__).parent.parent
-			/ "optimus" / "doctype" / "optimus_settings" / "optimus_settings.json"
-		)
-		doc = json.loads(settings_json.read_text())
-		by_name = {f["fieldname"]: f for f in doc["fields"]}
-		options = by_name["ai_provider"]["options"]
-		assert "Aerele" not in options.split("\n")
-
 
 class TestProviderSelectMatchesDefaults:
 	def test_select_options_match_provider_defaults(self):

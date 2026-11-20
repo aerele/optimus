@@ -78,19 +78,6 @@ def test_long_line_truncated_like_read_source_window(tmp_path):
 	assert window[1]["content"].endswith("...") and len(window[1]["content"]) == 203
 
 
-def test_decorators_and_the_outer_function_are_included():
-	lines = [
-		"@frappe.whitelist()",
-		"def outer(items):",
-		"\tfor d in items:",
-		"\t\tdef inner():",
-		"\t\t\treturn frappe.get_doc('Item', d)",
-		"\t\tinner()",
-	]
-	assert [r["lineno"] for r in ai_grounding.grounding_window(lines, 5, 24, 24).rows] == [1, 2, 3, 4, 5, 6]
-	assert ai_grounding.grounding_window(lines, 99, 24, 24).rows == []
-
-
 def test_grounding_window_reads_through_the_real_helpers_and_parses_once(tmp_path, monkeypatch):
 	"""analyze._ai_grounding_window over the real _source_lines and
 	grounding_window; two findings of one file share a single whole-file parse."""

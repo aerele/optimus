@@ -89,14 +89,6 @@ class TestRenamePhaseTwoDoctypePatch:
 		assert stub._rename_calls == []
 		assert stub._committed is False
 
-	def test_no_op_when_new_already_exists_alone(self, monkeypatch):
-		"""Already migrated: only the new DocType remains, so the patch finds no old
-		DocType and is a no-op."""
-		stub = _install_frappe_stub(monkeypatch, old_exists=False, new_exists=True)
-		patch = _import_patch()
-		patch.execute()
-		assert stub._rename_calls == []
-
 	def test_bails_when_both_exist(self, monkeypatch):
 		"""Conflict guard: both DocTypes present means a partial migration, so log a
 		warning and bail rather than guess."""

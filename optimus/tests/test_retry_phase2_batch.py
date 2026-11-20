@@ -30,10 +30,6 @@ def _fn_body(name: str) -> str:
 
 
 class TestRetryPhase2BatchEndpoint:
-	def test_whitelisted(self):
-		src = _read(_API_PATH)
-		assert re.search(r'@frappe\.whitelist\(methods=\["POST"\]\)\s*\ndef retry_phase2_analyzes_batch', src)
-
 	def test_gated_by_require_profiler_user(self):
 		body = _fn_body("retry_phase2_analyzes_batch")
 		# Permission gate must be the FIRST thing the function does (before
@@ -46,41 +42,6 @@ class TestRetryPhase2BatchEndpoint:
 		assert gate_idx < validation_idx, (
 			"permission gate must come before input validation"
 		)
-
-	def test_accepts_json_string_or_python_list(self):
-		"""Frappe whitelisted-API marshalling stringifies list args across
-		the request boundary; the endpoint must accept either shape."""
-		body = _fn_body("retry_phase2_analyzes_batch")
-		assert "isinstance(run_uuids, str)" in body
-		assert "_json.loads(run_uuids)" in body
-
-	def test_rejects_empty_or_non_list(self):
-		body = _fn_body("retry_phase2_analyzes_batch")
-		assert "not isinstance(run_uuids, (list, tuple))" in body
-		assert "non-empty list" in body
-
-	def test_isolates_per_row_failures(self):
-		"""One bad run_uuid must NOT abort the rest of the batch that's
-		the whole point of moving the loop server-side."""
-		body = _fn_body("retry_phase2_analyzes_batch")
-		# Each iteration is wrapped in try/except.
-		assert "try:" in body and "except Exception as exc:" in body
-		# And the failed row is recorded with its error message.
-		assert "\"error\": str(exc)" not in body
-		assert "Line profiling retry could not be confirmed" in body
-
-	def test_returns_aggregate_tallies(self):
-		body = _fn_body("retry_phase2_analyzes_batch")
-		assert "tallies" in body
-		# Specifically the statuses the UI checks.
-		assert "Ready" in body
-		assert "Failed" in body
-
-	def test_delegates_to_retry_phase2_analyze(self):
-		"""The batched endpoint should reuse the single-run logic, not
-		duplicate it otherwise drift between the two paths is inevitable."""
-		body = _fn_body("retry_phase2_analyzes_batch")
-		assert "retry_phase2_analyze(run_uuid)" in body
 
 
 class TestRetryPhase2BatchJsCall:

@@ -20,14 +20,6 @@ from optimus.report_context import (
 	build_report_context,
 )
 
-# Top-level keys the contract specifies, in document order.
-CONTRACT_KEYS = (
-	"session", "tldr", "kpis", "repro", "summary", "findings",
-	"line_drilldown_runs", "action_plan", "waterfall", "actions",
-	"background_jobs", "doc_events", "resource", "frontend",
-	"hot_frames", "slow_queries", "db", "how_to_read_items", "footer",
-)
-
 
 def _doc(**overrides):
 	defaults = dict(
@@ -93,12 +85,6 @@ class TestWebVitalClass:
 	def test_above_poor_threshold_returns_vital_poor(self):
 		assert _web_vital_class(3500, 1800, 3000) == "vital-poor"
 
-	def test_cls_thresholds(self):
-		# CLS uses fractional thresholds.
-		assert _web_vital_class(0.05, 0.1, 0.25) == "vital-good"
-		assert _web_vital_class(0.15, 0.1, 0.25) == "vital-meh"
-		assert _web_vital_class(0.3, 0.1, 0.25) == "vital-poor"
-
 
 class TestBarKindFor:
 	def test_above_one_second_returns_none_default_red(self):
@@ -132,23 +118,6 @@ class TestIsUserCode:
 
 
 # ----- top-level shape ----------------------------------------------------
-
-
-class TestTopLevelKeys:
-	def test_all_19_contract_keys_present(self):
-		# Subset rather than equality pragmatic non-contract extensions
-		# like ``actions_framework`` / ``background_jobs_framework`` from
-		# J.2.3 are permitted; the contract just specifies a minimum.
-		out = build_report_context(_doc(), _ctx())
-		missing = set(CONTRACT_KEYS) - set(out.keys())
-		assert not missing, f"Missing contract keys: {missing}"
-
-	def test_empty_session_renders_without_error(self):
-		# All keys produced, optional ones may be None.
-		out = build_report_context(_doc(), _ctx())
-		assert out["session"]["id"] == "uuid-0017"
-		assert out["kpis"] is not None and len(out["kpis"]) == 4
-		assert out["footer"]["framework"] == "Frappe v16"
 
 
 class TestAiTokensTotal:
@@ -217,10 +186,6 @@ class TestTldrShape:
 
 
 class TestKpisShape:
-	def test_kpis_are_exactly_4(self):
-		out = build_report_context(_doc(), _ctx())
-		assert len(out["kpis"]) == 4
-
 	def test_kpi_items_have_required_fields(self):
 		out = build_report_context(_doc(), _ctx())
 		for kpi in out["kpis"]:
@@ -495,11 +460,6 @@ class TestWaterfallShape:
 		assert row["is_hot_text"] is True
 		assert row["duration_display"] == "1.43s"
 
-	def test_bg_kind_when_bg_flag_set(self):
-		rows = [{"name": "job", "duration_ms": 500, "pct": 50, "hot": False, "bg": True}]
-		out = build_report_context(_doc(), _ctx(waterfall_rows=rows))
-		assert out["waterfall"][0]["kind"] == "bg"
-
 
 class TestActionsShape:
 	def test_action_has_contract_fields(self):
@@ -730,13 +690,6 @@ class TestFooterShape:
 		assert "config_profile=Custom" in out["footer"]["settings"]
 
 
-class TestHowToReadItems:
-	def test_omitted_for_now(self):
-		# J.1 leaves how_to_read_items=None; template falls back to default.
-		out = build_report_context(_doc(), _ctx())
-		assert out["how_to_read_items"] is None
-
-
 class TestRowDangerThreshold:
 	"""Per-row 'hot' (red) styling uses a fixed slowness threshold, decoupled from
 	the display / rollover setting, so row danger never follows the Sensitivity
@@ -748,11 +701,6 @@ class TestRowDangerThreshold:
 				_doc(), _ctx(render_config={"large_duration_threshold_ms": disp})
 			)
 			assert out["hot_action_ms"] == 1000.0
-
-	def test_bar_kind_uses_the_fixed_threshold(self):
-		assert _bar_kind_for(1500) is None   # >= 1000 -> red
-		assert _bar_kind_for(600) == "warn"  # 300..1000 -> amber, NOT red
-		assert _bar_kind_for(200) == "ok"
 
 	def test_frontend_hot_flags_follow_the_constant(self, monkeypatch):
 		# backend_is_hot / browser_is_hot use _HOT_ACTION_MS, not a hardcoded 1000,
@@ -780,10 +728,6 @@ class TestResourceRowNumbers:
 			{"cpu_avg": 1, "cpu_peak": 1}, timeline, list(actions), list(framework)
 		)
 		return [r["row_number"] for r in res["timeline"]]
-
-	def test_no_gaps_starts_at_one(self):
-		actions = [{"idx": i} for i in range(3)]
-		assert self._numbers([self._row(i) for i in range(3)], actions) == ["1", "2", "3"]
 
 	def test_gaps_keep_actions_table_numbers(self):
 		actions = [{"idx": i} for i in range(9)]

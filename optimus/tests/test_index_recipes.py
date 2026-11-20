@@ -307,13 +307,6 @@ class TestNoCode:
 		assert "The query's filter looks index-friendly" in text
 		assert not text.startswith("Index the")
 
-	def test_search_index_ticked_is_no_proof_of_an_index(self):
-		"""The table's real indexes decide, never the Search Index flag."""
-		ev = _ev(fields={**_ALL, "customer": F("Link", search_index=True)})
-		advice = ir.advise_finding(_missing("customer"), evidence_lookup=_lookup(ev))
-		assert advice.route == ir.ROUTE_ENSURE_INDEXES
-		assert "Search Index ticked" not in ir.finding_text(advice)
-
 	def test_explain_possible_keys_names_an_index_on_the_column(self):
 		row = {"type": "ALL", "possible_keys": "customer_index", "key": None}
 		q = "select `name` from `tabSales Invoice` where `customer` = ? and `docstatus` = ?"
@@ -1313,12 +1306,6 @@ class TestCardNote:
 		for gone in ("Save the code", "If that file already exists", "Replace your_app"):
 			assert gone not in text
 
-	def test_no_card_note_points_at_a_call_above(self):
-		for advice in _every_advice():
-			if advice is not None:
-				note = ir.card_note(advice)
-				assert "call above" not in note and "Run that call" not in note, note
-
 
 class TestGeneratedCode:
 	def test_every_generated_module_compiles(self):
@@ -1416,28 +1403,3 @@ def test_the_docs_show_the_generated_module_verbatim():
 	doc = (Path(ir.__file__).resolve().parents[2] / "docs" / "AI-FIXING.md").read_text(encoding="utf-8")
 	assert ir.ensure_indexes_code(entries, app_name="your_app") in doc
 
-
-def test_the_docs_say_how_to_remove_an_entry_and_that_the_guards_are_silent():
-	"""Removing an index or entry (the idx_* index and the
-	"<DocType>-<field>-search_index" Property Setter), and the guards that skip
-	without an Error Log row."""
-	from pathlib import Path
-
-	doc = (Path(ir.__file__).resolve().parents[2] / "docs" / "AI-FIXING.md").read_text(encoding="utf-8")
-	assert '"Sales Invoice-po_no-search_index"' in doc and "bench remove-app" in doc
-	assert "skips it without an Error Log row" in doc
-
-
-def test_the_docs_show_the_title_order_and_limit_the_indexed_lookup_to_mariadb():
-	"""The title example has the key and the error type before the
-	DocType; the "never reads the whole Error Log" claim is MariaDB's, because Postgres
-	names a Search Index after the bare field, schema-wide."""
-	from pathlib import Path
-
-	root = Path(ir.__file__).resolve().parents[2]
-	doc = " ".join((root / "docs" / "AI-FIXING.md").read_text(encoding="utf-8").split())
-	log = " ".join((root / "CHANGELOG.md").read_text(encoding="utf-8").split())
-	assert "`ensure_indexes: idx_sales_invoice_04c198b9 was not created (OperationalError) on Sales Invoice`" in doc
-	assert "so on MariaDB it never reads the whole Error Log table on every migrate" in doc
-	assert "Frappe names a Search Index after the bare field name and index names are schema-wide" in doc
-	assert "which MariaDB indexes" in log and "schema-wide" in log

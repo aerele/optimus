@@ -54,7 +54,6 @@ from optimus.analyzers.base import (
 	AnalyzeContext,
 	dur,
 	is_error_log_hook_query,
-	own_query_frame,
 	row_get,
 	strip_own_calls,
 	strip_profiler_own_calls,
@@ -479,13 +478,6 @@ def _rq_status(job_id: str) -> str | None:
 			return "missing"
 	except Exception:
 		return None
-
-
-def _rq_job_active(job_id: str) -> bool:
-	"""True if RQ job ``job_id`` is still queued / started / deferred / scheduled.
-	False if terminal or no longer fetchable. Any error counts as not active (so
-	analyze never blocks on it)."""
-	return _rq_status(job_id) in _RQ_ACTIVE
 
 
 def _short_exc(exc_info) -> str | None:
@@ -1678,11 +1670,6 @@ def _frame_source(frame) -> str:
 		return "unknown"
 	function = frame.get("function")
 	return f"{frame.get('filename')}:{function if isinstance(function, str) else '?'}"
-
-
-def _own_source(stack) -> str:
-	"""``file:function`` of the Optimus frame that made a dropped call's stack Optimus's own."""
-	return _frame_source(own_query_frame(stack))
 
 
 def _top_sources(frames: list, limit: int = 2) -> str:

@@ -124,12 +124,6 @@ def _bound_http_lock_wait():
 	return sql_work.bound_http_lock_wait(frappe.db, HTTP_LOCK_WAIT_SECONDS)
 
 
-
-
-def _pg_milliseconds(value):
-	return sql_work.lock_timeout_ms(value)
-
-
 def run_ai_refresh_slice(run_id: str, slice_no: int = 0) -> None:
 	"""RQ entry: replaying a claimed generation cannot send another request."""
 	if (

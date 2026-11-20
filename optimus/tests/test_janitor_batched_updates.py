@@ -234,22 +234,6 @@ class TestSweepStaleRecording:
 # --------------------------------------------------------------------------
 
 class TestSweepStuckAnalyzing:
-	def test_one_set_value_call_for_N_rows(self, monkeypatch):
-		stub = _install_frappe_stub(monkeypatch)
-		stub._get_all_return["Optimus Session"] = [
-			{"name": "PS-A"},
-			{"name": "PS-B"},
-		]
-		janitor = _reload_janitor(monkeypatch)
-		janitor._sweep_stuck_analyzing()
-		set_value_calls = [c for c in stub._set_value_calls if c[0] == "Optimus Session"]
-		assert len(set_value_calls) == 1
-		_, filters, fields = set_value_calls[0]
-		assert filters["name"] == ("in", ["PS-A", "PS-B"])
-		assert filters["status"] == "Analyzing" and "modified" in filters
-		assert fields["status"] == "Failed"
-		assert "analyzer_warnings" in fields
-
 	def test_the_failed_note_names_a_lapsed_heartbeat(self, monkeypatch):
 		"""A run whose flag lapsed looks stuck to this sweep, so the note names that
 		cause next to a timeout or a crash."""
@@ -276,6 +260,7 @@ class TestSweepStuckAnalyzing:
 		stub._get_all_return["Optimus Session"] = [
 			{"name": "PS-LIVE", "session_uuid": "u-live"},   # still heartbeating
 			{"name": "PS-DEAD", "session_uuid": "u-dead"},   # genuinely wedged
+			{"name": "PS-DEAD2", "session_uuid": "u-dead2"},  # a second wedged row: one call for both
 		]
 		stub._holder_uuid = "u-live"  # u-live currently holds the flag
 		janitor = _reload_janitor(monkeypatch)
@@ -284,8 +269,8 @@ class TestSweepStuckAnalyzing:
 		set_value_calls = [c for c in stub._set_value_calls if c[0] == "Optimus Session"]
 		assert len(set_value_calls) == 1
 		_, filters, fields = set_value_calls[0]
-		# Only the dead one is failed; the live holder is skipped.
-		assert filters["name"] == ("in", ["PS-DEAD"])
+		# Only the dead ones are failed, in one batched call; the live holder is skipped.
+		assert filters["name"] == ("in", ["PS-DEAD", "PS-DEAD2"])
 		assert filters["status"] == "Analyzing" and "modified" in filters
 		assert fields["status"] == "Failed"
 
@@ -487,12 +472,6 @@ class TestSweepStaleStopping:
 		ga = [c for c in stub._get_all_calls if c[0] == "Optimus Session"]
 		assert ga and ga[0][1].get("status") == ["in", ["Stopping", "Capturing Background Jobs"]]
 		assert stub._enqueue_calls == []
-
-	def test_wired_into_sweep_stale_sessions(self, monkeypatch):
-		import inspect
-		_install_frappe_stub(monkeypatch)
-		janitor = _reload_janitor(monkeypatch)
-		assert "_sweep_stale_stopping" in inspect.getsource(janitor.sweep_stale_sessions)
 
 
 # --------------------------------------------------------------------------
@@ -703,16 +682,6 @@ class TestSweepStalePhase2Runs:
 		stub.db.get_all = lambda doctype, **kw: seen.append(kw["order_by"]) or []
 		_reload_janitor(monkeypatch)._stale_phase2_recordings(cutoff=None)
 		assert seen == ["modified asc, name asc"], "rows sharing a modified time must not shift between pages"
-
-	def test_no_set_value_when_no_phase2_rows(self, monkeypatch):
-		from optimus import ai_jobs
-		stub = _install_frappe_stub(monkeypatch)
-		stub._get_all_return["Optimus Phase Two Run"] = []
-		monkeypatch.setattr(ai_jobs, "_transaction", lambda fn: fn())
-		janitor = _reload_janitor(monkeypatch)
-		janitor._sweep_stale_phase2_runs()
-		set_value_calls = [c for c in stub._set_value_calls if c[0] == "Optimus Phase Two Run"]
-		assert set_value_calls == []
 
 
 # --------------------------------------------------------------------------

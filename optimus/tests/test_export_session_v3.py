@@ -16,10 +16,3 @@ def test_export_session_source_includes_new_fields():
 	assert "hot_frames" in src
 	assert "session_time_breakdown" in src
 	assert "call_tree" in src
-
-
-def test_install_before_uninstall_calls_uninstall_wraps():
-	from optimus import install
-
-	src = inspect.getsource(install.before_uninstall)
-	assert "uninstall_wraps" in src
