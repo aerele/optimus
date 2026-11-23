@@ -175,7 +175,8 @@ def test_stop_returns_final_status_when_inline(monkeypatch):
 	assert '"status"' in src
 
 
-def test_enqueue_analyze_blocks_huge_inline_session(monkeypatch):
+@pytest.mark.parametrize("limit", [50, "50"], ids=["int", "string from set-config"])
+def test_enqueue_analyze_blocks_huge_inline_session(monkeypatch, limit):
     """Behavioral test for the inline-analyze recording cap.
 
     When the scheduler is disabled and recording_count > optimus_inline_analyze_limit,
@@ -211,7 +212,7 @@ def test_enqueue_analyze_blocks_huge_inline_session(monkeypatch):
     # that so a silent switch to attribute access would be caught.
     class FakeConf:
         def get(self, key, default=None):
-            return {"optimus_inline_analyze_limit": 50}.get(key, default)
+            return {"optimus_inline_analyze_limit": limit}.get(key, default)
 
     set_calls = []
 

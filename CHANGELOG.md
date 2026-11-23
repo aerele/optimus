@@ -8,6 +8,18 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.188] - 2026-11-23
+
+### Fixed
+
+- Sensitive Form / Header Keys entries now match whatever case they are typed in, as the setting already promised. An entry with a capital letter, such as `X-Customer-Id`, never matched, so that header, form or URL value was recorded in clear text.
+- A recording cap set with `bench set-config` without `-p` is stored as a string, such as "500". `optimus_max_recordings_per_session` then failed every profiled request, so no recording was kept, and `optimus_inline_analyze_limit` made Stop fail after the session was already marked Stopping on a site with the scheduler disabled. Both are now read as numbers.
+- The AI fix safety check now blocks more ways of bypassing permissions: `ignore_permissions` passed positionally to `insert`, `save` or `delete` on any document, and `flags.ignore_permissions` set through a subscript, `update`, `setattr`, an annotated or tuple assignment, or a `flags` variable.
+- The AI fix safety check now blocks a module-level dict used as a cache, and `lru_cache` imported under another name or applied as a call. Both share data across sites.
+- The AI fix safety check now reports a removed permission check even when another check with different arguments is still nearby, when the check is weakened, for example from `write` to `read`, or when it is left only in a comment.
+
+---
+
 ## [0.12.186] - 2026-11-18
 
 ### Fixed

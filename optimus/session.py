@@ -300,7 +300,9 @@ def register_recording(
 	"""
 	import frappe
 
-	cap = frappe.conf.get("optimus_max_recordings_per_session") or MAX_RECORDINGS_PER_SESSION
+	from optimus.settings import conf_int
+
+	cap = conf_int("optimus_max_recordings_per_session", MAX_RECORDINGS_PER_SESSION)
 
 	if recording_count(session_uuid) >= cap:
 		# Set a one-time warning flag on the session meta
