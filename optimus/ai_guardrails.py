@@ -372,6 +372,77 @@ def _dotted(n) -> str:
 	return ".".join(reversed(parts))
 
 
+_MEMOIZERS = {"functools.lru_cache", "functools.cache", "lru_cache"}
+_EMPTY_CONTAINERS = {"dict", "set", "list", "collections.defaultdict", "collections.OrderedDict", "defaultdict", "OrderedDict"}
+_MUTATORS = {"setdefault", "update", "append", "add", "__setitem__"}
+
+
+def _memoizer_names(tree) -> set[str]:
+	"""Local names bound to ``functools.lru_cache`` or ``functools.cache`` by an import."""
+	out = set()
+	for n in ast.walk(tree):
+		if isinstance(n, ast.ImportFrom) and n.module == "functools" and not n.level:
+			out.update(a.asname or a.name for a in n.names if a.name in ("lru_cache", "cache"))
+		elif isinstance(n, ast.Import):
+			for a in n.names:
+				if a.name == "functools":
+					out.update(f"{a.asname or a.name}.{m}" for m in ("lru_cache", "cache"))
+	return out
+
+
+def _module_caches(tree) -> list:
+	"""Top-level ``NAME = {}`` style assignments that a function in the fragment writes to."""
+	empty = {}
+	for st in tree.body:
+		if not (isinstance(st, ast.Assign) and len(st.targets) == 1 and isinstance(st.targets[0], ast.Name)):
+			continue
+		v = st.value
+		if (isinstance(v, ast.Dict | ast.List | ast.Set) and not getattr(v, "keys", getattr(v, "elts", None))) or (
+			isinstance(v, ast.Call) and _dotted(v.func) in _EMPTY_CONTAINERS and not v.keywords
+			and (not v.args or (_dotted(v.func).endswith("defaultdict") and len(v.args) == 1))
+		):
+			empty[st.targets[0].id] = st
+	written = set()
+	for fn in tree.body:
+		if not isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+			continue
+		for n in ast.walk(fn):
+			if isinstance(n, ast.Subscript) and isinstance(n.ctx, ast.Store) and isinstance(n.value, ast.Name):
+				written.add(n.value.id)
+			elif isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in _MUTATORS:
+				if isinstance(n.func.value, ast.Name):
+					written.add(n.func.value.id)
+	return [st for name, st in empty.items() if name in written]
+
+
+def _is_flags(n) -> bool:
+	return _dotted(n).split(".")[-1] == "flags"
+
+
+def _is_ignore_permissions_flag(t) -> bool:
+	"""True for an assignment target that sets ``<x>.flags.ignore_permissions``."""
+	if isinstance(t, ast.Tuple | ast.List):
+		return any(_is_ignore_permissions_flag(e) for e in t.elts)
+	if isinstance(t, ast.Attribute):
+		return t.attr == "ignore_permissions" and _is_flags(t.value)
+	if isinstance(t, ast.Subscript):
+		return _is_flags(t.value) and isinstance(t.slice, ast.Constant) and t.slice.value == "ignore_permissions"
+	return False
+
+
+def _sets_ignore_permissions_flag(call: ast.Call, name: str) -> bool:
+	"""True for ``setattr(x.flags, "ignore_permissions", v)`` or ``x.flags.update({"ignore_permissions": v})``."""
+	if name in ("setattr", "builtins.setattr") and len(call.args) >= 2:
+		key = call.args[1]
+		return _is_flags(call.args[0]) and isinstance(key, ast.Constant) and key.value == "ignore_permissions"
+	if isinstance(call.func, ast.Attribute) and call.func.attr == "update" and _is_flags(call.func.value):
+		return any(
+			isinstance(a, ast.Dict) and any(isinstance(k, ast.Constant) and k.value == "ignore_permissions" for k in a.keys)
+			for a in call.args
+		)
+	return False
+
+
 def _parse(code: str):
 	"""(tree, text_parsed, line_offset) or (None, '', 0). Tries the dedented code,
 	then the code wrapped in a def; a hunk ending on a block opener gets a body."""
@@ -525,6 +596,7 @@ def check_code(blocks: list[Block], source_lines: list[str]) -> list[Violation]:
 		if any(introduced(node, include_moved=True) for node in aliases.unsupported):
 			out.append(_v("unverified-safety", "dynamic policy-sensitive imports"))
 		parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+		memoizers = _memoizer_names(tree)
 		for n in ast.walk(tree):
 			if introduced(n, include_moved=True) and (
 				aliases.dynamic(n) or isinstance(n, (ast.Name, ast.Attribute)) and aliases.ambiguous_policy(n, sinks=_SINKS)
@@ -546,6 +618,8 @@ def check_code(blocks: list[Block], source_lines: list[str]) -> list[Violation]:
 			if isinstance(n, ast.Call):
 				name = aliases.call_name(n, _dotted)
 				head, _, tail = name.rpartition(".")
+				if (name in _MEMOIZERS or _dotted(n.func) in memoizers) and introduced(n):
+					out.append(_v("multitenant-cache", name))
 				if name in _RAW_SQL:
 					# Moving a call is still proposed code. A retained opener does
 					# not exempt new arguments; unchanged diff context stays allowed.
@@ -627,20 +701,22 @@ def check_code(blocks: list[Block], source_lines: list[str]) -> list[Violation]:
 				for k in n.keywords:
 					if k.arg == "allow_guest" and isinstance(k.value, ast.Constant) and k.value.value and introduced(n):
 						out.append(_v("allow-guest"))
-				if (introduced(n) and isinstance(n.func, ast.Attribute) and n.func.attr in {"insert", "save"}
-					and isinstance(n.func.value, ast.Name) and n.func.value.id in {"doc", "self"}
+				if (introduced(n) and isinstance(n.func, ast.Attribute) and n.func.attr in {"insert", "save", "delete"}
 					and n.args):
-					if isinstance(n.args[0], ast.Constant):
-						if n.args[0].value:
+					doc_like = isinstance(n.func.value, ast.Name) and n.func.value.id in {"doc", "self"}
+					first = n.args[0]
+					if isinstance(first, ast.Constant):
+						# Any receiver may be a Document; a bare True there is ignore_permissions.
+						if first.value is True or (doc_like and first.value):
 							out.append(_v("ignore-permissions"))
-					else:
+					elif doc_like and n.func.attr != "delete":
 						out.append(_v("unverified-safety", "computed persistence arguments"))
+				if introduced(n) and _sets_ignore_permissions_flag(n, name):
+					out.append(_v("ignore-permissions"))
 			elif (
-				isinstance(n, ast.Assign)
+				isinstance(n, ast.Assign | ast.AnnAssign)
 				and introduced(n)
-				and any(
-					isinstance(t, ast.Attribute) and _dotted(t).endswith(".flags.ignore_permissions") for t in n.targets
-				)
+				and any(_is_ignore_permissions_flag(t) for t in (n.targets if isinstance(n, ast.Assign) else [n.target]))
 			):
 				out.append(_v("ignore-permissions"))
 			elif (isinstance(n, ast.Assign) and introduced(n)
@@ -654,7 +730,8 @@ def check_code(blocks: list[Block], source_lines: list[str]) -> list[Violation]:
 				signature_changed = introduced(n) or any(introduced(a) for a in arguments)
 				for d in n.decorator_list:
 					dn = aliases.name(d.func if isinstance(d, ast.Call) else d) or _dotted(d.func if isinstance(d, ast.Call) else d)
-					if dn.split(".")[-1] in ("lru_cache", "cache") and introduced(d):
+					raw = _dotted(d.func if isinstance(d, ast.Call) else d)
+					if (dn.split(".")[-1] in ("lru_cache", "cache") or raw in memoizers) and introduced(d):
 						out.append(_v("multitenant-cache", dn))
 					if dn == "frappe.whitelist" and (signature_changed or introduced(d)):
 						untyped = [
@@ -698,6 +775,9 @@ def check_code(blocks: list[Block], source_lines: list[str]) -> list[Violation]:
 					)
 				):
 					out.append(_v("module-state", (ast.get_source_segment(parsed, st) or "")[:50]))
+			for cache in _module_caches(tree):
+				if introduced(cache):
+					out.append(_v("multitenant-cache", cache.targets[0].id))
 		# Hand-rolled state on frappe.local and overrides of the request proxies.
 		for n in ast.walk(tree):
 			if isinstance(n, ast.Assign | ast.AugAssign) and introduced(n):
@@ -725,11 +805,51 @@ def check_code(blocks: list[Block], source_lines: list[str]) -> list[Violation]:
 				out.append(_v("untranslated", _dotted(n.func)))
 	# Permission downgrade: a permission-bearing call in `-` lines with none after.
 	for after, minus in _code_units(blocks, source_lines):
-		new_text = " ".join(_norm(c) for c, new in after if new)
-		kept_text = " ".join(_norm(c) for c, new in after if not new)
+		after_code = [_strip_comment(_norm(c)) for c, _ in after]
+		removed = [_strip_comment(line) for line in minus]
+		after_text = " ".join(after_code)
 		for p in _PERM_CALLS:
-			if any(p in line for line in minus) and p not in new_text and p not in kept_text:
+			if any(p in line for line in removed) and p not in after_text:
 				out.append(_v("permission-downgrade", p.rstrip("(")))
+		# A removed check counts as kept only if the same check, with the same arguments, survives.
+		kept = {check for line in after_code for check in _check_calls(line)}
+		for method, _args in sorted({check for line in removed for check in _check_calls(line)} - kept):
+			out.append(_v("permission-downgrade", method))
+	return out
+
+
+_CHECK_CALL = re.compile(r"\b(has_permission|check_permission)\(")
+
+
+def _strip_comment(line: str) -> str:
+	"""Drop a trailing ``#`` comment that sits outside string literals."""
+	quote, escaped = None, False
+	for i, ch in enumerate(line):
+		if escaped:
+			escaped = False
+		elif ch == "\\":
+			escaped = True
+		elif quote:
+			quote = None if ch == quote else quote
+		elif ch in "'\"":
+			quote = ch
+		elif ch == "#":
+			return line[:i]
+	return line
+
+
+def _check_calls(line: str) -> set[tuple[str, str]]:
+	"""(method, normalised arguments) for each permission check call on a line."""
+	out = set()
+	for m in _CHECK_CALL.finditer(line):
+		depth, end = 1, len(line)
+		for i in range(m.end(), len(line)):
+			depth += {"(": 1, ")": -1}.get(line[i], 0)
+			if depth == 0:
+				end = i
+				break
+		args = "".join(line[m.end():end].split()).replace('"', "'").rstrip(",")
+		out.add((m.group(1), args))
 	return out
 
 
