@@ -383,12 +383,13 @@ class TestTriggeredBy:
 
 
 class TestRecordingCap:
-	def test_cap_hit_sets_warning_and_drops(self, monkeypatch):
+	@pytest.mark.parametrize("cap", [1, "1"], ids=["int", "string from set-config"])
+	def test_cap_hit_sets_warning_and_drops(self, monkeypatch, cap):
 		import frappe
 
 		from optimus import session
 
-		monkeypatch.setattr(frappe, "conf", {"optimus_max_recordings_per_session": 1}, raising=False)
+		monkeypatch.setattr(frappe, "conf", {"optimus_max_recordings_per_session": cap}, raising=False)
 		monkeypatch.setattr(session, "recording_count", lambda s: 1)
 		meta = {}
 		monkeypatch.setattr(session, "get_session_meta", lambda s: meta)

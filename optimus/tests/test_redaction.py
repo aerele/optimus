@@ -39,6 +39,12 @@ class TestIsSensitiveKey:
 		# Default still matches even when extras supplied.
 		assert redaction.is_sensitive_key("password", extra=("recovery_code",))
 
+	def test_extra_keys_match_whatever_case_the_admin_typed(self):
+		assert redaction.is_sensitive_key("X-Customer-Id", extra=("X-Customer-Id",))
+		assert redaction.is_sensitive_key("tenantref", extra=("TenantRef",))
+		assert redaction.is_sensitive_key("x" * 200 + "TenantRef", extra=("TENANTREF",))
+		assert redaction.redact_sensitive({"X-Customer-Id": "CUST-42"}, extra_keys=("X-Customer-Id",)) != {"X-Customer-Id": "CUST-42"}
+
 	def test_benign_keys_pass_through(self):
 		# Note: substring match means "csrf_disabled_flag" WOULD match
 		# ("csrf" substring); the only safe benign keys are those whose

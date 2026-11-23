@@ -700,3 +700,76 @@ def test_kept_full_block_policy_choices_do_not_become_new_changes_on_render(line
 @pytest.mark.parametrize("code", ["invoice.save(**options)", "frappe.get_doc('User', name).insert(**options)", "invoice.submit(**options)", "frappe.get_list(**options)"])
 def test_computed_kwargs_with_other_document_receivers_are_withheld(code):
 	assert "unverified-safety" in codes(H.format(f"```python\n{code}\n```"))
+
+
+def _py(code):
+	return H.format("```python\n" + code + "\n```")
+
+
+@pytest.mark.parametrize("code", [
+	"todo.insert(True)",
+	"frappe.get_doc({'doctype': 'ToDo'}).insert(True)",
+	"frappe.new_doc('ToDo').save(True)",
+	"doc.delete(True)",
+	'doc.flags["ignore_permissions"] = True',
+	"doc.flags.update({'ignore_permissions': True})",
+	'setattr(doc.flags, "ignore_permissions", True)',
+	"doc.flags.ignore_permissions: bool = True",
+	"doc.flags.ignore_permissions, doc.flags.ignore_links = True, True",
+	"flags = doc.flags\nflags.ignore_permissions = True",
+])
+def test_every_spelling_of_ignore_permissions_is_blocked(code):
+	assert "ignore-permissions" in codes(_py(code))
+
+
+@pytest.mark.parametrize("code", ["wb.save(path)", "items.insert(1, row)", "todo.insert()", "doc.flags.ignore_links = True"])
+def test_lookalike_calls_are_not_permission_bypasses(code):
+	assert "ignore-permissions" not in codes(_py(code))
+
+
+@pytest.mark.parametrize("code", [
+	"_cache = {}\n\n\ndef get_item(name):\n    if name not in _cache:\n        _cache[name] = frappe.get_doc('Item', name)\n    return _cache[name]",
+	"_seen = dict()\n\n\ndef f(k, v):\n    _seen.setdefault(k, v)",
+	"from functools import lru_cache as memo\n\n\n@memo(maxsize=None)\ndef f(a):\n    return a",
+	"import functools\n\n\ndef _f(a):\n    return a\n\n\nf = functools.lru_cache(maxsize=None)(_f)",
+])
+def test_process_wide_caches_are_blocked(code):
+	assert "multitenant-cache" in codes(_py(code))
+
+
+@pytest.mark.parametrize("code", [
+	"FIELDS = {'a': 1}\n\n\ndef f():\n    return FIELDS['a']",
+	"_cache = {}\n\n\ndef f(name):\n    return _cache.get(name)",
+	"def f(name):\n    return frappe.cache().get_value(name)",
+])
+def test_read_only_module_values_are_not_caches(code):
+	assert "multitenant-cache" not in codes(_py(code))
+
+
+def _diff(minus, plus, context=()):
+	lines = [" " + c for c in context] + ["-" + m for m in minus] + ["+" + p for p in plus]
+	return H.format("```diff\n" + "\n".join(lines) + "\n```")
+
+
+def test_a_removed_check_is_not_covered_by_a_different_check():
+	src = ["parent.check_permission('read')", "for d in rows:", "    doc.check_permission('write')", "    doc.save()"]
+	fix = _diff(src[1:], ["frappe.db.set_value('ToDo', {'name': ('in', rows)}, 'status', 'Closed')"], src[:1])
+	assert "permission-downgrade" in codes(fix, src)
+
+
+@pytest.mark.parametrize("after", [
+	["doc.check_permission('read')", "doc.save()"],
+	["# doc.check_permission('write') is no longer needed", "doc.db_set('status', 'Closed')"],
+])
+def test_a_weakened_or_commented_out_check_is_a_downgrade(after):
+	src = ["doc.check_permission('write')", "doc.save()"]
+	assert "permission-downgrade" in codes(_diff(src, after), src)
+
+
+@pytest.mark.parametrize("src, after", [
+	(["doc.check_permission('write')", "doc.save()"], ['doc.check_permission("write")', "doc.save()"]),
+	(["rows = frappe.get_list('Item', filters={'g': g})"], ["rows = frappe.get_list('Item', filters={'g': g}, fields=['name'])"]),
+	(["url = '#' + doc.name", "doc.check_permission('write')"], ["doc.check_permission('write')  # kept"]),
+])
+def test_a_kept_check_is_not_a_downgrade(src, after):
+	assert "permission-downgrade" not in codes(_diff(src, after), src)
