@@ -603,6 +603,16 @@ def _site_conf_fallback(key: str) -> int | None:
 		return None
 
 
+def conf_int(key: str, default: int) -> int:
+	"""Read a positive int from site_config, accepting a string value such as "500"."""
+	import frappe
+
+	try:
+		return int(frappe.conf.get(key) or 0) or default
+	except (TypeError, ValueError, AttributeError):
+		return default
+
+
 _UNREAD_ROW = object()
 CONFIG_CACHE_SECONDS = 60
 # Bump when OptimusConfig gains or loses a field. A web worker and an RQ worker on

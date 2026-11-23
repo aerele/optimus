@@ -707,7 +707,9 @@ def _enqueue_analyze(session_uuid: str, docname: str | None = None) -> bool:
 		# gunicorn's request timeout. Only applied when docname is
 		# provided (all production callers provide it).
 		if docname:
-			cap = frappe.conf.get("optimus_inline_analyze_limit") or 50
+			from optimus.settings import conf_int
+
+			cap = conf_int("optimus_inline_analyze_limit", 50)
 			try:
 				count = session.recording_count(session_uuid)
 			except Exception:
