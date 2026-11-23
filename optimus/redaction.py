@@ -63,7 +63,7 @@ def is_sensitive_key(key, *, extra: tuple[str, ...] = ()) -> bool:
 	"""
 	if not isinstance(key, str) or not key:
 		return False
-	extra = tuple(extra or ())
+	extra = tuple(p.lower() for p in extra or () if isinstance(p, str))
 	if len(key) > _IDENTIFIER_MAX:
 		return _substring_hit(key.lower(), extra)
 	return _sensitive_name(key, extra)
